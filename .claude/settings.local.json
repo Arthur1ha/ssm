@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"D:/software/mosquitto/mosquitto_sub.exe\" -h localhost -p 1883 -t \"test\" -v)",
+      "Bash(\"D:/software/mosquitto/mosquitto_pub.exe\" -h localhost -p 1883 -t \"test\" -m \"hello\")",
+      "Bash(kill %1)",
+      "Bash(cmd /c \"start \\\\\"Mosquitto Broker\\\\\" \\\\\"D:\\\\software\\\\mosquitto\\\\mosquitto.exe\\\\\" -c \\\\\"C:\\\\Users\\\\24225\\\\Desktop\\\\SSM\\\\broker\\\\mosquitto.conf\\\\\" -v\")",
+      "Bash(cmd:*)",
+      "Bash(uv run:*)",
+      "Bash(curl -s \"https://ark.cn-beijing.volces.com/api/v3/models\" -H \"Authorization: Bearer ark-a6bc9b9e-0cd9-4ff3-8d18-6706c793dfd3-dd812\")",
+      "Bash(python -c \"import sys,json; models=json.load\\(sys.stdin\\)['data']; [print\\(m['id'], m['status']\\) for m in models if m['status']=='Active']\")",
+      "Bash(curl:*)",
+      "Bash(set PYTHONUNBUFFERED=1)",
+      "Bash(ping -n 5 127.0.0.1)",
+      "Bash(ping -n 6 127.0.0.1)",
+      "Bash(ping -n 8 127.0.0.1)",
+      "Bash(cat \"C:\\\\Users\\\\24225\\\\Desktop\\\\SSM\\\\agents\\\\pc_agent\\\\output.txt\")",
+      "Bash(start /b uv run python main.py)",
+      "Bash(ping -n 7 127.0.0.1)",
+      "Bash(taskkill /F /IM python.exe /T)",
+      "Bash(taskkill /F /FI \"WINDOWTITLE eq uv*\")",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\")",
+      "Bash(tasklist /FI \"IMAGENAME eq python3.exe\")",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(powershell:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <meta name="theme-color" content="#1a1a2e">
+    <title>SSM 智能桌面控制台</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="styles/app.css">
+    <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+</head>
+<body>
+
+    <!-- Header -->
+    <header class="app-header">
+        <h1>SSM 智能桌面</h1>
+        <span id="connection-status" class="status-badge disconnected">未连接</span>
+    </header>
+
+    <!-- Broker Config Bar -->
+    <div class="config-bar">
+        <label for="broker-url">Broker:</label>
+        <input id="broker-url" type="text" placeholder="ws://192.168.x.x:9001" />
+        <button id="btn-connect">连接</button>
+    </div>
+
+    <main class="app-main">
+
+        <!-- Panel 1: 智能体订阅 -->
+        <section class="panel">
+            <h2>智能体订阅</h2>
+            <p class="panel-hint">订阅后查看实时数据；执行器可直接发送控制指令（最高优先级）</p>
+            <div id="subscription-cards" class="unit-grid"></div>
+        </section>
+
+        <!-- Panel 2: AI 决策日志 -->
+        <section class="panel">
+            <div class="log-header">
+                <div>
+                    <h2>AI 决策日志</h2>
+                    <p class="panel-hint">PC LangGraph 层的决策与评估</p>
+                </div>
+                <button id="btn-ai-log-clear" class="btn-small">清空</button>
+            </div>
+            <div id="ai-log" class="ai-log"></div>
+        </section>
+
+        <!-- Panel 3: 事件日志 -->
+        <section class="panel">
+            <div class="log-header">
+                <h2>事件日志</h2>
+                <button id="btn-log-clear" class="btn-small">清空</button>
+            </div>
+            <div id="event-log" class="event-log"></div>
+        </section>
+
+    </main>
+
+    <!-- Scripts -->
+    <script src="src/MqttBus.js"></script>
+    <script src="src/AgentRegistry.js"></script>
+    <script src="src/ISMTracker.js"></script>
+    <script src="src/DecisionAgent.js"></script>
+    <script src="src/ui/SubscriptionPanel.js"></script>
+    <script src="src/ui/AiLog.js"></script>
+    <script src="src/ui/EventLog.js"></script>
+    <script src="src/main.js"></script>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(() => {});
+        }
+    </script>
+</body>
+</html>
