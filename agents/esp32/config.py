@@ -6,8 +6,10 @@ WIFI_SSID     = "Arthur"
 WIFI_PASSWORD = "66666666"
                                                                                                             
 # ── MQTT ─────────────────────────────────────────────────────
-MQTT_BROKER_IP = "10.193.37.44"   # your laptop's local IP
+MQTT_BROKER_IP = "47.116.137.202"  # cloud server public IP
 MQTT_PORT      = 1883
+MQTT_USER      = "ssm_user"        # broker auth username
+MQTT_PASSWORD  = "Wl4sErQrlrpEbm7r"
 AGENT_ID       = "esp32_desk"
 FIRMWARE_VER   = "0.2.0"
 

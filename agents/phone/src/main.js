@@ -3,7 +3,9 @@
  * 手机角色：人类监督 + Override 层
  */
 
-const BROKER_WS_URL = 'ws://10.193.37.44:9001';
+const BROKER_WS_URL  = 'ws://47.116.137.202:9001';
+const BROKER_USER    = 'ssm_user';
+const BROKER_PASSWD  = 'Wl4sErQrlrpEbm7r';
 
 document.addEventListener('DOMContentLoaded', () => {
     const statusEl    = document.getElementById('connection-status');
@@ -48,9 +50,9 @@ document.addEventListener('DOMContentLoaded', () => {
     connectBtn?.addEventListener('click', () => {
         const url = brokerInput?.value.trim() || BROKER_WS_URL;
         setStatus('连接中...', 'reconnecting');
-        mqttBus.connect(url);
+        mqttBus.connect(url, null, { username: BROKER_USER, password: BROKER_PASSWD });
     });
 
     setStatus('连接中...', 'reconnecting');
-    mqttBus.connect(BROKER_WS_URL);
+    mqttBus.connect(BROKER_WS_URL, null, { username: BROKER_USER, password: BROKER_PASSWD });
 });

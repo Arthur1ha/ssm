@@ -23,7 +23,26 @@
       "Bash(tasklist /FI \"IMAGENAME eq python3.exe\")",
       "Bash(taskkill /F /IM python.exe)",
       "Bash(powershell:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(chown -R mosquitto:mosquitto /root/ssm/broker/logs /root/ssm/broker/data)",
+      "Bash(chmod o+r /root/ssm/broker/passwd)",
+      "Bash(mosquitto -c /root/ssm/broker/mosquitto.conf -v)",
+      "Bash(jobs)",
+      "Bash(pkill mosquitto *)",
+      "Bash(pkill -f mosquitto)",
+      "Bash(fuser -k 1883/tcp)",
+      "Bash(fuser -k 9001/tcp)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(mosquitto -c /root/ssm/broker/mosquitto.conf -d)",
+      "Bash(nohup python3 *)",
+      "Bash(mosquitto_pub -h 127.0.0.1 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t test/ping -m \"ok\")",
+      "Bash(mosquitto_pub -h 127.0.0.1 -p 1883 -t test/ping -m \"ok\")",
+      "Bash(uv --version)",
+      "Bash(~/miniconda3/bin/conda run *)",
+      "Read(//root/miniconda3/**)",
+      "Bash(/root/miniconda3/bin/uv venv *)",
+      "Bash(/root/miniconda3/bin/uv pip *)",
+      "Bash(/root/ssm/.venv/bin/python --version)"
     ]
   }
 }

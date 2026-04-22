@@ -111,19 +111,34 @@ All payloads are JSON with `agent_id` and `ts` (unix timestamp) fields.
 
 ## Setup
 
+### 0. Python Environment
+
+Managed with [uv](https://github.com/astral-sh/uv) via `pyproject.toml` + `uv.lock`.
+
+```bash
+# Install all dependencies
+uv sync
+
+# Add a new dependency
+uv add <package>
+```
+
+No need to activate — use `uv run python` to run any script and uv will automatically pick up `.venv`.
+
 ### 1. MQTT Broker
 
-Requires [Mosquitto](https://mosquitto.org/download/) installed on Windows.
+Requires [Mosquitto](https://mosquitto.org/download/) installed (`yum install -y mosquitto`).
 
-```
-tools\broker_start.bat
+```bash
+mosquitto -c /root/ssm/broker/mosquitto.conf -d
 ```
 
-Listens on TCP 1883 (ESP32 + PC) and WebSocket 9001 (Phone PWA).
+Listens on TCP 1883 (ESP32 + PC Agent) and WebSocket 9001 (Phone PWA).  
+Authentication is required — credentials are in `broker/passwd`.
 
 ### 2. ESP32
 
-Edit `agents/esp32/config.py` — set your WiFi credentials and broker IP.
+Edit `agents/esp32/config.py` — set WiFi credentials, broker IP, and MQTT auth.
 
 Upload via [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html):
 
@@ -137,21 +152,21 @@ Or use [Thonny](https://thonny.org/) — open each file and save to device.
 
 ### 3. PC Decision Agent
 
-Requires Python 3.11+ and [uv](https://github.com/astral-sh/uv).
+Edit `agents/pc_agent/.env` — set `OPENAI_API_KEY`.
 
-Edit `agents/pc_agent/.env` — set your LLM API key and broker IP.
-
-```
-tools\pc_agent_start.bat
+```bash
+cd /root/ssm/agents/pc_agent
+uv run python main.py
 ```
 
 ### 4. Phone PWA
 
-```
-tools\pwa_server.bat
+```bash
+cd /root/ssm/agents/phone
+uv run python -m http.server 8080
 ```
 
-Open `http://<broker-ip>:8080` on your phone. Enter the broker WebSocket URL (`ws://<ip>:9001`) and connect.
+Open `http://47.116.137.202:8080` on your phone.
 
 ## Data Flow Example
 

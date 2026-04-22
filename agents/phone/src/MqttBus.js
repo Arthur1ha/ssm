@@ -14,7 +14,7 @@ class MqttBus extends EventTarget {
         this._brokerUrl = null;
     }
 
-    connect(brokerWsUrl, clientId) {
+    connect(brokerWsUrl, clientId, opts = {}) {
         this._brokerUrl = brokerWsUrl;
         const id = clientId || ('phone_' + Math.random().toString(16).slice(2, 10));
 
@@ -22,6 +22,8 @@ class MqttBus extends EventTarget {
             clientId: id,
             keepalive: 60,
             reconnectPeriod: 3000,
+            username: opts.username,
+            password: opts.password,
             will: {
                 topic: 'ssm/agents/phone_decision/status',
                 payload: 'offline',

@@ -13,10 +13,29 @@
 
 Smart System Mesh — a multi-agent IoT system using MQTT as the message bus.
 
-- **Broker**: Mosquitto on Windows (`tools/broker_start.bat`)
+- **Broker**: Mosquitto on Linux cloud server (`47.116.137.202`), started with `mosquitto -c /root/ssm/broker/mosquitto.conf -d`
 - **Edge agent**: ESP32 with MicroPython (`agents/esp32/`)
-- **Control UI**: PWA on phone, served locally (`tools/pwa_server.bat`)
+- **Control UI**: PWA on phone, served via `python3 -m http.server 8080` from `agents/phone/`
+- **PC Agent**: runs in `/root/ssm/.venv` (uv-managed, Python 3.13)
 - **Hardware**: RGB LED (GPIO 4/16/17), buzzer (GPIO5), light sensor (GPIO18 digital), IR (GPIO19), sound (GPIO15)
+
+## Python Environment (uv)
+
+Project is managed with uv (`pyproject.toml` + `uv.lock` at `/root/ssm`).
+
+```bash
+# Add a new dependency
+uv add <package>
+
+# Sync / install all dependencies from lockfile
+uv sync
+
+# Run scripts — uv automatically uses .venv, no activation needed
+uv run python <script>
+```
+
+- Always run uv commands from `/root/ssm` (project root)
+- Use `uv run python` instead of activating the venv manually
 
 ## Architecture Rules
 

@@ -4,7 +4,7 @@
 import time
 import json
 from umqtt.robust import MQTTClient as _MQTTClient
-from config import MQTT_BROKER_IP, MQTT_PORT, AGENT_ID
+from config import MQTT_BROKER_IP, MQTT_PORT, AGENT_ID, MQTT_USER, MQTT_PASSWORD
 
 _STATUS_TOPIC = "ssm/agents/{}/status".format(AGENT_ID)
 
@@ -25,6 +25,8 @@ class MqttClient:
             server    = MQTT_BROKER_IP,
             port      = MQTT_PORT,
             keepalive = 60,
+            user      = MQTT_USER,
+            password  = MQTT_PASSWORD,
         )
         self._client.set_last_will(
             topic  = _STATUS_TOPIC,

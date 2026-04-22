@@ -19,9 +19,11 @@ from graph import build_graph
 
 # ── Config ────────────────────────────────────────────────────
 
-BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "10.193.37.44")
-BROKER_PORT  = int(os.getenv("MQTT_BROKER_PORT", "1883"))
-PC_AGENT_ID  = os.getenv("PC_AGENT_ID", "pc_decision")
+BROKER_HOST   = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
+BROKER_PORT   = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+BROKER_USER   = os.getenv("MQTT_USER", "ssm_user")
+BROKER_PASSWD = os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r")
+PC_AGENT_ID   = os.getenv("PC_AGENT_ID", "pc_decision")
 
 # Only trigger LLM agents for these message types
 TRIGGER_TYPES = {"report"}
@@ -121,6 +123,7 @@ def on_disconnect(client, userdata, rc):
 
 
 mqtt_client = mqtt_lib.Client(client_id=PC_AGENT_ID, clean_session=True)
+mqtt_client.username_pw_set(BROKER_USER, BROKER_PASSWD)
 mqtt_client.on_connect    = on_connect
 mqtt_client.on_message    = on_message
 mqtt_client.on_disconnect = on_disconnect
