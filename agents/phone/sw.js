@@ -1,5 +1,5 @@
 // Service Worker — cache PWA shell for offline use
-const CACHE = 'ssm-v1';
+const CACHE = 'ssm-v3';
 const ASSETS = [
     '/',
     '/index.html',

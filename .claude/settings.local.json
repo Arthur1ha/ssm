@@ -42,7 +42,26 @@
       "Read(//root/miniconda3/**)",
       "Bash(/root/miniconda3/bin/uv venv *)",
       "Bash(/root/miniconda3/bin/uv pip *)",
-      "Bash(/root/ssm/.venv/bin/python --version)"
+      "Bash(/root/ssm/.venv/bin/python --version)",
+      "Bash(mosquitto_pub -h localhost -t 'ssm/ping' -m 'test')",
+      "Bash(mosquitto_pub -h localhost -t 'ssm/ping' -m 'test' -u ssm_user -P ssm_pass)",
+      "Bash(python3 -c ' *)",
+      "WebFetch(domain:lbsyun.baidu.com)",
+      "WebSearch",
+      "WebFetch(domain:developer.baidu.com)",
+      "WebFetch(domain:lbs.amap.com)",
+      "Bash(python3 *)",
+      "Bash(ngrok version *)",
+      "Bash(tar -xzf /tmp/ngrok.tgz -C /usr/local/bin/)",
+      "Bash(ngrok config *)",
+      "Bash(ngrok http *)",
+      "Bash(echo \"ngrok PID: $!\")",
+      "Bash(pkill ngrok *)",
+      "Bash(echo \"ngrok PID: $!\" sleep 3 curl -s http://localhost:4040/api/tunnels)",
+      "Bash(mosquitto_sub -h 47.116.137.202 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t 'ssm/agents/#' -v -W 4)",
+      "Bash(nohup uv *)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(pkill -f \"uvicorn chat_api\")"
     ]
   }
 }

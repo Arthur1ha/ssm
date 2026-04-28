@@ -25,7 +25,7 @@ class MqttBus extends EventTarget {
             username: opts.username,
             password: opts.password,
             will: {
-                topic: 'ssm/agents/phone_decision/status',
+                topic: 'ssm/sys/phone_will',
                 payload: 'offline',
                 retain: true,
                 qos: 1

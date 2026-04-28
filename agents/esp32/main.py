@@ -4,6 +4,7 @@
 import time
 from config import AGENT_ID, LOCAL_RULES_DELAY_MS, HEARTBEAT_MS
 from config import AGENT_LIGHT, AGENT_IR, AGENT_LED, AGENT_BUZ
+from config import LOCATION_LNG, LOCATION_LAT
 from ism         import ISM, State, SENSOR_TABLE, LED_TABLE, BUZZER_TABLE
 from bsm         import BSM
 from mqtt_client import MqttClient
@@ -41,6 +42,9 @@ bsm._event_cb = trigger_map.on_bsm_event
 def on_reconnect():
     print("[Main] Reconnected — re-publishing manifests and states")
     agent_manifest.publish(mqtt)
+    mqtt.publish("ssm/agents/{}/location".format(AGENT_ID),
+                 {"agent": AGENT_ID, "lng": LOCATION_LNG, "lat": LOCATION_LAT,
+                  "type": "fixed", "ts": time.time()}, retain=True)
     mqtt.publish("ssm/agents/{}/state".format(AGENT_LED),
                  {"agent": AGENT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
     mqtt.publish("ssm/agents/{}/state".format(AGENT_BUZ),
@@ -59,6 +63,10 @@ mqtt.begin()
 
 # ── 首次发布 manifest + 初始状态 ─────────────────────────────
 agent_manifest.publish(mqtt)
+
+mqtt.publish("ssm/agents/{}/location".format(AGENT_ID),
+             {"agent": AGENT_ID, "lng": LOCATION_LNG, "lat": LOCATION_LAT,
+              "type": "fixed", "ts": time.time()}, retain=True)
 
 mqtt.publish("ssm/agents/{}/state".format(AGENT_LED),
              {"agent": AGENT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
