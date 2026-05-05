@@ -3,10 +3,11 @@
 # No MQTT knowledge — communicates upward via event_cb(event_name, data).
 
 import time
+import neopixel
 from machine import ADC, Pin, PWM
 from config import (
     LIGHT_SENSOR_PIN, IR_SENSOR_PIN, SOUND_SENSOR_PIN,
-    PIN_R, PIN_G, PIN_B, BUZZER_PIN, PWM_FREQ,
+    WS2812_PIN, WS2812_NUM, WS2812_MAX_VAL, BUZZER_PIN, PWM_FREQ,
     LIGHT_DIGITAL_MODE,
     LIGHT_BRIGHT_THRESH, LIGHT_NORMAL_THRESH, LIGHT_DIM_THRESH,
     LIGHT_HYSTERESIS, LIGHT_CONFIRM_COUNT,
@@ -65,10 +66,10 @@ class BSM:
         # store cooldown as instance var
         self._SOUND_COOLDOWN_MS = _SOUND_COOLDOWN_MS
 
-        # ── RGB LED ──────────────────────────────────────────
-        self._pwm_r = PWM(Pin(PIN_R), freq=PWM_FREQ, duty=0)
-        self._pwm_g = PWM(Pin(PIN_G), freq=PWM_FREQ, duty=0)
-        self._pwm_b = PWM(Pin(PIN_B), freq=PWM_FREQ, duty=0)
+        # ── WS2812 灯环 ──────────────────────────────────────
+        self._np          = neopixel.NeoPixel(Pin(WS2812_PIN), WS2812_NUM)
+        self._num_pixels  = WS2812_NUM
+        self._set_raw(0, 0, 0)   # 启动时全灭
         self._led_r = 0
         self._led_g = 0
         self._led_b = 0
@@ -266,10 +267,12 @@ class BSM:
         )
 
     def _set_raw(self, r, g, b):
-        # MicroPython ESP32 PWM duty: 0–1023 (10-bit)
-        self._pwm_r.duty(int(r * 1023 / 255))
-        self._pwm_g.duty(int(g * 1023 / 255))
-        self._pwm_b.duty(int(b * 1023 / 255))
+        r = min(r, WS2812_MAX_VAL)
+        g = min(g, WS2812_MAX_VAL)
+        b = min(b, WS2812_MAX_VAL)
+        for i in range(self._num_pixels):
+            self._np[i] = (r, g, b)
+        self._np.write()
 
     # ─────────────────────────────────────────────────────────
     #  BUZZER

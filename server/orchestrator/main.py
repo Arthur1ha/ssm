@@ -8,14 +8,15 @@ import json
 import queue
 import time
 
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv(override=True)   # 强制 .env 覆盖系统环境变量
+load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 import paho.mqtt.client as mqtt_lib
 
 from shared_state import SharedState
 import tools as agent_tools
-from graph import build_graph
+from graph import build_graph, build_orchestrator
 
 # ── Config ────────────────────────────────────────────────────
 
@@ -52,6 +53,8 @@ def _subscribe_and_announce(client):
         ("ssm/agents/+/event",    0),
         ("ssm/agents/+/report",   0),
         ("ssm/decision/active",   0),
+        ("ssm/intent/+",          0),
+        ("ssm/result/+/+",        0),
     ])
     # 接管控制权，抑制 ESP32 本地规则
     client.publish("ssm/decision/active", "true", retain=True)
@@ -112,6 +115,22 @@ def on_message(client, userdata, msg):
             suffix = unit_id.split("_")[-1]
             if suffix not in ("light", "ir", "sound"):
                 event_queue.put({"trigger": "actuator", "payload": payload, "unit_id": unit_id})
+        return
+
+    # ssm/intent/{session_id} → Orchestrator
+    if len(parts) == 3 and parts[1] == "intent":
+        session_id = parts[2]
+        if isinstance(payload, dict):
+            print(f"[Intent] session={session_id} user_msg={payload.get('user_msg', '')[:40]}")
+            event_queue.put({"trigger": "intent", "payload": payload, "session_id": session_id})
+        return
+
+    # ssm/result/{device_id}/{task_id} → store in SharedState
+    if len(parts) == 4 and parts[1] == "result":
+        task_id = parts[3]
+        if isinstance(payload, dict):
+            state.store_task_result(task_id, payload)
+            print(f"[Result] task={task_id} result={payload.get('result')}")
 
 
 def on_disconnect(client, userdata, rc):
@@ -131,7 +150,8 @@ mqtt_client.on_disconnect = on_disconnect
 # ── Init tools + graph ────────────────────────────────────────
 
 agent_tools.init(state, mqtt_client)
-graph = build_graph()
+graph        = build_graph()
+orchestrator = build_orchestrator()
 
 # ── MQTT：用 loop_start() 让 paho 自己管线程 ─────────────────
 
@@ -154,14 +174,32 @@ while True:
     except queue.Empty:
         continue
 
-    unit_id = event["unit_id"]
-    trigger  = event["trigger"]
+    trigger = event["trigger"]
 
+    if trigger == "intent":
+        session_id = event.get("session_id", "")
+        print(f"[Main] Orchestrator invoked for session={session_id}")
+        try:
+            orchestrator.invoke({
+                "session_id":   session_id,
+                "user_msg":     event["payload"].get("user_msg", ""),
+                "requirements": event["payload"].get("requirements", []),
+                "planned_tasks": [],
+                "task_results":  {},
+                "response_text": "",
+                "early_exit":    False,
+            })
+            print("[Main] Orchestrator done.")
+        except Exception as e:
+            print(f"[Main] Orchestrator error: {e}")
+        continue
+
+    unit_id = event.get("unit_id", "")
     print(f"[Main] Invoking {'Decision' if trigger == 'sensor' else 'Evaluation'} Agent "
           f"for unit={unit_id}")
 
     try:
         graph.invoke({"trigger": trigger, "payload": event["payload"]})
-        print(f"[Main] Done.")
+        print("[Main] Done.")
     except Exception as e:
         print(f"[Main] Graph error: {e}")

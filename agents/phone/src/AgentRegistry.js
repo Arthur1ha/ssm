@@ -22,10 +22,12 @@ class AgentRegistry extends EventTarget {
             if (mManifest) {
                 const id = mManifest[1];
                 const existing = this._agents.get(id) || {};
+                // 若父设备已知在线，子设备 manifest 到达时直接标记在线（处理 status 先于 manifest 到达的情况）
+                const parentOnline = msg.parent_id && this._agents.get(msg.parent_id)?._online === true;
                 this._agents.set(id, {
                     ...existing,
                     ...msg,
-                    _online:   existing._online === true,   // stay online only if status confirmed it
+                    _online:   existing._online === true || parentOnline,
                     _lastSeen: Date.now()
                 });
                 this._emit();

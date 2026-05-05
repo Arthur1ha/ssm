@@ -44,14 +44,26 @@ def publish(mqtt):
         "values": ["detected"],
     }, ts)
 
-    _pub(mqtt, AGENT_LED, "actuator", "rgb_led", {
+    _pub(mqtt, AGENT_LED, "actuator", "ws2812_ring", {
+        "num_pixels": 16,
         "commands": ["SET_COLOR", "SET_STATE", "BLINK"],
         "ism_states": ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK"],
+        "capabilities": [
+            {"action": "SET_COLOR", "params": ["r", "g", "b", "brightness"]},
+            {"action": "SET_STATE", "params": ["state"], "values": ["ON", "OFF", "BRIGHT", "DIM"]},
+            {"action": "BLINK",     "params": ["r", "g", "b", "count"]},
+        ],
+        "resource_tags": ["lighting", "ambiance"],
     }, ts)
 
     _pub(mqtt, AGENT_BUZ, "actuator", "buzzer", {
         "commands": ["PLAY", "STOP"],
         "ism_states": ["SILENT", "ALERT", "NOTIFY"],
+        "capabilities": [
+            {"action": "PLAY", "params": ["pattern"], "values": ["NOTIFY", "ALERT"]},
+            {"action": "STOP", "params": []},
+        ],
+        "resource_tags": ["alert", "notification"],
     }, ts)
 
     print("[Manifest] Published 5 unit manifests for {}".format(AGENT_ID))

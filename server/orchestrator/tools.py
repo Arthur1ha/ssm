@@ -2,6 +2,7 @@
 # Call init() once before building the graph.
 
 import json
+import time as _time
 from langchain_core.tools import tool
 
 _state  = None
@@ -14,7 +15,45 @@ def init(shared_state, mqtt_client):
     _mqtt  = mqtt_client
 
 
+# ── Plain helpers for graph nodes (not LangChain tools) ──────
+
+def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "ok"):
+    _mqtt.publish(
+        f"ssm/feedback/{session_id}",
+        json.dumps({"session_id": session_id, "stage": stage,
+                    "text": text, "status": status, "ts": int(_time.time())}),
+    )
+
+def do_publish_task(device_id: str, task_id: str, action: str, params: dict, session_id: str):
+    _mqtt.publish(
+        f"ssm/task/{device_id}/{task_id}",
+        json.dumps({"task_id": task_id, "session_id": session_id,
+                    "action": action, "params": params, "ts": int(_time.time())}),
+    )
+
+
 # ── Decision agent tools ──────────────────────────────────────
+
+@tool
+def get_capabilities() -> str:
+    """
+    Get all registered device capabilities indexed by resource_tag.
+    Returns JSON: { registry: {tag: [device_id]}, devices: {device_id: {capabilities, resource_tags}} }
+    Use this to discover what actuators are available and what actions they support.
+    """
+    registry = _state.get_capability_registry()
+    devices = {}
+    for ids in registry.values():
+        for uid in ids:
+            if uid not in devices:
+                m = _state.get_manifest(uid)
+                if m:
+                    devices[uid] = {
+                        "capabilities": m.get("capabilities", []),
+                        "resource_tags": m.get("resource_tags", []),
+                    }
+    return json.dumps({"registry": registry, "devices": devices}, ensure_ascii=False, indent=2)
+
 
 @tool
 def get_sensor_snapshot() -> str:

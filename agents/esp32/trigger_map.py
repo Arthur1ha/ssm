@@ -16,8 +16,10 @@ class TriggerMap:
         self._mqtt       = mqtt
         self._local      = local_rules
 
-        self._led_cmd_topic = "ssm/agents/{}/command".format(AGENT_LED)
-        self._buz_cmd_topic = "ssm/agents/{}/command".format(AGENT_BUZ)
+        self._led_cmd_topic  = "ssm/agents/{}/command".format(AGENT_LED)
+        self._buz_cmd_topic  = "ssm/agents/{}/command".format(AGENT_BUZ)
+        self._led_task_pfx   = "ssm/task/{}/".format(AGENT_LED)
+        self._buz_task_pfx   = "ssm/task/{}/".format(AGENT_BUZ)
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
@@ -28,6 +30,14 @@ class TriggerMap:
 
         elif topic == self._buz_cmd_topic:
             self._handle_buzzer(payload)
+
+        elif topic.startswith(self._led_task_pfx):
+            task_id = topic[len(self._led_task_pfx):]
+            self._handle_led_task(payload, task_id)
+
+        elif topic.startswith(self._buz_task_pfx):
+            task_id = topic[len(self._buz_task_pfx):]
+            self._handle_buz_task(payload, task_id)
 
         elif topic == "ssm/decision/active":
             active = (payload == "true" or payload is True)
@@ -140,6 +150,66 @@ class TriggerMap:
     # ─────────────────────────────────────────────────────────
     #  Publish helpers
     # ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────
+    #  Task handlers (V2 Orchestrator protocol)
+    #  Topic: ssm/task/{device_id}/{task_id}
+    #  Payload: {task_id, session_id, action, params, ts}
+    # ─────────────────────────────────────────────────────────
+    def _handle_led_task(self, p, task_id):
+        session_id = p.get("session_id", "") if isinstance(p, dict) else ""
+        action     = p.get("action") if isinstance(p, dict) else None
+        params     = p.get("params", {}) if isinstance(p, dict) else {}
+
+        ok = False
+        if action == "SET_COLOR":
+            self._bsm.led_set_color(
+                int(params.get("r", 255)), int(params.get("g", 255)),
+                int(params.get("b", 255)), int(params.get("brightness", 200)))
+            ok = self._ism_led.transition(Trigger.CMD_COLOR)
+            self._publish_led_state()
+        elif action == "SET_STATE":
+            st = params.get("state", "OFF")
+            self._bsm.led_set_state(st)
+            trig = {"OFF": Trigger.CMD_OFF, "BRIGHT": Trigger.CMD_BRIGHT,
+                    "DIM": Trigger.CMD_DIM}.get(st, Trigger.CMD_OFF)
+            ok = self._ism_led.transition(trig)
+            self._publish_led_state()
+        elif action == "BLINK":
+            self._bsm.led_blink(
+                int(params.get("r", 255)), int(params.get("g", 255)),
+                int(params.get("b", 255)), int(params.get("count", 3)))
+            ok = self._ism_led.transition(Trigger.CMD_BLINK)
+            self._publish_led_state()
+
+        self._mqtt.publish("ssm/result/{}/{}".format(AGENT_LED, task_id), {
+            "task_id": task_id, "session_id": session_id,
+            "result": "ok" if ok else "blocked",
+            "ism_state": self._ism_led.state, "ts": time.time(),
+        })
+
+    def _handle_buz_task(self, p, task_id):
+        session_id = p.get("session_id", "") if isinstance(p, dict) else ""
+        action     = p.get("action") if isinstance(p, dict) else None
+        params     = p.get("params", {}) if isinstance(p, dict) else {}
+
+        ok = False
+        if action == "PLAY":
+            pattern = params.get("pattern", "NOTIFY")
+            self._bsm.buzzer_play(pattern)
+            trig = Trigger.PLAY_NOTIFY if pattern == "NOTIFY" else Trigger.PLAY_ALERT
+            ok = self._ism_buz.transition(trig)
+            self._publish_buz_state()
+        elif action == "STOP":
+            self._bsm.buzzer_stop()
+            ok = self._ism_buz.transition(Trigger.STOP_SOUND)
+            self._publish_buz_state()
+
+        self._mqtt.publish("ssm/result/{}/{}".format(AGENT_BUZ, task_id), {
+            "task_id": task_id, "session_id": session_id,
+            "result": "ok" if ok else "blocked",
+            "ism_state": self._ism_buz.state, "ts": time.time(),
+        })
+
     def _publish_led_state(self):
         self._mqtt.publish("ssm/agents/{}/state".format(AGENT_LED), {
             "agent": AGENT_LED, "ism": self._ism_led.state, "ts": time.time()

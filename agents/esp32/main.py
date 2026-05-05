@@ -56,6 +56,8 @@ mqtt.set_reconnect_callback(on_reconnect)
 
 mqtt.subscribe("ssm/agents/{}/command".format(AGENT_LED))
 mqtt.subscribe("ssm/agents/{}/command".format(AGENT_BUZ))
+mqtt.subscribe("ssm/task/{}/+".format(AGENT_LED))
+mqtt.subscribe("ssm/task/{}/+".format(AGENT_BUZ))
 mqtt.subscribe("ssm/decision/active")
 mqtt.subscribe("ssm/sys/ping")
 

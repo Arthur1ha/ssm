@@ -4,19 +4,23 @@
 
 import network
 import time
-from machine import Pin, PWM
-from config import WIFI_SSID, WIFI_PASSWORD, PIN_R, PIN_G, PIN_B, PWM_FREQ
+import neopixel
+from machine import Pin
+from config import WIFI_SSID, WIFI_PASSWORD, WS2812_PIN, WS2812_NUM
 
 def _blink_error():
-    """Rapid red blink on the RGB LED to signal WiFi failure."""
+    """WiFi 连接失败时用 WS2812 红色闪烁提示。"""
     try:
-        r = PWM(Pin(PIN_R), freq=PWM_FREQ, duty=512)
+        np = neopixel.NeoPixel(Pin(WS2812_PIN), WS2812_NUM)
         for _ in range(20):
-            r.duty(512)
+            for i in range(WS2812_NUM):
+                np[i] = (80, 0, 0)
+            np.write()
             time.sleep_ms(150)
-            r.duty(0)
+            for i in range(WS2812_NUM):
+                np[i] = (0, 0, 0)
+            np.write()
             time.sleep_ms(150)
-        r.deinit()
     except Exception:
         pass
 

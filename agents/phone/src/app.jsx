@@ -52,7 +52,7 @@ function formatDist(m) {
 /* ── Agent metadata helpers ─────────────────────────────────────── */
 function getAgentMeta(agent) {
   const n = (agent.name || '').toLowerCase();
-  if (n.includes('led') || n.includes('rgb')) return { icon: 'bulb',     color: '#FF9A5A', label: 'LED 灯' };
+  if (n.includes('led') || n.includes('rgb') || n.includes('ws2812') || n.includes('ring')) return { icon: 'bulb', color: '#FF9A5A', label: 'LED 灯' };
   if (n.includes('buz'))                       return { icon: 'volume',   color: '#E26BFF', label: '蜂鸣器' };
   if (n.includes('ir'))                        return { icon: 'zap',      color: '#6B6CFF', label: 'IR 传感器' };
   if (n.includes('sound') || n.includes('mic'))return { icon: 'mic',      color: '#E26BFF', label: '声音传感器' };
@@ -370,12 +370,13 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
   subsRef.current = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id));
   const subs = subsRef.current;
 
-  const [messages, setMessages] = useState([
+  const [messages, setMessages]     = useState([
     { role: 'assistant', text: '需要控制什么设备？', actions: [] }
   ]);
-  const [input, setInput]       = useState('');
-  const [thinking, setThinking] = useState(false);
-  const [kbOffset, setKbOffset] = useState(0);
+  const [input, setInput]           = useState('');
+  const [thinking, setThinking]     = useState(false);
+  const [thinkingText, setThinkingText] = useState('');
+  const [kbOffset, setKbOffset]     = useState(0);
   const endRef   = useRef(null);
   const inputRef = useRef(null);
 
@@ -384,7 +385,6 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
     if (!open) setKbOffset(0);
   }, [open]);
 
-  // Track keyboard height via visualViewport so the sheet lifts above the keyboard
   useEffect(() => {
     if (!open) return;
     const vv = window.visualViewport;
@@ -401,27 +401,65 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
     const t = (text || input).trim();
     if (!t) return;
     setInput('');
-    setMessages(m => [...m, { role:'user', text:t }]);
+    setMessages(m => [...m, { role: 'user', text: t }]);
     setThinking(true);
+    setThinkingText('解析意图...');
+
     try {
-      const res = await fetch('/api/chat', {
+      // ① NLU parse — get session_id + immediate feedback
+      const res = await fetch('/api/nlu', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: t, devices: subs }),
       });
-      const { reply, commands } = await res.json();
-      commands.forEach(({ topic, payload }) => {
-        mqttBus.publish(topic, { ...payload, ts: Math.floor(Date.now() / 1000) });
+      if (!res.ok) throw new Error('nlu_failed');
+      const { session_id, nlu_feedback, requirements } = await res.json();
+
+      // Show NLU feedback immediately
+      setMessages(m => [...m, { role: 'assistant', text: nlu_feedback, actions: [] }]);
+      setThinkingText('正在规划...');
+
+      // ② Subscribe to feedback topic
+      const feedbackTopic = `ssm/feedback/${session_id}`;
+      mqttBus.subscribe(feedbackTopic);
+
+      let timeoutId = setTimeout(() => {
+        mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+        setThinking(false);
+        setThinkingText('');
+        setMessages(m => [...m, { role: 'assistant', text: '操作超时，设备可能无响应', actions: [] }]);
+      }, 12000);
+
+      function handleFeedback(e) {
+        const { stage, text } = e.detail || {};
+        if (!stage) return;
+        if (stage === 'planning') {
+          setThinkingText('正在规划...');
+        } else if (stage === 'executing') {
+          setThinkingText('正在执行...');
+        } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
+          clearTimeout(timeoutId);
+          mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+          setThinking(false);
+          setThinkingText('');
+          setMessages(m => [...m, { role: 'assistant', text, actions: [] }]);
+        }
+      }
+      mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
+
+      // ③ Publish intent to Orchestrator
+      mqttBus.publish(`ssm/intent/${session_id}`, {
+        session_id,
+        user_msg: t,
+        requirements,
+        priority: 5,
+        ts: Math.floor(Date.now() / 1000),
       });
-      const actions = commands.map(c => ({
-        name: c.topic.split('/')[2] || c.topic,
-        action: c.payload.cmd || '指令',
-      }));
-      setMessages(m => [...m, { role:'assistant', text:reply, actions }]);
+
     } catch (e) {
-      setMessages(m => [...m, { role:'assistant', text:'连接服务失败，请检查网络', actions:[] }]);
-    } finally {
       setThinking(false);
+      setThinkingText('');
+      setMessages(m => [...m, { role: 'assistant', text: '连接服务失败，请检查网络', actions: [] }]);
     }
   };
 
@@ -493,10 +531,17 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
             </div>
           ))}
           {thinking && (
-            <div style={{ alignSelf:'flex-start', padding:'12px 14px', borderRadius:'4px 18px 18px 18px',
+            <div style={{ alignSelf:'flex-start', padding:'10px 14px', borderRadius:'4px 18px 18px 18px',
               background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.07)',
-              display:'flex', gap:4, alignItems:'center' }}>
-              <span className="typing-dot"/><span className="typing-dot" style={{ animationDelay:'.14s' }}/><span className="typing-dot" style={{ animationDelay:'.28s' }}/>
+              display:'flex', flexDirection:'column', gap:6 }}>
+              <div style={{ display:'flex', gap:4, alignItems:'center' }}>
+                <span className="typing-dot"/><span className="typing-dot" style={{ animationDelay:'.14s' }}/><span className="typing-dot" style={{ animationDelay:'.28s' }}/>
+              </div>
+              {thinkingText && (
+                <span style={{ fontSize:11, color:'rgba(255,255,255,0.32)', fontFamily:'monospace' }}>
+                  {thinkingText}
+                </span>
+              )}
             </div>
           )}
           <div ref={endRef}/>

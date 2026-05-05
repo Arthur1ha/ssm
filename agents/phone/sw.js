@@ -1,5 +1,5 @@
 // Service Worker — cache PWA shell for offline use
-const CACHE = 'ssm-v3';
+const CACHE = 'ssm-v4';
 const ASSETS = [
     '/',
     '/index.html',
@@ -7,11 +7,7 @@ const ASSETS = [
     '/src/MqttBus.js',
     '/src/AgentRegistry.js',
     '/src/ISMTracker.js',
-    '/src/DecisionAgent.js',
-    '/src/ui/Dashboard.js',
-    '/src/ui/ManualControl.js',
-    '/src/ui/EventLog.js',
-    '/src/main.js',
+    '/src/app.jsx',
 ];
 
 self.addEventListener('install', e => {

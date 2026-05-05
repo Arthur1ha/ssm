@@ -1,4 +1,8 @@
-import os, json
+import os, json, uuid, time as _time
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env", override=True)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,10 +12,10 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 client = OpenAI(
-    base_url="https://tokenhub.tencentmaas.com/v1",
-    api_key=os.getenv("CHAT_API_KEY", "sk-nWxTcBZGRyI7B5JB0XWJvl7bukVIRudanTWuiXS4UNiA2dse"),
+    base_url=os.getenv("CHAT_API_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
+    api_key=os.getenv("CHAT_API_KEY"),
 )
-MODEL = "hy3-preview"
+MODEL = os.getenv("CHAT_MODEL", "hy3-preview")
 
 SYSTEM = """你是 SSM 智能家居助手。用自然语言简短回复用户（1-2句话），同时调用 mqtt_publish 工具发送必要的设备控制指令。
 - 如果用户想控制设备，先回复确认，再发指令
@@ -34,9 +38,29 @@ TOOLS = [{
     }
 }]
 
+NLU_SYSTEM = """你是 SSM 智能家居语音助手的意图解析器。将用户输入解析为结构化 JSON。
+
+输出格式（只输出 JSON，不要代码块和解释）：
+{
+  "nlu_feedback": "明白了，你想看书，我来帮你调亮一点。",
+  "requirements": [
+    {"resource_tag": "lighting", "action": "brighten", "context": "reading"}
+  ]
+}
+
+resource_tag 选择：lighting（灯光）、ambiance（氛围）、alert（警报）、notification（通知）
+action 选择：set_color、brighten、dim、off、on、blink、alert、notify
+nlu_feedback 要求：自然口语，1-2句，提前预告要做什么"""
+
+
 class ChatRequest(BaseModel):
     message: str
     devices: list
+
+
+class NLURequest(BaseModel):
+    message: str
+    devices: list = []
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
@@ -63,3 +87,29 @@ def chat(req: ChatRequest):
                 commands.append(json.loads(tc.function.arguments))
 
     return {"reply": reply, "commands": commands}
+
+
+@app.post("/api/nlu")
+def nlu(req: NLURequest):
+    session_id = f"s_{int(_time.time())}_{uuid.uuid4().hex[:6]}"
+
+    response = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=256,
+        messages=[
+            {"role": "system", "content": NLU_SYSTEM},
+            {"role": "user",   "content": req.message},
+        ]
+    )
+
+    content = response.choices[0].message.content.strip()
+    try:
+        result = json.loads(content)
+    except Exception:
+        result = {"nlu_feedback": "好的，我来帮你处理。", "requirements": []}
+
+    return {
+        "session_id":   session_id,
+        "nlu_feedback": result.get("nlu_feedback", "好的，我来处理。"),
+        "requirements": result.get("requirements", []),
+    }
