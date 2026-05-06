@@ -138,11 +138,13 @@ def on_disconnect(client, userdata, rc):
     _connected = False
     _announced = False
     print(f"[MQTT] Disconnected (rc={rc}), reconnecting...")
-    client.publish("ssm/decision/active", "false", retain=True)
+    # 不在此处 publish — 会触发第二条重连路径与 loop_start() 冲突，造成 client_id 自踢循环
+    # 断线时 "decision/active=false" 由 LWT 自动发布
 
 
 mqtt_client = mqtt_lib.Client(client_id=PC_AGENT_ID, clean_session=True)
 mqtt_client.username_pw_set(BROKER_USER, BROKER_PASSWD)
+mqtt_client.will_set("ssm/decision/active", "false", retain=True)  # LWT：断线自动释放控制权
 mqtt_client.on_connect    = on_connect
 mqtt_client.on_message    = on_message
 mqtt_client.on_disconnect = on_disconnect

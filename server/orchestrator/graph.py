@@ -21,16 +21,21 @@ from tools import (
     get_last_decision, get_actuator_snapshot, publish_assessment,
 )
 
-# ── Shared LLM factory ────────────────────────────────────────
+# ── Shared LLM factory（带 fallback 链）────────────────────────
 
 def _make_llm():
-    return ChatOpenAI(
-        model=os.getenv("MODEL"),
+    model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
+    models = [m.strip() for m in model_list_str.split(",") if m.strip()]
+
+    base_kwargs = dict(
         base_url=os.getenv("OPENAI_BASE_URL"),
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0,
         timeout=30,
     )
+    llms = [ChatOpenAI(model=m, **base_kwargs) for m in models]
+    print(f"[Graph] LLM fallback chain: {' → '.join(models)}")
+    return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
 
 
 # ════════════════════════════════════════════════════════════
@@ -69,7 +74,6 @@ class RouterState(TypedDict):
 
 def build_graph():
     llm = _make_llm()
-    print(f"[Graph] Using model: {os.getenv('MODEL')}  base_url: {os.getenv('OPENAI_BASE_URL')}")
 
     decision_react = create_react_agent(
         llm,
@@ -156,24 +160,37 @@ def build_orchestrator():
                 "抱歉，我还没有发现附近的设备，请确认 ESP32 已上线。")
             return {**state, "planned_tasks": [], "early_exit": True}
 
-        # Build device capability summary
-        lines = []
+        # Build device capability summary — deduplicate by uid, merge all tags
+        uid_tags = {}
         for tag, device_ids in registry.items():
             for uid in device_ids:
-                m = _t._state.get_manifest(uid)
-                if m:
-                    caps = json.dumps(m.get("capabilities", []), ensure_ascii=False)
-                    lines.append(f"设备 {uid}（标签: {tag}）能力: {caps}")
+                uid_tags.setdefault(uid, []).append(tag)
+
+        lines = []
+        for uid, tags in uid_tags.items():
+            m = _t._state.get_manifest(uid)
+            if m:
+                caps = json.dumps(m.get("capabilities", []), ensure_ascii=False)
+                lines.append(f"设备 {uid}（标签: {', '.join(tags)}）能力: {caps}")
         device_str = "\n".join(lines) if lines else "无可用设备"
 
         prompt = (
-            f"你是 SSM 通用决策智能体。根据用户意图和可用设备能力，推理出最合适的控制方案。\n"
+            f"你是 SSM 智能家居控制中枢。根据用户意图生成设备控制任务列表。\n\n"
             f"用户原话：{state['user_msg']}\n"
-            f"结构化需求：{json.dumps(state['requirements'], ensure_ascii=False)}\n\n"
+            f"意图解析：{json.dumps(state['requirements'], ensure_ascii=False)}\n\n"
             f"可用设备：\n{device_str}\n\n"
-            f"思考：意图需要什么资源？哪些设备有对应能力？最合适的参数是什么？\n"
-            f"输出一个 JSON 数组（直接输出，不含代码块），每项包含 device_id、action、params。\n"
-            f"如无合适设备或无需操作，输出空数组 []。"
+            f"规则：\n"
+            f"1. 将 requirements 中的 resource_tag 与设备标签匹配\n"
+            f"2. 将 action 映射为设备支持的操作：\n"
+            f"   brighten/on → SET_STATE state=BRIGHT\n"
+            f"   dim → SET_STATE state=DIM\n"
+            f"   off → SET_STATE state=OFF\n"
+            f"   set_color → SET_COLOR（选择合适的 r/g/b/brightness）\n"
+            f"   notify → PLAY pattern=NOTIFY\n"
+            f"   alert → PLAY pattern=ALERT\n"
+            f"3. 用户描述的是场景（如读书、睡眠、休息），根据场景选择最合适的灯光参数\n\n"
+            f"直接输出 JSON 数组，不含代码块或解释，每项包含 device_id、action、params。\n"
+            f"示例：[{{\"device_id\": \"esp32_desk_led\", \"action\": \"SET_STATE\", \"params\": {{\"state\": \"BRIGHT\"}}}}]"
         )
 
         try:
