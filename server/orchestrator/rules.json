@@ -1,0 +1,19 @@
+[
+  {
+    "rule_id": "r_1778142399_e864bb",
+    "name": "测试规则",
+    "enabled": true,
+    "trigger": {
+      "agent_tag": "presence",
+      "event": "detected"
+    },
+    "action": {
+      "resource_tag": "lighting",
+      "cmd": "SET_STATE",
+      "params": {
+        "state": "BRIGHT"
+      }
+    },
+    "created_at": 1778142399
+  }
+]

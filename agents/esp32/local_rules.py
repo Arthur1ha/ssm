@@ -1,51 +1,82 @@
-# local_rules.py — Autonomous rules active when phone (decision agent) is absent.
-# Suppressed automatically when ssm/decision/active = "true" is received.
+# local_rules.py — Autonomous rules active when decision agent is offline.
+# Rules are synced from cloud via ssm/rules/{AGENT_ID} (retain).
+# Suppressed by ssm/decision/active = "true".
 
+import ujson
 from config import AGENT_LED
 
-_LED_CMD = "ssm/agents/{}/command".format(AGENT_LED)
+_LED_CMD        = "ssm/agents/{}/command".format(AGENT_LED)
+_RULES_CACHE    = "rules_cache.json"
+_MAX_RULES      = 10
 
 
 class LocalRules:
     def __init__(self, mqtt):
-        self._mqtt           = mqtt
+        self._mqtt            = mqtt
         self._decision_active = False
-        self._light_level    = "NORMAL"
-        self._ir_presence    = False
+        self._rules           = []
+        self._load_from_file()
 
     def set_decision_active(self, active: bool):
         self._decision_active = active
-        status = "手机决策层" if active else "本地规则"
-        print(f"[LocalRules] 控制权: {status}")
+        print("[LocalRules] 控制权: {}".format("云端" if active else "本地规则({} 条)".format(len(self._rules))))
+
+    def load_rules(self, rules):
+        """接收云端下推的精简规则列表，缓存到内存和 flash。"""
+        self._rules = rules[:_MAX_RULES]
+        self._save_to_file(self._rules)
+        print("[LocalRules] 规则已更新: {} 条".format(len(self._rules)))
+
+    def _load_from_file(self):
+        try:
+            with open(_RULES_CACHE, "r") as f:
+                self._rules = ujson.loads(f.read())
+            print("[LocalRules] 从 flash 加载 {} 条规则".format(len(self._rules)))
+        except:
+            self._rules = []
+
+    def _save_to_file(self, rules):
+        try:
+            with open(_RULES_CACHE, "w") as f:
+                f.write(ujson.dumps(rules))
+        except:
+            pass  # flash 写入失败不影响运行
 
     def on_light_event(self, level: str):
-        self._light_level = level
-        self._evaluate()
+        self._fire("light_level", {"level": level})
 
     def on_ir_event(self, presence: bool):
-        self._ir_presence = presence
-        self._evaluate()
-
-    def _evaluate(self):
-        if self._decision_active:
-            return   # PC/phone decision agent is in charge
-
-        lvl = self._light_level
-
-        # 光线暗 → 暖白（不依赖 IR，光敏单独触发）
-        if lvl in ("DIM", "DARK"):
-            self._cmd_led({
-                "cmd": "SET_COLOR",
-                "r": 255, "g": 160, "b": 60, "brightness": 180
-            })
-        # 光线亮 → 关灯
-        elif lvl == "BRIGHT":
-            self._cmd_led({"cmd": "SET_STATE", "state": "OFF"})
+        self._fire("presence", {"presence": presence})
 
     def on_sound_event(self):
-        """声音检测到 → LED 短闪白色提示（不受 decision_active 抑制，始终响应）"""
-        self._mqtt.publish(_LED_CMD,
-                           {"cmd": "BLINK", "r": 255, "g": 255, "b": 255, "count": 2})
+        self._fire("sound", {"detected": True})
+
+    def _fire(self, sensor_tag, payload):
+        if self._decision_active:
+            return
+        for rule in self._rules:
+            if not rule.get("en", True):
+                continue
+            trig = rule.get("trig", {})
+            if trig.get("tag") != sensor_tag:
+                continue
+            if self._match(trig.get("ev", ""), sensor_tag, payload):
+                act = rule.get("act", {})
+                self._cmd_led(act)
+                break  # 每次传感器事件只触发第一条匹配规则
+
+    def _match(self, ev, tag, payload):
+        if tag == "presence":
+            if ev == "detected":    return payload.get("presence") is True
+            if ev == "disappeared": return payload.get("presence") is False
+        elif tag == "light_level":
+            lvl = payload.get("level", "")
+            if ev == "dark":    return lvl in ("DARK", "DIM")
+            if ev == "bright":  return lvl in ("BRIGHT", "NORMAL")
+            if ev == "changed": return "level" in payload
+        elif tag == "sound":
+            if ev == "detected": return True
+        return False
 
     def _cmd_led(self, payload):
         self._mqtt.publish(_LED_CMD, payload)

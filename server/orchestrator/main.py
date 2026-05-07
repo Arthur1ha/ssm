@@ -16,7 +16,7 @@ import paho.mqtt.client as mqtt_lib
 
 from shared_state import SharedState
 import tools as agent_tools
-from graph import build_graph, build_orchestrator
+from graph import build_evaluation_graph, build_orchestrator
 from rule_engine import RuleEngine
 
 # ── Config ────────────────────────────────────────────────────
@@ -153,8 +153,8 @@ mqtt_client.on_disconnect = on_disconnect
 # ── Init tools + graph ────────────────────────────────────────
 
 agent_tools.init(state, mqtt_client)
-graph        = build_graph()
-orchestrator = build_orchestrator()
+evaluation_graph = build_evaluation_graph()
+orchestrator     = build_orchestrator()
 rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
 
 # ── MQTT：用 loop_start() 让 paho 自己管线程 ─────────────────
@@ -202,12 +202,14 @@ while True:
     print(f"[Main] Invoking {'Decision' if trigger == 'sensor' else 'Evaluation'} Agent "
           f"for unit={unit_id}")
 
-    # 用户规则匹配（零 LLM，先于 LangGraph 执行）
+    # 传感器事件：规则引擎处理，不走 LLM
     if trigger == "sensor":
         rule_engine.match_and_fire(unit_id, event["payload"])
+        continue
 
+    # 执行器报告：评估图（检查指令是否被正确执行）
     try:
-        graph.invoke({"trigger": trigger, "payload": event["payload"]})
+        evaluation_graph.invoke({"payload": event["payload"]})
         print("[Main] Done.")
     except Exception as e:
-        print(f"[Main] Graph error: {e}")
+        print(f"[Main] Evaluation error: {e}")

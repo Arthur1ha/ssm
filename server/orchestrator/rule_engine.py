@@ -60,18 +60,20 @@ class RuleEngine:
                 return True
         return False
 
-    def match_and_fire(self, unit_id: str, payload: dict):
-        """传感器 event 到来时调用。从 manifest 读 agent_tag，匹配规则，直接派发任务。"""
+    def match_and_fire(self, unit_id: str, payload: dict) -> bool:
+        """传感器 event 到来时调用。从 manifest 读 agent_tag，匹配规则，直接派发任务。
+        返回 True 表示至少一条规则命中（调用方可跳过后续 LLM 决策）。"""
         manifest = self._state.get_manifest(unit_id)
         if not manifest:
-            return
+            return False
         agent_tag = manifest.get("agent_tag")
         if not agent_tag:
-            return
+            return False
 
         rules = self._load()  # 每次热加载，确保 API 保存后立即生效
         registry = self._state.get_capability_registry()
         session_id = f"rule_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+        fired = False
 
         for rule in rules:
             if not rule.get("enabled", True):
@@ -96,3 +98,6 @@ class RuleEngine:
                     session_id,
                 )
                 print(f"[RuleEngine]   → task dispatched to {device_id}")
+            fired = True
+
+        return fired

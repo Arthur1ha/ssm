@@ -3,7 +3,7 @@
 
 import time
 from ism import Trigger
-from config import AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
+from config import AGENT_ID, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
 
 
 class TriggerMap:
@@ -20,6 +20,7 @@ class TriggerMap:
         self._buz_cmd_topic  = "ssm/agents/{}/command".format(AGENT_BUZ)
         self._led_task_pfx   = "ssm/task/{}/".format(AGENT_LED)
         self._buz_task_pfx   = "ssm/task/{}/".format(AGENT_BUZ)
+        self._rules_topic    = "ssm/rules/{}".format(AGENT_ID)
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
@@ -42,6 +43,10 @@ class TriggerMap:
         elif topic == "ssm/decision/active":
             active = (payload == "true" or payload is True)
             self._local.set_decision_active(active)
+
+        elif topic == self._rules_topic:
+            if isinstance(payload, list):
+                self._local.load_rules(payload)
 
         elif topic == "ssm/sys/ping":
             self._mqtt.publish("ssm/sys/pong/{}".format(AGENT_LED),

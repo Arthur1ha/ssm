@@ -41,6 +41,7 @@ bsm._event_cb = trigger_map.on_bsm_event
 # ── 重连后重新发布函数 ────────────────────────────────────────
 def on_reconnect():
     print("[Main] Reconnected — re-publishing manifests and states")
+    local_rules._load_from_file()  # 立即从 flash 恢复规则，不等 MQTT retain 消息
     agent_manifest.publish(mqtt)
     mqtt.publish("ssm/agents/{}/location".format(AGENT_ID),
                  {"agent": AGENT_ID, "lng": LOCATION_LNG, "lat": LOCATION_LAT,
@@ -59,6 +60,7 @@ mqtt.subscribe("ssm/agents/{}/command".format(AGENT_BUZ))
 mqtt.subscribe("ssm/task/{}/+".format(AGENT_LED))
 mqtt.subscribe("ssm/task/{}/+".format(AGENT_BUZ))
 mqtt.subscribe("ssm/decision/active")
+mqtt.subscribe("ssm/rules/{}".format(AGENT_ID))
 mqtt.subscribe("ssm/sys/ping")
 
 mqtt.begin()
