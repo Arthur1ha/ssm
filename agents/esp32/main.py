@@ -88,13 +88,8 @@ while True:
     bsm.tick()
 
     now = time.ticks_ms()
-    if time.ticks_diff(now, _last_heartbeat) >= 5000:   # 临时改成5秒打印一次确认循环在跑
+    if time.ticks_diff(now, _last_heartbeat) >= HEARTBEAT_MS:
         _last_heartbeat = now
         print("[Loop] alive — light={} ir={}".format(bsm.light_level, bsm.ir_presence))
-        mqtt.publish("ssm/agents/{}/heartbeat".format(AGENT_ID), {
-            "ts":    time.time(),
-            "light": bsm.light_level,
-            "ir":    bsm.ir_presence,
-        })
 
     time.sleep_ms(10)

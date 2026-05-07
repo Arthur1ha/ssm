@@ -22,6 +22,7 @@ const ICONS = {
   sun:      "M12 17A5 5 0 1 0 12 7a5 5 0 0 0 0 10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42",
   wifi:     "M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01",
   x:        "M18 6L6 18M6 6l12 12",
+  list:     "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
 };
 
 function Icon({ name, size = 18, sw = 1.75, color = "currentColor" }) {
@@ -377,6 +378,8 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
   const [thinking, setThinking]     = useState(false);
   const [thinkingText, setThinkingText] = useState('');
   const [kbOffset, setKbOffset]     = useState(0);
+  const [pendingRule, setPendingRule] = useState(null);
+  const [savingRule, setSavingRule]   = useState(false);
   const endRef   = useRef(null);
   const inputRef = useRef(null);
 
@@ -397,29 +400,62 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, thinking, kbOffset]);
 
+  const handleConfirmRule = async () => {
+    if (!pendingRule) return;
+    setSavingRule(true);
+    try {
+      await fetch('/api/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pendingRule),
+      });
+      const saved = pendingRule;
+      setPendingRule(null);
+      setMessages(m => [...m, { role: 'assistant', text: `规则「${saved.name}」已保存，条件触发时自动执行。`, actions: [] }]);
+    } catch {
+      setMessages(m => [...m, { role: 'assistant', text: '规则保存失败，请重试。', actions: [] }]);
+    }
+    setSavingRule(false);
+  };
+
+  const handleCancelRule = () => {
+    setPendingRule(null);
+    setMessages(m => [...m, { role: 'assistant', text: '已取消，规则未保存。', actions: [] }]);
+  };
+
   const send = async (text) => {
     const t = (text || input).trim();
     if (!t) return;
     setInput('');
+    setPendingRule(null);
     setMessages(m => [...m, { role: 'user', text: t }]);
     setThinking(true);
     setThinkingText('解析意图...');
 
     try {
-      // ① NLU parse — get session_id + immediate feedback
+      // ① NLU parse — 同时识别 intent_type
       const res = await fetch('/api/nlu', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: t, devices: subs }),
       });
       if (!res.ok) throw new Error('nlu_failed');
-      const { session_id, nlu_feedback, requirements } = await res.json();
+      const nluData = await res.json();
+      const { session_id, nlu_feedback, intent_type, requirements, rule } = nluData;
 
-      // Show NLU feedback immediately
       setMessages(m => [...m, { role: 'assistant', text: nlu_feedback, actions: [] }]);
-      setThinkingText('正在规划...');
+      setThinking(false);
+      setThinkingText('');
 
-      // ② Subscribe to feedback topic
+      // ② 按 intent_type 分流
+      if (intent_type === 'define_rule' && rule) {
+        setPendingRule(rule);
+        return;
+      }
+
+      // ③ execute 流程：订阅 feedback → 发布 intent
+      setThinking(true);
+      setThinkingText('正在规划...');
       const feedbackTopic = `ssm/feedback/${session_id}`;
       mqttBus.subscribe(feedbackTopic);
 
@@ -428,15 +464,20 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
         setThinking(false);
         setThinkingText('');
         setMessages(m => [...m, { role: 'assistant', text: '操作超时，设备可能无响应', actions: [] }]);
-      }, 12000);
+      }, 30000);
 
       function handleFeedback(e) {
         const { stage, text } = e.detail || {};
         if (!stage) return;
-        if (stage === 'planning') {
-          setThinkingText('正在规划...');
-        } else if (stage === 'executing') {
-          setThinkingText('正在执行...');
+        if (stage === 'planning' || stage === 'executing') {
+          clearTimeout(timeoutId);
+          timeoutId = setTimeout(() => {
+            mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+            setThinking(false);
+            setThinkingText('');
+            setMessages(m => [...m, { role: 'assistant', text: '操作超时，设备可能无响应', actions: [] }]);
+          }, 20000);
+          setThinkingText(stage === 'planning' ? '正在规划...' : '正在执行...');
         } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
           clearTimeout(timeoutId);
           mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
@@ -447,7 +488,6 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
       }
       mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
 
-      // ③ Publish intent to Orchestrator
       mqttBus.publish(`ssm/intent/${session_id}`, {
         session_id,
         user_msg: t,
@@ -546,6 +586,36 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
           )}
           <div ref={endRef}/>
         </div>
+        {/* rule preview card */}
+        {pendingRule && (
+          <div style={{ padding: '0 16px 10px', flexShrink: 0 }}>
+            <div style={{ background: 'rgba(200,255,62,0.07)', border: '1px solid rgba(200,255,62,0.22)',
+              borderRadius: 18, padding: '14px 16px' }}>
+              <div style={{ fontSize: 12, color: LIME, fontWeight: 600, marginBottom: 8 }}>规则预览 · 确认保存？</div>
+              <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{pendingRule.name}</div>
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 12 }}>
+                当 {pendingRule.trigger?.agent_tag}.{pendingRule.trigger?.event}
+                {' → '}
+                {pendingRule.action?.resource_tag} / {pendingRule.action?.cmd}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={handleCancelRule}
+                  style={{ flex: 1, padding: '9px 0', borderRadius: 999, fontSize: 13,
+                    background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
+                    color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontFamily: 'inherit' }}>
+                  取消
+                </button>
+                <button onClick={handleConfirmRule} disabled={savingRule}
+                  style={{ flex: 2, padding: '9px 0', borderRadius: 999, fontSize: 13, fontWeight: 600,
+                    background: LIME, border: 'none', color: '#0B0B0E',
+                    cursor: 'pointer', fontFamily: 'inherit',
+                    boxShadow: '0 0 16px rgba(200,255,62,0.3)' }}>
+                  {savingRule ? '保存中...' : '确认保存'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* suggestions */}
         {messages.length <= 1 && (
           <div style={{ padding:'0 12px 8px', display:'flex', gap:6, overflowX:'auto', scrollbarWidth:'none', flexShrink:0 }}>
@@ -613,11 +683,94 @@ function PersistentInputBar({ onOpen }) {
   );
 }
 
-/* ── TabBar — 2 tabs ────────────────────────────────────────────── */
+/* ── RulesScreen ─────────────────────────────────────────────────── */
+function RulesScreen() {
+  const [rules, setRules] = useState([]);
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/rules');
+      setRules(await r.json());
+    } catch {}
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const handleDelete = async (rule_id) => {
+    await fetch(`/api/rules/${rule_id}`, { method: 'DELETE' });
+    load();
+  };
+
+  const handleToggle = async (rule_id, enabled) => {
+    await fetch(`/api/rules/${rule_id}/toggle?enabled=${!enabled}`, { method: 'PATCH' });
+    load();
+  };
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
+        background: 'radial-gradient(50% 30% at 50% 5%, rgba(200,255,62,0.1), transparent 70%)' }}/>
+      <div style={{ padding: '14px 22px 4px', flexShrink: 0, position: 'relative' }}>
+        <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', fontWeight: 500, letterSpacing: '0.06em' }}>SSM</span>
+      </div>
+      <div style={{ padding: '4px 22px 16px', flexShrink: 0, position: 'relative' }}>
+        <div style={{ fontSize: 32, fontWeight: 300, letterSpacing: '-0.02em', lineHeight: 1.1 }}>自动规则</div>
+        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 6 }}>
+          {rules.filter(r => r.enabled).length} 条启用 · {rules.length} 条总计 · 在对话中定义新规则
+        </div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
+        paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
+        {rules.length === 0 ? (
+          <div style={{ padding: '60px 20px', textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 13, lineHeight: 2 }}>
+            还没有规则<br/>
+            <span style={{ fontSize: 12 }}>在对话框里说"检测到人就开灯"来创建</span>
+          </div>
+        ) : rules.map(rule => (
+          <div key={rule.rule_id} style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            padding: '13px 14px', marginBottom: 8, borderRadius: 18,
+            background: rule.enabled ? 'rgba(200,255,62,0.05)' : 'rgba(255,255,255,0.03)',
+            border: `1px solid ${rule.enabled ? 'rgba(200,255,62,0.16)' : 'rgba(255,255,255,0.06)'}`,
+          }}>
+            <div onClick={() => handleToggle(rule.rule_id, rule.enabled)}
+              style={{ width: 38, height: 22, borderRadius: 11, flexShrink: 0, cursor: 'pointer',
+                background: rule.enabled ? LIME : 'rgba(255,255,255,0.12)', position: 'relative',
+                transition: 'background 0.2s' }}>
+              <div style={{ position: 'absolute', top: 3, left: rule.enabled ? 18 : 3,
+                width: 16, height: 16, borderRadius: '50%',
+                background: '#0B0B0E', transition: 'left 0.2s' }}/>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 500,
+                color: rule.enabled ? '#fff' : 'rgba(255,255,255,0.4)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {rule.name}
+              </div>
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginTop: 2 }}>
+                {rule.trigger?.agent_tag}.{rule.trigger?.event} → {rule.action?.resource_tag}
+              </div>
+            </div>
+            <button onClick={() => handleDelete(rule.rule_id)}
+              style={{ width: 28, height: 28, borderRadius: '50%', flexShrink: 0, padding: 0,
+                background: 'rgba(255,82,82,0.1)', border: '1px solid rgba(255,82,82,0.2)',
+                color: 'rgba(255,82,82,0.7)', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="x" size={12}/>
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── TabBar — 3 tabs ────────────────────────────────────────────── */
 function TabBar({ tab, setTab, badge }) {
   const tabs = [
     { id: 'discover', icon: 'search', label: '附近' },
     { id: 'devices',  icon: 'home',   label: '设备', badge },
+    { id: 'rules',    icon: 'list',   label: '规则' },
   ];
   return (
     <div style={{
@@ -739,6 +892,7 @@ function App() {
         {tab === 'devices' && (
           <DevicesScreen agents={agents} subscribed={subscribed} unitData={unitData}/>
         )}
+        {tab === 'rules' && <RulesScreen />}
         <PersistentInputBar onOpen={() => setSheetOpen(true)}/>
         <TabBar tab={tab} setTab={setTab} badge={subscribed.length}/>
       </div>

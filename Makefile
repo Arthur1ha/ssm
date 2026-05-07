@@ -15,7 +15,7 @@
 #   make logs              查看后台服务日志
 
 .PHONY: broker api api-bg orchestrator orchestrator-bg pwa pwa-bg ngrok ngrok-bg \
-        ps logs ngrok-url \
+        ps logs ngrok-url trace \
         stop restart-api restart-orchestrator restart-pwa restart-ngrok
 
 # ── Broker ──────────────────────────────────────────────────
@@ -93,3 +93,6 @@ logs:
 ngrok-url:
 	@curl -s http://localhost:4040/api/tunnels | \
 		python3 -c "import sys,json;[print(t['public_url']) for t in json.load(sys.stdin)['tunnels']]"
+
+trace:
+	mosquitto_sub -h 47.116.137.202 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t "ssm/#" -v

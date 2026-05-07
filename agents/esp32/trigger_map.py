@@ -148,9 +148,6 @@ class TriggerMap:
             self._publish_buz_state()
 
     # ─────────────────────────────────────────────────────────
-    #  Publish helpers
-    # ─────────────────────────────────────────────────────────
-    # ─────────────────────────────────────────────────────────
     #  Task handlers (V2 Orchestrator protocol)
     #  Topic: ssm/task/{device_id}/{task_id}
     #  Payload: {task_id, session_id, action, params, ts}

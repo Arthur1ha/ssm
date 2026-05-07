@@ -17,6 +17,7 @@ import paho.mqtt.client as mqtt_lib
 from shared_state import SharedState
 import tools as agent_tools
 from graph import build_graph, build_orchestrator
+from rule_engine import RuleEngine
 
 # ── Config ────────────────────────────────────────────────────
 
@@ -154,6 +155,7 @@ mqtt_client.on_disconnect = on_disconnect
 agent_tools.init(state, mqtt_client)
 graph        = build_graph()
 orchestrator = build_orchestrator()
+rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
 
 # ── MQTT：用 loop_start() 让 paho 自己管线程 ─────────────────
 
@@ -199,6 +201,10 @@ while True:
     unit_id = event.get("unit_id", "")
     print(f"[Main] Invoking {'Decision' if trigger == 'sensor' else 'Evaluation'} Agent "
           f"for unit={unit_id}")
+
+    # 用户规则匹配（零 LLM，先于 LangGraph 执行）
+    if trigger == "sensor":
+        rule_engine.match_and_fire(unit_id, event["payload"])
 
     try:
         graph.invoke({"trigger": trigger, "payload": event["payload"]})

@@ -40,17 +40,57 @@ TOOLS = [{
 
 NLU_SYSTEM = """你是 SSM 智能家居语音助手的意图解析器。将用户输入解析为结构化 JSON。
 
-输出格式（只输出 JSON，不要代码块和解释）：
+首先判断 intent_type：
+- "execute"：立即执行的一次性指令（"把灯调暗"、"开灯"、"播放警报"）
+- "define_rule"：定义自动化规则（含"以后"、"每次"、"当…就"、"检测到…就"、"自动"等词）
+
+execute 输出格式（只输出 JSON，不要代码块和解释）：
 {
-  "nlu_feedback": "明白了，你想看书，我来帮你调亮一点。",
-  "requirements": [
-    {"resource_tag": "lighting", "action": "brighten", "context": "reading"}
-  ]
+  "intent_type": "execute",
+  "nlu_feedback": "好的，我来帮你调暗灯光。",
+  "requirements": [{"resource_tag": "lighting", "action": "dim", "context": ""}]
 }
 
-resource_tag 选择：lighting（灯光）、ambiance（氛围）、alert（警报）、notification（通知）
-action 选择：set_color、brighten、dim、off、on、blink、alert、notify
-nlu_feedback 要求：自然口语，1-2句，提前预告要做什么"""
+define_rule 输出格式（只输出 JSON，不要代码块和解释）：
+{
+  "intent_type": "define_rule",
+  "nlu_feedback": "明白了，我来帮你设置这条规则。",
+  "rule": {
+    "name": "检测到人就开灯",
+    "trigger": {"agent_tag": "presence", "event": "detected"},
+    "action": {"resource_tag": "lighting", "cmd": "SET_STATE", "params": {"state": "BRIGHT"}}
+  }
+}
+
+trigger.agent_tag 选择：presence（存在/红外）、light_level（光线）、sound（声音）
+trigger.event 选择：
+  presence → detected（检测到人）、disappeared（人离开）
+  light_level → dark（变暗）、bright（变亮）
+  sound → detected（检测到声音）
+
+action.resource_tag 选择：lighting（灯光）、ambiance（氛围）、alert（警报）、notification（通知）
+action.cmd 与 params：
+  SET_STATE: params={state: "BRIGHT"|"DIM"|"OFF"}
+  SET_COLOR: params={r:255, g:160, b:60, brightness:180}（暖光示例）
+  BLINK: params={r:255, g:255, b:255, count:3}
+  PLAY: params={pattern: "NOTIFY"|"ALERT"}
+
+execute 时 resource_tag 选择：lighting、ambiance、alert、notification
+execute 时 action 选择：set_color、brighten、dim、off、on、blink、alert、notify"""
+
+
+_RULES_FILE = Path(__file__).parent.parent / "orchestrator" / "rules.json"
+
+
+def _load_rules():
+    try:
+        return json.loads(_RULES_FILE.read_text()) if _RULES_FILE.exists() else []
+    except Exception:
+        return []
+
+
+def _save_rules(rules):
+    _RULES_FILE.write_text(json.dumps(rules, indent=2, ensure_ascii=False))
 
 
 class ChatRequest(BaseModel):
@@ -61,6 +101,14 @@ class ChatRequest(BaseModel):
 class NLURequest(BaseModel):
     message: str
     devices: list = []
+
+
+class RuleCreateRequest(BaseModel):
+    name: str
+    trigger: dict
+    action: dict
+    enabled: bool = True
+
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
@@ -95,7 +143,7 @@ def nlu(req: NLURequest):
 
     response = client.chat.completions.create(
         model=MODEL,
-        max_tokens=256,
+        max_tokens=512,
         messages=[
             {"role": "system", "content": NLU_SYSTEM},
             {"role": "user",   "content": req.message},
@@ -106,10 +154,62 @@ def nlu(req: NLURequest):
     try:
         result = json.loads(content)
     except Exception:
-        result = {"nlu_feedback": "好的，我来帮你处理。", "requirements": []}
+        result = {"intent_type": "execute", "nlu_feedback": "好的，我来帮你处理。", "requirements": []}
 
-    return {
+    intent_type = result.get("intent_type", "execute")
+
+    base = {
         "session_id":   session_id,
+        "intent_type":  intent_type,
         "nlu_feedback": result.get("nlu_feedback", "好的，我来处理。"),
-        "requirements": result.get("requirements", []),
     }
+    if intent_type == "define_rule":
+        base["rule"] = result.get("rule", {})
+    else:
+        base["requirements"] = result.get("requirements", [])
+
+    return base
+
+
+# ── 规则 CRUD ─────────────────────────────────────────────────────────
+
+@app.get("/api/rules")
+def list_rules():
+    return _load_rules()
+
+
+@app.post("/api/rules")
+def create_rule(req: RuleCreateRequest):
+    rules = _load_rules()
+    rule = {
+        "rule_id":    f"r_{int(_time.time())}_{uuid.uuid4().hex[:6]}",
+        "name":       req.name,
+        "enabled":    req.enabled,
+        "trigger":    req.trigger,
+        "action":     req.action,
+        "created_at": int(_time.time()),
+    }
+    rules.append(rule)
+    _save_rules(rules)
+    return rule
+
+
+@app.delete("/api/rules/{rule_id}")
+def delete_rule(rule_id: str):
+    rules = _load_rules()
+    new = [r for r in rules if r["rule_id"] != rule_id]
+    if len(new) == len(rules):
+        return {"error": "not_found"}
+    _save_rules(new)
+    return {"deleted": rule_id}
+
+
+@app.patch("/api/rules/{rule_id}/toggle")
+def toggle_rule(rule_id: str, enabled: bool):
+    rules = _load_rules()
+    for r in rules:
+        if r["rule_id"] == rule_id:
+            r["enabled"] = enabled
+            _save_rules(rules)
+            return r
+    return {"error": "not_found"}

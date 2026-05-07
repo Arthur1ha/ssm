@@ -30,8 +30,7 @@ WS2812_PIN       = 4    # D4  — WS2812 灯环数据线
 WS2812_NUM       = 16   # 灯环像素数量
 WS2812_MAX_VAL   = 100  # 单通道最大值（0-255），限制峰值电流防止过热
 SOUND_SENSOR_PIN = 15   # D15 — 声音传感器 数字输入（高=检测到声音，启动后正常）
-LIGHT_SENSOR_PIN = 18   # D18 — 光敏传感器 数字输入（⚠️ 无 ADC，只能读亮/暗两档）
-                        #       如需渐变等级，请改接 GPIO34/36（ADC1，不受 WiFi 影响）
+LIGHT_SENSOR_PIN = 34   # GPIO34 — 光敏传感器 AO 模拟输入（ADC1，不受 WiFi 影响）
 IR_SENSOR_PIN    = 19   # D19 — 红外传感器 数字输入（低电平=检测到）
 
 PWM_FREQ         = 5000  # Hz for buzzer base freq
@@ -39,18 +38,19 @@ PWM_FREQ         = 5000  # Hz for buzzer base freq
 # ── 光敏传感器模式 ────────────────────────────────────────────
 # D18 没有 ADC，只能数字读取 → LIGHT_DIGITAL_MODE = True
 # 若改接 GPIO34/36，将此设为 False 可启用渐变等级
-LIGHT_DIGITAL_MODE   = True
+LIGHT_DIGITAL_MODE   = False
 
 # 以下阈值仅在 LIGHT_DIGITAL_MODE = False（ADC 模式）时生效
 LIGHT_BRIGHT_THRESH  = 3000
-LIGHT_NORMAL_THRESH  = 1500
+LIGHT_NORMAL_THRESH  = 1600
 LIGHT_DIM_THRESH     = 600
-LIGHT_HYSTERESIS     = 100
-LIGHT_CONFIRM_COUNT  = 3
+LIGHT_HYSTERESIS     = 50
+LIGHT_CONFIRM_COUNT  = 2
 
 # ── Timing (milliseconds) ─────────────────────────────────────
-LIGHT_SAMPLE_MS      = 2000    # light polling interval
+LIGHT_SAMPLE_MS      = 2000   # light polling interval
 IR_DEBOUNCE_MS       = 200    # IR presence debounce
 IR_HEARTBEAT_MS      = 30000  # IR heartbeat even when no change
+SOUND_COOLDOWN_MS    = 2000   # minimum gap between sound events
 LOCAL_RULES_DELAY_MS = 500    # delay after MQTT connect before local rules fire
-HEARTBEAT_MS         = 60000  # agent keepalive publish interval
+HEARTBEAT_MS         = 60000  # agent keepalive interval

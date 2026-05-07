@@ -11,7 +11,7 @@ from config import (
     LIGHT_DIGITAL_MODE,
     LIGHT_BRIGHT_THRESH, LIGHT_NORMAL_THRESH, LIGHT_DIM_THRESH,
     LIGHT_HYSTERESIS, LIGHT_CONFIRM_COUNT,
-    LIGHT_SAMPLE_MS, IR_DEBOUNCE_MS, IR_HEARTBEAT_MS,
+    LIGHT_SAMPLE_MS, IR_DEBOUNCE_MS, IR_HEARTBEAT_MS, SOUND_COOLDOWN_MS,
 )
 
 # Light levels
@@ -31,7 +31,8 @@ class BSM:
         self._event_cb = event_cb
 
         # ── Light sensor ─────────────────────────────────────
-        # D18 = digital only (no ADC). LIGHT_DIGITAL_MODE controls behavior.
+        # LIGHT_DIGITAL_MODE=False → ADC on GPIO32-39 (e.g. GPIO34)
+        # LIGHT_DIGITAL_MODE=True  → digital DO pin (binary only)
         if LIGHT_DIGITAL_MODE:
             self._light_pin  = Pin(LIGHT_SENSOR_PIN, Pin.IN)
             self._light_adc  = None
@@ -54,17 +55,11 @@ class BSM:
         self._ir_last_hb    = 0
 
         # ── Sound sensor ─────────────────────────────────────
-        # D15: digital output from sound detection module
-        # HIGH = sound detected, LOW = quiet
+        # Digital DO pin: HIGH = sound detected, LOW = quiet
         # One-shot event: only fires on rising edge (quiet→sound)
-        self._sound_pin     = Pin(SOUND_SENSOR_PIN, Pin.IN)
-        self._sound_prev    = 0
-        self._sound_last_hb = 0
-        self._sound_cooldown= 0   # prevent rapid repeat events (ms)
-        _SOUND_COOLDOWN_MS  = 1000
-
-        # store cooldown as instance var
-        self._SOUND_COOLDOWN_MS = _SOUND_COOLDOWN_MS
+        self._sound_pin      = Pin(SOUND_SENSOR_PIN, Pin.IN)
+        self._sound_prev     = 0
+        self._sound_cooldown = 0   # ticks_ms of last fired event
 
         # ── WS2812 灯环 ──────────────────────────────────────
         self._np          = neopixel.NeoPixel(Pin(WS2812_PIN), WS2812_NUM)
@@ -154,16 +149,24 @@ class BSM:
 
     def _classify_light(self, raw):
         lvl = self._light_level
+        # → BRIGHT
         if lvl != LEVEL_BRIGHT and raw > LIGHT_BRIGHT_THRESH + LIGHT_HYSTERESIS:
             return LEVEL_BRIGHT
+        # BRIGHT → NORMAL
         if lvl == LEVEL_BRIGHT and raw < LIGHT_BRIGHT_THRESH - LIGHT_HYSTERESIS:
             return LEVEL_NORMAL
-        if lvl not in (LEVEL_DIM, LEVEL_DARK) and raw < LIGHT_DIM_THRESH - LIGHT_HYSTERESIS:
+        # NORMAL/BRIGHT → DIM  (NORMAL_THRESH 是 NORMAL/DIM 分界)
+        if lvl not in (LEVEL_DIM, LEVEL_DARK) and raw < LIGHT_NORMAL_THRESH - LIGHT_HYSTERESIS:
             return LEVEL_DIM
-        if lvl in (LEVEL_DIM, LEVEL_DARK) and raw > LIGHT_DIM_THRESH + LIGHT_HYSTERESIS:
+        # DIM/DARK → NORMAL
+        if lvl in (LEVEL_DIM, LEVEL_DARK) and raw > LIGHT_NORMAL_THRESH + LIGHT_HYSTERESIS:
             return LEVEL_NORMAL
-        if lvl != LEVEL_DARK and raw < 100:
+        # DIM → DARK  (DIM_THRESH 是 DIM/DARK 分界)
+        if lvl == LEVEL_DIM and raw < LIGHT_DIM_THRESH - LIGHT_HYSTERESIS:
             return LEVEL_DARK
+        # DARK → DIM
+        if lvl == LEVEL_DARK and raw > LIGHT_DIM_THRESH + LIGHT_HYSTERESIS:
+            return LEVEL_DIM
         return lvl
 
     @property
@@ -203,7 +206,7 @@ class BSM:
 
         # Rising edge detection + cooldown
         if raw == 1 and self._sound_prev == 0:
-            if time.ticks_diff(now, self._sound_cooldown) >= self._SOUND_COOLDOWN_MS:
+            if time.ticks_diff(now, self._sound_cooldown) >= SOUND_COOLDOWN_MS:
                 self._sound_cooldown = now
                 self._event_cb("SOUND_DETECTED", {"ts": time.time()})
 

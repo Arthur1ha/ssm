@@ -246,7 +246,7 @@ def build_orchestrator():
         if not tasks:
             return state
 
-        deadline = _time.time() + 6.0
+        deadline = _time.time() + 2.0
         results = {}
         while _time.time() < deadline:
             for task in tasks:

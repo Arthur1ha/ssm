@@ -31,16 +31,19 @@ def publish(mqtt):
     ts = time.time()
 
     _pub(mqtt, AGENT_LIGHT, "sensor", "ambient_light", {
+        "agent_tag": "light_level",
         "levels": ["DARK", "DIM", "NORMAL", "BRIGHT"],
         "ism_states": ["SAMPLING", "ERROR"],
     }, ts)
 
     _pub(mqtt, AGENT_IR, "sensor", "ir_presence", {
+        "agent_tag": "presence",
         "values": [True, False],
         "ism_states": ["MONITORING", "ERROR"],
     }, ts)
 
     _pub(mqtt, AGENT_SOUND, "sensor", "sound", {
+        "agent_tag": "sound",
         "values": ["detected"],
     }, ts)
 
