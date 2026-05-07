@@ -1,7 +1,7 @@
 # agent_manifest.py — Publish one retained manifest per agent unit on startup.
 # Topics: ssm/agents/{unit_id}/manifest
 import time
-from config import AGENT_ID, FIRMWARE_VER, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
+from config import AGENT_ID, FIRMWARE_VER, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ, BUZZER_ENABLED
 
 
 def _pub(mqtt, unit_id, agent_type, name, extra, ts):
@@ -59,14 +59,16 @@ def publish(mqtt):
         "resource_tags": ["lighting", "ambiance"],
     }, ts)
 
-    _pub(mqtt, AGENT_BUZ, "actuator", "buzzer", {
-        "commands": ["PLAY", "STOP"],
-        "ism_states": ["SILENT", "ALERT", "NOTIFY"],
-        "capabilities": [
-            {"action": "PLAY", "params": ["pattern"], "values": ["NOTIFY", "ALERT"]},
-            {"action": "STOP", "params": []},
-        ],
-        "resource_tags": ["alert", "notification"],
-    }, ts)
+    if BUZZER_ENABLED:
+        _pub(mqtt, AGENT_BUZ, "actuator", "buzzer", {
+            "commands": ["PLAY", "STOP"],
+            "ism_states": ["SILENT", "ALERT", "NOTIFY"],
+            "capabilities": [
+                {"action": "PLAY", "params": ["pattern"], "values": ["NOTIFY", "ALERT"]},
+                {"action": "STOP", "params": []},
+            ],
+            "resource_tags": ["alert", "notification"],
+        }, ts)
 
-    print("[Manifest] Published 5 unit manifests for {}".format(AGENT_ID))
+    count = 4 + (1 if BUZZER_ENABLED else 0)
+    print("[Manifest] Published {} unit manifests for {}".format(count, AGENT_ID))

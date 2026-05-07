@@ -24,6 +24,16 @@ def _blink_error():
     except Exception:
         pass
 
+# 第一时间拉低数据线，防止浮空期间 WS2812 锁存噪声
+try:
+    _np = neopixel.NeoPixel(Pin(WS2812_PIN), WS2812_NUM)
+    for _i in range(WS2812_NUM):
+        _np[_i] = (0, 0, 0)
+    _np.write()
+    del _np, _i
+except Exception:
+    pass
+
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
 

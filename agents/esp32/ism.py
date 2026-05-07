@@ -3,8 +3,7 @@
 
 # ── States ────────────────────────────────────────────────────
 class State:
-    BOOT       = "BOOT"
-    SAMPLING   = "SAMPLING"     # light sensor active
+    SAMPLING   = "SAMPLING"     # light/IR sensor active
     MONITORING = "MONITORING"   # IR sensor active
     OFF        = "OFF"
     DIM        = "DIM"
@@ -18,10 +17,8 @@ class State:
 
 # ── Triggers ──────────────────────────────────────────────────
 class Trigger:
-    INIT_COMPLETE    = "INIT_COMPLETE"
     SENSOR_FAIL      = "SENSOR_FAIL"
     SENSOR_RECOVERED = "SENSOR_RECOVERED"
-    CMD_ON           = "CMD_ON"
     CMD_OFF          = "CMD_OFF"
     CMD_DIM          = "CMD_DIM"
     CMD_BRIGHT       = "CMD_BRIGHT"
@@ -33,49 +30,60 @@ class Trigger:
     PLAY_NOTIFY      = "PLAY_NOTIFY"
     STOP_SOUND       = "STOP_SOUND"
     SOUND_DONE       = "SOUND_DONE"
-    HW_FAULT         = "HW_FAULT"
 
 # ── Per-unit transition tables ────────────────────────────────
 
-# Shared by light and IR sensors
 SENSOR_TABLE = {
-    (State.BOOT,       Trigger.INIT_COMPLETE):    State.SAMPLING,
     (State.SAMPLING,   Trigger.SENSOR_FAIL):      State.ERROR,
-    (State.SAMPLING,   Trigger.HW_FAULT):         State.ERROR,
-    (State.MONITORING, Trigger.INIT_COMPLETE):    State.MONITORING,
     (State.MONITORING, Trigger.SENSOR_FAIL):      State.ERROR,
     (State.ERROR,      Trigger.SENSOR_RECOVERED): State.SAMPLING,
     (State.ERROR,      Trigger.CMD_RESET):        State.SAMPLING,
 }
 
 LED_TABLE = {
-    (State.OFF,    Trigger.CMD_ON):     State.BRIGHT,
-    (State.OFF,    Trigger.CMD_COLOR):  State.COLOR,
+    # From OFF
+    (State.OFF,    Trigger.CMD_BRIGHT): State.BRIGHT,
     (State.OFF,    Trigger.CMD_DIM):    State.DIM,
+    (State.OFF,    Trigger.CMD_COLOR):  State.COLOR,
     (State.OFF,    Trigger.CMD_BLINK):  State.BLINK,
-    (State.BRIGHT, Trigger.CMD_OFF):   State.OFF,
-    (State.BRIGHT, Trigger.CMD_DIM):   State.DIM,
-    (State.BRIGHT, Trigger.CMD_COLOR): State.COLOR,
-    (State.BRIGHT, Trigger.CMD_BLINK): State.BLINK,
-    (State.DIM,    Trigger.CMD_OFF):   State.OFF,
-    (State.DIM,    Trigger.CMD_BRIGHT):State.BRIGHT,
-    (State.DIM,    Trigger.CMD_COLOR): State.COLOR,
-    (State.DIM,    Trigger.CMD_BLINK): State.BLINK,
-    (State.COLOR,  Trigger.CMD_OFF):   State.OFF,
-    (State.COLOR,  Trigger.CMD_BRIGHT):State.BRIGHT,
-    (State.COLOR,  Trigger.CMD_COLOR): State.COLOR,
-    (State.COLOR,  Trigger.CMD_BLINK): State.BLINK,
-    (State.BLINK,  Trigger.BLINK_DONE):State.OFF,
-    (State.BLINK,  Trigger.CMD_OFF):   State.OFF,
+    # From BRIGHT
+    (State.BRIGHT, Trigger.CMD_OFF):    State.OFF,
+    (State.BRIGHT, Trigger.CMD_DIM):    State.DIM,
+    (State.BRIGHT, Trigger.CMD_COLOR):  State.COLOR,
+    (State.BRIGHT, Trigger.CMD_BLINK):  State.BLINK,
+    # From DIM
+    (State.DIM,    Trigger.CMD_OFF):    State.OFF,
+    (State.DIM,    Trigger.CMD_BRIGHT): State.BRIGHT,
+    (State.DIM,    Trigger.CMD_COLOR):  State.COLOR,
+    (State.DIM,    Trigger.CMD_BLINK):  State.BLINK,
+    # From COLOR
+    (State.COLOR,  Trigger.CMD_OFF):    State.OFF,
+    (State.COLOR,  Trigger.CMD_BRIGHT): State.BRIGHT,
+    (State.COLOR,  Trigger.CMD_DIM):    State.DIM,
+    (State.COLOR,  Trigger.CMD_COLOR):  State.COLOR,
+    (State.COLOR,  Trigger.CMD_BLINK):  State.BLINK,
+    # From BLINK — any command interrupts the blink
+    (State.BLINK,  Trigger.CMD_OFF):    State.OFF,
+    (State.BLINK,  Trigger.CMD_BRIGHT): State.BRIGHT,
+    (State.BLINK,  Trigger.CMD_DIM):    State.DIM,
+    (State.BLINK,  Trigger.CMD_COLOR):  State.COLOR,
+    (State.BLINK,  Trigger.BLINK_DONE): State.OFF,
 }
 
 BUZZER_TABLE = {
+    # From SILENT
     (State.SILENT, Trigger.PLAY_ALERT):  State.ALERT,
     (State.SILENT, Trigger.PLAY_NOTIFY): State.NOTIFY,
+    # From ALERT — natural end, explicit stop, or interrupt/re-trigger
     (State.ALERT,  Trigger.SOUND_DONE):  State.SILENT,
     (State.ALERT,  Trigger.STOP_SOUND):  State.SILENT,
+    (State.ALERT,  Trigger.PLAY_ALERT):  State.ALERT,
+    (State.ALERT,  Trigger.PLAY_NOTIFY): State.NOTIFY,
+    # From NOTIFY — natural end, explicit stop, or interrupt/re-trigger
     (State.NOTIFY, Trigger.SOUND_DONE):  State.SILENT,
     (State.NOTIFY, Trigger.STOP_SOUND):  State.SILENT,
+    (State.NOTIFY, Trigger.PLAY_NOTIFY): State.NOTIFY,
+    (State.NOTIFY, Trigger.PLAY_ALERT):  State.ALERT,
 }
 
 

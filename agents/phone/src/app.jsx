@@ -69,10 +69,29 @@ function getStateLabel(agent, unitData) {
   const n   = (agent.name || '').toLowerCase();
   if (n.includes('led') || n.includes('rgb')) return s.ism || (s.state === 'OFF' ? '已关闭' : '待命');
   if (n.includes('buz'))   return s.ism || '待命';
-  if (n.includes('ir'))    return s.detected !== undefined ? (s.detected ? '检测到' : '无信号') : '监测中';
+  if (n.includes('ir'))    return s.presence !== undefined ? (s.presence ? '有人' : '无人') : '监测中';
   if (n.includes('sound')) return s.detected ? '检测到声音' : '静默';
   if (n.includes('light')) return s.level || (s.lux !== undefined ? `${s.lux} lux` : '监测中');
   return '在线';
+}
+
+function getSensorReading(agent, unitData) {
+  const uid = agent.unit_id || agent.agent_id;
+  const s   = (unitData[uid] || {}).state || (unitData[uid] || {}).event || {};
+  const n   = (agent.name || '').toLowerCase();
+  if (n.includes('light') || n.includes('lux')) {
+    const map = { DARK: ['暗', '#6B6CFF'], DIM: ['微亮', '#7EE8A2'], NORMAL: ['正常', '#C8FF3E'], BRIGHT: ['强光', '#FFD060'] };
+    const [label, color] = map[s.level] || ['...', 'rgba(255,255,255,0.25)'];
+    return { value: label, color };
+  }
+  if (n.includes('ir')) {
+    if (s.presence === undefined) return { value: '...', color: 'rgba(255,255,255,0.25)' };
+    return s.presence ? { value: '有人', color: '#C8FF3E' } : { value: '无人', color: 'rgba(255,255,255,0.35)' };
+  }
+  if (n.includes('sound') || n.includes('mic')) {
+    return { value: '监测中', color: 'rgba(255,255,255,0.25)' };
+  }
+  return { value: '...', color: 'rgba(255,255,255,0.25)' };
 }
 
 function isAgentActive(agent, unitData) {
@@ -188,8 +207,36 @@ function AgentCard({ agent, subscribed, onToggle, phoneLoc }) {
   );
 }
 
+/* ── SensorCard — read-only, shows live sensor value ────────────── */
+function SensorCard({ agent, unitData }) {
+  const meta    = getAgentMeta(agent);
+  const reading = getSensorReading(agent, unitData);
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '8px 12px', marginBottom: 6, borderRadius: 12,
+      background: 'rgba(255,255,255,0.025)',
+      border: '1px solid rgba(255,255,255,0.04)',
+    }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+        background: `${meta.color}18`, color: meta.color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <Icon name={meta.icon} size={13} sw={2}/>
+      </div>
+      <span style={{ flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>
+        {meta.label}
+      </span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: reading.color, fontFamily: 'monospace' }}>
+        {reading.value}
+      </span>
+    </div>
+  );
+}
+
 /* ── DiscoverScreen ─────────────────────────────────────────────── */
-function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, locError }) {
+function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, locError, unitData }) {
   const sorted = [...agents].sort((a, b) => {
     const da = (phoneLoc && a._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, a._lat, a._lng) : Infinity;
     const db = (phoneLoc && b._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, b._lat, b._lng) : Infinity;
@@ -280,8 +327,11 @@ function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, lo
                     {actuators.map(a => <AgentCard key={a.unit_id||a.agent_id} agent={a} subscribed={subscribed} onToggle={toggleSub} phoneLoc={phoneLoc}/>)}
                   </>}
                   {sensors.length > 0 && <>
-                    <div style={{ padding: actuators.length ? '8px 6px 6px' : '0 6px 6px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#7EE8A2', fontWeight: 600 }}>传感器</div>
-                    {sensors.map(a => <AgentCard key={a.unit_id||a.agent_id} agent={a} subscribed={subscribed} onToggle={toggleSub} phoneLoc={phoneLoc}/>)}
+                    <div style={{ padding: actuators.length ? '8px 6px 6px' : '0 6px 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.25)', fontWeight: 600 }}>传感器</span>
+                      <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '1px 5px' }}>只读</span>
+                    </div>
+                    {sensors.map(a => <SensorCard key={a.unit_id||a.agent_id} agent={a} unitData={unitData}/>)}
                   </>}
                 </div>
               );
@@ -295,7 +345,7 @@ function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, lo
 
 /* ── DevicesScreen ──────────────────────────────────────────────── */
 function DevicesScreen({ agents, subscribed, unitData }) {
-  const subs = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id));
+  const subs = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id) && a.agent_type === 'actuator');
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(50% 30% at 80% 5%, rgba(226,107,255,0.18), transparent 70%)', pointerEvents: 'none' }}/>
@@ -368,7 +418,7 @@ const SUGGESTIONS = ['开灯，暖白', '红色 LED', '播放通知音', '关闭
 
 function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
   const subsRef  = useRef([]);
-  subsRef.current = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id));
+  subsRef.current = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id) && a.agent_type === 'actuator');
   const subs = subsRef.current;
 
   const [messages, setMessages]     = useState([
@@ -429,6 +479,17 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
     setInput('');
     setPendingRule(null);
     setMessages(m => [...m, { role: 'user', text: t }]);
+
+    const actuators = agents.filter(a => a.agent_type === 'actuator');
+    if (actuators.length === 0) {
+      setMessages(m => [...m, { role: 'assistant', text: '附近没有发现可控设备，请确认设备已上线。', actions: [] }]);
+      return;
+    }
+    if (subs.length === 0) {
+      setMessages(m => [...m, { role: 'assistant', text: '请先在「附近」页面订阅设备，才能通过对话控制。', actions: [] }]);
+      return;
+    }
+
     setThinking(true);
     setThinkingText('解析意图...');
 
@@ -499,7 +560,7 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
     } catch (e) {
       setThinking(false);
       setThinkingText('');
-      setMessages(m => [...m, { role: 'assistant', text: '连接服务失败，请检查网络', actions: [] }]);
+      setMessages(m => [...m, { role: 'assistant', text: '服务暂时无响应，请稍后重试。', actions: [] }]);
     }
   };
 
@@ -887,14 +948,14 @@ function App() {
         {tab === 'discover' && (
           <DiscoverScreen agents={agents} connected={connected}
             subscribed={subscribed} toggleSub={toggleSub}
-            phoneLoc={phoneLoc} locError={locError}/>
+            phoneLoc={phoneLoc} locError={locError} unitData={unitData}/>
         )}
         {tab === 'devices' && (
           <DevicesScreen agents={agents} subscribed={subscribed} unitData={unitData}/>
         )}
         {tab === 'rules' && <RulesScreen />}
         <PersistentInputBar onOpen={() => setSheetOpen(true)}/>
-        <TabBar tab={tab} setTab={setTab} badge={subscribed.length}/>
+        <TabBar tab={tab} setTab={setTab} badge={agents.filter(a => subscribed.includes(a.unit_id || a.agent_id) && a.agent_type === 'actuator').length}/>
       </div>
       <ChatSheet
         open={sheetOpen}

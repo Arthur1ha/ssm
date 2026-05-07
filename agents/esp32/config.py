@@ -26,6 +26,7 @@ AGENT_BUZ   = AGENT_ID + "_buz"
 
 # ── Hardware Pins（实际接线）─────────────────────────────────
 BUZZER_PIN       = 5    # D5  — 无源蜂鸣器 PWM 输出
+BUZZER_ENABLED   = False
 WS2812_PIN       = 4    # D4  — WS2812 灯环数据线
 WS2812_NUM       = 16   # 灯环像素数量
 WS2812_MAX_VAL   = 100  # 单通道最大值（0-255），限制峰值电流防止过热

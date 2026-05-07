@@ -224,16 +224,20 @@ class BSM:
         self._apply_led()
 
     def led_set_state(self, state):
-        self._blinking = False
         if state == "OFF":
+            self._blinking = False
             self._led_r = self._led_g = self._led_b = 0
             self._led_brightness = 0
         elif state == "BRIGHT":
+            self._blinking = False
             self._led_r = self._led_g = self._led_b = 255
             self._led_brightness = 255
         elif state == "DIM":
+            self._blinking = False
             self._led_r = self._led_g = self._led_b = 255
             self._led_brightness = 40
+        else:
+            return
         self._apply_led()
 
     def led_blink(self, r=255, g=255, b=255, count=3):
@@ -294,7 +298,6 @@ class BSM:
     def buzzer_stop(self):
         self._buz_pattern = None
         self._pwm_buz.duty(0)
-        self._event_cb("SOUND_DONE", {})
 
     def _tick_buzzer(self, now):
         if not self._buz_pattern or self._buz_step >= len(self._buz_pattern):

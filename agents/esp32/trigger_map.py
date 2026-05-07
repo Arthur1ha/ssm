@@ -5,6 +5,12 @@ import time
 from ism import Trigger
 from config import AGENT_ID, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
 
+_LED_STATE_TRIG = {
+    "OFF":    Trigger.CMD_OFF,
+    "BRIGHT": Trigger.CMD_BRIGHT,
+    "DIM":    Trigger.CMD_DIM,
+}
+
 
 class TriggerMap:
     def __init__(self, bsm, ism_led, ism_light, ism_ir, ism_buz, mqtt, local_rules):
@@ -27,10 +33,16 @@ class TriggerMap:
     # ─────────────────────────────────────────────────────────
     def on_mqtt(self, topic, payload):
         if topic == self._led_cmd_topic:
-            self._handle_led(payload)
+            if isinstance(payload, dict):
+                cmd = payload.get("cmd")
+                ok = self._exec_led(cmd, payload)
+                self._publish_led_report(cmd, ok)
 
         elif topic == self._buz_cmd_topic:
-            self._handle_buzzer(payload)
+            if isinstance(payload, dict):
+                cmd = payload.get("cmd")
+                ok = self._exec_buz(cmd, payload)
+                self._publish_buz_report(cmd, ok)
 
         elif topic.startswith(self._led_task_pfx):
             task_id = topic[len(self._led_task_pfx):]
@@ -49,55 +61,67 @@ class TriggerMap:
                 self._local.load_rules(payload)
 
         elif topic == "ssm/sys/ping":
-            self._mqtt.publish("ssm/sys/pong/{}".format(AGENT_LED),
+            self._mqtt.publish("ssm/sys/pong/{}".format(AGENT_ID),
                                {"ts": time.time()})
 
-    def _handle_led(self, p):
-        cmd = p.get("cmd") if isinstance(p, dict) else None
-
-        if cmd == "SET_COLOR":
-            r   = int(p.get("r", 255))
-            g   = int(p.get("g", 255))
-            b   = int(p.get("b", 255))
-            bri = int(p.get("brightness", 255))
-            self._bsm.led_set_color(r, g, b, bri)
+    # ─────────────────────────────────────────────────────────
+    #  Shared LED execution — ISM validates first, then BSM acts
+    # ─────────────────────────────────────────────────────────
+    def _exec_led(self, action, params):
+        if action == "SET_COLOR":
+            r   = int(params.get("r", 255))
+            g   = int(params.get("g", 255))
+            b   = int(params.get("b", 255))
+            bri = int(params.get("brightness", 200))
             ok = self._ism_led.transition(Trigger.CMD_COLOR)
-            self._publish_led_state()
-            self._publish_led_report(cmd, ok)
+            if ok:
+                self._bsm.led_set_color(r, g, b, bri)
 
-        elif cmd == "SET_STATE":
-            state = p.get("state", "OFF")
-            self._bsm.led_set_state(state)
-            trig = {"OFF": Trigger.CMD_OFF, "BRIGHT": Trigger.CMD_BRIGHT,
-                    "DIM":  Trigger.CMD_DIM}.get(state, Trigger.CMD_OFF)
+        elif action == "SET_STATE":
+            st   = params.get("state")
+            trig = _LED_STATE_TRIG.get(st) if st else None
+            if not trig:
+                return False
             ok = self._ism_led.transition(trig)
-            self._publish_led_state()
-            self._publish_led_report(cmd, ok)
+            if ok:
+                self._bsm.led_set_state(st)
 
-        elif cmd == "BLINK":
-            r   = int(p.get("r", 255))
-            g   = int(p.get("g", 255))
-            b   = int(p.get("b", 255))
-            cnt = int(p.get("count", 3))
-            self._bsm.led_blink(r, g, b, cnt)
+        elif action == "BLINK":
+            r   = int(params.get("r", 255))
+            g   = int(params.get("g", 255))
+            b   = int(params.get("b", 255))
+            cnt = int(params.get("count", 3))
             ok = self._ism_led.transition(Trigger.CMD_BLINK)
-            self._publish_led_state()
-            self._publish_led_report(cmd, ok)
+            if ok:
+                self._bsm.led_blink(r, g, b, cnt)
 
-    def _handle_buzzer(self, p):
-        cmd = p.get("cmd") if isinstance(p, dict) else None
-        if cmd == "PLAY":
-            pattern = p.get("pattern", "NOTIFY")
-            self._bsm.buzzer_play(pattern)
+        else:
+            return False
+
+        self._publish_led_state()
+        return ok
+
+    # ─────────────────────────────────────────────────────────
+    #  Shared buzzer execution — ISM validates first, then BSM acts
+    # ─────────────────────────────────────────────────────────
+    def _exec_buz(self, action, params):
+        if action == "PLAY":
+            pattern = params.get("pattern", "NOTIFY")
             trig = Trigger.PLAY_NOTIFY if pattern == "NOTIFY" else Trigger.PLAY_ALERT
             ok = self._ism_buz.transition(trig)
-            self._publish_buz_state()
-            self._publish_buz_report(cmd, ok)
-        elif cmd == "STOP":
-            self._bsm.buzzer_stop()
+            if ok:
+                self._bsm.buzzer_play(pattern)
+
+        elif action == "STOP":
             ok = self._ism_buz.transition(Trigger.STOP_SOUND)
-            self._publish_buz_state()
-            self._publish_buz_report(cmd, ok)
+            if ok:
+                self._bsm.buzzer_stop()
+
+        else:
+            return False
+
+        self._publish_buz_state()
+        return ok
 
     # ─────────────────────────────────────────────────────────
     #  Called by BSM event_cb for hardware-originated events
@@ -108,14 +132,11 @@ class TriggerMap:
         if event in ("LIGHT_CHANGED", "LIGHT_HEARTBEAT"):
             payload = {"agent": AGENT_LIGHT, "value": data["value"],
                        "level": data["level"], "ts": ts}
-            # state: retained current reading
             self._mqtt.publish("ssm/agents/{}/state".format(AGENT_LIGHT),
                                payload, retain=True)
-            # event: non-retained change notification
             if event == "LIGHT_CHANGED":
                 self._mqtt.publish("ssm/agents/{}/event".format(AGENT_LIGHT), payload)
                 self._local.on_light_event(data["level"])
-            # report: observation for decision layer
             self._mqtt.publish("ssm/agents/{}/report".format(AGENT_LIGHT), {
                 "agent": AGENT_LIGHT, "level": data["level"],
                 "type": "observation", "ts": ts
@@ -161,28 +182,7 @@ class TriggerMap:
         session_id = p.get("session_id", "") if isinstance(p, dict) else ""
         action     = p.get("action") if isinstance(p, dict) else None
         params     = p.get("params", {}) if isinstance(p, dict) else {}
-
-        ok = False
-        if action == "SET_COLOR":
-            self._bsm.led_set_color(
-                int(params.get("r", 255)), int(params.get("g", 255)),
-                int(params.get("b", 255)), int(params.get("brightness", 200)))
-            ok = self._ism_led.transition(Trigger.CMD_COLOR)
-            self._publish_led_state()
-        elif action == "SET_STATE":
-            st = params.get("state", "OFF")
-            self._bsm.led_set_state(st)
-            trig = {"OFF": Trigger.CMD_OFF, "BRIGHT": Trigger.CMD_BRIGHT,
-                    "DIM": Trigger.CMD_DIM}.get(st, Trigger.CMD_OFF)
-            ok = self._ism_led.transition(trig)
-            self._publish_led_state()
-        elif action == "BLINK":
-            self._bsm.led_blink(
-                int(params.get("r", 255)), int(params.get("g", 255)),
-                int(params.get("b", 255)), int(params.get("count", 3)))
-            ok = self._ism_led.transition(Trigger.CMD_BLINK)
-            self._publish_led_state()
-
+        ok = self._exec_led(action, params) if action else False
         self._mqtt.publish("ssm/result/{}/{}".format(AGENT_LED, task_id), {
             "task_id": task_id, "session_id": session_id,
             "result": "ok" if ok else "blocked",
@@ -193,19 +193,7 @@ class TriggerMap:
         session_id = p.get("session_id", "") if isinstance(p, dict) else ""
         action     = p.get("action") if isinstance(p, dict) else None
         params     = p.get("params", {}) if isinstance(p, dict) else {}
-
-        ok = False
-        if action == "PLAY":
-            pattern = params.get("pattern", "NOTIFY")
-            self._bsm.buzzer_play(pattern)
-            trig = Trigger.PLAY_NOTIFY if pattern == "NOTIFY" else Trigger.PLAY_ALERT
-            ok = self._ism_buz.transition(trig)
-            self._publish_buz_state()
-        elif action == "STOP":
-            self._bsm.buzzer_stop()
-            ok = self._ism_buz.transition(Trigger.STOP_SOUND)
-            self._publish_buz_state()
-
+        ok = self._exec_buz(action, params) if action else False
         self._mqtt.publish("ssm/result/{}/{}".format(AGENT_BUZ, task_id), {
             "task_id": task_id, "session_id": session_id,
             "result": "ok" if ok else "blocked",
