@@ -55,3 +55,75 @@ IR_HEARTBEAT_MS      = 30000  # IR heartbeat even when no change
 SOUND_COOLDOWN_MS    = 2000   # minimum gap between sound events
 LOCAL_RULES_DELAY_MS = 500    # delay after MQTT connect before local rules fire
 HEARTBEAT_MS         = 60000  # agent keepalive interval
+
+# ── Unit registry — 新增设备只需在这里添加一条 ──────────────
+# probe 策略:
+#   {'type': 'digital', 'pin': N, 'pull': 'up'|'down', 'active': 0|1}
+#     pull_down + active=1 → 空引脚被拉低(0)，接了传感器(输出HIGH)读到1
+#     pull_up  + active=0 → 空引脚被拉高(1)，接了传感器(输出LOW) 读到0
+#   {'type': 'adc',     'pin': N, 'min_val': X}
+#     空引脚 ADC 读值接近0，接了传感器读值 > min_val
+#   {'type': 'flag',    'enabled': True|False}
+#     执行器或无法探测引脚时使用手动开关
+UNIT_CONFIGS = {
+    AGENT_LIGHT: {
+        'agent_type': 'sensor',
+        'name': 'ambient_light',
+        'probe': {'type': 'adc', 'pin': LIGHT_SENSOR_PIN, 'min_val': 30},
+        'manifest': {
+            'agent_tag': 'light_level',
+            'levels': ['DARK', 'DIM', 'NORMAL', 'BRIGHT'],
+            'ism_states': ['SAMPLING', 'ERROR'],
+        },
+    },
+    AGENT_IR: {
+        'agent_type': 'sensor',
+        'name': 'ir_presence',
+        'probe': {'type': 'digital', 'pin': IR_SENSOR_PIN, 'pull': 'down', 'active': 1},
+        'manifest': {
+            'agent_tag': 'presence',
+            'values': [True, False],
+            'ism_states': ['MONITORING', 'ERROR'],
+        },
+    },
+    AGENT_SOUND: {
+        'agent_type': 'sensor',
+        'name': 'sound',
+        # min_hits=3: 20次采样中只需3次LOW即可确认接线（传感器偶尔被声音触发也不影响检测）
+        'probe': {'type': 'digital', 'pin': SOUND_SENSOR_PIN, 'pull': 'up', 'active': 0, 'min_hits': 3},
+        'manifest': {
+            'agent_tag': 'sound',
+            'values': ['detected'],
+        },
+    },
+    AGENT_LED: {
+        'agent_type': 'actuator',
+        'name': 'ws2812_ring',
+        'probe': {'type': 'flag', 'enabled': True},
+        'manifest': {
+            'num_pixels': WS2812_NUM,
+            'commands': ['SET_COLOR', 'SET_STATE', 'BLINK'],
+            'ism_states': ['OFF', 'DIM', 'BRIGHT', 'COLOR', 'BLINK'],
+            'capabilities': [
+                {'action': 'SET_COLOR', 'params': ['r', 'g', 'b', 'brightness']},
+                {'action': 'SET_STATE', 'params': ['state'], 'values': ['ON', 'OFF', 'BRIGHT', 'DIM']},
+                {'action': 'BLINK',     'params': ['r', 'g', 'b', 'count']},
+            ],
+            'resource_tags': ['lighting', 'ambiance'],
+        },
+    },
+    AGENT_BUZ: {
+        'agent_type': 'actuator',
+        'name': 'buzzer',
+        'probe': {'type': 'flag', 'enabled': BUZZER_ENABLED},
+        'manifest': {
+            'commands': ['PLAY', 'STOP'],
+            'ism_states': ['SILENT', 'ALERT', 'NOTIFY'],
+            'capabilities': [
+                {'action': 'PLAY', 'params': ['pattern'], 'values': ['NOTIFY', 'ALERT']},
+                {'action': 'STOP', 'params': []},
+            ],
+            'resource_tags': ['alert', 'notification'],
+        },
+    },
+}

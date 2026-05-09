@@ -5,6 +5,8 @@
 import time
 import neopixel
 from machine import ADC, Pin, PWM
+from probe import PRESENCE
+from config import AGENT_IR, AGENT_SOUND
 from config import (
     LIGHT_SENSOR_PIN, IR_SENSOR_PIN, SOUND_SENSOR_PIN,
     WS2812_PIN, WS2812_NUM, WS2812_MAX_VAL, BUZZER_PIN, PWM_FREQ,
@@ -89,8 +91,10 @@ class BSM:
     def tick(self):
         now = time.ticks_ms()
         self._tick_light(now)
-        self._tick_ir(now)
-        self._tick_sound(now)
+        if PRESENCE.get(AGENT_IR):
+            self._tick_ir(now)
+        if PRESENCE.get(AGENT_SOUND):
+            self._tick_sound(now)
         self._tick_blink(now)
         self._tick_buzzer(now)
 

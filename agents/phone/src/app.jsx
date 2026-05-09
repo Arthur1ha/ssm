@@ -104,81 +104,176 @@ function isAgentActive(agent, unitData) {
   return true;
 }
 
-/* ── useLongPress ───────────────────────────────────────────────── */
-function useLongPress(onLongPress, ms = 500) {
-  const timer = useRef(null);
-  const start = useCallback(() => {
-    timer.current = setTimeout(onLongPress, ms);
-  }, [onLongPress, ms]);
-  const cancel = useCallback(() => { clearTimeout(timer.current); }, []);
-  return { onTouchStart: start, onTouchEnd: cancel, onTouchMove: cancel,
-           onMouseDown: start, onMouseUp: cancel, onMouseLeave: cancel };
+/* ── Radar helpers ──────────────────────────────────────────────── */
+function bearing(lat1, lng1, lat2, lng2) {
+  const f1 = lat1 * Math.PI / 180, f2 = lat2 * Math.PI / 180;
+  const dl = (lng2 - lng1) * Math.PI / 180;
+  const y  = Math.sin(dl) * Math.cos(f2);
+  const x  = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-/* ── Radar ──────────────────────────────────────────────────────── */
-function RadarScan({ agents }) {
+// angular distance between two angles (0-180)
+function angleDiff(a, b) {
+  const d = Math.abs((a - b + 360) % 360);
+  return d > 180 ? 360 - d : d;
+}
+
+/* ── RadarScan — real GPS positions, sweep ping effect ─────────── */
+const RADAR_R     = 100;   // px, usable radius inside 240×240 canvas
+const RADAR_MAX_M = 500;   // meters mapped to full radius
+
+function RadarScan({ agents, phoneLoc }) {
   const [sweep, setSweep] = useState(0);
+  // pingAge[uid] = frames since last ping (0 = just pinged)
+  const pingAge  = useRef({});
+  const prevSweep = useRef(0);
+
   useEffect(() => {
-    const id = setInterval(() => setSweep(s => (s + 1.5) % 360), 16);
+    const id = setInterval(() => {
+      setSweep(s => {
+        const next = (s + 1.2) % 360;
+        // detect which agents the sweep just crossed
+        agents.forEach(a => {
+          const pos = agentRadarPos(a, phoneLoc);
+          if (pos) {
+            const d = angleDiff(next, pos.bearing);
+            const prev = angleDiff(prevSweep.current, pos.bearing);
+            if (d < 4 && prev >= 4) {
+              pingAge.current[a.unit_id || a.agent_id] = 0;
+            }
+          }
+        });
+        // age all pings
+        Object.keys(pingAge.current).forEach(k => { pingAge.current[k]++; });
+        prevSweep.current = next;
+        return next;
+      });
+    }, 16);
     return () => clearInterval(id);
-  }, []);
+  }, [agents, phoneLoc]);
+
+  // compute radar (x,y) from agent GPS + phone GPS
+  function agentRadarPos(agent, phone) {
+    if (!phone || agent._lat == null) return null;
+    const dist = haversine(phone.lat, phone.lng, agent._lat, agent._lng);
+    const brng  = bearing(phone.lat, phone.lng, agent._lat, agent._lng);
+    const r     = Math.min(dist / RADAR_MAX_M, 1) * RADAR_R;
+    // north = up: x = sin(bearing)*r, y = -cos(bearing)*r
+    const rad = brng * Math.PI / 180;
+    return {
+      x:       120 + Math.sin(rad) * r,
+      y:       120 - Math.cos(rad) * r,
+      bearing: brng,
+      distM:   dist,
+    };
+  }
+
+  // ring distances to label
+  const rings = [
+    { frac: RADAR_R * (100 / RADAR_MAX_M), label: '100m' },
+    { frac: RADAR_R * (250 / RADAR_MAX_M), label: '250m' },
+    { frac: RADAR_R,                        label: `${RADAR_MAX_M}m` },
+  ].filter(r => r.frac <= RADAR_R);
+
   return (
     <div style={{ position: 'relative', width: 240, height: 240, margin: '0 auto' }}>
-      {[1, 0.7, 0.44].map((s, i) => (
-        <div key={i} style={{ position: 'absolute', inset: `${(1-s)*50}%`,
-          borderRadius: '50%', border: '1px solid rgba(200,255,62,0.12)' }}/>
+      {/* distance rings */}
+      {rings.map(({ frac, label }) => (
+        <div key={label} style={{
+          position: 'absolute',
+          left: 120 - frac, top: 120 - frac,
+          width: frac * 2, height: frac * 2,
+          borderRadius: '50%',
+          border: '1px solid rgba(200,255,62,0.1)',
+        }}>
+          <span style={{
+            position: 'absolute', top: -9, left: '50%', transform: 'translateX(-50%)',
+            fontSize: 8, color: 'rgba(200,255,62,0.3)', fontFamily: 'monospace', whiteSpace: 'nowrap',
+          }}>{label}</span>
+        </div>
       ))}
-      <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, borderTop: '1px dashed rgba(200,255,62,0.07)' }}/>
-      <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, borderLeft: '1px dashed rgba(200,255,62,0.07)' }}/>
+      {/* crosshairs */}
+      <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, borderTop: '1px dashed rgba(200,255,62,0.06)' }}/>
+      <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, borderLeft: '1px dashed rgba(200,255,62,0.06)' }}/>
+      {/* north label */}
+      <span style={{ position: 'absolute', top: 4, left: '50%', transform: 'translateX(-50%)',
+        fontSize: 9, color: 'rgba(200,255,62,0.4)', fontFamily: 'monospace', fontWeight: 600 }}>N</span>
+      {/* sweep arm */}
       <div style={{ position: 'absolute', inset: 0, transform: `rotate(${sweep}deg)`, pointerEvents: 'none' }}>
         <div style={{ position: 'absolute', left: '50%', top: '50%', width: '50%', height: 2,
-          background: 'linear-gradient(to right, rgba(200,255,62,0.85), rgba(200,255,62,0))',
-          transformOrigin: '0 50%', boxShadow: '0 0 10px rgba(200,255,62,0.5)' }}/>
+          background: 'linear-gradient(to right, rgba(200,255,62,0.9), rgba(200,255,62,0))',
+          transformOrigin: '0 50%', boxShadow: '0 0 8px rgba(200,255,62,0.5)' }}/>
         <div style={{ position: 'absolute', left: '50%', top: '50%', width: '50%', height: 120,
-          background: 'conic-gradient(from -8deg, rgba(200,255,62,0.14), rgba(200,255,62,0) 35deg)',
+          background: 'conic-gradient(from -6deg, rgba(200,255,62,0.13), rgba(200,255,62,0) 30deg)',
           transformOrigin: '0 0', transform: 'translateY(-60px)' }}/>
       </div>
-      {agents.map((a, i) => {
-        const meta  = getAgentMeta(a);
-        const angle = (i * 73 + 30) % 360;
-        const r     = 42 + (i % 3) * 28;
-        const cx    = 120 + r * Math.cos(angle * Math.PI / 180);
-        const cy    = 120 + r * Math.sin(angle * Math.PI / 180);
+      {/* device dots */}
+      {agents.map(a => {
+        const uid  = a.unit_id || a.agent_id;
+        const meta = getAgentMeta(a);
+        const pos  = agentRadarPos(a, phoneLoc);
+
+        // fallback: no GPS — place off-screen placeholder ring at edge with faded style
+        const hasFix = pos != null;
+        const cx = hasFix ? pos.x : null;
+        const cy = hasFix ? pos.y : null;
+
+        if (!hasFix) return null;   // skip dots without real position
+
+        const age   = pingAge.current[uid] ?? 999;
+        const ping  = age < 45;                  // show ping for ~45 frames (~0.7s)
+        const glow  = ping ? Math.max(0, 1 - age / 45) : 0;
+        const color = a._online ? meta.color : 'rgba(255,255,255,0.25)';
+
         return (
-          <div key={a.unit_id || a.agent_id} style={{
-            position: 'absolute', left: cx - 12, top: cy - 12,
-            width: 24, height: 24, borderRadius: '50%',
-            background: meta.color, border: '2px solid #0B0B0E',
-            boxShadow: `0 0 12px ${meta.color}99`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#0B0B0E',
-          }}>
-            <Icon name={meta.icon} size={11} sw={2}/>
+          <div key={uid} style={{ position: 'absolute', left: cx - 10, top: cy - 10,
+            width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {/* ping ripple */}
+            {ping && (
+              <div style={{
+                position: 'absolute', inset: -Math.round(glow * 12),
+                borderRadius: '50%',
+                border: `1px solid ${meta.color}`,
+                opacity: glow * 0.7,
+                pointerEvents: 'none',
+              }}/>
+            )}
+            <div style={{
+              width: 20, height: 20, borderRadius: '50%',
+              background: a._online ? `${color}28` : 'rgba(255,255,255,0.06)',
+              border: `1.5px solid ${color}`,
+              boxShadow: ping ? `0 0 ${8 + glow * 10}px ${color}` : `0 0 4px ${color}55`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color,
+              transition: 'box-shadow 0.1s',
+            }}>
+              <Icon name={meta.icon} size={9} sw={2.2}/>
+            </div>
           </div>
         );
       })}
+      {/* phone dot (center) */}
       <div style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)',
-        width: 14, height: 14, borderRadius: '50%', background: '#fff', border: '3px solid #0B0B0E',
-        boxShadow: '0 0 14px rgba(255,255,255,0.4)' }}/>
+        width: 12, height: 12, borderRadius: '50%', background: '#fff', border: '2px solid #0B0B0E',
+        boxShadow: '0 0 12px rgba(255,255,255,0.5)' }}/>
     </div>
   );
 }
 
-/* ── AgentCard — long-press to subscribe ────────────────────────── */
-function AgentCard({ agent, subscribed, onToggle, phoneLoc }) {
-  const uid   = agent.unit_id || agent.agent_id;
-  const meta  = getAgentMeta(agent);
-  const isSub = subscribed.includes(uid);
-  const dist  = (phoneLoc && agent._lat != null)
+/* ── AgentCard — shows actuator with online indicator ───────────── */
+function AgentCard({ agent, phoneLoc }) {
+  const uid  = agent.unit_id || agent.agent_id;
+  const meta = getAgentMeta(agent);
+  const dist = (phoneLoc && agent._lat != null)
     ? formatDist(haversine(phoneLoc.lat, phoneLoc.lng, agent._lat, agent._lng))
     : null;
-  const lp = useLongPress(useCallback(() => onToggle(uid), [uid, onToggle]));
   return (
-    <div {...lp} style={{
+    <div style={{
       display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px',
       marginBottom: 8, borderRadius: 18,
-      background: isSub ? 'rgba(200,255,62,0.06)' : 'rgba(255,255,255,0.04)',
-      border: `1px solid ${isSub ? 'rgba(200,255,62,0.28)' : 'rgba(255,255,255,0.07)'}`,
-      userSelect: 'none', WebkitUserSelect: 'none',
+      background: 'rgba(255,255,255,0.04)',
+      border: '1px solid rgba(255,255,255,0.07)',
     }}>
       <div style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0,
         background: `${meta.color}22`, color: meta.color,
@@ -193,16 +288,9 @@ function AgentCard({ agent, subscribed, onToggle, phoneLoc }) {
           {meta.label}{dist && <> · <span style={{ color: LIME }}>{dist}</span></>}
         </div>
       </div>
-      {isSub
-        ? <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
-            background: LIME, color: '#0B0B0E',
-            display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon name="check" size={12} sw={2.5}/>
-          </div>
-        : <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', flexShrink: 0, letterSpacing: '0.02em' }}>
-            长按订阅
-          </span>
-      }
+      <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+        background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
+        boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
     </div>
   );
 }
@@ -236,7 +324,7 @@ function SensorCard({ agent, unitData }) {
 }
 
 /* ── DiscoverScreen ─────────────────────────────────────────────── */
-function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, locError, unitData }) {
+function DiscoverScreen({ agents, connected, phoneLoc, locError, unitData }) {
   const sorted = [...agents].sort((a, b) => {
     const da = (phoneLoc && a._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, a._lat, a._lng) : Infinity;
     const db = (phoneLoc && b._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, b._lat, b._lng) : Infinity;
@@ -258,40 +346,24 @@ function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, lo
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(60% 40% at 30% 5%, rgba(255,154,90,0.2), transparent 70%)', pointerEvents: 'none' }}/>
-      <div style={{ padding: '14px 22px 8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
-        <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '0.06em' }}>SSM</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div style={{ width: 7, height: 7, borderRadius: '50%',
+      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
+        <div>
+          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>附近设备</span>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginLeft: 10 }}>
+            {agents.length === 0 ? '扫描中…' : `${visible.length} 个`}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 10, color: phoneLoc ? 'rgba(200,255,62,0.6)' : 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>
+            {phoneLoc ? `${phoneLoc.lat.toFixed(3)}, ${phoneLoc.lng.toFixed(3)}` : locError || '定位中…'}
+          </span>
+          <div style={{ width: 6, height: 6, borderRadius: '50%',
             background: connected ? LIME : '#FF5252',
-            boxShadow: connected ? `0 0 8px ${LIME}` : 'none' }}/>
-          <span style={{ fontSize: 11, color: connected ? LIME : '#FF5252' }}>
-            {connected ? '已连接' : '连接中'}
-          </span>
-        </div>
-      </div>
-      <div style={{ padding: '6px 22px 0', flexShrink: 0, position: 'relative' }}>
-        <div style={{ fontSize: 32, fontWeight: 300, letterSpacing: '-0.02em', lineHeight: 1.1 }}>附近设备</div>
-        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-          {agents.length === 0
-            ? '扫描周边设备中...'
-            : phoneLoc
-              ? `${NEARBY_RADIUS_M}m 内发现 ${visible.length} 个 · 长按订阅`
-              : `发现 ${visible.length} 个（位置未知）· 长按订阅`}
-        </div>
-        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6,
-          padding: '5px 10px', borderRadius: 999, width: 'fit-content',
-          background: phoneLoc ? 'rgba(200,255,62,0.08)' : 'rgba(255,255,255,0.05)',
-          border: `1px solid ${phoneLoc ? 'rgba(200,255,62,0.2)' : 'rgba(255,255,255,0.08)'}` }}>
-          <span style={{ fontSize: 12 }}>{phoneLoc ? '📍' : '🔍'}</span>
-          <span style={{ fontSize: 11, color: phoneLoc ? LIME : 'rgba(255,255,255,0.4)' }}>
-            {phoneLoc
-              ? `${phoneLoc.lat.toFixed(4)}, ${phoneLoc.lng.toFixed(4)}`
-              : locError || '获取位置中…'}
-          </span>
+            boxShadow: connected ? `0 0 6px ${LIME}` : 'none' }}/>
         </div>
       </div>
       <div style={{ padding: '16px 0 8px', flexShrink: 0, position: 'relative' }}>
-        <RadarScan agents={agents}/>
+        <RadarScan agents={agents} phoneLoc={phoneLoc}/>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
         paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
@@ -305,9 +377,8 @@ function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, lo
           </div>
         ) : (
           <>
-            <div style={{ padding: '0 6px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ padding: '0 6px 8px' }}>
               <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.3)', fontWeight: 500 }}>已发现</span>
-              <span style={{ fontSize: 11, color: LIME, fontWeight: 500 }}>{subscribed.length} 已订阅</span>
             </div>
             {Object.entries(groups).map(([plat, { actuators, sensors }]) => {
               const allIds = [...actuators, ...sensors].map(a => a.unit_id || a.agent_id);
@@ -324,7 +395,7 @@ function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, lo
                   </div>
                   {actuators.length > 0 && <>
                     <div style={{ padding: '0 6px 6px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#FF9A5A', fontWeight: 600 }}>执行器</div>
-                    {actuators.map(a => <AgentCard key={a.unit_id||a.agent_id} agent={a} subscribed={subscribed} onToggle={toggleSub} phoneLoc={phoneLoc}/>)}
+                    {actuators.map(a => <AgentCard key={a.unit_id||a.agent_id} agent={a} phoneLoc={phoneLoc}/>)}
                   </>}
                   {sensors.length > 0 && <>
                     <div style={{ padding: actuators.length ? '8px 6px 6px' : '0 6px 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -344,35 +415,32 @@ function DiscoverScreen({ agents, connected, subscribed, toggleSub, phoneLoc, lo
 }
 
 /* ── DevicesScreen ──────────────────────────────────────────────── */
-function DevicesScreen({ agents, subscribed, unitData }) {
-  const subs = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id) && a.agent_type === 'actuator');
+function DevicesScreen({ agents, unitData }) {
+  const actuators = agents.filter(a => a.agent_type === 'actuator');
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(50% 30% at 80% 5%, rgba(226,107,255,0.18), transparent 70%)', pointerEvents: 'none' }}/>
-      <div style={{ padding: '14px 22px 8px', flexShrink: 0, position: 'relative' }}>
-        <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '0.06em' }}>SSM</span>
-      </div>
-      <div style={{ padding: '6px 22px 14px', flexShrink: 0, position: 'relative' }}>
-        <div style={{ fontSize: 32, fontWeight: 300, letterSpacing: '-0.02em', lineHeight: 1.1 }}>我的设备</div>
-        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-          {subs.length} 个已订阅 · {subs.filter(a => isAgentActive(a, unitData)).length} 个活跃
-        </div>
+      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
+        <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>设备</span>
+        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
+          {actuators.length} 个执行器 · {actuators.filter(a => isAgentActive(a, unitData)).length} 活跃
+        </span>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
         paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
-        {subs.length === 0 ? (
+        {actuators.length === 0 ? (
           <div style={{ padding: '60px 20px', textAlign: 'center' }}>
             <div style={{ width: 60, height: 60, borderRadius: '50%', background: 'rgba(255,255,255,0.04)', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Icon name="wifi" size={24} color="rgba(255,255,255,0.25)"/>
             </div>
-            <div style={{ fontSize: 20, fontWeight: 300, marginBottom: 8 }}>暂无订阅设备</div>
+            <div style={{ fontSize: 20, fontWeight: 300, marginBottom: 8 }}>等待设备上线</div>
             <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', lineHeight: 1.6, maxWidth: 220, margin: '0 auto' }}>
-              前往「附近」长按设备卡片即可订阅
+              确认 ESP32 已连接到 MQTT Broker
             </div>
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            {subs.map(a => {
+            {actuators.map(a => {
               const uid    = a.unit_id || a.agent_id;
               const meta   = getAgentMeta(a);
               const active = isAgentActive(a, unitData);
@@ -416,10 +484,10 @@ function DevicesScreen({ agents, subscribed, unitData }) {
 /* ── ChatSheet — bottom sheet, context persists across open/close ─ */
 const SUGGESTIONS = ['开灯，暖白', '红色 LED', '播放通知音', '关闭 LED'];
 
-function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
-  const subsRef  = useRef([]);
-  subsRef.current = agents.filter(a => subscribed.includes(a.unit_id || a.agent_id) && a.agent_type === 'actuator');
-  const subs = subsRef.current;
+function ChatSheet({ open, onClose, agents, unitData }) {
+  const actuatorsRef = useRef([]);
+  actuatorsRef.current = agents.filter(a => a.agent_type === 'actuator');
+  const subs = actuatorsRef.current;
 
   const [messages, setMessages]     = useState([
     { role: 'assistant', text: '需要控制什么设备？', actions: [] }
@@ -480,13 +548,8 @@ function ChatSheet({ open, onClose, subscribed, agents, unitData }) {
     setPendingRule(null);
     setMessages(m => [...m, { role: 'user', text: t }]);
 
-    const actuators = agents.filter(a => a.agent_type === 'actuator');
-    if (actuators.length === 0) {
-      setMessages(m => [...m, { role: 'assistant', text: '附近没有发现可控设备，请确认设备已上线。', actions: [] }]);
-      return;
-    }
     if (subs.length === 0) {
-      setMessages(m => [...m, { role: 'assistant', text: '请先在「附近」页面订阅设备，才能通过对话控制。', actions: [] }]);
+      setMessages(m => [...m, { role: 'assistant', text: '附近没有发现可控设备，请确认 ESP32 已上线。', actions: [] }]);
       return;
     }
 
@@ -771,14 +834,11 @@ function RulesScreen() {
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
         background: 'radial-gradient(50% 30% at 50% 5%, rgba(200,255,62,0.1), transparent 70%)' }}/>
-      <div style={{ padding: '14px 22px 4px', flexShrink: 0, position: 'relative' }}>
-        <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', fontWeight: 500, letterSpacing: '0.06em' }}>SSM</span>
-      </div>
-      <div style={{ padding: '4px 22px 16px', flexShrink: 0, position: 'relative' }}>
-        <div style={{ fontSize: 32, fontWeight: 300, letterSpacing: '-0.02em', lineHeight: 1.1 }}>自动规则</div>
-        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 6 }}>
-          {rules.filter(r => r.enabled).length} 条启用 · {rules.length} 条总计 · 在对话中定义新规则
-        </div>
+      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
+        <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>规则</span>
+        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
+          {rules.filter(r => r.enabled).length} 启用 · {rules.length} 总计
+        </span>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
         paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
@@ -879,10 +939,6 @@ function App() {
   const [unitData, setUnitData]     = useState({});
   const [phoneLoc, setPhoneLoc]     = useState(null);
   const [locError, setLocError]     = useState(null);
-  const [subscribed, setSubscribed] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('ssm_sub') || '[]'); }
-    catch { return []; }
-  });
 
   useEffect(() => {
     if (!navigator.geolocation) { setLocError('浏览器不支持定位'); return; }
@@ -929,14 +985,6 @@ function App() {
     mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
   }, []);
 
-  const toggleSub = useCallback((uid) => {
-    setSubscribed(prev => {
-      const next = prev.includes(uid) ? prev.filter(x => x !== uid) : [...prev, uid];
-      localStorage.setItem('ssm_sub', JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
   return (
     <div style={{
       position: 'fixed', inset: 0, overflow: 'hidden',
@@ -947,20 +995,18 @@ function App() {
       <div style={{ position: 'relative', height: '100%' }}>
         {tab === 'discover' && (
           <DiscoverScreen agents={agents} connected={connected}
-            subscribed={subscribed} toggleSub={toggleSub}
             phoneLoc={phoneLoc} locError={locError} unitData={unitData}/>
         )}
         {tab === 'devices' && (
-          <DevicesScreen agents={agents} subscribed={subscribed} unitData={unitData}/>
+          <DevicesScreen agents={agents} unitData={unitData}/>
         )}
         {tab === 'rules' && <RulesScreen />}
         <PersistentInputBar onOpen={() => setSheetOpen(true)}/>
-        <TabBar tab={tab} setTab={setTab} badge={agents.filter(a => subscribed.includes(a.unit_id || a.agent_id) && a.agent_type === 'actuator').length}/>
+        <TabBar tab={tab} setTab={setTab} badge={agents.filter(a => a.agent_type === 'actuator').length}/>
       </div>
       <ChatSheet
         open={sheetOpen}
         onClose={() => setSheetOpen(false)}
-        subscribed={subscribed}
         agents={agents}
         unitData={unitData}
       />
