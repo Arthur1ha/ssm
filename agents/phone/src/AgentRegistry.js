@@ -22,9 +22,11 @@ class AgentRegistry extends EventTarget {
             if (mManifest) {
                 const id = mManifest[1];
                 const existing = this._agents.get(id) || {};
-                // 若父设备已知在线，子设备 manifest 到达时直接标记在线（处理 status 先于 manifest 到达的情况）
-                const parentOnline = msg.parent_id && this._agents.get(msg.parent_id)?._online === true;
+                const parent = msg.parent_id ? this._agents.get(msg.parent_id) : null;
+                const parentOnline = parent?._online === true;
                 this._agents.set(id, {
+                    _lat: parent?._lat ?? null,
+                    _lng: parent?._lng ?? null,
                     ...existing,
                     ...msg,
                     _online:   existing._online === true || parentOnline,
@@ -52,6 +54,12 @@ class AgentRegistry extends EventTarget {
                 const id = mLocation[1];
                 const existing = this._agents.get(id) || { agent_id: id };
                 this._agents.set(id, { ...existing, _lat: msg.lat, _lng: msg.lng });
+                // propagate to child agents that share this parent_id
+                for (const [aid, agent] of this._agents) {
+                    if (agent.parent_id === id) {
+                        this._agents.set(aid, { ...agent, _lat: msg.lat, _lng: msg.lng });
+                    }
+                }
                 this._emit();
             }
         });

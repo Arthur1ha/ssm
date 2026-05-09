@@ -6,8 +6,8 @@ WIFI_SSID     = "Arthur"
 WIFI_PASSWORD = "66666666"
                                                                                                             
 # ── Location (fixed coordinates, GCJ-02) ─────────────────────
-LOCATION_LNG = 121.43235
-LOCATION_LAT  = 31.029672
+LOCATION_LNG = 121.4275
+LOCATION_LAT  = 31.0316
 
 # ── MQTT ─────────────────────────────────────────────────────
 MQTT_BROKER_IP = "47.116.137.202"  # cloud server public IP
