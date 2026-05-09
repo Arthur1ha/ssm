@@ -266,33 +266,34 @@ function RadarScan({ agents, phoneLoc }) {
   );
 }
 
-/* ── AgentCard — shows actuator with online indicator ───────────── */
-function AgentCard({ agent, phoneLoc }) {
-  const uid  = agent.unit_id || agent.agent_id;
-  const meta = getAgentMeta(agent);
-  const dist = (phoneLoc && agent._lat != null)
-    ? formatDist(haversine(phoneLoc.lat, phoneLoc.lng, agent._lat, agent._lng))
-    : null;
+/* ── SensorCard — read-only device row ──────────────────────────── */
+function SensorCard({ agent, unitData }) {
+  const uid     = agent.unit_id || agent.agent_id;
+  const meta    = getAgentMeta(agent);
+  const reading = getSensorReading(agent, unitData);
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px',
+      display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
       marginBottom: 8, borderRadius: 18,
-      background: 'rgba(255,255,255,0.04)',
-      border: '1px solid rgba(255,255,255,0.07)',
+      background: 'rgba(255,255,255,0.03)',
+      border: '1px solid rgba(255,255,255,0.05)',
     }}>
-      <div style={{ width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-        background: `${meta.color}22`, color: meta.color,
+      <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
+        background: `${meta.color}18`, color: meta.color,
         display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Icon name={meta.icon} size={18}/>
+        <Icon name={meta.icon} size={19}/>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {agent.name || uid}
         </div>
-        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace', marginTop: 2 }}>
-          {meta.label}{dist && <> · <span style={{ color: LIME }}>{dist}</span></>}
+        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginTop: 2 }}>
+          {meta.label} · 只读
         </div>
       </div>
+      <span style={{ fontSize: 14, fontWeight: 600, color: reading.color, fontFamily: 'monospace', flexShrink: 0 }}>
+        {reading.value}
+      </span>
       <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
         background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
         boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
@@ -300,65 +301,123 @@ function AgentCard({ agent, phoneLoc }) {
   );
 }
 
-/* ── SensorCard — read-only, shows live sensor value ────────────── */
-function SensorCard({ agent, unitData }) {
-  const meta    = getAgentMeta(agent);
-  const reading = getSensorReading(agent, unitData);
+/* ── ActuatorCard — with quick-control buttons ───────────────────── */
+function ActuatorCard({ agent, unitData }) {
+  const uid    = agent.unit_id || agent.agent_id;
+  const meta   = getAgentMeta(agent);
+  const active = isAgentActive(agent, unitData);
+  const n      = (agent.name || '').toLowerCase();
+  const cmdTopic = agent.topics?.command;
+
+  const sendCmd = (cmd, extra = {}) => {
+    if (!cmdTopic) return;
+    mqttBus.publish(cmdTopic, { cmd, ...extra });
+  };
+
+  const stateData = (unitData[uid] || {}).state || {};
+  const ism = stateData.ism || 'OFF';
+
+  const btnBase = {
+    flex: 1, padding: '7px 4px', borderRadius: 999, fontSize: 12,
+    cursor: 'pointer', fontFamily: 'inherit', border: 'none',
+    transition: 'background 0.15s, color 0.15s',
+  };
+  const btnActive = (color) => ({
+    ...btnBase,
+    background: color, color: '#0B0B0E', fontWeight: 600,
+    boxShadow: `0 0 10px ${color}60`,
+  });
+  const btnIdle = {
+    ...btnBase,
+    background: 'rgba(255,255,255,0.07)',
+    border: '1px solid rgba(255,255,255,0.09)',
+    color: 'rgba(255,255,255,0.55)',
+  };
+
+  let controls = null;
+  if (n.includes('led') || n.includes('rgb') || n.includes('ws2812')) {
+    const isOff = (ism === 'OFF');
+    controls = (
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <button onClick={() => sendCmd('SET_STATE', { state: isOff ? 'BRIGHT' : 'OFF' })}
+          style={isOff ? btnIdle : btnActive(meta.color)}>
+          {isOff ? '开灯' : '关灯'}
+        </button>
+        <button onClick={() => sendCmd('SET_STATE', { state: 'DIM' })}
+          style={ism === 'DIM' ? btnActive(meta.color) : btnIdle}>
+          微光
+        </button>
+        <button onClick={() => sendCmd('BLINK', { r: 255, g: 180, b: 30, count: 3 })}
+          style={ism === 'BLINK' ? btnActive(meta.color) : btnIdle}>
+          闪烁
+        </button>
+      </div>
+    );
+  } else if (n.includes('buz')) {
+    controls = (
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <button onClick={() => sendCmd('PLAY', { pattern: 'NOTIFY' })}
+          style={ism === 'NOTIFY' ? btnActive(meta.color) : btnIdle}>
+          通知音
+        </button>
+        <button onClick={() => sendCmd('PLAY', { pattern: 'ALERT' })}
+          style={ism === 'ALERT' ? btnActive('#FF5252') : btnIdle}>
+          警报
+        </button>
+        <button onClick={() => sendCmd('STOP')}
+          style={ism === 'SILENT' ? btnActive(LIME) : btnIdle}>
+          停止
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
-      padding: '8px 12px', marginBottom: 6, borderRadius: 12,
-      background: 'rgba(255,255,255,0.025)',
-      border: '1px solid rgba(255,255,255,0.04)',
+      padding: '12px 14px', marginBottom: 10, borderRadius: 18,
+      background: active
+        ? `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`
+        : 'rgba(255,255,255,0.04)',
+      border: `1px solid ${active ? meta.color + '40' : 'rgba(255,255,255,0.07)'}`,
     }}>
-      <div style={{
-        width: 28, height: 28, borderRadius: 8, flexShrink: 0,
-        background: `${meta.color}18`, color: meta.color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        <Icon name={meta.icon} size={13} sw={2}/>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
+          background: active ? meta.color : 'rgba(255,255,255,0.06)',
+          color: active ? '#0B0B0E' : meta.color,
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name={meta.icon} size={19}/>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {agent.name || uid}
+          </div>
+          <div style={{ fontSize: 11, color: active ? meta.color : 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'monospace' }}>
+            {getStateLabel(agent, unitData)}
+          </div>
+        </div>
+        <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+          background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
+          boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
       </div>
-      <span style={{ flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>
-        {meta.label}
-      </span>
-      <span style={{ fontSize: 12, fontWeight: 600, color: reading.color, fontFamily: 'monospace' }}>
-        {reading.value}
-      </span>
+      {controls}
     </div>
   );
 }
 
-/* ── DiscoverScreen ─────────────────────────────────────────────── */
-function DiscoverScreen({ agents, connected, phoneLoc, locError, unitData }) {
-  const byDist = (a, b) => {
-    const da = (phoneLoc && a._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, a._lat, a._lng) : Infinity;
-    const db = (phoneLoc && b._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, b._lat, b._lng) : Infinity;
-    return da - db;
-  };
-  const sorted = [...agents].sort(byDist);
-
-  const nearby = phoneLoc
-    ? sorted.filter(a => a._lat == null || haversine(phoneLoc.lat, phoneLoc.lng, a._lat, a._lng) <= NEARBY_RADIUS_M)
-    : sorted;
-
-  // 附近 tab = sensor awareness only; actuators live in 设备 tab
-  const sensors = nearby.filter(a => a.agent_type !== 'actuator');
-
-  const sensorGroups = {};
-  sensors.forEach(a => {
-    const key = a.hw_platform || 'other';
-    if (!sensorGroups[key]) sensorGroups[key] = [];
-    sensorGroups[key].push(a);
-  });
+/* ── DiscoverScreen — radar-only spatial view ───────────────────── */
+function DiscoverScreen({ agents, connected, phoneLoc, locError }) {
+  const sensorCnt   = agents.filter(a => a.agent_type !== 'actuator').length;
+  const actuatorCnt = agents.filter(a => a.agent_type === 'actuator').length;
 
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(60% 40% at 30% 5%, rgba(255,154,90,0.2), transparent 70%)', pointerEvents: 'none' }}/>
-      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
+      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(60% 45% at 50% 40%, rgba(200,255,62,0.06), transparent 70%)', pointerEvents: 'none' }}/>
+      {/* Header */}
+      <div style={{ padding: '14px 20px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
         <div>
-          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>附近感知</span>
+          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>附近</span>
           <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginLeft: 10 }}>
-            {agents.length === 0 ? '扫描中…' : `${sensors.length} 个传感器`}
+            {agents.length === 0 ? '扫描中…' : `${agents.length} 个在线`}
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -370,63 +429,55 @@ function DiscoverScreen({ agents, connected, phoneLoc, locError, unitData }) {
             boxShadow: connected ? `0 0 6px ${LIME}` : 'none' }}/>
         </div>
       </div>
-      <div style={{ padding: '16px 0 8px', flexShrink: 0, position: 'relative' }}>
-        <RadarScan agents={agents} phoneLoc={phoneLoc}/>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
+      {/* Centered radar */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
         paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
-        {agents.length === 0 ? (
-          <div style={{ padding: '20px 0', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
-            等待 ESP32 上线...
+        <RadarScan agents={agents} phoneLoc={phoneLoc}/>
+        {/* Stats */}
+        <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', gap: 28 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 20, fontWeight: 300, color: LIME }}>{sensorCnt}</div>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', marginTop: 3 }}>传感器</div>
           </div>
-        ) : sensors.length === 0 ? (
-          <div style={{ padding: '20px 0', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
-            附近 {NEARBY_RADIUS_M}m 内暂无传感器
+          <div style={{ width: 1, height: 28, background: 'rgba(255,255,255,0.08)' }}/>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 20, fontWeight: 300, color: '#FF9A5A' }}>{actuatorCnt}</div>
+            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', marginTop: 3 }}>执行器</div>
           </div>
-        ) : (
-          <>
-            <div style={{ padding: '0 6px 8px' }}>
-              <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.3)', fontWeight: 500 }}>环境感知</span>
-            </div>
-            {Object.entries(sensorGroups).map(([plat, platSensors]) => {
-              const allIds = platSensors.map(a => a.unit_id || a.agent_id);
-              let prefix = allIds[0] || plat;
-              for (const id of allIds) {
-                while (prefix && !id.startsWith(prefix)) prefix = prefix.slice(0, prefix.lastIndexOf('_'));
-              }
-              return (
-                <div key={plat} style={{ marginBottom: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px 10px' }}>
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: LIME, boxShadow: `0 0 6px ${LIME}`, flexShrink: 0 }}/>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.9)', fontFamily: 'monospace' }}>{prefix || plat}</span>
-                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', fontFamily: 'monospace' }}>{plat}</span>
-                  </div>
-                  {platSensors.map(a => <SensorCard key={a.unit_id||a.agent_id} agent={a} unitData={unitData}/>)}
-                </div>
-              );
-            })}
-          </>
+        </div>
+        {agents.length === 0 && (
+          <div style={{ marginTop: 18, fontSize: 12, color: 'rgba(255,255,255,0.25)' }}>等待 ESP32 上线...</div>
         )}
       </div>
     </div>
   );
 }
 
-/* ── DevicesScreen ──────────────────────────────────────────────── */
+/* ── DevicesScreen — all devices: actuators + sensors ───────────── */
 function DevicesScreen({ agents, unitData }) {
-  const actuators = agents.filter(a => a.agent_type === 'actuator');
+  const actuators  = agents.filter(a => a.agent_type === 'actuator');
+  const sensors    = agents.filter(a => a.agent_type !== 'actuator');
+  const activeCount = actuators.filter(a => isAgentActive(a, unitData)).length;
+
+  const sectionLabel = (text) => (
+    <div style={{ padding: '4px 2px 8px', marginTop: 6 }}>
+      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+        color: 'rgba(255,255,255,0.28)', fontWeight: 600 }}>{text}</span>
+    </div>
+  );
+
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(50% 30% at 80% 5%, rgba(226,107,255,0.18), transparent 70%)', pointerEvents: 'none' }}/>
       <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
         <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>设备</span>
         <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-          {actuators.length} 个执行器 · {actuators.filter(a => isAgentActive(a, unitData)).length} 活跃
+          {agents.length} 个 · {activeCount} 活跃
         </span>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
         paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
-        {actuators.length === 0 ? (
+        {agents.length === 0 ? (
           <div style={{ padding: '60px 20px', textAlign: 'center' }}>
             <div style={{ width: 60, height: 60, borderRadius: '50%', background: 'rgba(255,255,255,0.04)', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Icon name="wifi" size={24} color="rgba(255,255,255,0.25)"/>
@@ -437,42 +488,20 @@ function DevicesScreen({ agents, unitData }) {
             </div>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            {actuators.map(a => {
-              const uid    = a.unit_id || a.agent_id;
-              const meta   = getAgentMeta(a);
-              const active = isAgentActive(a, unitData);
-              const label  = getStateLabel(a, unitData);
-              return (
-                <div key={uid} style={{
-                  background: active ? `linear-gradient(135deg, ${meta.color}1a, rgba(255,255,255,0.03))` : 'rgba(255,255,255,0.04)',
-                  border: `1px solid ${active ? meta.color + '44' : 'rgba(255,255,255,0.07)'}`,
-                  borderRadius: 20, padding: 14, height: 128,
-                  display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div style={{ width: 34, height: 34, borderRadius: 10,
-                      background: active ? meta.color : 'rgba(255,255,255,0.06)',
-                      color: active ? '#0B0B0E' : 'rgba(255,255,255,0.35)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <Icon name={meta.icon} size={16}/>
-                    </div>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', marginTop: 6,
-                      background: active ? meta.color : 'rgba(255,255,255,0.1)',
-                      boxShadow: active ? `0 0 8px ${meta.color}` : 'none' }}/>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {a.name || uid}
-                    </div>
-                    <div style={{ fontSize: 11, color: active ? meta.color : 'rgba(255,255,255,0.3)', marginTop: 3, fontFamily: 'monospace' }}>
-                      {label}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <>
+            {actuators.length > 0 && (
+              <>
+                {sectionLabel('执行器')}
+                {actuators.map(a => <ActuatorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>)}
+              </>
+            )}
+            {sensors.length > 0 && (
+              <>
+                {sectionLabel('传感器')}
+                {sensors.map(a => <SensorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>)}
+              </>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -885,10 +914,10 @@ function RulesScreen() {
 }
 
 /* ── TabBar — 3 tabs ────────────────────────────────────────────── */
-function TabBar({ tab, setTab, sensorBadge, actuatorBadge }) {
+function TabBar({ tab, setTab, deviceBadge }) {
   const tabs = [
-    { id: 'discover', icon: 'search', label: '感知', badge: sensorBadge },
-    { id: 'devices',  icon: 'home',   label: '设备', badge: actuatorBadge },
+    { id: 'discover', icon: 'search', label: '附近' },
+    { id: 'devices',  icon: 'home',   label: '设备', badge: deviceBadge },
     { id: 'rules',    icon: 'list',   label: '规则' },
   ];
   return (
@@ -993,16 +1022,14 @@ function App() {
       <div style={{ position: 'relative', height: '100%' }}>
         {tab === 'discover' && (
           <DiscoverScreen agents={agents} connected={connected}
-            phoneLoc={phoneLoc} locError={locError} unitData={unitData}/>
+            phoneLoc={phoneLoc} locError={locError}/>
         )}
         {tab === 'devices' && (
           <DevicesScreen agents={agents} unitData={unitData}/>
         )}
         {tab === 'rules' && <RulesScreen />}
         <PersistentInputBar onOpen={() => setSheetOpen(true)}/>
-        <TabBar tab={tab} setTab={setTab}
-          sensorBadge={agents.filter(a => a.agent_type !== 'actuator').length}
-          actuatorBadge={agents.filter(a => a.agent_type === 'actuator').length}/>
+        <TabBar tab={tab} setTab={setTab} deviceBadge={agents.length}/>
       </div>
       <ChatSheet
         open={sheetOpen}
