@@ -3,13 +3,14 @@
 
 import time
 from config import AGENT_ID, LOCAL_RULES_DELAY_MS, HEARTBEAT_MS
-from config import AGENT_LIGHT, AGENT_IR, AGENT_LED, AGENT_BUZ
+from config import AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
 from config import LOCATION_LNG, LOCATION_LAT
 from ism         import ISM, State, SENSOR_TABLE, LED_TABLE, BUZZER_TABLE
 from bsm         import BSM
 from mqtt_client import MqttClient
 from trigger_map import TriggerMap
 from local_rules import LocalRules
+from probe       import PRESENCE
 import agent_manifest
 
 print("[Main] SSM {} starting...".format(AGENT_ID))
@@ -50,6 +51,9 @@ def on_reconnect():
                  {"agent": AGENT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
     mqtt.publish("ssm/agents/{}/state".format(AGENT_BUZ),
                  {"agent": AGENT_BUZ, "ism": ism_buz.state, "ts": time.time()}, retain=True)
+    if PRESENCE.get(AGENT_SOUND):
+        mqtt.publish("ssm/agents/{}/state".format(AGENT_SOUND),
+                     {"agent": AGENT_SOUND, "detected": False, "ts": time.time()}, retain=True)
 
 # ── MQTT setup ───────────────────────────────────────────────
 mqtt.set_callback(trigger_map.on_mqtt)
@@ -76,6 +80,9 @@ mqtt.publish("ssm/agents/{}/state".format(AGENT_LED),
              {"agent": AGENT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
 mqtt.publish("ssm/agents/{}/state".format(AGENT_BUZ),
              {"agent": AGENT_BUZ, "ism": ism_buz.state, "ts": time.time()}, retain=True)
+if PRESENCE.get(AGENT_SOUND):
+    mqtt.publish("ssm/agents/{}/state".format(AGENT_SOUND),
+                 {"agent": AGENT_SOUND, "detected": False, "ts": time.time()}, retain=True)
 
 # ── 等待 retained decision/active 到达再激活本地规则 ──────────
 print("[Main] Waiting {}ms before local rules activate...".format(LOCAL_RULES_DELAY_MS))
@@ -93,5 +100,8 @@ while True:
     if time.ticks_diff(now, _last_heartbeat) >= HEARTBEAT_MS:
         _last_heartbeat = now
         print("[Loop] alive — light={} ir={}".format(bsm.light_level, bsm.ir_presence))
+        if PRESENCE.get(AGENT_SOUND):
+            mqtt.publish("ssm/agents/{}/state".format(AGENT_SOUND),
+                         {"agent": AGENT_SOUND, "detected": False, "ts": time.time()}, retain=True)
 
     time.sleep_ms(10)

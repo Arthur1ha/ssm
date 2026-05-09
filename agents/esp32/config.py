@@ -89,8 +89,8 @@ UNIT_CONFIGS = {
     AGENT_SOUND: {
         'agent_type': 'sensor',
         'name': 'sound',
-        # min_hits=3: 20次采样中只需3次LOW即可确认接线（传感器偶尔被声音触发也不影响检测）
-        'probe': {'type': 'digital', 'pin': SOUND_SENSOR_PIN, 'pull': 'up', 'active': 0, 'min_hits': 3},
+        # DO 引脚为开漏输出，安静时浮空无法数字探测，改为手动标志位
+        'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
             'agent_tag': 'sound',
             'values': ['detected'],

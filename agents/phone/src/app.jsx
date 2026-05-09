@@ -77,7 +77,8 @@ function getStateLabel(agent, unitData) {
 
 function getSensorReading(agent, unitData) {
   const uid = agent.unit_id || agent.agent_id;
-  const s   = (unitData[uid] || {}).state || (unitData[uid] || {}).event || {};
+  const d   = unitData[uid] || {};
+  const s   = d.state || d.event || {};
   const n   = (agent.name || '').toLowerCase();
   if (n.includes('light') || n.includes('lux')) {
     const map = { DARK: ['暗', '#6B6CFF'], DIM: ['微亮', '#7EE8A2'], NORMAL: ['正常', '#C8FF3E'], BRIGHT: ['强光', '#FFD060'] };
@@ -89,7 +90,11 @@ function getSensorReading(agent, unitData) {
     return s.presence ? { value: '有人', color: '#C8FF3E' } : { value: '无人', color: 'rgba(255,255,255,0.35)' };
   }
   if (n.includes('sound') || n.includes('mic')) {
-    return { value: '监测中', color: 'rgba(255,255,255,0.25)' };
+    const ev = d.event || {};
+    const recentDetect = ev.detected && (Date.now() / 1000 - (ev.ts || 0) < 5);
+    return recentDetect
+      ? { value: '检测到声音', color: '#E26BFF' }
+      : { value: '静默', color: 'rgba(255,255,255,0.25)' };
   }
   return { value: '...', color: 'rgba(255,255,255,0.25)' };
 }
@@ -325,32 +330,35 @@ function SensorCard({ agent, unitData }) {
 
 /* ── DiscoverScreen ─────────────────────────────────────────────── */
 function DiscoverScreen({ agents, connected, phoneLoc, locError, unitData }) {
-  const sorted = [...agents].sort((a, b) => {
+  const byDist = (a, b) => {
     const da = (phoneLoc && a._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, a._lat, a._lng) : Infinity;
     const db = (phoneLoc && b._lat != null) ? haversine(phoneLoc.lat, phoneLoc.lng, b._lat, b._lng) : Infinity;
     return da - db;
-  });
+  };
+  const sorted = [...agents].sort(byDist);
 
-  // filter by range — if phone location available, only show devices within NEARBY_RADIUS_M
-  // devices without location data are always shown (can't filter without coordinates)
-  const visible = phoneLoc
+  const nearby = phoneLoc
     ? sorted.filter(a => a._lat == null || haversine(phoneLoc.lat, phoneLoc.lng, a._lat, a._lng) <= NEARBY_RADIUS_M)
     : sorted;
 
-  const groups = {};
-  visible.forEach(a => {
+  // 附近 tab = sensor awareness only; actuators live in 设备 tab
+  const sensors = nearby.filter(a => a.agent_type !== 'actuator');
+
+  const sensorGroups = {};
+  sensors.forEach(a => {
     const key = a.hw_platform || 'other';
-    if (!groups[key]) groups[key] = { actuators: [], sensors: [] };
-    (a.agent_type === 'actuator' ? groups[key].actuators : groups[key].sensors).push(a);
+    if (!sensorGroups[key]) sensorGroups[key] = [];
+    sensorGroups[key].push(a);
   });
+
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(60% 40% at 30% 5%, rgba(255,154,90,0.2), transparent 70%)', pointerEvents: 'none' }}/>
       <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
         <div>
-          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>附近设备</span>
+          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>附近感知</span>
           <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginLeft: 10 }}>
-            {agents.length === 0 ? '扫描中…' : `${visible.length} 个`}
+            {agents.length === 0 ? '扫描中…' : `${sensors.length} 个传感器`}
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -371,17 +379,17 @@ function DiscoverScreen({ agents, connected, phoneLoc, locError, unitData }) {
           <div style={{ padding: '20px 0', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             等待 ESP32 上线...
           </div>
-        ) : visible.length === 0 ? (
+        ) : sensors.length === 0 ? (
           <div style={{ padding: '20px 0', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
-            附近 {NEARBY_RADIUS_M}m 内暂无设备
+            附近 {NEARBY_RADIUS_M}m 内暂无传感器
           </div>
         ) : (
           <>
             <div style={{ padding: '0 6px 8px' }}>
-              <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.3)', fontWeight: 500 }}>已发现</span>
+              <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.3)', fontWeight: 500 }}>环境感知</span>
             </div>
-            {Object.entries(groups).map(([plat, { actuators, sensors }]) => {
-              const allIds = [...actuators, ...sensors].map(a => a.unit_id || a.agent_id);
+            {Object.entries(sensorGroups).map(([plat, platSensors]) => {
+              const allIds = platSensors.map(a => a.unit_id || a.agent_id);
               let prefix = allIds[0] || plat;
               for (const id of allIds) {
                 while (prefix && !id.startsWith(prefix)) prefix = prefix.slice(0, prefix.lastIndexOf('_'));
@@ -393,17 +401,7 @@ function DiscoverScreen({ agents, connected, phoneLoc, locError, unitData }) {
                     <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.9)', fontFamily: 'monospace' }}>{prefix || plat}</span>
                     <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', fontFamily: 'monospace' }}>{plat}</span>
                   </div>
-                  {actuators.length > 0 && <>
-                    <div style={{ padding: '0 6px 6px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#FF9A5A', fontWeight: 600 }}>执行器</div>
-                    {actuators.map(a => <AgentCard key={a.unit_id||a.agent_id} agent={a} phoneLoc={phoneLoc}/>)}
-                  </>}
-                  {sensors.length > 0 && <>
-                    <div style={{ padding: actuators.length ? '8px 6px 6px' : '0 6px 6px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.25)', fontWeight: 600 }}>传感器</span>
-                      <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '1px 5px' }}>只读</span>
-                    </div>
-                    {sensors.map(a => <SensorCard key={a.unit_id||a.agent_id} agent={a} unitData={unitData}/>)}
-                  </>}
+                  {platSensors.map(a => <SensorCard key={a.unit_id||a.agent_id} agent={a} unitData={unitData}/>)}
                 </div>
               );
             })}
@@ -887,10 +885,10 @@ function RulesScreen() {
 }
 
 /* ── TabBar — 3 tabs ────────────────────────────────────────────── */
-function TabBar({ tab, setTab, badge }) {
+function TabBar({ tab, setTab, sensorBadge, actuatorBadge }) {
   const tabs = [
-    { id: 'discover', icon: 'search', label: '附近' },
-    { id: 'devices',  icon: 'home',   label: '设备', badge },
+    { id: 'discover', icon: 'search', label: '感知', badge: sensorBadge },
+    { id: 'devices',  icon: 'home',   label: '设备', badge: actuatorBadge },
     { id: 'rules',    icon: 'list',   label: '规则' },
   ];
   return (
@@ -1002,7 +1000,9 @@ function App() {
         )}
         {tab === 'rules' && <RulesScreen />}
         <PersistentInputBar onOpen={() => setSheetOpen(true)}/>
-        <TabBar tab={tab} setTab={setTab} badge={agents.filter(a => a.agent_type === 'actuator').length}/>
+        <TabBar tab={tab} setTab={setTab}
+          sensorBadge={agents.filter(a => a.agent_type !== 'actuator').length}
+          actuatorBadge={agents.filter(a => a.agent_type === 'actuator').length}/>
       </div>
       <ChatSheet
         open={sheetOpen}
