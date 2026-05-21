@@ -215,3 +215,36 @@ class TestAct:
         agent._act(belief)
         captured = capsys.readouterr()
         assert "cooldown" in captured.out
+
+
+class TestLoop:
+    def test_history_appended_after_reason(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(
+            content='{"context": "test", "space_mood": "空闲", "should_act": false, "action": {}, "reason": "ok"}'
+        )
+        agent = DeskAgent(shared_state=MagicMock(), publish_task_fn=MagicMock(), llm=mock_llm)
+        sense = {"light_level": "NORMAL", "light_lux": 200, "sound_detected": False, "sound_recent": False}
+
+        belief = agent._reason(sense)
+        assert belief is not None
+        agent._belief_history.append(belief)
+        assert len(agent._belief_history) == 1
+        assert agent._belief_history[0]["context"] == "test"
+
+    def test_history_capped_at_10(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(
+            content='{"context": "x", "space_mood": "空闲", "should_act": false, "action": {}, "reason": "ok"}'
+        )
+        agent = DeskAgent(shared_state=MagicMock(), publish_task_fn=MagicMock(), llm=mock_llm)
+        sense = {"light_level": "NORMAL", "light_lux": 200, "sound_detected": False, "sound_recent": False}
+
+        for _ in range(15):
+            b = agent._reason(sense)
+            if b:
+                agent._belief_history.append(b)
+                if len(agent._belief_history) > 10:
+                    agent._belief_history.pop(0)
+
+        assert len(agent._belief_history) == 10

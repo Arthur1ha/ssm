@@ -141,4 +141,31 @@ class DeskAgent:
         print(f"[DeskAgent] act → {device} {cmd} {params}")
 
     def _loop(self):
-        pass  # Task 6
+        print("[DeskAgent] running")
+        _last_event_ts: dict[str, float] = {}
+        DEBOUNCE_SECS = 5
+
+        while True:
+            try:
+                event = self._event_queue.get(timeout=30)
+                unit_id = event.get("unit_id", "")
+                now = time.time()
+                if now - _last_event_ts.get(unit_id, 0) < DEBOUNCE_SECS:
+                    continue
+                _last_event_ts[unit_id] = now
+            except queue.Empty:
+                pass  # 周期 tick
+
+            sense = self._sense()
+            if sense is None:
+                continue
+
+            belief = self._reason(sense)
+            if belief is None:
+                continue
+
+            self._belief_history.append(belief)
+            if len(self._belief_history) > 10:
+                self._belief_history.pop(0)
+
+            self._act(belief)
