@@ -162,6 +162,10 @@ agent_tools.init(state, mqtt_client)
 orchestrator = build_orchestrator()
 rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
 
+from desk_agent import DeskAgent
+desk_agent = DeskAgent(state, agent_tools.do_publish_task, None)
+desk_agent.start()
+
 # ── MQTT：用 loop_start() 让 paho 自己管线程 ─────────────────
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
@@ -205,10 +209,11 @@ while True:
 
     unit_id = event.get("unit_id", "")
 
-    # 传感器事件：规则引擎处理，不走 LLM
+    # 传感器事件：规则引擎处理，不走 LLM；同时通知 DeskAgent
     if trigger == "sensor":
         print(f"[Main] RuleEngine for unit={unit_id}")
         rule_engine.match_and_fire(unit_id, event["payload"])
+        desk_agent.push_sensor_event(unit_id, event["payload"])
         continue
 
     # 执行器报告：V2 orchestrator 已在 evaluator_node 内联处理，此处直接跳过
