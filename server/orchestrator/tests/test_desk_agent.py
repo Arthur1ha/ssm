@@ -163,3 +163,55 @@ class TestReason:
         prompt_text = call_args[0].content
         assert "空间安静" in prompt_text
         assert "有人进入" in prompt_text
+
+
+class TestAct:
+    def _make_agent(self):
+        mock_publish = MagicMock()
+        agent = DeskAgent(shared_state=MagicMock(), publish_task_fn=mock_publish, llm=MagicMock())
+        return agent, mock_publish
+
+    def _belief(self, should_act=True, cmd="SET_STATE", params=None):
+        return {
+            "should_act": should_act,
+            "action": {
+                "device": "esp32_desk_led",
+                "cmd": cmd,
+                "params": params or {"state": "BRIGHT"},
+            } if should_act else {},
+        }
+
+    def test_publishes_when_should_act_true(self):
+        agent, mock_publish = self._make_agent()
+        agent._act(self._belief())
+        mock_publish.assert_called_once()
+        args = mock_publish.call_args[0]
+        assert args[0] == "esp32_desk_led"
+        assert args[2] == "SET_STATE"
+        assert args[4] == "agent_auto"
+
+    def test_skips_when_should_act_false(self):
+        agent, mock_publish = self._make_agent()
+        agent._act(self._belief(should_act=False))
+        mock_publish.assert_not_called()
+
+    def test_cooldown_blocks_second_call(self):
+        agent, mock_publish = self._make_agent()
+        belief = self._belief()
+        agent._act(belief)   # first call — publishes
+        agent._act(belief)   # second call — same cmd+params, should be blocked
+        mock_publish.assert_called_once()
+
+    def test_cooldown_allows_different_params(self):
+        agent, mock_publish = self._make_agent()
+        agent._act(self._belief(params={"state": "BRIGHT"}))
+        agent._act(self._belief(params={"state": "OFF"}))
+        assert mock_publish.call_count == 2
+
+    def test_cooldown_log_message(self, capsys):
+        agent, _ = self._make_agent()
+        belief = self._belief()
+        agent._act(belief)
+        agent._act(belief)
+        captured = capsys.readouterr()
+        assert "cooldown" in captured.out

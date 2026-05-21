@@ -119,7 +119,26 @@ class DeskAgent:
             return None
 
     def _act(self, belief: dict):
-        pass  # Task 5
+        if not belief.get("should_act"):
+            return
+        action = belief.get("action", {})
+        if not action:
+            return
+
+        device = action.get("device", "")
+        cmd = action.get("cmd", "")
+        params = action.get("params", {})
+
+        key = f"{cmd}_{json.dumps(params, sort_keys=True)}"
+        now = time.time()
+        if now - self._cooldown.get(key, 0) < 300:
+            print(f"[DeskAgent] cooldown, skip ({key})")
+            return
+        self._cooldown[key] = now
+
+        task_id = f"agent_auto_{int(now)}"
+        self._publish_task(device, task_id, cmd, params, "agent_auto")
+        print(f"[DeskAgent] act → {device} {cmd} {params}")
 
     def _loop(self):
         pass  # Task 6
