@@ -18,6 +18,7 @@ from shared_state import SharedState
 import tools as agent_tools
 from graph import build_orchestrator
 from rule_engine import RuleEngine
+from desk_agent import DeskAgent
 
 # ── Config ────────────────────────────────────────────────────
 
@@ -162,7 +163,6 @@ agent_tools.init(state, mqtt_client)
 orchestrator = build_orchestrator()
 rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
 
-from desk_agent import DeskAgent
 desk_agent = DeskAgent(state, agent_tools.do_publish_task, None)
 desk_agent.start()
 
