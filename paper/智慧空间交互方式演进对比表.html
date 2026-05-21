@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; padding: 24px; color: #1a1a1a; }
+  h2 { font-size: 16px; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #d0d0d0; padding: 10px 14px; vertical-align: top; text-align: left; line-height: 1.6; }
+  th { background: #f5f5f5; font-weight: bold; text-align: center; }
+  td:first-child { font-weight: bold; white-space: nowrap; background: #fafafa; }
+  .col3 { background: #fff8e6; }
+  .col4 { background: #e8f4ff; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 3px; margin-right: 4px; }
+  .tag-red { background: #fde8e8; color: #c0392b; }
+  .tag-blue { background: #e8f4ff; color: #2980b9; }
+  .tag-green { background: #e8f8f0; color: #27ae60; }
+
+  /* 场景对比区 */
+  .scenario { margin-top: 32px; }
+  .scenario h3 { font-size: 14px; margin-bottom: 12px; }
+  .scenario-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .scenario-box { border: 1px solid #d0d0d0; border-radius: 6px; padding: 16px; font-size: 13px; line-height: 1.7; }
+  .scenario-box h4 { font-size: 13px; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+  .scenario-box.old h4 { color: #888; }
+  .scenario-box.new h4 { color: #2980b9; }
+  .step { margin: 4px 0; }
+  .step .who { font-size: 11px; color: #888; font-weight: bold; margin-right: 4px; }
+  .muted { color: #aaa; font-style: italic; }
+</style>
+</head>
+<body>
+
+<h2>智慧空间交互方式演进对比</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:10%">维度</th>
+      <th style="width:20%">第一代<br>显式命令控制</th>
+      <th style="width:20%">第二代<br>规则 / 场景自动化</th>
+      <th class="col3" style="width:22%">第二代升级<br>自然语言单 LLM 控制</th>
+      <th class="col4" style="width:28%">第三代<br>多智能体协同（本研究）</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>交互模式</td>
+      <td>用户逐一操作设备</td>
+      <td>预设规则，条件触发执行</td>
+      <td class="col3">自然语言 → LLM 解析 → 生成设备指令序列 → 执行</td>
+      <td class="col4">自然语言目标 → 发现当前空间能力 → 生成执行计划（用户可见）→ 协同执行 → 反馈</td>
+    </tr>
+    <tr>
+      <td>典型形态</td>
+      <td>App 滑块、语音"开灯"、遥控器</td>
+      <td>"回家模式"、IFTTT、米家自动化、Apple 捷径</td>
+      <td class="col3">Google Gemini for Home、Amazon Alexa + LLM、Siri with Apple Intelligence</td>
+      <td class="col4">本研究 SSM 原型：Planner → Dispatcher → Evaluator → Responder</td>
+    </tr>
+    <tr>
+      <td>系统"知道自己能做什么"的方式</td>
+      <td>用户知道，系统不需要知道</td>
+      <td>开发者预配置的固定规则</td>
+      <td class="col3">LLM 训练知识 + 系统预先注册的设备列表（静态，新设备接入需手动更新配置）</td>
+      <td class="col4">设备启动时主动发布 manifest，系统实时感知当前在线设备及其能力（动态，新设备自动纳入）</td>
+    </tr>
+    <tr>
+      <td>用户输入"我想专注"后发生了什么</td>
+      <td>——（无法处理此类目标性表达）</td>
+      <td>——（需提前配置"专注模式"规则才能触发）</td>
+      <td class="col3">LLM 生成指令列表，<strong>直接执行</strong>，完成后告知结果。<br>用户看不到中间推理过程，无法在执行前修改。</td>
+      <td class="col4">① 先告诉用户"当前空间有哪些能力"<br>② 展示执行计划，用户可修改<br>③ 逐步执行，每步可见<br>④ 执行后解释"为什么这样做"</td>
+    </tr>
+    <tr>
+      <td>认知负担承担方</td>
+      <td>用户：自行探索、规划、逐一操作</td>
+      <td>用户：配置阶段承担全部规划；执行时系统代劳</td>
+      <td class="col3">系统承担语义翻译和指令生成；<br>但用户仍需<strong>自己知道"这个空间能做什么"</strong>才能提出合适请求</td>
+      <td class="col4">系统主动承担能力发现，用户无需提前了解设备；<br>用户只需表达目标</td>
+    </tr>
+    <tr>
+      <td>执行过程透明度</td>
+      <td>完全透明（每步用户亲自操作）</td>
+      <td>黑箱（触发后自动完成，用户看不到过程）</td>
+      <td class="col3"><span class="tag tag-red">黑箱</span>LLM 的推理过程和执行步骤对用户不可见</td>
+      <td class="col4"><span class="tag tag-green">可见</span>用户看到每个智能体在做什么：Planner 在规划、Dispatcher 在执行、Evaluator 在验证</td>
+    </tr>
+    <tr>
+      <td>用户能否干预执行</td>
+      <td>每步都是用户自己操作，完全可控</td>
+      <td>不能（触发即执行，无法干预）</td>
+      <td class="col3"><span class="tag tag-red">不能</span>命令一旦下达即执行，无法在中途修改</td>
+      <td class="col4"><span class="tag tag-green">可以</span>执行前可修改计划；执行中可中止任意步骤</td>
+    </tr>
+    <tr>
+      <td>位置的角色</td>
+      <td>不感知</td>
+      <td>位置作为触发条件（进入房间开灯），静态规则</td>
+      <td class="col3">基本不感知（全局统一处理，不区分用户在哪个空间）</td>
+      <td class="col4">位置作为<strong>能力发现入口</strong>：用户在哪里，系统就聚合那里当前在线的设备能力</td>
+    </tr>
+    <tr>
+      <td>体验特征</td>
+      <td>精确可控；操作与结果一一对应；用户掌握全局</td>
+      <td>一次配置长期生效；常用场景高效；多设备联动</td>
+      <td class="col3">无需记忆设备名称；自然语言输入；多设备协调由系统完成</td>
+      <td class="col4">以目标表达需求；空间能力主动可见；执行过程透明可干预；位置驱动动态能力发现</td>
+    </tr>
+    <tr>
+      <td>局限</td>
+      <td>设备越多入口越分散；无法处理目标性表达；多设备联动需用户手动规划</td>
+      <td>场景固定；能力仍需用户预先了解才能配置；执行黑箱；规则数爆炸</td>
+      <td class="col3">
+        <strong>以设备为中心</strong>：仍在翻译"控制哪个设备"，不是发现"空间能做什么"<br>
+        <strong>执行黑箱</strong>：用户无法看到推理过程，无法干预<br>
+        <strong>静态能力表</strong>：新设备接入需更新系统配置<br>
+        <strong>不感知位置</strong>：无论用户在哪个空间，系统响应逻辑相同
+      </td>
+      <td class="col4">协调链路较长，延迟高于前三代；<br>用户对 AI 决策的信任需要校准；<br>原型实现复杂度高</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- 场景对比 -->
+<div class="scenario">
+  <h3>场景对比：用户说"我想专注"</h3>
+  <div class="scenario-grid">
+    <div class="scenario-box old">
+      <h4>第二代升级（单 LLM，如 Gemini for Home）</h4>
+      <div class="step"><span class="who">用户</span>"我想专注"</div>
+      <div class="step"><span class="who">系统</span>[黑箱推理中……]</div>
+      <div class="step"><span class="who">系统</span>调光至 60%、打开白噪音……</div>
+      <div class="step"><span class="who">系统</span>"好的，已为您调整环境。"</div>
+      <div class="step muted">——用户不知道系统考虑了什么、为什么这样做、哪些步骤失败了</div>
+    </div>
+    <div class="scenario-box new">
+      <h4>第三代（多智能体，本研究）</h4>
+      <div class="step"><span class="who">用户</span>"我想专注"</div>
+      <div class="step"><span class="who">Planner</span>发现当前空间：LED 灯环（可调色温/亮度）、声音传感器（当前 38dB，较安静）、光线传感器（180lux，偏暗）</div>
+      <div class="step"><span class="who">Planner</span>生成计划：① 调 LED 至暖白 40% ② 开启噪音监控（&gt;60dB 提醒）</div>
+      <div class="step"><span class="who">系统</span>→ 用户确认或修改计划</div>
+      <div class="step"><span class="who">Dispatcher</span>执行第 ① 步 → LED 已响应 ✓</div>
+      <div class="step"><span class="who">Dispatcher</span>执行第 ② 步 → 噪音监控已开启 ✓</div>
+      <div class="step"><span class="who">Evaluator</span>校验执行结果，全部符合预期</div>
+      <div class="step"><span class="who">Responder</span>"已调暗灯光并开启噪音监控，当前环境光 180lux、噪音 38dB，适合专注。"</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

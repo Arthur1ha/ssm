@@ -48,6 +48,10 @@ class AgentRegistry extends EventTarget {
                     }
                 }
                 this._emit();
+                // notify app that this parent came online (even if already was online = quick restart)
+                if (online) {
+                    this.dispatchEvent(Object.assign(new Event('reconnect'), { detail: { parentId: id } }));
+                }
             }
 
             if (mLocation) {

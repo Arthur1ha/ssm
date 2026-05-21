@@ -8,7 +8,7 @@ const BROKER_USER = 'ssm_user';
 const BROKER_PASS = 'Wl4sErQrlrpEbm7r';
 const LIME             = '#C8FF3E';
 const NEARBY_RADIUS_M  = 300;   // only show devices within this distance
-const POPUP_RADIUS_M   = 15;    // trigger discovery popup within this distance
+const POPUP_RADIUS_M   = 5000;    // trigger discovery popup within this distance
 
 const ICONS = {
   search:   "M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0",
@@ -616,7 +616,7 @@ function ChatSheet({ open, onClose, agents, unitData }) {
         setThinking(false);
         setThinkingText('');
         setMessages(m => [...m, { role: 'assistant', text: '操作超时，设备可能无响应', actions: [] }]);
-      }, 30000);
+      }, 60000);
 
       function handleFeedback(e) {
         const { stage, text } = e.detail || {};
@@ -628,7 +628,7 @@ function ChatSheet({ open, onClose, agents, unitData }) {
             setThinking(false);
             setThinkingText('');
             setMessages(m => [...m, { role: 'assistant', text: '操作超时，设备可能无响应', actions: [] }]);
-          }, 20000);
+          }, 40000);
           setThinkingText(stage === 'planning' ? '正在规划...' : '正在执行...');
         } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
           clearTimeout(timeoutId);
@@ -1062,18 +1062,23 @@ function App() {
       pos => {
         const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setPhoneLoc(loc);
+        console.log('[GPS] phone loc:', loc, 'agents:', agentsRef.current.length);
         agentsRef.current.forEach(agent => {
-          if (agent._lat == null || agent._lng == null) return;
           const uid = agent.unit_id || agent.agent_id;
+          if (agent._lat == null || agent._lng == null) {
+            console.log('[GPS] skip (no loc):', uid);
+            return;
+          }
+          const dist = Math.round(haversine(loc.lat, loc.lng, agent._lat, agent._lng));
+          console.log('[GPS]', uid, 'dist:', dist, 'm / threshold:', POPUP_RADIUS_M, 'm | seen:', seenPopupDevices.current.has(uid));
           if (seenPopupDevices.current.has(uid)) return;
-          const dist = haversine(loc.lat, loc.lng, agent._lat, agent._lng);
           if (dist < POPUP_RADIUS_M) {
             seenPopupDevices.current.add(uid);
             setDiscoveryDevice(prev => prev || agent);
           }
         });
       },
-      err => setLocError(err.code === 1 ? '位置权限被拒绝' : '定位失败'),
+      err => { console.warn('[GPS] error:', err.code, err.message); setLocError(err.code === 1 ? '位置权限被拒绝' : '定位失败'); },
       { enableHighAccuracy: true, timeout: 10000 }
     );
     return () => navigator.geolocation.clearWatch(watchId);
@@ -1087,6 +1092,17 @@ function App() {
       setAgents(registry.getAll().filter(a =>
         !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) && a._online === true
       ));
+    });
+
+    // 设备重新上线（含快速重启未触发 LWT 的情况）→ 清除弹窗去重记录，允许再次弹窗
+    registry.addEventListener('reconnect', ({ detail }) => {
+      agentsRef.current.forEach(agent => {
+        if (agent.parent_id === detail.parentId) {
+          const uid = agent.unit_id || agent.agent_id;
+          seenPopupDevices.current.delete(uid);
+          onlineIdsRef.current.delete(uid);
+        }
+      });
     });
 
     ismTracker.addEventListener('update', () => {

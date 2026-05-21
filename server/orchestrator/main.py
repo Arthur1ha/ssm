@@ -16,7 +16,7 @@ import paho.mqtt.client as mqtt_lib
 
 from shared_state import SharedState
 import tools as agent_tools
-from graph import build_evaluation_graph, build_orchestrator
+from graph import build_orchestrator
 from rule_engine import RuleEngine
 
 # ── Config ────────────────────────────────────────────────────
@@ -123,6 +123,12 @@ def on_message(client, userdata, msg):
         session_id = parts[2]
         if isinstance(payload, dict):
             print(f"[Intent] session={session_id} user_msg={payload.get('user_msg', '')[:40]}")
+            # 立即 ACK，防止 PWA 初始计时器在排队等待时超时
+            client.publish(
+                f"ssm/feedback/{session_id}",
+                json.dumps({"stage": "planning", "text": "已收到请求，正在处理...", "session_id": session_id}),
+                qos=0,
+            )
             event_queue.put({"trigger": "intent", "payload": payload, "session_id": session_id})
         return
 
@@ -153,8 +159,7 @@ mqtt_client.on_disconnect = on_disconnect
 # ── Init tools + graph ────────────────────────────────────────
 
 agent_tools.init(state, mqtt_client)
-evaluation_graph = build_evaluation_graph()
-orchestrator     = build_orchestrator()
+orchestrator = build_orchestrator()
 rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
 
 # ── MQTT：用 loop_start() 让 paho 自己管线程 ─────────────────
@@ -199,17 +204,12 @@ while True:
         continue
 
     unit_id = event.get("unit_id", "")
-    print(f"[Main] Invoking {'Decision' if trigger == 'sensor' else 'Evaluation'} Agent "
-          f"for unit={unit_id}")
 
     # 传感器事件：规则引擎处理，不走 LLM
     if trigger == "sensor":
+        print(f"[Main] RuleEngine for unit={unit_id}")
         rule_engine.match_and_fire(unit_id, event["payload"])
         continue
 
-    # 执行器报告：评估图（检查指令是否被正确执行）
-    try:
-        evaluation_graph.invoke({"payload": event["payload"]})
-        print("[Main] Done.")
-    except Exception as e:
-        print(f"[Main] Evaluation error: {e}")
+    # 执行器报告：V2 orchestrator 已在 evaluator_node 内联处理，此处直接跳过
+    # （旧 Evaluation Agent 因 LLM 调用耗时 20-30s，会严重堵塞 intent 队列）
