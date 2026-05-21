@@ -39,7 +39,38 @@ class DeskAgent:
         self._event_queue.put({"unit_id": unit_id, "payload": payload})
 
     def _sense(self) -> dict | None:
-        pass  # Task 3
+        snap = self._shared_state.sensor_snapshot()
+
+        light_data = None
+        for unit_id, data in snap.items():
+            if unit_id.endswith("_light"):
+                light_data = data.get("state") or data.get("event")
+                break
+
+        if not light_data:
+            return None
+
+        level = light_data.get("level", "NORMAL")
+        lux = light_data.get("lux", 0)
+
+        sound_detected = False
+        sound_recent = False
+        now = time.time()
+        for unit_id, data in snap.items():
+            if unit_id.endswith("_sound"):
+                event = data.get("event", {})
+                if event:
+                    event_ts = event.get("ts", 0)
+                    sound_recent = (now - event_ts) < 5
+                    sound_detected = sound_recent
+                break
+
+        return {
+            "light_level": level,
+            "light_lux": lux,
+            "sound_detected": sound_detected,
+            "sound_recent": sound_recent,
+        }
 
     def _reason(self, sense_data: dict) -> dict | None:
         pass  # Task 4
