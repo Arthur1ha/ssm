@@ -103,3 +103,63 @@ class TestSense:
         result = agent._sense()
         assert result["sound_detected"] is False
         assert result["sound_recent"] is False
+
+
+import time as _time
+from langchain_core.messages import AIMessage
+
+
+class TestReason:
+    SENSE_DATA = {
+        "light_level": "DARK",
+        "light_lux": 30,
+        "sound_detected": False,
+        "sound_recent": False,
+    }
+
+    def _make_agent_with_llm_response(self, content: str):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content=content)
+        return DeskAgent(shared_state=MagicMock(), publish_task_fn=None, llm=mock_llm)
+
+    def test_returns_belief_dict(self):
+        agent = self._make_agent_with_llm_response(
+            '{"context": "光线昏暗", "space_mood": "昏暗", "should_act": true, '
+            '"action": {"device": "esp32_desk_led", "cmd": "SET_STATE", "params": {"state": "BRIGHT"}}, '
+            '"reason": "光线不足"}'
+        )
+        belief = agent._reason(self.SENSE_DATA)
+        assert belief is not None
+        assert belief["should_act"] is True
+        assert belief["action"]["cmd"] == "SET_STATE"
+        assert "ts" in belief
+
+    def test_returns_none_on_invalid_json(self):
+        agent = self._make_agent_with_llm_response("not valid json at all")
+        belief = agent._reason(self.SENSE_DATA)
+        assert belief is None
+
+    def test_handles_json_with_preamble(self):
+        agent = self._make_agent_with_llm_response(
+            '好的，以下是结果：\n{"context": "正常", "space_mood": "空闲", '
+            '"should_act": false, "action": {}, "reason": "ok"}'
+        )
+        belief = agent._reason(self.SENSE_DATA)
+        assert belief is not None
+        assert belief["should_act"] is False
+
+    def test_prompt_includes_history_context(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(
+            content='{"context": "test", "space_mood": "空闲", "should_act": false, "action": {}, "reason": "ok"}'
+        )
+        agent = DeskAgent(shared_state=MagicMock(), publish_task_fn=None, llm=mock_llm)
+        agent._belief_history = [
+            {"context": "空间安静", "space_mood": "空闲", "ts": _time.time() - 120},
+            {"context": "有人进入", "space_mood": "专注", "ts": _time.time() - 60},
+        ]
+        agent._reason(self.SENSE_DATA)
+        call_args = mock_llm.invoke.call_args[0][0]
+        prompt_text = call_args[0].content
+        assert "空间安静" in prompt_text
+        assert "有人进入" in prompt_text

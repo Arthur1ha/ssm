@@ -73,7 +73,50 @@ class DeskAgent:
         }
 
     def _reason(self, sense_data: dict) -> dict | None:
-        pass  # Task 4
+        last_context = self._belief_history[-1]["context"] if self._belief_history else ""
+
+        history_lines = ""
+        if self._belief_history:
+            recent = self._belief_history[-3:]
+            lines = []
+            for b in recent:
+                ts_str = time.strftime("%H:%M", time.localtime(b.get("ts", 0)))
+                lines.append(f"- {ts_str}: {b.get('context', '')}")
+            history_lines = "\n近期状态变化：\n" + "\n".join(lines)
+
+        prompt = (
+            "你是一个桌面空间智能体。根据传感器数据判断当前情境，并决定是否需要调节照明。\n\n"
+            f"传感器数据：{json.dumps(sense_data, ensure_ascii=False)}\n"
+            f"上一次判断：{last_context}（若无则忽略）"
+            f"{history_lines}\n\n"
+            "输出 JSON（不含代码块）：\n"
+            "{\n"
+            '  "context": "一句话描述当前情境",\n'
+            '  "space_mood": "专注/空闲/嘈杂/昏暗 中的一个",\n'
+            '  "should_act": true/false,\n'
+            '  "action": {\n'
+            '    "device": "esp32_desk_led",\n'
+            '    "cmd": "SET_STATE",\n'
+            '    "params": {"state": "BRIGHT"}\n'
+            "  },\n"
+            '  "reason": "为什么这样决定"\n'
+            "}\n"
+            "若 should_act 为 false，action 填 {}。"
+        )
+
+        try:
+            resp = self._llm.invoke([HumanMessage(content=prompt)])
+            content = resp.content.strip()
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1:
+                raise ValueError("no JSON found")
+            belief = json.loads(content[start:end])
+            belief["ts"] = time.time()
+            return belief
+        except Exception as e:
+            print(f"[DeskAgent] reason parse error: {e}")
+            return None
 
     def _act(self, belief: dict):
         pass  # Task 5
