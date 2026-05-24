@@ -39,6 +39,8 @@ orchestrator:
 
 orchestrator-bg:
 	@pkill -f "[o]rchestrator.*main.py" || true
+	@pkill -f "uv run python -u main.py" || true
+	@sleep 1
 	cd server/orchestrator && nohup uv run python -u main.py \
 		> /tmp/ssm_orchestrator.log 2>&1 &
 	@echo "Orchestrator started in background → /tmp/ssm_orchestrator.log"
@@ -55,11 +57,13 @@ pwa-bg:
 
 # ── ngrok ────────────────────────────────────────────────────
 ngrok:
-	ngrok http 8080 --log=stdout --request-header-add "ngrok-skip-browser-warning:1"
+	env HTTP_PROXY="" HTTPS_PROXY="" http_proxy="" https_proxy="" \
+		ngrok http 8080 --log=stdout --request-header-add "ngrok-skip-browser-warning:1"
 
 ngrok-bg:
 	@pkill -f "[n]grok" || true
-	nohup ngrok http 8080 --log=stdout --request-header-add "ngrok-skip-browser-warning:1" > /tmp/ssm_ngrok.log 2>&1 &
+	nohup env HTTP_PROXY="" HTTPS_PROXY="" http_proxy="" https_proxy="" \
+		ngrok http 8080 --log=stdout --request-header-add "ngrok-skip-browser-warning:1" > /tmp/ssm_ngrok.log 2>&1 &
 	@echo "ngrok started in background → /tmp/ssm_ngrok.log"
 	@sleep 2
 	@curl -s http://localhost:4040/api/tunnels 2>/dev/null | \

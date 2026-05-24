@@ -29,6 +29,7 @@ def do_publish_task(device_id: str, task_id: str, action: str, params: dict, ses
         f"ssm/task/{device_id}/{task_id}",
         json.dumps({"task_id": task_id, "session_id": session_id,
                     "action": action, "params": params, "ts": int(_time.time())}),
+        qos=1,  # QoS 1：保证送达，防止网络抖动时 QoS 0 静默丢包
     )
 
 

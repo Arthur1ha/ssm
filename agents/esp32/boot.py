@@ -34,21 +34,36 @@ try:
 except Exception:
     pass
 
+import machine
+
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
 
-if not wlan.isconnected():
-    print(f"[boot] Connecting to WiFi: {WIFI_SSID}")
-    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+MAX_RETRIES = 5       # 最多重试 5 次
+TIMEOUT_MS  = 20000  # 每次等待 20 秒
 
-    deadline = time.ticks_add(time.ticks_ms(), 15000)  # 15s timeout
-    while not wlan.isconnected():
-        if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
-            print("[boot] WiFi timeout — halting")
-            _blink_error()
-            import sys
-            sys.exit()
-        time.sleep_ms(200)
+if not wlan.isconnected():
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"[boot] Connecting to WiFi: {WIFI_SSID} (attempt {attempt}/{MAX_RETRIES})")
+        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+
+        deadline = time.ticks_add(time.ticks_ms(), TIMEOUT_MS)
+        while not wlan.isconnected():
+            if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                print(f"[boot] WiFi timeout (attempt {attempt})")
+                wlan.disconnect()
+                time.sleep_ms(2000)  # 断开后等 2s 再重试
+                break
+            time.sleep_ms(200)
+
+        if wlan.isconnected():
+            break
+    else:
+        # 全部重试失败：闪红灯后自动重启，不永久停机
+        print("[boot] WiFi failed after all retries — rebooting in 5s")
+        _blink_error()
+        time.sleep_ms(5000)
+        machine.reset()
 
 ip = wlan.ifconfig()[0]
 print(f"[boot] WiFi OK — IP: {ip}")
