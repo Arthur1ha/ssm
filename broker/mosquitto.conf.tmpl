@@ -1,10 +1,9 @@
 # SSM Mosquitto Broker Configuration
-
-# Run as root (log/data dirs are under /root which mosquitto user cannot access)
-user root
+# 此文件是模板，由 make broker 通过 envsubst 生成最终配置
+# 不要直接修改 mosquitto.conf，修改此模板文件
 
 # Authentication
-password_file /root/ssm/broker/passwd
+password_file ${SSM_DIR}/broker/passwd
 allow_anonymous false
 
 # TCP listener for ESP32 (port 1883)
@@ -16,12 +15,12 @@ protocol websockets
 
 # Persistence (retain messages survive restarts)
 persistence true
-persistence_location /root/ssm/broker/data/
+persistence_location ${SSM_DIR}/broker/data/
 retained_persistence true
 
 # Logging
 log_dest stdout
-log_dest file /root/ssm/broker/logs/mosquitto.log
+log_dest file ${SSM_DIR}/logs/mosquitto.log
 log_type error
 log_type warning
 log_type notice

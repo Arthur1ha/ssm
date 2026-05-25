@@ -1,5 +1,8 @@
 broker/data/
 broker/logs/
+logs/
+server/.env
+broker/mosquitto.conf
 agents/phone/node_modules/
 agents/pc_agent/.env
 *.log
