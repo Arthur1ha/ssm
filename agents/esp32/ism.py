@@ -42,6 +42,7 @@ SENSOR_TABLE = {
 
 LED_TABLE = {
     # From OFF
+    (State.OFF,    Trigger.CMD_OFF):   State.OFF,    # 幂等：已关灯时再关无副作用
     (State.OFF,    Trigger.CMD_BRIGHT): State.BRIGHT,
     (State.OFF,    Trigger.CMD_DIM):    State.DIM,
     (State.OFF,    Trigger.CMD_COLOR):  State.COLOR,

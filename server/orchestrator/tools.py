@@ -32,6 +32,10 @@ def do_publish_task(device_id: str, task_id: str, action: str, params: dict, ses
         qos=1,  # QoS 1：保证送达，防止网络抖动时 QoS 0 静默丢包
     )
 
+def do_publish(topic: str, payload: dict):
+    """直接发布任意 MQTT 消息，供 DeskAgent 使用（speech、led_mood、thought）。"""
+    _mqtt.publish(topic, json.dumps(payload, ensure_ascii=False))
+
 
 # ── Decision agent tools ──────────────────────────────────────
 

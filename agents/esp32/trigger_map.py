@@ -27,6 +27,7 @@ class TriggerMap:
         self._led_task_pfx   = "ssm/task/{}/".format(AGENT_LED)
         self._buz_task_pfx   = "ssm/task/{}/".format(AGENT_BUZ)
         self._rules_topic    = "ssm/rules/{}".format(AGENT_ID)
+        self._led_mood_topic = "ssm/agents/desk/led_mood"  # F3
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
@@ -59,6 +60,12 @@ class TriggerMap:
         elif topic == self._rules_topic:
             if isinstance(payload, list):
                 self._local.load_rules(payload)
+
+        elif topic == self._led_mood_topic:
+            # F3: DeskAgent 发来的 LED 情绪指令
+            if isinstance(payload, dict):
+                mood = payload.get("mood", "idle")
+                self._bsm.led_mood_set(mood)
 
         elif topic == "ssm/sys/ping":
             self._mqtt.publish("ssm/sys/pong/{}".format(AGENT_ID),

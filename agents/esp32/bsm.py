@@ -87,6 +87,13 @@ class BSM:
         self._buz_step    = 0
         self._buz_last    = 0
 
+        # ── LED Mood（F3）────────────────────────────────────
+        # mood 覆盖 LED：不影响"期望状态"变量（_led_r/g/b/brightness）
+        # led_set_state() 调用时会清除 mood 并立即应用；_tick_mood() 通过 _set_raw 直接驱动硬件
+        self._mood       = None   # "thinking" | "speaking" | "done" | None
+        self._mood_step  = 0
+        self._mood_last  = 0
+
     # ── Main loop (call every iteration) ─────────────────────
     def tick(self):
         now = time.ticks_ms()
@@ -97,6 +104,7 @@ class BSM:
             self._tick_sound(now)
         self._tick_blink(now)
         self._tick_buzzer(now)
+        self._tick_mood(now)
 
     # ─────────────────────────────────────────────────────────
     #  LIGHT SENSOR
@@ -242,6 +250,9 @@ class BSM:
             self._led_brightness = 40
         else:
             return
+        # 显式命令（来自用户或编排器）强制中断 mood，立即写入硬件
+        # 原因：mood 动画只是视觉反馈，不应阻塞用户的控制意图
+        self._mood = None
         self._apply_led()
 
     def led_blink(self, r=255, g=255, b=255, count=3):
@@ -268,6 +279,62 @@ class BSM:
             if self._blink_count <= 0:
                 self._blinking = False
                 self._event_cb("BLINK_DONE", {})
+
+    # ─────────────────────────────────────────────────────────
+    #  LED MOOD（F3）
+    # ─────────────────────────────────────────────────────────
+    def led_mood_set(self, mood):
+        """
+        设置 LED 情绪模式：
+          thinking  — 慢速蓝色呼吸（0.5Hz）
+          speaking  — 随机微闪（模拟说话节奏）
+          done      — 短暂亮一下再恢复期望状态
+          idle      — 清除 mood，恢复期望状态
+        """
+        if mood == "idle":
+            self._mood = None
+            self._apply_led()   # 恢复到 led_set_state 设置的期望状态
+            return
+        self._mood      = mood
+        self._mood_step = 0
+        self._mood_last = time.ticks_ms()
+
+    def _tick_mood(self, now):
+        if self._mood is None:
+            return
+
+        if self._mood == "thinking":
+            # 蓝色呼吸：20 步 × 100ms = 2000ms/周期（0.5Hz）
+            # 步 0-9：亮度 5→50，步 10-19：亮度 50→5
+            if time.ticks_diff(now, self._mood_last) < 100:
+                return
+            self._mood_last = now
+            self._mood_step = (self._mood_step + 1) % 20
+            s = self._mood_step
+            bri = (5 + s * 5) if s < 10 else (55 - (s - 10) * 5)
+            self._set_raw(0, 0, bri)
+
+        elif self._mood == "speaking":
+            # 随机微闪：每 120ms 切换高/低亮度，模拟说话节奏
+            if time.ticks_diff(now, self._mood_last) < 120:
+                return
+            self._mood_last = now
+            self._mood_step += 1
+            if self._mood_step % 2 == 0:
+                bri = 20 + (self._mood_step * 7) % 50  # 伪随机亮度
+                self._set_raw(bri, bri, bri)
+            else:
+                self._set_raw(5, 5, 5)
+
+        elif self._mood == "done":
+            # 闪一下（300ms）后恢复期望状态
+            if self._mood_step == 0:
+                self._set_raw(200, 200, 200)
+                self._mood_last = now
+                self._mood_step = 1
+            elif self._mood_step == 1 and time.ticks_diff(now, self._mood_last) >= 300:
+                self._mood = None
+                self._apply_led()
 
     def _apply_led(self):
         bri = self._led_brightness / 255.0

@@ -66,6 +66,7 @@ mqtt.subscribe("ssm/task/{}/+".format(AGENT_BUZ))
 mqtt.subscribe("ssm/decision/active")
 mqtt.subscribe("ssm/rules/{}".format(AGENT_ID))
 mqtt.subscribe("ssm/sys/ping")
+mqtt.subscribe("ssm/agents/desk/led_mood")  # F3: DeskAgent LED 情绪同步
 
 mqtt.begin()
 

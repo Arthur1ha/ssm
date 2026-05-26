@@ -163,7 +163,7 @@ agent_tools.init(state, mqtt_client)
 orchestrator = build_orchestrator()
 rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
 
-desk_agent = DeskAgent(state, agent_tools.do_publish_task, None)
+desk_agent = DeskAgent(state, agent_tools.do_publish_task, agent_tools.do_publish)
 desk_agent.start()
 
 # ── MQTT：用 loop_start() 让 paho 自己管线程 ─────────────────
