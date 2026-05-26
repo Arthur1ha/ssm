@@ -1015,6 +1015,41 @@ function TabBar({ tab, setTab, deviceBadge }) {
 const EXCL_TYPES = new Set(['decision', 'supervisor']);
 const EXCL_PLAT  = new Set(['pc', 'pwa']);
 
+/* ── 服务端 TTS 音频播放 ─────────────────────────────────────── */
+// Android Chrome 要求：用户首次手势后解锁 AudioContext，
+// 之后 MQTT 触发的 Audio.play() 才不会被自动播放策略拦截。
+let _audioUnlocked = false;
+function _unlockAudio() {
+  if (_audioUnlocked) return;
+  _audioUnlocked = true;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ctx.resume().then(() => ctx.close()).catch(() => {});
+  } catch (e) {}
+}
+document.addEventListener('pointerdown', _unlockAudio, { passive: true });
+
+function _base64ToBlob(b64, mimeType) {
+  const bin   = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
+
+function playAudioB64(b64) {
+  if (!b64) return;
+  try {
+    const blob  = _base64ToBlob(b64, 'audio/mpeg');
+    const url   = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => URL.revokeObjectURL(url);
+    audio.onerror = () => URL.revokeObjectURL(url);
+    audio.play().catch(err => console.warn('[Speech] play() blocked:', err));
+  } catch (e) {
+    console.warn('[Speech] playAudioB64 error:', e);
+  }
+}
+
 function App() {
   const [tab, setTab]                     = useState('discover');
   const [sheetOpen, setSheetOpen]         = useState(false);
@@ -1124,11 +1159,23 @@ function App() {
         name: 'human_supervisor', hw_platform: 'pwa',
         ts: Math.floor(Date.now() / 1000),
       }, { retain: true });
+      // F1: 订阅 DeskAgent 语音 topic（连接建立后订阅，重连也会重新执行）
+      mqttBus.subscribe('ssm/agents/desk/speech');
     });
     mqttBus.addEventListener('disconnect', () => setConnected(false));
     mqttBus.addEventListener('reconnect',  () => setConnected(false));
 
     mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
+  }, []);
+
+  // F1: speech 事件处理器 — 收到服务端 TTS 音频直接播放
+  useEffect(() => {
+    const handleSpeech = (e) => {
+      const { audio } = e.detail || {};
+      if (audio) playAudioB64(audio);
+    };
+    mqttBus.addEventListener('topic:ssm/agents/desk/speech', handleSpeech);
+    return () => mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
   }, []);
 
   return (
