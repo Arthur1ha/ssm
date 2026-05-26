@@ -11,3 +11,10 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+
+# 本地工具与文档，不纳入版本控制
+.claude/
+.vscode/
+docs/
+paper/
+test_script/
