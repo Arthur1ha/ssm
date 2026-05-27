@@ -2,7 +2,10 @@
 
 import threading
 import json
+from pathlib import Path
 from typing import Optional
+
+_DEVICES_FILE = Path(__file__).parent / "devices.json"
 
 
 class SharedState:
@@ -26,6 +29,7 @@ class SharedState:
                     self._capability_registry[tag] = []
                 if unit_id not in self._capability_registry[tag]:
                     self._capability_registry[tag].append(unit_id)
+            self._flush_devices()   # 同步写 devices.json，供 FastAPI 进程读取
 
     def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict):
         """msg_type: state | event | report"""
@@ -85,6 +89,15 @@ class SharedState:
         with self._lock:
             m = self._manifests.get(unit_id)
             return json.loads(json.dumps(m)) if m else None
+
+    def _flush_devices(self):
+        """将当前 _manifests 写入 devices.json，供 FastAPI 进程读取。必须在 _lock 内调用。"""
+        try:
+            _DEVICES_FILE.write_text(
+                json.dumps(self._manifests, ensure_ascii=False, indent=2)
+            )
+        except Exception as e:
+            print(f"[SharedState] devices.json 写入失败: {e}")
 
     def _is_actuator(self, unit_id: str) -> bool:
         suffix = unit_id.split("_")[-1]
