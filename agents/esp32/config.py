@@ -101,6 +101,7 @@ UNIT_CONFIGS = {
         'name': 'ws2812_ring',
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
+            'slug': 'desk-lamp',
             'num_pixels': WS2812_NUM,
             'commands': ['SET_COLOR', 'SET_STATE', 'BLINK'],
             'ism_states': ['OFF', 'DIM', 'BRIGHT', 'COLOR', 'BLINK'],
