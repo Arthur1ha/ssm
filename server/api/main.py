@@ -5,7 +5,7 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 import paho.mqtt.publish as _mqtt_pub
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
@@ -82,6 +82,23 @@ execute 时 action 选择：set_color、brighten、dim、off、on、blink、aler
 
 
 _RULES_FILE   = Path(__file__).parent.parent / "orchestrator" / "rules.json"
+_DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
+
+
+def _load_devices() -> dict:
+    """读取 Orchestrator 写入的 devices.json，返回 {unit_id: manifest} dict。"""
+    try:
+        return json.loads(_DEVICES_FILE.read_text()) if _DEVICES_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _find_device_by_slug(slug: str) -> dict | None:
+    """按 slug 扫描设备注册表，未找到返回 None。"""
+    for device in _load_devices().values():
+        if device.get("slug") == slug:
+            return device
+    return None
 _MQTT_HOST    = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
 _MQTT_PORT    = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 _MQTT_USER    = os.getenv("MQTT_USER", "ssm_user")
@@ -251,3 +268,55 @@ def toggle_rule(rule_id: str, enabled: bool):
             _push_rules_to_esp32()
             return r
     return {"error": "not_found"}
+
+
+# ── 设备 API ────────────────────────────────────────────────────────────────
+
+@app.get("/api/devices")
+def list_devices():
+    """列出所有在线且带有 slug 的可控设备。"""
+    devices = [d for d in _load_devices().values() if d.get("slug")]
+    return [
+        {
+            "unit_id":    d.get("unit_id"),
+            "name":       d.get("name"),
+            "slug":       d.get("slug"),
+            "agent_type": d.get("agent_type"),
+            "online":     True,
+        }
+        for d in devices
+    ]
+
+
+@app.get("/api/devices/{slug}/agent")
+def device_agent_card(slug: str):
+    """Agent Card —— 机器可读的设备能力描述，供其他 AI Agent 自动发现和调用。"""
+    device = _find_device_by_slug(slug)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"设备 '{slug}' 不存在或未上线")
+
+    base_url = os.getenv("PUBLIC_BASE_URL", "")
+    return {
+        "name":       device.get("name", slug),
+        "slug":       slug,
+        "unit_id":    device.get("unit_id", ""),
+        "agent_type": device.get("agent_type", ""),
+        "online":     True,
+        "talk_to":    f"{base_url}/#/devices/{slug}",
+        "control_api": {
+            "method":   "POST",
+            "endpoint": f"{base_url}/api/chat",
+            "body_schema": {
+                "message": "string（自然语言指令，如：把灯调成暖黄色）",
+                "devices": "array（可传空数组，系统自动匹配）",
+            },
+            "example": {
+                "message": "把灯调成暖黄色",
+                "devices": [],
+            },
+        },
+        "capabilities":  device.get("capabilities", []),
+        "resource_tags": device.get("resource_tags", []),
+        "agent_tag":     device.get("agent_tag", ""),
+        "ts":            device.get("ts"),
+    }
