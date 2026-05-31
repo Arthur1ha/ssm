@@ -34,25 +34,24 @@ class Go2Connection:
             logging.error("[Go2] 连接失败: %s", exc)
             raise
 
-        # connect() 内部的 init_webrtc() 执行后 video 属性才存在
-        async def on_track(track):
-            import cv2
-            while True:
-                try:
-                    frame = await track.recv()
-                    arr = frame.to_ndarray(format="bgr24")
-                    _, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    self._latest_frame = buf.tobytes()
-                except Exception:
-                    break
-
-        self._conn.video.add_track_callback(on_track)
-
         self._conn.datachannel.pub_sub.subscribe(
             RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_state
         )
         self.is_connected = True
         logging.info("[Go2] WebRTC 连接成功")
+
+        # track 事件在 connect() 内部触发，此处直接从 transceiver 取 track 消费
+        video_track = None
+        for t in self._conn.pc.getTransceivers():
+            if t.kind == "video" and t.receiver and t.receiver.track:
+                video_track = t.receiver.track
+                break
+
+        if video_track:
+            asyncio.create_task(self._consume_video(video_track))
+            logging.info("[Go2] 视频 track 已找到，开始采集")
+        else:
+            logging.warning("[Go2] 未找到视频 track，画面不可用")
 
     async def disconnect(self) -> None:
         self.is_connected = False
@@ -87,6 +86,20 @@ class Go2Connection:
         await self._conn.datachannel.pub_sub.publish_request_new(
             RTC_TOPIC["SPORT_MOD"], options
         )
+
+    async def _consume_video(self, track) -> None:
+        import cv2
+        logging.info("[Go2] 视频采集开始")
+        while self.is_connected:
+            try:
+                frame = await track.recv()
+                arr = frame.to_ndarray(format="bgr24")
+                _, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                self._latest_frame = buf.tobytes()
+            except Exception as e:
+                logging.warning("[Go2] 视频帧读取结束: %s", e)
+                break
+        logging.info("[Go2] 视频采集停止")
 
     async def mjpeg_generator(self):
         """Async generator，每 ~33ms yield 一帧 MJPEG multipart 数据。"""
