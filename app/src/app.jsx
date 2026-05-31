@@ -76,6 +76,7 @@ function getAgentMeta(agent) {
   if (n.includes('light') || n.includes('lux'))return { icon: 'sun',      color: LIME,      label: '光线传感器' };
   if (agent.agent_type === 'sensor')           return { icon: 'wifi',     color: '#7EE8A2', label: '传感器' };
   if (agent.agent_type === 'actuator')         return { icon: 'settings', color: '#FF9A5A', label: '执行器' };
+  if (agent.agent_type === 'robot')            return { icon: 'zap',      color: LIME,      label: '机器人' };
   return { icon: 'wifi', color: '#7EE8A2', label: '设备' };
 }
 
@@ -477,8 +478,9 @@ function DiscoverScreen({ agents, connected, phoneLoc, locError }) {
 
 /* ── DevicesScreen — all devices: actuators + sensors ───────────── */
 function DevicesScreen({ agents, unitData }) {
+  const robots     = agents.filter(a => a.agent_type === 'robot');
   const actuators  = agents.filter(a => a.agent_type === 'actuator');
-  const sensors    = agents.filter(a => a.agent_type !== 'actuator');
+  const sensors    = agents.filter(a => a.agent_type !== 'actuator' && a.agent_type !== 'robot');
   const activeCount = actuators.filter(a => isAgentActive(a, unitData)).length;
 
   const sectionLabel = (text) => (
@@ -511,6 +513,34 @@ function DevicesScreen({ agents, unitData }) {
           </div>
         ) : (
           <>
+            {robots.length > 0 && (
+              <>
+                {sectionLabel('机器人')}
+                {robots.map(a => {
+                  const meta = getAgentMeta(a);
+                  const slug = a.slug || a.unit_id || a.agent_id;
+                  return (
+                    <div key={a.unit_id || a.agent_id}
+                      onClick={() => navigate('#/devices/' + slug)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
+                        marginBottom: 8, borderRadius: 18, cursor: 'pointer',
+                        background: `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`,
+                        border: `1px solid ${meta.color}40` }}>
+                      <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
+                        background: meta.color, color: '#0B0B0E',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <Icon name={meta.icon} size={19}/>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500 }}>{a.name || slug}</div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', marginTop: 2 }}>{meta.label} · 点击控制</div>
+                      </div>
+                      <Icon name="arrow" size={16} color="rgba(255,255,255,0.3)"/>
+                    </div>
+                  );
+                })}
+              </>
+            )}
             {actuators.length > 0 && (
               <>
                 {sectionLabel('执行器')}

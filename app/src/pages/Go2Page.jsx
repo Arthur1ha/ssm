@@ -212,3 +212,5 @@ function Go2DevicePage({ onBack }) {
     </div>
   );
 }
+
+window.Go2DevicePage = Go2DevicePage;
