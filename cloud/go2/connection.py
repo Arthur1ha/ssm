@@ -88,14 +88,14 @@ class Go2Connection:
         )
 
     async def _consume_video(self, track) -> None:
-        import cv2
+        import io
         logging.info("[Go2] 视频采集开始")
         while self.is_connected:
             try:
                 frame = await track.recv()
-                arr = frame.to_ndarray(format="bgr24")
-                _, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                self._latest_frame = buf.tobytes()
+                buf = io.BytesIO()
+                frame.to_image().save(buf, format="JPEG", quality=75)
+                self._latest_frame = buf.getvalue()
             except Exception as e:
                 logging.warning("[Go2] 视频帧读取结束: %s", e)
                 break
