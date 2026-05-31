@@ -47,6 +47,9 @@ class Go2Connection:
                 video_track = t.receiver.track
                 break
 
+        # 通知 Go2 开始推送视频（不发这条指令机器狗默认不传视频）
+        self._conn.video.switchVideoChannel(True)
+
         if video_track:
             asyncio.create_task(self._consume_video(video_track))
             logging.info("[Go2] 视频 track 已找到，开始采集")
@@ -88,14 +91,19 @@ class Go2Connection:
         )
 
     async def _consume_video(self, track) -> None:
-        import io
+        import io, time
         logging.info("[Go2] 视频采集开始")
+        last_encode = 0.0
         while self.is_connected:
             try:
-                frame = await track.recv()
+                frame = await track.recv()   # 必须持续 drain，否则 aiortc 缓冲区积压
+                now = time.monotonic()
+                if now - last_encode < 0.2:  # 5fps 上限，保护 CPU
+                    continue
                 buf = io.BytesIO()
-                frame.to_image().save(buf, format="JPEG", quality=75)
+                frame.to_image().save(buf, format="JPEG", quality=60)
                 self._latest_frame = buf.getvalue()
+                last_encode = now
             except Exception as e:
                 logging.warning("[Go2] 视频帧读取结束: %s", e)
                 break
