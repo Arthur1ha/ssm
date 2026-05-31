@@ -28,38 +28,45 @@ BROKER_CONF := $(LOG_DIR)/mosquitto.conf
 # ── Broker ──────────────────────────────────────────────────
 broker: $(LOG_DIR)
 	@pkill -f "[m]osquitto" || true
-	@SSM_DIR=$(SSM_DIR) envsubst < broker/mosquitto.conf.tmpl > $(BROKER_CONF)
+	@SSM_DIR=$(SSM_DIR) envsubst < infra/broker/mosquitto.conf.tmpl > $(BROKER_CONF)
 	mosquitto -c $(BROKER_CONF) -d
 	@echo "Broker started: TCP :1883  WS :9001"
+	@echo "--- 实时日志（Ctrl+C 只停止查看，不停止 broker）---"
+	@tail -f $(LOG_DIR)/mosquitto.log
 
 # ── Cloud services ───────────────────────────────────────────
 api:
-	uv run uvicorn server.api.main:app --host 127.0.0.1 --port 8082 --reload
+	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload
 
 api-bg: $(LOG_DIR)
-	@pkill -f "[u]vicorn server.api.main" || true
-	nohup uv run uvicorn server.api.main:app --host 127.0.0.1 --port 8082 \
+	@pkill -f "[u]vicorn cloud.api.main" || true
+	nohup uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 \
 		> $(LOG_DIR)/api.log 2>&1 &
 	@echo "API started in background → logs/api.log"
 
 orchestrator:
-	cd server/orchestrator && uv run python -u main.py
+	@while true; do \
+		uv run python -u cloud/orchestrator/main.py; \
+		echo "[`date '+%H:%M:%S'`] Orchestrator 退出，3 秒后自动重启... (Ctrl+C 停止)"; \
+		sleep 3; \
+	done
 
 orchestrator-bg: $(LOG_DIR)
+	@pkill -f "cloud/orchestrator/main.py" || true
 	@pkill -f "[o]rchestrator.*main.py" || true
-	@pkill -f "uv run python -u main.py" || true
-	@sleep 1
-	cd server/orchestrator && nohup uv run python -u main.py \
+	@pkill -f "python.*-u main.py" || true
+	@sleep 2
+	nohup uv run python -u cloud/orchestrator/main.py \
 		> $(LOG_DIR)/orchestrator.log 2>&1 &
 	@echo "Orchestrator started in background → logs/orchestrator.log"
 
 # ── Phone PWA ────────────────────────────────────────────────
 pwa:
-	uv run python -m http.server 8081 --directory agents/phone
+	uv run python -m http.server 8081 --directory app
 
 pwa-bg: $(LOG_DIR)
 	@pkill -f "[h]ttp.server 8081" || true
-	nohup uv run python -m http.server 8081 --directory agents/phone \
+	nohup uv run python -m http.server 8081 --directory app \
 		> $(LOG_DIR)/pwa.log 2>&1 &
 	@echo "PWA started in background → logs/pwa.log"
 
@@ -79,11 +86,13 @@ ngrok-bg: $(LOG_DIR)
 
 # ── 停止 / 重启 ───────────────────────────────────────────────
 stop:
-	@pkill -f "[m]osquitto"               || true
-	@pkill -f "[u]vicorn server.api.main" || true
-	@pkill -f "[o]rchestrator.*main.py"   || true
-	@pkill -f "[h]ttp.server 8081"        || true
-	@pkill -f "[n]grok"                   || true
+	@pkill -f "[m]osquitto"                    || true
+	@pkill -f "[u]vicorn cloud.api.main"       || true
+	@pkill -f "cloud/orchestrator/main.py"     || true
+	@pkill -f "[o]rchestrator.*main.py"        || true
+	@pkill -f "python.*-u main.py"             || true
+	@pkill -f "[h]ttp.server 8081"             || true
+	@pkill -f "[n]grok"                        || true
 	@echo "All SSM background services stopped."
 
 restart-api: api-bg
@@ -97,7 +106,7 @@ $(LOG_DIR):
 
 ps:
 	@echo "=== SSM processes ==="
-	@pgrep -a -f "mosquitto|uvicorn|http.server|ngrok|orchestrator" || echo "(none running)"
+	@pgrep -a -f "mosquitto|uvicorn|http\.server|ngrok|orchestrator/main\.py" || echo "(none running)"
 
 logs:
 	@echo "=== API ===" && tail -20 logs/api.log 2>/dev/null || echo "(no log)"
@@ -110,4 +119,8 @@ ngrok-url:
 		python3 -c "import sys,json;[print(t['public_url']) for t in json.load(sys.stdin)['tunnels']]"
 
 trace:
-	mosquitto_sub -h 127.0.0.1 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t "ssm/#" -v
+	@while true; do \
+		mosquitto_sub -h 127.0.0.1 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t "ssm/#" -v; \
+		echo "[`date '+%H:%M:%S'`] MQTT 连接断开，2 秒后重连..."; \
+		sleep 2; \
+	done

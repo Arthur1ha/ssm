@@ -23,7 +23,7 @@
 | 边缘库 | `umqtt.robust`、`neopixel`、`machine`、`ujson` | 内置于 MicroPython |
 | 消息代理 | Mosquitto | 运行于云服务器 `47.116.137.202`，TCP 1883 / WS 9001 |
 | 云端 AI | LangGraph + LangChain + ChatOpenAI（兼容接口） | langgraph≥0.2、langchain≥0.3 |
-| LLM | 豆包系列（doubao-seed-*）/ DeepSeek-V3，通过 OpenAI 兼容接口调用 | 见 `server/.env: MODEL_LIST` |
+| LLM | 豆包系列（doubao-seed-*）/ DeepSeek-V3，通过 OpenAI 兼容接口调用 | 见 `cloud/.env: MODEL_LIST` |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
 | 手机 PWA | React 18（无构建，Babel standalone） + MQTT.js | React 18.3.1、mqtt.js 5.3.4 |
 | Python 环境 | uv 管理，Python 3.13 | `pyproject.toml` + `uv.lock` |
@@ -34,34 +34,49 @@
 
 ```
 ssm/
-├── agents/
-│   ├── esp32/               ← MicroPython 边缘智能体
-│   │   ├── config.py        ← ★ 唯一配置入口：引脚、MQTT、UNIT_CONFIGS 注册表
-│   │   ├── probe.py         ← 通用引脚探测引擎（读 UNIT_CONFIGS，零硬编码）
-│   │   ├── agent_manifest.py← 通用 manifest 发布（读 UNIT_CONFIGS + PRESENCE）
-│   │   ├── bsm.py           ← 硬件驱动层（GPIO/ADC/PWM），只抛事件
-│   │   ├── ism.py           ← 状态机契约层，只做状态转换
-│   │   ├── trigger_map.py   ← ★ 唯一耦合点：BSM↔ISM↔MQTT 接线
-│   │   ├── local_rules.py   ← 云端离线兜底规则
-│   │   ├── mqtt_client.py   ← MQTT 封装，自动重连 + LWT
-│   │   ├── boot.py          ← WiFi 连接（先于 main.py 执行）
-│   │   └── main.py          ← 主循环入口
-│   └── phone/               ← PWA 控制界面
-│       ├── src/app.jsx      ← ★ 主 React 应用（雷达、设备、规则、对话）
-│       ├── src/MqttBus.js   ← MQTT 连接与发布/订阅封装
-│       ├── src/AgentRegistry.js ← 设备注册表（监听 manifest/status/location）
-│       └── src/ISMTracker.js    ← 设备状态跟踪（监听 state/event/report）
-├── server/
-│   ├── .env                 ← LLM API Key、MQTT 地址、MODEL_LIST
-│   ├── api/main.py          ← FastAPI：/api/nlu、/api/rules
+├── edge/                ← MicroPython 边缘智能体（跑在 ESP32 上）
+│   ├── config.py        ← ★ 唯一配置入口：引脚、MQTT、UNIT_CONFIGS 注册表
+│   ├── probe.py         ← 通用引脚探测引擎（读 UNIT_CONFIGS，零硬编码）
+│   ├── agent_manifest.py← 通用 manifest 发布（读 UNIT_CONFIGS + PRESENCE）
+│   ├── bsm.py           ← 硬件驱动层（GPIO/ADC/PWM），只抛事件
+│   ├── ism.py           ← 状态机契约层，只做状态转换
+│   ├── trigger_map.py   ← ★ 唯一耦合点：BSM↔ISM↔MQTT 接线
+│   ├── local_rules.py   ← 云端离线兜底规则
+│   ├── mqtt_client.py   ← MQTT 封装，自动重连 + LWT
+│   ├── boot.py          ← WiFi 连接（先于 main.py 执行）
+│   └── main.py          ← 主循环入口
+├── cloud/               ← 云端服务（跑在服务器上）
+│   ├── .env             ← LLM API Key、MQTT 地址、MODEL_LIST
+│   ├── api/
+│   │   └── main.py      ← FastAPI：/api/nlu、/api/rules、/api/devices
 │   └── orchestrator/
-│       ├── graph.py         ← LangGraph 图：V1 ReAct + V2 Planner→Dispatcher→Evaluator→Responder
-│       ├── tools.py         ← @tool 函数：能力查询、传感器快照、指令发布
-│       ├── shared_state.py  ← 线程安全能力注册表 + 任务结果缓存
-│       └── main.py          ← MQTT 事件循环，路由 V1/V2
-├── broker/mosquitto.conf    ← Broker 配置
-├── Makefile                 ← 统一服务管理
-└── docs/ARCHITECTURE.md     ← 通信架构单一真实来源
+│       ├── main.py      ← MQTT 事件循环，路由 RuleEngine / DeskAgent
+│       ├── desk_agent.py← 桌面空间智能体：sense→reason→act
+│       ├── graph.py     ← LangGraph 图：Planner→Dispatcher→Evaluator→Responder
+│       ├── tools.py     ← MQTT 发布辅助函数（供图节点使用）
+│       ├── shared_state.py ← 线程安全传感器/执行器快照
+│       ├── rule_engine.py  ← 规则匹配引擎
+│       └── tts.py       ← TTS 合成封装
+├── app/                 ← 用户端 PWA（跑在手机/浏览器）
+│   ├── index.html
+│   ├── manifest.json
+│   ├── sw.js
+│   ├── styles/app.css
+│   └── src/
+│       ├── app.jsx      ← ★ 主 React 应用（雷达、设备、规则、对话）
+│       ├── MqttBus.js   ← MQTT 连接与发布/订阅封装
+│       ├── AgentRegistry.js ← 设备注册表
+│       └── ISMTracker.js    ← 设备状态跟踪
+├── protocol/            ← MQTT 协议契约（单一真实来源）
+│   └── topics.md        ← 所有 topic 格式定义
+├── infra/               ← 运维与部署配置
+│   └── broker/
+│       ├── mosquitto.conf.tmpl ← Broker 配置模板（envsubst 生成）
+│       └── passwd       ← MQTT 认证文件
+├── Makefile             ← 统一服务管理
+├── pyproject.toml       ← Python 依赖（uv 管理）
+└── docs/
+    └── ARCHITECTURE.md  ← 通信架构单一真实来源
 ```
 
 **当前接线**（以 `config.py` 为准）：

@@ -11,11 +11,10 @@ _DEVICES_FILE = Path(__file__).parent / "devices.json"
 class SharedState:
     def __init__(self):
         self._lock = threading.Lock()
-        self._sensors   = {}    # unit_id → { state, event, report }
-        self._actuators = {}    # unit_id → { state, report }
-        self._manifests = {}    # unit_id → manifest payload
+        self._sensors            = {}   # unit_id → { state, event, report }
+        self._actuators          = {}   # unit_id → { state, report }
+        self._manifests          = {}   # unit_id → manifest payload
         self._decision_active    = False
-        self._last_decision      = None
         self._capability_registry = {}  # resource_tag → [unit_id]
         self._task_results        = {}  # task_id → result payload
 
@@ -29,10 +28,9 @@ class SharedState:
                     self._capability_registry[tag] = []
                 if unit_id not in self._capability_registry[tag]:
                     self._capability_registry[tag].append(unit_id)
-            self._flush_devices()   # 同步写 devices.json，供 FastAPI 进程读取
+            self._flush_devices()
 
     def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict):
-        """msg_type: state | event | report"""
         with self._lock:
             bucket = self._actuators if self._is_actuator(unit_id) else self._sensors
             if unit_id not in bucket:
@@ -43,11 +41,7 @@ class SharedState:
         with self._lock:
             self._decision_active = active
 
-    def set_last_decision(self, decision: dict):
-        with self._lock:
-            self._last_decision = decision
-
-    # ── Read helpers (return copies, safe outside lock) ──────
+    # ── Read helpers ──────────────────────────────────────────
 
     def sensor_snapshot(self) -> dict:
         with self._lock:
@@ -57,21 +51,9 @@ class SharedState:
         with self._lock:
             return json.loads(json.dumps(self._actuators))
 
-    def last_decision(self):
-        with self._lock:
-            return self._last_decision
-
     def is_phone_active(self) -> bool:
         with self._lock:
             return self._decision_active
-
-    def get_command_topic(self, name: str) -> Optional[str]:
-        """Find command topic for a named actuator from manifests."""
-        with self._lock:
-            for m in self._manifests.values():
-                if m.get("name") == name and m.get("agent_type") == "actuator":
-                    return m.get("topics", {}).get("command")
-        return None
 
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:
@@ -91,7 +73,6 @@ class SharedState:
             return json.loads(json.dumps(m)) if m else None
 
     def _flush_devices(self):
-        """将当前 _manifests 写入 devices.json，供 FastAPI 进程读取。必须在 _lock 内调用。"""
         try:
             _DEVICES_FILE.write_text(
                 json.dumps(self._manifests, ensure_ascii=False, indent=2)
@@ -100,5 +81,4 @@ class SharedState:
             print(f"[SharedState] devices.json 写入失败: {e}")
 
     def _is_actuator(self, unit_id: str) -> bool:
-        suffix = unit_id.split("_")[-1]
-        return suffix in ("led", "buz")
+        return unit_id.split("_")[-1] == "led"

@@ -3,9 +3,9 @@
 
 import time
 from config import AGENT_ID, LOCAL_RULES_DELAY_MS, HEARTBEAT_MS
-from config import AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
+from config import AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED
 from config import LOCATION_LNG, LOCATION_LAT
-from ism         import ISM, State, SENSOR_TABLE, LED_TABLE, BUZZER_TABLE
+from ism         import ISM, State, SENSOR_TABLE, LED_TABLE
 from bsm         import BSM
 from mqtt_client import MqttClient
 from trigger_map import TriggerMap
@@ -21,7 +21,6 @@ mqtt = MqttClient()
 ism_light = ISM(State.SAMPLING,   AGENT_LIGHT, SENSOR_TABLE)
 ism_ir    = ISM(State.MONITORING, AGENT_IR,    SENSOR_TABLE)
 ism_led   = ISM(State.OFF,        AGENT_LED,   LED_TABLE)
-ism_buz   = ISM(State.SILENT,     AGENT_BUZ,   BUZZER_TABLE)
 
 local_rules = LocalRules(mqtt)
 
@@ -32,7 +31,6 @@ trigger_map = TriggerMap(
     ism_led     = ism_led,
     ism_light   = ism_light,
     ism_ir      = ism_ir,
-    ism_buz     = ism_buz,
     mqtt        = mqtt,
     local_rules = local_rules,
 )
@@ -42,15 +40,13 @@ bsm._event_cb = trigger_map.on_bsm_event
 # ── 重连后重新发布函数 ────────────────────────────────────────
 def on_reconnect():
     print("[Main] Reconnected — re-publishing manifests and states")
-    local_rules._load_from_file()  # 立即从 flash 恢复规则，不等 MQTT retain 消息
+    local_rules._load_from_file()
     agent_manifest.publish(mqtt)
     mqtt.publish("ssm/agents/{}/location".format(AGENT_ID),
                  {"agent": AGENT_ID, "lng": LOCATION_LNG, "lat": LOCATION_LAT,
                   "type": "fixed", "ts": time.time()}, retain=True)
     mqtt.publish("ssm/agents/{}/state".format(AGENT_LED),
                  {"agent": AGENT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
-    mqtt.publish("ssm/agents/{}/state".format(AGENT_BUZ),
-                 {"agent": AGENT_BUZ, "ism": ism_buz.state, "ts": time.time()}, retain=True)
     if PRESENCE.get(AGENT_SOUND):
         mqtt.publish("ssm/agents/{}/state".format(AGENT_SOUND),
                      {"agent": AGENT_SOUND, "detected": False, "ts": time.time()}, retain=True)
@@ -60,13 +56,11 @@ mqtt.set_callback(trigger_map.on_mqtt)
 mqtt.set_reconnect_callback(on_reconnect)
 
 mqtt.subscribe("ssm/agents/{}/command".format(AGENT_LED))
-mqtt.subscribe("ssm/agents/{}/command".format(AGENT_BUZ))
 mqtt.subscribe("ssm/task/{}/+".format(AGENT_LED))
-mqtt.subscribe("ssm/task/{}/+".format(AGENT_BUZ))
 mqtt.subscribe("ssm/decision/active")
 mqtt.subscribe("ssm/rules/{}".format(AGENT_ID))
 mqtt.subscribe("ssm/sys/ping")
-mqtt.subscribe("ssm/agents/desk/led_mood")  # F3: DeskAgent LED 情绪同步
+mqtt.subscribe("ssm/agents/desk/led_mood")
 
 mqtt.begin()
 
@@ -79,8 +73,7 @@ mqtt.publish("ssm/agents/{}/location".format(AGENT_ID),
 
 mqtt.publish("ssm/agents/{}/state".format(AGENT_LED),
              {"agent": AGENT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
-mqtt.publish("ssm/agents/{}/state".format(AGENT_BUZ),
-             {"agent": AGENT_BUZ, "ism": ism_buz.state, "ts": time.time()}, retain=True)
+
 if PRESENCE.get(AGENT_SOUND):
     mqtt.publish("ssm/agents/{}/state".format(AGENT_SOUND),
                  {"agent": AGENT_SOUND, "detected": False, "ts": time.time()}, retain=True)
@@ -100,7 +93,10 @@ while True:
     now = time.ticks_ms()
     if time.ticks_diff(now, _last_heartbeat) >= HEARTBEAT_MS:
         _last_heartbeat = now
-        print("[Loop] alive — light={} ir={}".format(bsm.light_level, bsm.ir_presence))
+        status = "light={}".format(bsm.light_level)
+        if PRESENCE.get(AGENT_IR):
+            status += " ir={}".format(bsm.ir_presence)
+        print("[Loop] alive —", status)
         if PRESENCE.get(AGENT_SOUND):
             mqtt.publish("ssm/agents/{}/state".format(AGENT_SOUND),
                          {"agent": AGENT_SOUND, "detected": False, "ts": time.time()}, retain=True)

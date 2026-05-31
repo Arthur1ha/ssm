@@ -3,7 +3,7 @@
 
 import time
 from ism import Trigger
-from config import AGENT_ID, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED, AGENT_BUZ
+from config import AGENT_ID, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED
 
 _LED_STATE_TRIG = {
     "OFF":    Trigger.CMD_OFF,
@@ -13,21 +13,18 @@ _LED_STATE_TRIG = {
 
 
 class TriggerMap:
-    def __init__(self, bsm, ism_led, ism_light, ism_ir, ism_buz, mqtt, local_rules):
+    def __init__(self, bsm, ism_led, ism_light, ism_ir, mqtt, local_rules):
         self._bsm        = bsm
         self._ism_led    = ism_led
         self._ism_light  = ism_light
         self._ism_ir     = ism_ir
-        self._ism_buz    = ism_buz
         self._mqtt       = mqtt
         self._local      = local_rules
 
         self._led_cmd_topic  = "ssm/agents/{}/command".format(AGENT_LED)
-        self._buz_cmd_topic  = "ssm/agents/{}/command".format(AGENT_BUZ)
         self._led_task_pfx   = "ssm/task/{}/".format(AGENT_LED)
-        self._buz_task_pfx   = "ssm/task/{}/".format(AGENT_BUZ)
         self._rules_topic    = "ssm/rules/{}".format(AGENT_ID)
-        self._led_mood_topic = "ssm/agents/desk/led_mood"  # F3
+        self._led_mood_topic = "ssm/agents/desk/led_mood"
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
@@ -39,19 +36,9 @@ class TriggerMap:
                 ok = self._exec_led(cmd, payload)
                 self._publish_led_report(cmd, ok)
 
-        elif topic == self._buz_cmd_topic:
-            if isinstance(payload, dict):
-                cmd = payload.get("cmd")
-                ok = self._exec_buz(cmd, payload)
-                self._publish_buz_report(cmd, ok)
-
         elif topic.startswith(self._led_task_pfx):
             task_id = topic[len(self._led_task_pfx):]
             self._handle_led_task(payload, task_id)
-
-        elif topic.startswith(self._buz_task_pfx):
-            task_id = topic[len(self._buz_task_pfx):]
-            self._handle_buz_task(payload, task_id)
 
         elif topic == "ssm/decision/active":
             active = (payload == "true" or payload is True)
@@ -62,7 +49,6 @@ class TriggerMap:
                 self._local.load_rules(payload)
 
         elif topic == self._led_mood_topic:
-            # F3: DeskAgent 发来的 LED 情绪指令
             if isinstance(payload, dict):
                 mood = payload.get("mood", "idle")
                 self._bsm.led_mood_set(mood)
@@ -72,7 +58,7 @@ class TriggerMap:
                                {"ts": time.time()})
 
     # ─────────────────────────────────────────────────────────
-    #  Shared LED execution — ISM validates first, then BSM acts
+    #  LED execution — ISM validates first, then BSM acts
     # ─────────────────────────────────────────────────────────
     def _exec_led(self, action, params):
         if action == "SET_COLOR":
@@ -106,28 +92,6 @@ class TriggerMap:
             return False
 
         self._publish_led_state()
-        return ok
-
-    # ─────────────────────────────────────────────────────────
-    #  Shared buzzer execution — ISM validates first, then BSM acts
-    # ─────────────────────────────────────────────────────────
-    def _exec_buz(self, action, params):
-        if action == "PLAY":
-            pattern = params.get("pattern", "NOTIFY")
-            trig = Trigger.PLAY_NOTIFY if pattern == "NOTIFY" else Trigger.PLAY_ALERT
-            ok = self._ism_buz.transition(trig)
-            if ok:
-                self._bsm.buzzer_play(pattern)
-
-        elif action == "STOP":
-            ok = self._ism_buz.transition(Trigger.STOP_SOUND)
-            if ok:
-                self._bsm.buzzer_stop()
-
-        else:
-            return False
-
-        self._publish_buz_state()
         return ok
 
     # ─────────────────────────────────────────────────────────
@@ -176,14 +140,9 @@ class TriggerMap:
             self._ism_led.transition(Trigger.BLINK_DONE)
             self._publish_led_state()
 
-        elif event == "SOUND_DONE":
-            self._ism_buz.transition(Trigger.SOUND_DONE)
-            self._publish_buz_state()
-
     # ─────────────────────────────────────────────────────────
-    #  Task handlers (V2 Orchestrator protocol)
+    #  Task handler (V2 Orchestrator protocol)
     #  Topic: ssm/task/{device_id}/{task_id}
-    #  Payload: {task_id, session_id, action, params, ts}
     # ─────────────────────────────────────────────────────────
     def _handle_led_task(self, p, task_id):
         session_id = p.get("session_id", "") if isinstance(p, dict) else ""
@@ -196,17 +155,6 @@ class TriggerMap:
             "ism_state": self._ism_led.state, "ts": time.time(),
         })
 
-    def _handle_buz_task(self, p, task_id):
-        session_id = p.get("session_id", "") if isinstance(p, dict) else ""
-        action     = p.get("action") if isinstance(p, dict) else None
-        params     = p.get("params", {}) if isinstance(p, dict) else {}
-        ok = self._exec_buz(action, params) if action else False
-        self._mqtt.publish("ssm/result/{}/{}".format(AGENT_BUZ, task_id), {
-            "task_id": task_id, "session_id": session_id,
-            "result": "ok" if ok else "blocked",
-            "ism_state": self._ism_buz.state, "ts": time.time(),
-        })
-
     def _publish_led_state(self):
         self._mqtt.publish("ssm/agents/{}/state".format(AGENT_LED), {
             "agent": AGENT_LED, "ism": self._ism_led.state, "ts": time.time()
@@ -217,16 +165,4 @@ class TriggerMap:
             "agent": AGENT_LED, "cmd": cmd,
             "result": "ok" if ok else "blocked",
             "ism_state": self._ism_led.state, "ts": time.time()
-        })
-
-    def _publish_buz_state(self):
-        self._mqtt.publish("ssm/agents/{}/state".format(AGENT_BUZ), {
-            "agent": AGENT_BUZ, "ism": self._ism_buz.state, "ts": time.time()
-        }, retain=True)
-
-    def _publish_buz_report(self, cmd, ok):
-        self._mqtt.publish("ssm/agents/{}/report".format(AGENT_BUZ), {
-            "agent": AGENT_BUZ, "cmd": cmd,
-            "result": "ok" if ok else "blocked",
-            "ism_state": self._ism_buz.state, "ts": time.time()
         })

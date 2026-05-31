@@ -354,7 +354,7 @@ function ActuatorCard({ agent, unitData }) {
   if (n.includes('led') || n.includes('rgb') || n.includes('ws2812')) {
     const isOff = (ism === 'OFF');
     controls = (
-      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
         <button onClick={() => sendCmd('SET_STATE', { state: isOff ? 'BRIGHT' : 'OFF' })}
           style={isOff ? btnIdle : btnActive(meta.color)}>
           {isOff ? '开灯' : '关灯'}
@@ -371,7 +371,7 @@ function ActuatorCard({ agent, unitData }) {
     );
   } else if (n.includes('buz')) {
     controls = (
-      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
         <button onClick={() => sendCmd('PLAY', { pattern: 'NOTIFY' })}
           style={ism === 'NOTIFY' ? btnActive(meta.color) : btnIdle}>
           通知音
@@ -389,13 +389,16 @@ function ActuatorCard({ agent, unitData }) {
   }
 
   return (
-    <div style={{
-      padding: '12px 14px', marginBottom: 10, borderRadius: 18,
-      background: active
-        ? `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`
-        : 'rgba(255,255,255,0.04)',
-      border: `1px solid ${active ? meta.color + '40' : 'rgba(255,255,255,0.07)'}`,
-    }}>
+    <div
+      onClick={() => navigate('#/devices/' + (agent.slug || uid))}
+      style={{
+        padding: '12px 14px', marginBottom: 10, borderRadius: 18,
+        background: active
+          ? `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`
+          : 'rgba(255,255,255,0.04)',
+        border: `1px solid ${active ? meta.color + '40' : 'rgba(255,255,255,0.07)'}`,
+        cursor: 'pointer',
+      }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
           background: active ? meta.color : 'rgba(255,255,255,0.06)',
@@ -411,22 +414,9 @@ function ActuatorCard({ agent, unitData }) {
             {getStateLabel(agent, unitData)}
           </div>
         </div>
-        {agent.slug && (
-          <button
-            onClick={e => { e.stopPropagation(); navigate('#/devices/' + agent.slug); }}
-            style={{
-              flexShrink: 0, width: 28, height: 28, borderRadius: 9,
-              background: 'rgba(255,255,255,0.06)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              color: 'rgba(255,255,255,0.5)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', padding: 0,
-            }}
-            title="查看详情"
-          >
-            <Icon name="arrow" size={13} sw={2}/>
-          </button>
-        )}
+        <div style={{ flexShrink: 0, color: 'rgba(255,255,255,0.3)' }}>
+          <Icon name="arrow" size={13} sw={2}/>
+        </div>
         <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
           background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
           boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
@@ -1371,7 +1361,7 @@ function App() {
 
     registry.addEventListener('change', () => {
       setAgents(registry.getAll().filter(a =>
-        !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) && a._online === true
+        a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) && a._online === true
       ));
     });
 
@@ -1424,11 +1414,11 @@ function App() {
     return () => mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
   }, []);
 
-  // Hash 路由分发：#/devices/{slug} → 设备详情页
+  // Hash 路由分发：#/devices/{slug|unit_id} → 设备详情页
   const hashMatch = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (hashMatch) {
     const slug   = hashMatch[1];
-    const device = agents.find(a => a.slug === slug);
+    const device = agents.find(a => a.slug === slug || (a.unit_id || a.agent_id) === slug);
     return (
       <DeviceDetailPage
         slug={slug}

@@ -1,25 +1,18 @@
-# graph.py — LangGraph graphs
-#
-# build_evaluation_graph() : 执行效果评估（执行器 report → LLM 评估 → publish_assessment）
-# build_orchestrator()     : V2 用户意图编排 Planner→Dispatcher→Evaluator→Responder
+# graph.py — 用户意图编排图
+# Planner → Dispatcher → Evaluator → Responder
 
 import os
 import re
 import json
 import time as _time
-from typing import TypedDict, Literal
+from typing import TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
-from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, END
 
 import tools as _t
-from tools import (
-    get_last_decision, get_actuator_snapshot, publish_assessment,
-)
 
-# ── Shared LLM factory（带 fallback 链）────────────────────────
 
 def _make_llm():
     model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
@@ -36,72 +29,14 @@ def _make_llm():
     return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
 
 
-# ════════════════════════════════════════════════════════════
-#  执行效果评估图
-#  触发：执行器 report 到达（trigger="actuator"）
-#  作用：静默评估规则引擎或 V2 编排器下发指令的执行结果
-# ════════════════════════════════════════════════════════════
-
-EVALUATION_PROMPT = """你是 SSM 执行效果评估智能体，检验指令是否被设备正确执行。
-
-工作流程：
-1. 调用 get_last_decision 获取上一次下发的指令
-2. 调用 get_actuator_snapshot 获取执行器的实际反馈
-3. 比对意图与结果：
-   - result="ok" 且状态符合预期 → 评估为 "ok"
-   - result="blocked"（状态机拒绝）→ 评估为 "blocked"，说明原因
-   - 指令与执行不一致 → 评估为 "mismatch"
-4. 调用 publish_assessment 发布评估结论（简洁中文）"""
-
-
-class EvaluationState(TypedDict):
-    payload: dict
-
-
-def build_evaluation_graph():
-    llm = _make_llm()
-
-    evaluation_react = create_react_agent(
-        llm,
-        tools=[get_last_decision, get_actuator_snapshot, publish_assessment],
-        prompt=EVALUATION_PROMPT,
-    )
-
-    def _stream(agent, messages):
-        for chunk in agent.stream(messages, stream_mode="updates"):
-            for node_name, node_data in chunk.items():
-                for msg in node_data.get("messages", []):
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            print(f"  [Evaluation] 调用工具 → {tc['name']}({tc.get('args', {})})")
-                    elif hasattr(msg, "content") and msg.content:
-                        print(f"  [Evaluation/{type(msg).__name__}] {msg.content}")
-
-    def evaluation_node(state: EvaluationState) -> EvaluationState:
-        prompt = f"收到执行器反馈，payload={state['payload']}。请评估执行效果。"
-        print("  [Evaluation] 开始评估...")
-        _stream(evaluation_react, {"messages": [HumanMessage(content=prompt)]})
-        return state
-
-    g = StateGraph(EvaluationState)
-    g.add_node("evaluation_node", evaluation_node)
-    g.set_entry_point("evaluation_node")
-    g.add_edge("evaluation_node", END)
-    return g.compile()
-
-
-# ════════════════════════════════════════════════════════════
-#  V2 — Intent-driven Orchestrator
-# ════════════════════════════════════════════════════════════
-
 class OrchestratorState(TypedDict):
-    session_id:   str
-    user_msg:     str
-    requirements: list
+    session_id:    str
+    user_msg:      str
+    requirements:  list
     planned_tasks: list   # [{device_id, task_id, action, params}]
     task_results:  dict   # task_id → result payload
     response_text: str
-    early_exit:    bool   # True = feedback already sent, skip remaining nodes
+    early_exit:    bool   # True = feedback 已发出，跳过后续节点
 
 
 def build_orchestrator():
@@ -118,7 +53,6 @@ def build_orchestrator():
                 "抱歉，我还没有发现附近的设备，请确认 ESP32 已上线。")
             return {**state, "planned_tasks": [], "early_exit": True}
 
-        # Build device capability summary — deduplicate by uid, merge all tags
         uid_tags = {}
         for tag, device_ids in registry.items():
             for uid in device_ids:
@@ -218,7 +152,6 @@ def build_orchestrator():
                 break
             _time.sleep(0.2)
 
-        # Fill timed-out tasks
         for task in tasks:
             tid = task["task_id"]
             if tid not in results:

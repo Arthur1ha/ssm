@@ -4,8 +4,8 @@ import queue
 import time
 import datetime
 import threading
-import asyncio
-import base64
+
+from tts import synthesize as tts_synthesize
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
@@ -43,6 +43,8 @@ class DeskAgent:
         self._belief_summary: str = ""
         self._beliefs_since_summary: int = 0
 
+        self._last_combo: str = ""  # 上次处理的 context_combo，用于颜色变化检测
+
     def _make_llm(self):
         model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
         models = [m.strip() for m in model_list_str.split(",") if m.strip()]
@@ -62,9 +64,11 @@ class DeskAgent:
         t.start()
 
     def push_sensor_event(self, unit_id: str, payload: dict):
+        now = time.time()
         if unit_id.endswith("_sound"):
-            self._last_sound_ts = time.time()   # 用服务器时间，不信任 ESP32 的 ts
-        self._event_queue.put({"unit_id": unit_id, "payload": payload})
+            self._last_sound_ts = now
+        # Enqueue with server-side timestamp; loop uses this for debounce
+        self._event_queue.put({"unit_id": unit_id, "payload": payload, "enqueue_ts": now})
 
     # ─────────────────────────────────────────────────────────
     #  SENSE
@@ -150,7 +154,7 @@ class DeskAgent:
     # ─────────────────────────────────────────────────────────
     #  REASON
     # ─────────────────────────────────────────────────────────
-    def _reason(self, sense_data: dict, proactive_triggers: list[str] | None = None) -> dict | None:
+    def _reason(self, sense_data: dict, proactive_triggers: list[str] | None = None, combo_changed: bool = False) -> dict | None:
         # 历史上下文：优先用摘要（F8），无摘要则用近3条原始记录
         last_context = self._belief_history[-1]["context"] if self._belief_history else ""
 
@@ -184,13 +188,16 @@ class DeskAgent:
                 "若你认为有必要，可将 proactive_report 设为 true 并在 speech_text 中说出来，不一定要有 action。"
             )
 
+        combo_changed_str = "true（环境情境已改变）" if combo_changed else "false（情境与上次相同）"
+
         prompt = (
             f"{AGENT_PERSONA}\n"
             "你负责自动控制桌面 LED 灯，并用符合性格的语言表达决策。\n"
             "light_value 是光线传感器 ADC 原始值（0=最暗，4095=最亮），light_level 是档位，"
             "light_lux 是换算后照度（如有）。\n"
             "led_state 是 LED 当前状态（OFF=关, BRIGHT=亮, DIM=暗）。\n"
-            f"当前时段：{time_period}（{time_str}），请结合时段判断合理行为。\n\n"
+            f"当前时段：{time_period}（{time_str}），请结合时段判断合理行为。\n"
+            f"combo_changed={combo_changed_str}\n\n"
             f"传感器数据：{json.dumps(sense_data, ensure_ascii=False)}\n"
             f"context_combo 含义：dark_active=黑暗中有人，dark_silent=黑暗无人，"
             f"normal_active=正常有人，normal_silent=正常无人。当前：{combo}\n"
@@ -198,27 +205,29 @@ class DeskAgent:
             f"{history_lines}"
             f"{proactive_ctx}\n\n"
             "决策规则（按优先级）：\n"
-            "1. dark_active → 开灯（BRIGHT）\n"
-            "2. dark_silent 且 led_state=OFF → 不动；dark_silent 且灯亮 → 可以关\n"
-            "3. normal_active / normal_silent 且 led_state 不是 OFF → 关灯（OFF）\n"
-            "4. 其他情况 → 不动作\n\n"
-            "输出 JSON（不含代码块），state 只能填 BRIGHT 或 OFF：\n"
+            "1. dark_active → state_action=BRIGHT；若 combo_changed=true 同时输出 color_action\n"
+            "2. dark_silent 且灯亮 → state_action=OFF，color_action=null\n"
+            "3. dark_silent 且灯关 → 两者均 null\n"
+            "4. normal_* 且灯亮 → state_action=OFF，color_action=null\n"
+            "5. combo_changed=true 且灯亮 → 可仅输出 color_action 换色，state_action=null\n"
+            "6. 其他 → 两者均 null\n\n"
+            "颜色参考（结合时段和 combo 自由决定 r/g/b，0-255，颜色要好看）：\n"
+            "深夜暖橙(255,100,30 亮120)、傍晚暖黄(255,160,60 亮160)、"
+            "清晨淡蓝白(200,220,255 亮200)、上午专注冷白(220,220,255 亮220)、"
+            "嘈杂活跃偏青(180,220,200 亮200)，不限于此。\n\n"
+            "输出 JSON（不含代码块）：\n"
             "{\n"
             '  "context": "一句话描述当前情境（内部日志）",\n'
             '  "space_mood": "专注/空闲/嘈杂/昏暗 中的一个",\n'
             '  "should_act": true/false,\n'
-            '  "action": {\n'
-            '    "device": "esp32_desk_led",\n'
-            '    "cmd": "SET_STATE",\n'
-            '    "params": {"state": "BRIGHT 或 OFF"}\n'
-            "  },\n"
+            '  "state_action": {"state": "BRIGHT"} 或 {"state": "OFF"} 或 null,\n'
+            '  "color_action": {"r": 0-255, "g": 0-255, "b": 0-255, "brightness": 0-255} 或 null,\n'
             '  "reason": "为什么这样决定（内部日志，不播放）",\n'
             '  "speech_text": "智能体说出来的话，符合性格设定，简洁不超过两句，不执行动作时可为空字符串",\n'
             '  "thought_text": "觉得有意思的推理过程，简洁一句话，不值得说就为空字符串",\n'
             '  "should_verbalize_thought": true/false,\n'
             '  "proactive_report": true/false\n'
             "}\n"
-            "若 should_act 为 false，action 填 {}。"
         )
 
         try:
@@ -239,23 +248,54 @@ class DeskAgent:
     #  ACT
     # ─────────────────────────────────────────────────────────
     def _act(self, belief: dict, combo: str = ""):
-        if not belief.get("should_act"):
-            return
-        action = belief.get("action", {})
-        if not action:
+        device = "esp32_desk_led"
+        now    = time.time()
+
+        state_action = belief.get("state_action")  # {"state": "BRIGHT"|"OFF"} | null
+        color_action = belief.get("color_action")  # {"r","g","b","brightness"} | null
+
+        # 获取当前灯的 ISM 状态（用于 cooldown bypass 和颜色动作前置检查）
+        current_ism = ""
+        actuator_snap = self._shared_state.actuator_snapshot()
+        for uid, data in actuator_snap.items():
+            if uid.endswith("_led"):
+                current_ism = (data.get("state") or {}).get("ism", "").upper()
+                break
+
+        # 根据两个独立决策字段确定最终命令
+        cmd, params = None, {}
+        if state_action and state_action.get("state") == "OFF":
+            # 关灯：忽略颜色
+            cmd, params = "SET_STATE", {"state": "OFF"}
+        elif state_action and state_action.get("state") == "BRIGHT" and color_action:
+            # 开灯 + 有颜色：SET_COLOR 自带亮度，等效开灯，避免先白后换色的闪烁
+            cmd, params = "SET_COLOR", color_action
+        elif state_action and state_action.get("state") == "BRIGHT":
+            # 开灯 + 无颜色：白色兜底
+            cmd, params = "SET_STATE", {"state": "BRIGHT"}
+        elif color_action and current_ism not in ("OFF", "UNKNOWN", ""):
+            # 仅换色（灯已开着）
+            cmd, params = "SET_COLOR", color_action
+
+        if not cmd:
             return
 
-        device = action.get("device", "")
-        cmd    = action.get("cmd", "")
-        params = action.get("params", {})
-
+        # Cooldown 检查（SET_STATE 支持状态不一致时 bypass；SET_COLOR 每次 RGB 不同 key 也不同）
         key = f"{cmd}_{json.dumps(params, sort_keys=True)}"
-        now = time.time()
         if now - self._cooldown.get(key, 0) < 300:
-            print(f"[DeskAgent] cooldown, skip ({key})")
-            return
-        self._cooldown[key] = now
+            if cmd == "SET_STATE":
+                target_state = params.get("state", "").upper()
+                if current_ism and current_ism != target_state:
+                    print(f"[DeskAgent] cooldown bypass: target={target_state} current={current_ism}, resend")
+                    self._cooldown[key] = now
+                else:
+                    print(f"[DeskAgent] cooldown, skip ({key})")
+                    return
+            else:
+                print(f"[DeskAgent] cooldown, skip ({key})")
+                return
 
+        self._cooldown[key] = now
         # F4: 记录动作时刻和当时的 combo，用于检测是否改善
         self._last_act_ts    = now
         self._last_act_combo = combo
@@ -267,31 +307,14 @@ class DeskAgent:
     # ─────────────────────────────────────────────────────────
     #  F1: 语音输出
     # ─────────────────────────────────────────────────────────
-    async def _tts_generate(self, text: str) -> bytes:
-        """调用 edge-tts 生成中文 MP3，返回原始字节。"""
-        import edge_tts
-        com = edge_tts.Communicate(text, voice="zh-CN-XiaoxiaoNeural")
-        audio = b""
-        async for chunk in com.stream():
-            if chunk["type"] == "audio":
-                audio += chunk["data"]
-        return audio
-
     def _speak(self, text: str, priority: str = "normal"):
-        """生成服务端 TTS 音频并通过 MQTT 发送给 PWA（ssm/agents/desk/speech）。"""
+        """合成 TTS 音频并通过 MQTT 发送给 PWA（ssm/agents/desk/speech）。"""
         if not text or not self._publish:
             return
         payload: dict = {"text": text, "priority": priority}
-        try:
-            loop = asyncio.new_event_loop()
-            try:
-                audio_bytes = loop.run_until_complete(self._tts_generate(text))
-                payload["audio"] = base64.b64encode(audio_bytes).decode()
-                print(f"[DeskAgent] TTS generated {len(audio_bytes)} bytes")
-            finally:
-                loop.close()
-        except Exception as e:
-            print(f"[DeskAgent] TTS error: {e}，仅发送文本")
+        audio_b64 = tts_synthesize(text)
+        if audio_b64:
+            payload["audio"] = audio_b64
         self._publish("ssm/agents/desk/speech", payload)
         print(f"[DeskAgent] speech → {text}")
 
@@ -388,11 +411,13 @@ class DeskAgent:
                 try:
                     event = self._event_queue.get(timeout=30)
                     unit_id = event.get("unit_id", "")
+                    enqueue_ts = event.get("enqueue_ts", time.time())
                     now = time.time()
-                    _last_any_event_ts = now
-                    if now - _last_event_ts.get(unit_id, 0) < DEBOUNCE_SECS:
+                    _last_any_event_ts = enqueue_ts  # 用入队时间判断设备是否在线
+                    # 防抖：用事件的入队时间，避免 LLM 耗时导致积压事件全部通过
+                    if enqueue_ts - _last_event_ts.get(unit_id, 0) < DEBOUNCE_SECS:
                         continue
-                    _last_event_ts[unit_id] = now
+                    _last_event_ts[unit_id] = enqueue_ts
                     triggered_by_event = True
                     print(f"[DeskAgent] triggered by {unit_id}")
                 except queue.Empty:
@@ -411,10 +436,13 @@ class DeskAgent:
                 # F4: 检查主动报告触发器
                 proactive_triggers = self._check_proactive(sense)
 
+                # 颜色决策：仅在 context_combo 变化时允许换色
+                combo_changed = sense.get("context_combo", "") != self._last_combo
+
                 # F3: 开始思考 → LED 进入 thinking 模式
                 self._set_led_mood("thinking")
 
-                belief = self._reason(sense, proactive_triggers or None)
+                belief = self._reason(sense, proactive_triggers or None, combo_changed=combo_changed)
                 if belief is None:
                     self._set_led_mood("idle")
                     continue
@@ -437,8 +465,9 @@ class DeskAgent:
                     self._publish_thought(belief["thought_text"])
 
                 # F3+F1: 有话说 → LED speaking + 发布 TTS
+                # 只在环境发生变化（combo 切换或主动报告触发）时才开口
                 speech_text = belief.get("speech_text", "")
-                if speech_text:
+                if speech_text and (combo_changed or proactive_triggers):
                     self._set_led_mood("speaking")
                     self._speak(speech_text)
 
@@ -448,6 +477,7 @@ class DeskAgent:
 
                 # 执行控制动作
                 self._act(belief, combo=sense.get("context_combo", ""))
+                self._last_combo = sense.get("context_combo", "")
 
                 # F3: 动作完成 → LED done → 延迟 2s → idle
                 self._set_led_mood("done")
