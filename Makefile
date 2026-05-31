@@ -40,6 +40,7 @@ api:
 
 api-bg: $(LOG_DIR)
 	@pkill -f "[u]vicorn cloud.api.main" || true
+	@sleep 1
 	nohup uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 \
 		> $(LOG_DIR)/api.log 2>&1 &
 	@echo "API started in background → logs/api.log"
