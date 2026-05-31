@@ -22,9 +22,13 @@ function Go2DevicePage({ onBack }) {
       const data = await r.json();
       if (data.connected && status !== "connected") {
         setStatus("connected");
+        setError("");
       } else if (!data.connected && status === "connected") {
         setStatus("idle");
         setRobot(null);
+      } else if (!data.connected && status === "connecting" && data.error) {
+        setStatus("error");
+        setError(data.error);
       }
     } catch (_) {}
   }, [status]);

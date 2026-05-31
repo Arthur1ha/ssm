@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import logging
+
 from cloud.go2.connection import go2
 
 router = APIRouter()
@@ -19,7 +21,9 @@ async def go2_connect():
     region   = os.getenv("GO2_REGION", "cn")
     if not email or not password or not serial:
         raise HTTPException(status_code=500, detail="GO2_EMAIL/PASSWORD/SERIAL 未配置")
-    asyncio.create_task(go2.connect(email, password, serial, region))
+    go2._last_error = None
+    task = asyncio.create_task(go2.connect(email, password, serial, region))
+    task.add_done_callback(lambda t: setattr(go2, "_last_error", str(t.exception())) if not t.cancelled() and t.exception() else None)
     return {"status": "connecting"}
 
 
@@ -31,7 +35,11 @@ async def go2_disconnect():
 
 @router.get("/api/go2/status")
 def go2_status():
-    return {"connected": go2.is_connected, "state": go2._robot_state}
+    return {
+        "connected": go2.is_connected,
+        "state": go2._robot_state,
+        "error": getattr(go2, "_last_error", None),
+    }
 
 
 @router.get("/api/go2/video")

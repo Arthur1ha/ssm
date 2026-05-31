@@ -27,8 +27,16 @@ class Go2Connection:
             device_type="Go2",
         )
 
+        try:
+            await self._conn.connect()
+        except Exception as exc:
+            self.is_connected = False
+            logging.error("[Go2] 连接失败: %s", exc)
+            raise
+
+        # connect() 内部的 init_webrtc() 执行后 video 属性才存在
         async def on_track(track):
-            import cv2  # 延迟导入，仅在实际使用视频时加载
+            import cv2
             while True:
                 try:
                     frame = await track.recv()
@@ -39,13 +47,6 @@ class Go2Connection:
                     break
 
         self._conn.video.add_track_callback(on_track)
-
-        try:
-            await self._conn.connect()
-        except Exception as exc:
-            self.is_connected = False
-            logging.error("[Go2] 连接失败: %s", exc)
-            raise
 
         self._conn.datachannel.pub_sub.subscribe(
             RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_state
