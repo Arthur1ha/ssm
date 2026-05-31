@@ -1285,11 +1285,20 @@ function playAudioB64(b64) {
   }
 }
 
+const GO2_STATIC_DEVICE = {
+  unit_id:      "go2_main",
+  agent_id:     "go2_main",
+  slug:         "go2-air",
+  name:         "Go2 Air",
+  agent_type:   "robot",
+  capabilities: ["MOVE", "STAND_UP", "SIT_DOWN", "HELLO", "STRETCH", "DANCE"],
+};
+
 function App() {
   const [tab, setTab]                     = useState('discover');
   const [sheetOpen, setSheetOpen]         = useState(false);
   const [connected, setConnected]         = useState(false);
-  const [agents, setAgents]               = useState([]);
+  const [agents, setAgents]               = useState([GO2_STATIC_DEVICE]);
   const [unitData, setUnitData]           = useState({});
   const [phoneLoc, setPhoneLoc]           = useState(null);
   const [locError, setLocError]           = useState(null);
@@ -1360,9 +1369,10 @@ function App() {
     const ismTracker = new ISMTracker(mqttBus);
 
     registry.addEventListener('change', () => {
-      setAgents(registry.getAll().filter(a =>
+      const mqttAgents = registry.getAll().filter(a =>
         a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) && a._online === true
-      ));
+      );
+      setAgents([GO2_STATIC_DEVICE, ...mqttAgents]);
     });
 
     // 设备重新上线（含快速重启未触发 LWT 的情况）→ 清除弹窗去重记录，允许再次弹窗
@@ -1417,7 +1427,10 @@ function App() {
   // Hash 路由分发：#/devices/{slug|unit_id} → 设备详情页
   const hashMatch = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (hashMatch) {
-    const slug   = hashMatch[1];
+    const slug = hashMatch[1];
+    if (slug === "go2-air") {
+      return <Go2DevicePage onBack={() => navigate('#')} />;
+    }
     const device = agents.find(a => a.slug === slug || (a.unit_id || a.agent_id) === slug);
     return (
       <DeviceDetailPage
