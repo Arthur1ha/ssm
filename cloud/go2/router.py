@@ -74,6 +74,10 @@ class CommandRequest(BaseModel):
     params: dict = {}
 
 
+class ModeRequest(BaseModel):
+    mode: str
+
+
 @router.post("/api/go2/command")
 async def go2_command(req: CommandRequest):
     try:
@@ -83,3 +87,14 @@ async def go2_command(req: CommandRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+@router.post("/api/go2/mode")
+async def go2_mode(req: ModeRequest):
+    if req.mode not in ("normal", "ai", "mcf"):
+        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
+    try:
+        await go2.switch_mode(req.mode)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"ok": True, "mode": req.mode}

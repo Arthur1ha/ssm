@@ -77,6 +77,14 @@ class Go2Connection:
             except asyncio.QueueFull:
                 pass
 
+    async def switch_mode(self, mode: str) -> None:
+        if not self.is_connected or not self._conn:
+            raise RuntimeError("Go2 not connected")
+        await self._conn.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC["MOTION_SWITCHER"],
+            {"api_id": 1002, "parameter": {"name": mode}},
+        )
+
     async def send_command(self, cmd: str, params: dict | None = None) -> None:
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
