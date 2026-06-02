@@ -15,7 +15,7 @@
 #   make logs              查看后台服务日志
 
 .PHONY: broker api api-bg orchestrator orchestrator-bg pwa pwa-bg ngrok ngrok-bg \
-        ps logs ngrok-url trace \
+        ps logs ngrok-url trace go2-logs go2-logs-window \
         stop restart-api restart-orchestrator restart-pwa restart-ngrok
 
 # 项目根目录（Makefile 所在目录的绝对路径，运行时自动计算）
@@ -27,6 +27,7 @@ BROKER_CONF := $(LOG_DIR)/mosquitto.conf
 
 # ── Broker ──────────────────────────────────────────────────
 broker: $(LOG_DIR)
+	@mkdir -p $(LOG_DIR)/broker
 	@pkill -f "[m]osquitto" || true
 	@SSM_DIR=$(SSM_DIR) envsubst < infra/broker/mosquitto.conf.tmpl > $(BROKER_CONF)
 	mosquitto -c $(BROKER_CONF) -d
@@ -36,6 +37,8 @@ broker: $(LOG_DIR)
 
 # ── Cloud services ───────────────────────────────────────────
 api:
+	@pkill -f "[u]vicorn cloud.api.main" || true
+	@sleep 1
 	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload
 
 api-bg: $(LOG_DIR)
@@ -125,3 +128,9 @@ trace:
 		echo "[`date '+%H:%M:%S'`] MQTT 连接断开，2 秒后重连..."; \
 		sleep 2; \
 	done
+
+go2-logs:
+	@tail -f $(LOG_DIR)/api.log | grep --line-buffered -E "\[Go2\]|ERROR|WARNING"
+
+go2-logs-window:
+	@tmux new-window -n go2 "tail -f $(LOG_DIR)/api.log | grep --line-buffered -E '\\[Go2\\]|ERROR|WARNING'"

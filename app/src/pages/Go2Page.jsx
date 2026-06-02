@@ -61,6 +61,14 @@ function Go2DevicePage({ onBack }) {
     setStatus("idle"); setRobot(null); setMoving(null);
   };
 
+  /* ── 进入页面自动连接 ─────────────────────────────────────── */
+  useEffect(() => {
+    fetch("/api/go2/status")
+      .then(r => r.json())
+      .then(d => { if (d.connected) { setStatus("connected"); setError(""); } else { connect(); } })
+      .catch(() => { connect(); });
+  }, []);
+
   /* ── 指令 ─────────────────────────────────────────────────── */
   const sendCmd = (cmd, params) => fetch("/api/go2/command", {
     method: "POST", headers: { "Content-Type": "application/json" },

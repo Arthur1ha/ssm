@@ -100,17 +100,21 @@ class Go2Connection:
 
     async def _consume_video(self, track) -> None:
         import io, time
+        loop = asyncio.get_event_loop()
         logging.info("[Go2] 视频采集开始")
         last_encode = 0.0
         while self.is_connected:
             try:
                 frame = await track.recv()   # 必须持续 drain，否则 aiortc 缓冲区积压
                 now = time.monotonic()
-                if now - last_encode < 0.2:  # 5fps 上限，保护 CPU
+                if now - last_encode < 0.066:  # ~15fps
                     continue
-                buf = io.BytesIO()
-                frame.to_image().save(buf, format="JPEG", quality=60)
-                self._latest_frame = buf.getvalue()
+                img = frame.to_image()
+                def encode():
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=40)
+                    return buf.getvalue()
+                self._latest_frame = await loop.run_in_executor(None, encode)
                 last_encode = now
             except Exception as e:
                 logging.warning("[Go2] 视频帧读取结束: %s", e)
