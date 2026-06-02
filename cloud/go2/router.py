@@ -98,3 +98,14 @@ async def go2_mode(req: ModeRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     return {"ok": True, "mode": req.mode}
+
+
+class ChatRequest(BaseModel):
+    session_id: str = "default"
+    message: str
+
+
+@router.post("/api/go2/chat")
+async def go2_chat(req: ChatRequest):
+    from cloud.go2.agent import run_agent
+    return await run_agent(req.session_id, req.message)

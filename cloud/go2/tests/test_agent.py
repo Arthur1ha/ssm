@@ -281,3 +281,45 @@ def test_run_agent_triggers_rule_after_observe(tmp_path, monkeypatch):
 
     conn_mod.go2.is_connected = False
     conn_mod.go2._latest_frame = None
+
+
+# ── /api/go2/chat 路由测试 ────────────────────────────────────────
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from cloud.go2.router import router as go2_router
+
+
+@pytest.fixture
+def chat_client():
+    app = FastAPI()
+    app.include_router(go2_router)
+    return TestClient(app)
+
+
+def test_chat_returns_response(chat_client, monkeypatch):
+    import cloud.go2.agent as agent_mod
+    async def fake_run_agent(session_id, message):
+        return {"response": "好的，已站起来", "actions_taken": ["go2_sport"]}
+    monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)
+    r = chat_client.post("/api/go2/chat", json={"session_id": "test", "message": "站起来"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["response"] == "好的，已站起来"
+    assert data["actions_taken"] == ["go2_sport"]
+
+
+def test_chat_missing_message_returns_422(chat_client):
+    r = chat_client.post("/api/go2/chat", json={"session_id": "test"})
+    assert r.status_code == 422
+
+
+def test_chat_default_session_id(chat_client, monkeypatch):
+    import cloud.go2.agent as agent_mod
+    received = {}
+    async def fake_run_agent(session_id, message):
+        received["session_id"] = session_id
+        return {"response": "ok", "actions_taken": []}
+    monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)
+    chat_client.post("/api/go2/chat", json={"message": "你好"})
+    assert received["session_id"] == "default"
