@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import sys as _sys
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -254,8 +255,6 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
 
 
 # ── 图组装 + 入口 ─────────────────────────────────────────────────
-
-import sys as _sys
 
 
 def _build_agent():
