@@ -1,6 +1,13 @@
+import asyncio
 import json
+import os
 import time
 from pathlib import Path
+
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+
+from cloud.go2.connection import go2
 
 RULES_FILE = Path(__file__).parent / "rules.json"
 
@@ -32,14 +39,6 @@ def check_rules(observation: str) -> list[str]:
         save_rules(rules)
     return triggered
 
-
-import asyncio
-import os
-
-from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
-
-from cloud.go2.connection import go2
 
 # ── LLM 单例 ─────────────────────────────────────────────────────
 
