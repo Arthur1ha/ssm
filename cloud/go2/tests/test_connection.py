@@ -56,3 +56,17 @@ def test_remove_nonexistent_queue_does_not_raise():
     conn = Go2Connection()
     q = asyncio.Queue()
     conn.remove_state_queue(q)  # should not raise
+
+
+def test_latest_frame_b64_returns_none_when_no_frame():
+    conn = Go2Connection()
+    assert conn.latest_frame_b64() is None
+
+
+def test_latest_frame_b64_returns_base64_string():
+    import base64
+    conn = Go2Connection()
+    conn._latest_frame = b"\xff\xd8\xff"   # fake JPEG header bytes
+    result = conn.latest_frame_b64()
+    assert result == base64.b64encode(b"\xff\xd8\xff").decode()
+    assert isinstance(result, str)
