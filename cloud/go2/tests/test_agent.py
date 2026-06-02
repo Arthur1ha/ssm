@@ -209,3 +209,75 @@ def test_go2_list_rules_shows_rules(tmp_path, monkeypatch):
     result = agent_mod.go2_list_rules()
     assert "人" in result
     assert "Hello" in result
+
+
+# ── LangGraph 流水线测试 ──────────────────────────────────────────
+
+def test_run_agent_returns_early_when_disconnected():
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.connection as conn_mod
+    conn_mod.go2.is_connected = False
+    result = asyncio.run(agent_mod.run_agent("s1", "站起来"))
+    assert "未连接" in result["response"]
+    assert result["actions_taken"] == []
+
+
+def test_run_agent_executes_sport_command(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.connection as conn_mod
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    conn_mod.go2.is_connected = True
+
+    async def fake_planner(state):
+        return {**state, "planned_tools": [{"tool": "go2_sport", "params": {"cmd": "Hello"}}],
+                "early_exit": False}
+
+    mock_text_llm = MagicMock()
+    mock_text_llm.ainvoke = AsyncMock(return_value=MagicMock(content="好的，Go2 已挥手问好"))
+    monkeypatch.setattr(agent_mod, "get_text_llm", lambda: mock_text_llm)
+
+    with patch.object(conn_mod.go2, "send_command", new_callable=AsyncMock):
+        with patch.object(agent_mod, "planner_node", side_effect=fake_planner):
+            result = asyncio.run(agent_mod.run_agent("s1", "挥手"))
+
+    assert "actions_taken" in result
+    assert "go2_sport" in result["actions_taken"]
+    conn_mod.go2.is_connected = False
+
+
+def test_run_agent_triggers_rule_after_observe(tmp_path, monkeypatch):
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.connection as conn_mod
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    conn_mod.go2.is_connected = True
+    conn_mod.go2._latest_frame = b"\xff\xd8\xff"
+
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text(json.dumps([
+        {"trigger": "人", "action": "Hello", "cooldown_s": 30, "last_triggered": 0}
+    ]))
+    monkeypatch.setattr(agent_mod, "RULES_FILE", rules_file)
+
+    mock_vision = MagicMock()
+    mock_vision.ainvoke = AsyncMock(return_value=MagicMock(content="画面中有一个人"))
+    monkeypatch.setattr(agent_mod, "get_vision_llm", lambda: mock_vision)
+
+    mock_text = MagicMock()
+    mock_text.ainvoke = AsyncMock(return_value=MagicMock(content="我看到有人，已挥手问好"))
+    monkeypatch.setattr(agent_mod, "get_text_llm", lambda: mock_text)
+
+    async def fake_planner(state):
+        return {**state, "planned_tools": [{"tool": "go2_observe", "params": {"question": "有没有人"}}],
+                "early_exit": False}
+
+    with patch.object(conn_mod.go2, "send_command", new_callable=AsyncMock) as mock_cmd:
+        with patch.object(agent_mod, "planner_node", side_effect=fake_planner):
+            result = asyncio.run(agent_mod.run_agent("s1", "看看有没有人"))
+
+    mock_cmd.assert_called_once_with("Hello")
+    assert "rule_trigger" in result["actions_taken"]
+
+    conn_mod.go2.is_connected = False
+    conn_mod.go2._latest_frame = None
