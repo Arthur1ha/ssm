@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
@@ -146,7 +147,6 @@ class Go2Connection:
     def latest_frame_b64(self) -> str | None:
         if self._latest_frame is None:
             return None
-        import base64
         return base64.b64encode(self._latest_frame).decode()
 
 
