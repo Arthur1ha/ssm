@@ -159,15 +159,66 @@ def go2_list_rules() -> str:
     )
 
 
+# ── 导航工具 ─────────────────────────────────────────────────────
+
+async def go2_tag_location(name: str) -> str:
+    if not go2.is_connected:
+        return "Go2 未连接"
+    odom = go2.odom
+    if not odom:
+        return "暂无位置数据，请确认 Odom 订阅正常"
+    from cloud.go2 import spatial_memory
+    return spatial_memory.tag_location(name, odom)
+
+
+async def go2_navigate_to(name: str) -> str:
+    if not go2.is_connected:
+        return "Go2 未连接"
+    from cloud.go2.navigator import navigator
+    return await navigator.go_to(name)
+
+
+def go2_list_locations() -> str:
+    from cloud.go2 import spatial_memory
+    locs = spatial_memory.list_locations()
+    if not locs:
+        return "暂无保存的地点，请先用 go2_tag_location 保存地点"
+    return "\n".join(
+        f"- {l['name']} ({l['x']:.2f}, {l['y']:.2f})" for l in locs
+    )
+
+
+async def go2_set_obstacle_avoidance(enabled: bool) -> str:
+    if not go2.is_connected:
+        return "Go2 未连接"
+    await go2.set_obstacle_avoidance(enabled)
+    return f"内置避障已{'开启' if enabled else '关闭'}"
+
+
+async def go2_set_led(color: str = "white", duration: int = 60) -> str:
+    if not go2.is_connected:
+        return "Go2 未连接"
+    try:
+        await go2.set_led(color, duration)
+        return f"LED 已设为 {color}，持续 {duration}s"
+    except ValueError as e:
+        return str(e)
+
+
 # ── 工具分发表 ────────────────────────────────────────────────────
 
 TOOL_FN_MAP = {
-    "go2_sport":      go2_sport,
-    "go2_move":       go2_move,
-    "go2_observe":    go2_observe,
-    "go2_status":     go2_status,
-    "go2_add_rule":   go2_add_rule,
-    "go2_list_rules": go2_list_rules,
+    "go2_sport":                  go2_sport,
+    "go2_move":                   go2_move,
+    "go2_observe":                go2_observe,
+    "go2_status":                 go2_status,
+    "go2_add_rule":               go2_add_rule,
+    "go2_list_rules":             go2_list_rules,
+    "go2_tag_location":           go2_tag_location,
+    "go2_navigate_to":            go2_navigate_to,
+    "go2_list_locations":         go2_list_locations,
+    "go2_set_obstacle_avoidance": go2_set_obstacle_avoidance,
+    "go2_set_led":                go2_set_led,
 }
 
 TOOL_DESCRIPTIONS = """\
@@ -177,4 +228,9 @@ TOOL_DESCRIPTIONS = """\
 - go2_observe(question="描述你看到的场景"): 用摄像头分析当前画面，返回视觉描述
 - go2_status(): 查询连接状态和机器狗当前姿态
 - go2_add_rule(trigger, action, cooldown_s=30): 添加视觉触发规则，检测到 trigger 关键词时自动执行 action
-- go2_list_rules(): 列出当前所有视觉触发规则"""
+- go2_list_rules(): 列出当前所有视觉触发规则
+- go2_tag_location(name): 将当前位置保存为命名地点，供导航使用
+- go2_navigate_to(name): 导航到已保存的命名地点，支持模糊描述
+- go2_list_locations(): 列出所有已保存的命名地点
+- go2_set_obstacle_avoidance(enabled): 开启/关闭 Go2 内置避障（布尔值）
+- go2_set_led(color="white", duration=60): 设置 LED 颜色，支持 white/red/yellow/blue/green/cyan/purple"""

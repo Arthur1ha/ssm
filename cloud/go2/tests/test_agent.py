@@ -323,3 +323,11 @@ def test_chat_default_session_id(chat_client, monkeypatch):
     monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)
     chat_client.post("/api/go2/chat", json={"message": "你好"})
     assert received["session_id"] == "default"
+
+
+def test_new_tools_in_fn_map():
+    from cloud.go2.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS
+    for name in ("go2_tag_location", "go2_navigate_to", "go2_list_locations",
+                 "go2_set_obstacle_avoidance", "go2_set_led"):
+        assert name in TOOL_FN_MAP, f"{name} missing from TOOL_FN_MAP"
+        assert name in TOOL_DESCRIPTIONS, f"{name} missing from TOOL_DESCRIPTIONS"
