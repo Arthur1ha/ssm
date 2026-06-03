@@ -26,13 +26,24 @@ def save_rules(rules: list) -> None:
     )
 
 
+_NEGATION_PREFIXES = ("没有", "无", "没", "看不到", "未发现", "不见")
+
+
+def _is_negated(trigger: str, text: str) -> bool:
+    for prefix in _NEGATION_PREFIXES:
+        if prefix + trigger in text:
+            return True
+    return False
+
+
 def check_rules(observation: str) -> list[str]:
     rules = load_rules()
     now = time.time()
     triggered = []
     changed = False
     for rule in rules:
-        if rule["trigger"] in observation:
+        trigger = rule["trigger"]
+        if trigger in observation and not _is_negated(trigger, observation):
             if now - rule.get("last_triggered", 0) >= rule["cooldown_s"]:
                 rule["last_triggered"] = now
                 triggered.append(rule["action"])

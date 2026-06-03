@@ -10,7 +10,7 @@ _FSM_AVAILABLE: dict[str, list[str]] = {
     "connecting": [],
     "lying":      ["StandUp"],
     "standing":   ["StandDown", "Move", "Hello", "Stretch", "Dance1", "Dance2"],
-    "moving":     ["StopMove"],
+    "moving":     ["Move", "StopMove"],
     "executing":  ["StopMove"],
 }
 
@@ -72,7 +72,7 @@ class Go2Connection:
             RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_state
         )
         self.is_connected = True
-        self.fsm_state = "lying"
+        self.fsm_state = "standing"
         logging.info("[Go2] WebRTC 连接成功")
 
         # track 事件在 connect() 内部触发，此处直接从 transceiver 取 track 消费
@@ -142,8 +142,7 @@ class Go2Connection:
         if api_id is None:
             raise ValueError(f"Unknown command: {cmd}")
 
-        next_state = _FSM_NEXT.get(self.fsm_state, {}).get(cmd)
-        if next_state is None:
+        if cmd not in self.available_actions:
             raise ValueError(
                 f"'{cmd}' 在当前状态 '{self.fsm_state}' 下不可用，"
                 f"可用动作: {self.available_actions}"
@@ -156,7 +155,9 @@ class Go2Connection:
             RTC_TOPIC["SPORT_MOD"], options
         )
 
-        self.fsm_state = next_state
+        next_state = _FSM_NEXT.get(self.fsm_state, {}).get(cmd)
+        if next_state is not None:
+            self.fsm_state = next_state
         if next_state == "executing":
             self._schedule_exec_reset()
 
