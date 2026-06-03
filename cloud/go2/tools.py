@@ -184,7 +184,7 @@ def go2_list_locations() -> str:
     if not locs:
         return "暂无保存的地点，请先用 go2_tag_location 保存地点"
     return "\n".join(
-        f"- {l['name']} ({l['x']:.2f}, {l['y']:.2f})" for l in locs
+        f"- {loc['name']} ({loc['x']:.2f}, {loc['y']:.2f})" for loc in locs
     )
 
 
