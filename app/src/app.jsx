@@ -146,140 +146,172 @@ const RADAR_R     = 100;   // px, usable radius inside 240×240 canvas
 const RADAR_MAX_M = 500;   // meters mapped to full radius
 
 function RadarScan({ agents, phoneLoc }) {
-  const [sweep, setSweep] = useState(0);
-  // pingAge[uid] = frames since last ping (0 = just pinged)
-  const pingAge  = useRef({});
-  const prevSweep = useRef(0);
+  const canvasRef   = useRef(null);
+  const agentsRef   = useRef(agents);
+  const phoneLocRef = useRef(phoneLoc);
+
+  useEffect(() => { agentsRef.current   = agents;   }, [agents]);
+  useEffect(() => { phoneLocRef.current = phoneLoc; }, [phoneLoc]);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setSweep(s => {
-        const next = (s + 1.2) % 360;
-        // detect which agents the sweep just crossed
-        agents.forEach(a => {
-          const pos = agentRadarPos(a, phoneLoc);
-          if (pos) {
-            const d = angleDiff(next, pos.bearing);
-            const prev = angleDiff(prevSweep.current, pos.bearing);
-            if (d < 4 && prev >= 4) {
-              pingAge.current[a.unit_id || a.agent_id] = 0;
-            }
-          }
-        });
-        // age all pings
-        Object.keys(pingAge.current).forEach(k => { pingAge.current[k]++; });
-        prevSweep.current = next;
-        return next;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const SIZE = 240;
+    const dpr  = window.devicePixelRatio || 1;
+    canvas.width  = SIZE * dpr;
+    canvas.height = SIZE * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    let sweep     = 0;
+    let prevSweep = 0;
+    const pingAge = {};
+
+    function hexAlpha(hex, a) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a})`;
+    }
+
+    function agentRadarPos(agent, phone) {
+      if (!phone || agent._lat == null) return null;
+      const dist = haversine(phone.lat, phone.lng, agent._lat, agent._lng);
+      const brng  = bearing(phone.lat, phone.lng, agent._lat, agent._lng);
+      const r     = Math.min(dist / RADAR_MAX_M, 1) * RADAR_R;
+      const rad   = brng * Math.PI / 180;
+      return { x: 120 + Math.sin(rad) * r, y: 120 - Math.cos(rad) * r, bearing: brng };
+    }
+
+    function draw() {
+      const agts  = agentsRef.current;
+      const phone = phoneLocRef.current;
+
+      ctx.clearRect(0, 0, SIZE, SIZE);
+
+      // rings
+      const RINGS = [
+        { r: RADAR_R * 100 / RADAR_MAX_M, label: '100m' },
+        { r: RADAR_R * 250 / RADAR_MAX_M, label: '250m' },
+        { r: RADAR_R,                      label: `${RADAR_MAX_M}m` },
+      ].filter(rr => rr.r <= RADAR_R);
+      RINGS.forEach(({ r, label }) => {
+        ctx.strokeStyle = 'rgba(200,255,62,0.1)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(120, 120, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = 'rgba(200,255,62,0.3)';
+        ctx.font = '8px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(label, 120, 120 - r - 2);
       });
-    }, 16);
-    return () => clearInterval(id);
-  }, [agents, phoneLoc]);
 
-  // compute radar (x,y) from agent GPS + phone GPS
-  function agentRadarPos(agent, phone) {
-    if (!phone || agent._lat == null) return null;
-    const dist = haversine(phone.lat, phone.lng, agent._lat, agent._lng);
-    const brng  = bearing(phone.lat, phone.lng, agent._lat, agent._lng);
-    const r     = Math.min(dist / RADAR_MAX_M, 1) * RADAR_R;
-    // north = up: x = sin(bearing)*r, y = -cos(bearing)*r
-    const rad = brng * Math.PI / 180;
-    return {
-      x:       120 + Math.sin(rad) * r,
-      y:       120 - Math.cos(rad) * r,
-      bearing: brng,
-      distM:   dist,
-    };
-  }
+      // crosshairs
+      ctx.strokeStyle = 'rgba(200,255,62,0.06)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(0, 120); ctx.lineTo(SIZE, 120); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(120, 0); ctx.lineTo(120, SIZE); ctx.stroke();
+      ctx.setLineDash([]);
 
-  // ring distances to label
-  const rings = [
-    { frac: RADAR_R * (100 / RADAR_MAX_M), label: '100m' },
-    { frac: RADAR_R * (250 / RADAR_MAX_M), label: '250m' },
-    { frac: RADAR_R,                        label: `${RADAR_MAX_M}m` },
-  ].filter(r => r.frac <= RADAR_R);
+      // N label
+      ctx.fillStyle = 'rgba(200,255,62,0.4)';
+      ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('N', 120, 14);
 
-  return (
-    <div style={{ position: 'relative', width: 240, height: 240, margin: '0 auto' }}>
-      {/* distance rings */}
-      {rings.map(({ frac, label }) => (
-        <div key={label} style={{
-          position: 'absolute',
-          left: 120 - frac, top: 120 - frac,
-          width: frac * 2, height: frac * 2,
-          borderRadius: '50%',
-          border: '1px solid rgba(200,255,62,0.1)',
-        }}>
-          <span style={{
-            position: 'absolute', top: -9, left: '50%', transform: 'translateX(-50%)',
-            fontSize: 8, color: 'rgba(200,255,62,0.3)', fontFamily: 'monospace', whiteSpace: 'nowrap',
-          }}>{label}</span>
-        </div>
-      ))}
-      {/* crosshairs */}
-      <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, borderTop: '1px dashed rgba(200,255,62,0.06)' }}/>
-      <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, borderLeft: '1px dashed rgba(200,255,62,0.06)' }}/>
-      {/* north label */}
-      <span style={{ position: 'absolute', top: 4, left: '50%', transform: 'translateX(-50%)',
-        fontSize: 9, color: 'rgba(200,255,62,0.4)', fontFamily: 'monospace', fontWeight: 600 }}>N</span>
-      {/* sweep arm */}
-      <div style={{ position: 'absolute', inset: 0, transform: `rotate(${sweep}deg)`, pointerEvents: 'none' }}>
-        <div style={{ position: 'absolute', left: '50%', top: '50%', width: '50%', height: 2,
-          background: 'linear-gradient(to right, rgba(200,255,62,0.9), rgba(200,255,62,0))',
-          transformOrigin: '0 50%', boxShadow: '0 0 8px rgba(200,255,62,0.5)' }}/>
-        <div style={{ position: 'absolute', left: '50%', top: '50%', width: '50%', height: 120,
-          background: 'conic-gradient(from -6deg, rgba(200,255,62,0.13), rgba(200,255,62,0) 30deg)',
-          transformOrigin: '0 0', transform: 'translateY(-60px)' }}/>
-      </div>
-      {/* device dots */}
-      {agents.map(a => {
+      // sweep cone + arm
+      const sweepRad = sweep * Math.PI / 180;
+      ctx.save();
+      ctx.translate(120, 120);
+      ctx.rotate(sweepRad);
+
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, RADAR_R, -6 * Math.PI / 180, 24 * Math.PI / 180);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(200,255,62,0.08)';
+      ctx.fill();
+
+      const armGrad = ctx.createLinearGradient(0, 0, RADAR_R, 0);
+      armGrad.addColorStop(0, 'rgba(200,255,62,0.9)');
+      armGrad.addColorStop(1, 'rgba(200,255,62,0)');
+      ctx.strokeStyle = armGrad;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = 'rgba(200,255,62,0.5)';
+      ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(RADAR_R, 0); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+
+      // advance sweep & detect pings
+      prevSweep = sweep;
+      sweep     = (sweep + 1.2) % 360;
+      agts.forEach(a => {
+        const pos = agentRadarPos(a, phone);
+        if (!pos) return;
+        const uid  = a.unit_id || a.agent_id;
+        const d    = angleDiff(sweep,     pos.bearing);
+        const prev = angleDiff(prevSweep, pos.bearing);
+        if (d < 4 && prev >= 4) pingAge[uid] = 0;
+      });
+      Object.keys(pingAge).forEach(k => { pingAge[k]++; });
+
+      // device dots
+      agts.forEach(a => {
         const uid  = a.unit_id || a.agent_id;
         const meta = getAgentMeta(a);
-        const pos  = agentRadarPos(a, phoneLoc);
+        const pos  = agentRadarPos(a, phone);
+        if (!pos) return;
 
-        // fallback: no GPS — place off-screen placeholder ring at edge with faded style
-        const hasFix = pos != null;
-        const cx = hasFix ? pos.x : null;
-        const cy = hasFix ? pos.y : null;
+        const { x, y } = pos;
+        const age  = pingAge[uid] ?? 999;
+        const ping = age < 45;
+        const glow = ping ? Math.max(0, 1 - age / 45) : 0;
+        const col  = a._online ? meta.color : 'rgba(255,255,255,0.25)';
+        const isHex = col.startsWith('#');
 
-        if (!hasFix) return null;   // skip dots without real position
+        if (ping && glow > 0.05) {
+          ctx.beginPath();
+          ctx.arc(x, y, 10 + glow * 12, 0, Math.PI * 2);
+          ctx.strokeStyle = isHex ? hexAlpha(col, glow * 0.7) : col;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
 
-        const age   = pingAge.current[uid] ?? 999;
-        const ping  = age < 45;                  // show ping for ~45 frames (~0.7s)
-        const glow  = ping ? Math.max(0, 1 - age / 45) : 0;
-        const color = a._online ? meta.color : 'rgba(255,255,255,0.25)';
+        ctx.beginPath(); ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.fillStyle = a._online && isHex ? hexAlpha(col, 0.16) : 'rgba(255,255,255,0.06)';
+        ctx.fill();
 
-        return (
-          <div key={uid} style={{ position: 'absolute', left: cx - 10, top: cy - 10,
-            width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {/* ping ripple */}
-            {ping && (
-              <div style={{
-                position: 'absolute', inset: -Math.round(glow * 12),
-                borderRadius: '50%',
-                border: `1px solid ${meta.color}`,
-                opacity: glow * 0.7,
-                pointerEvents: 'none',
-              }}/>
-            )}
-            <div style={{
-              width: 20, height: 20, borderRadius: '50%',
-              background: a._online ? `${color}28` : 'rgba(255,255,255,0.06)',
-              border: `1.5px solid ${color}`,
-              boxShadow: ping ? `0 0 ${8 + glow * 10}px ${color}` : `0 0 4px ${color}55`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color,
-              transition: 'box-shadow 0.1s',
-            }}>
-              <Icon name={meta.icon} size={9} sw={2.2}/>
-            </div>
-          </div>
-        );
-      })}
-      {/* phone dot (center) */}
-      <div style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)',
-        width: 12, height: 12, borderRadius: '50%', background: '#fff', border: '2px solid #0B0B0E',
-        boxShadow: '0 0 12px rgba(255,255,255,0.5)' }}/>
-    </div>
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = col;
+        ctx.shadowBlur = ping ? 8 + glow * 10 : 4;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = col; ctx.fill();
+      });
+
+      // phone dot
+      ctx.beginPath(); ctx.arc(120, 120, 6, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.shadowColor = 'rgba(255,255,255,0.5)';
+      ctx.shadowBlur = 12;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#0B0B0E';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      rafId = requestAnimationFrame(draw);
+    }
+
+    let rafId = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+
+  return (
+    <canvas ref={canvasRef} style={{ display: 'block', width: 240, height: 240, margin: '0 auto' }}/>
   );
 }
 
@@ -1416,16 +1448,22 @@ function App() {
       });
     });
 
+    let pendingUnitData = false;
     ismTracker.addEventListener('update', () => {
-      const snap = {};
-      ismTracker.unitIds().forEach(uid => {
-        snap[uid] = {
-          state:  ismTracker.get(uid, 'state'),
-          event:  ismTracker.get(uid, 'event'),
-          report: ismTracker.get(uid, 'report'),
-        };
+      if (pendingUnitData) return;
+      pendingUnitData = true;
+      requestAnimationFrame(() => {
+        pendingUnitData = false;
+        const snap = {};
+        ismTracker.unitIds().forEach(uid => {
+          snap[uid] = {
+            state:  ismTracker.get(uid, 'state'),
+            event:  ismTracker.get(uid, 'event'),
+            report: ismTracker.get(uid, 'report'),
+          };
+        });
+        setUnitData({ ...snap });
       });
-      setUnitData({ ...snap });
     });
 
     mqttBus.onConnect(() => {

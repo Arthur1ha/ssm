@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "trigger": "人",
+    "action": "Hello",
+    "cooldown_s": 30,
+    "last_triggered": 1780456491.6709394
+  }
+]

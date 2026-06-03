@@ -13,6 +13,12 @@ class Go2Connection:
         self._latest_frame: bytes | None = None
         self._robot_state: dict = {}
         self._state_queues: list[asyncio.Queue] = []
+        self._frame_ready: asyncio.Event | None = None
+
+    def _get_frame_event(self) -> asyncio.Event:
+        if self._frame_ready is None:
+            self._frame_ready = asyncio.Event()
+        return self._frame_ready
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
         """建立 Remote 模式 WebRTC 连接。应作为 asyncio.create_task() 调用。"""
@@ -59,6 +65,7 @@ class Go2Connection:
 
     async def disconnect(self) -> None:
         self.is_connected = False
+        self._frame_ready = None
         if self._conn:
             await self._conn.disconnect()
             self._conn = None
@@ -107,9 +114,13 @@ class Go2Connection:
         while self.is_connected:
             try:
                 frame = await track.recv()   # 必须持续 drain，否则 aiortc 缓冲区积压
-                now = time.monotonic()
-                if now - last_encode < 0.066:  # ~15fps
-                    continue
+            except Exception as e:
+                logging.warning("[Go2] 视频 track 结束: %s", e)
+                break
+            now = time.monotonic()
+            if now - last_encode < 0.04:  # ~25fps
+                continue
+            try:
                 img = frame.to_image()
                 def encode():
                     buf = io.BytesIO()
@@ -117,21 +128,27 @@ class Go2Connection:
                     return buf.getvalue()
                 self._latest_frame = await loop.run_in_executor(None, encode)
                 last_encode = now
+                self._get_frame_event().set()
             except Exception as e:
-                logging.warning("[Go2] 视频帧读取结束: %s", e)
-                break
+                logging.debug("[Go2] 帧编码失败，跳过: %s", e)
         logging.info("[Go2] 视频采集停止")
 
     async def mjpeg_generator(self):
-        """Async generator，每 ~33ms yield 一帧 MJPEG multipart 数据。"""
+        """Async generator，有新帧时立即 yield，无重复帧。"""
+        event = self._get_frame_event()
         while self.is_connected:
-            if self._latest_frame:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            event.clear()
+            frame = self._latest_frame
+            if frame:
                 yield (
                     b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                    + self._latest_frame
+                    + frame
                     + b"\r\n"
                 )
-            await asyncio.sleep(0.033)
 
     def new_state_queue(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=20)

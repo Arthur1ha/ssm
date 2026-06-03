@@ -16,6 +16,7 @@ dependencies = [
     "edge-tts>=6.1.0",
     "unitree-webrtc-connect>=2.1.2",
     "pillow>=12.2.0",
+    "opencv-python-headless>=4.10.0",
 ]
 
 [dependency-groups]

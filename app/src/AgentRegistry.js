@@ -74,6 +74,9 @@ class AgentRegistry extends EventTarget {
     isOnline(id) { return this._agents.get(id)?._online ?? false; }
 
     _emit() {
-        this.dispatchEvent(new Event('change'));
+        clearTimeout(this._emitTimer);
+        this._emitTimer = setTimeout(() => {
+            this.dispatchEvent(new Event('change'));
+        }, 50);
     }
 }

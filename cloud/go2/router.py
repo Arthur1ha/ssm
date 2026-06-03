@@ -9,8 +9,12 @@ from pydantic import BaseModel
 import logging
 
 from cloud.go2.connection import go2
+from cloud.go2.vision import vision_loop
 
 router = APIRouter()
+
+# 当前注册的视觉规则回调，重连时先移除再重注册，防止重复触发
+_active_rule_cb = None
 
 
 @router.post("/api/go2/connect")
@@ -22,13 +26,52 @@ async def go2_connect():
     if not email or not password or not serial:
         raise HTTPException(status_code=500, detail="GO2_EMAIL/PASSWORD/SERIAL 未配置")
     go2._last_error = None
+
+    def _on_connect_done(t: asyncio.Task) -> None:
+        global _active_rule_cb
+        if not t.cancelled() and t.exception():
+            go2._last_error = str(t.exception())
+            return
+
+        from cloud.go2.tools import check_rules, go2_sport
+
+        # 移除上一次连接遗留的回调
+        if _active_rule_cb is not None:
+            vision_loop.remove_callback(_active_rule_cb)
+
+        def _rule_cb(result) -> None:
+            """OpenCV 检测结果 → 关键词 → 规则引擎 → 动作"""
+            parts = []
+            if result["persons"]["detected"]:
+                parts.append("人")
+            if result["faces"]["detected"]:
+                parts.append("脸")
+            if not parts:
+                return
+            observation = "，".join(parts)
+            triggered = check_rules(observation)
+            if not triggered:
+                return
+            try:
+                loop = asyncio.get_running_loop()
+                for action in triggered:
+                    loop.create_task(go2_sport(action))
+                    logging.info("[Go2Rules] vision→rule fired: %s", action)
+            except RuntimeError:
+                pass
+
+        _active_rule_cb = _rule_cb
+        vision_loop.start(lambda: go2._latest_frame)
+        vision_loop.add_callback(_rule_cb)
+
     task = asyncio.create_task(go2.connect(email, password, serial, region))
-    task.add_done_callback(lambda t: setattr(go2, "_last_error", str(t.exception())) if not t.cancelled() and t.exception() else None)
+    task.add_done_callback(_on_connect_done)
     return {"status": "connecting"}
 
 
 @router.post("/api/go2/disconnect")
 async def go2_disconnect():
+    vision_loop.stop()
     await go2.disconnect()
     return {"status": "disconnected"}
 
@@ -109,3 +152,38 @@ class ChatRequest(BaseModel):
 async def go2_chat(req: ChatRequest):
     from cloud.go2.agent import run_agent
     return await run_agent(req.session_id, req.message)
+
+
+@router.get("/api/go2/vision/latest")
+def go2_vision_latest():
+    """返回最近一次 OpenCV 检测的结构化结果。"""
+    if vision_loop.latest is None:
+        raise HTTPException(status_code=503, detail="暂无检测数据，请确认 Go2 已连接")
+    return vision_loop.latest
+
+
+@router.get("/api/go2/vision/stream")
+async def go2_vision_stream():
+    """SSE 流：每次检测完成后推送一条 VisionFrame JSON。"""
+    q: asyncio.Queue = asyncio.Queue(maxsize=10)
+
+    def on_frame(result):
+        try:
+            q.put_nowait(result)
+        except asyncio.QueueFull:
+            pass
+
+    vision_loop.add_callback(on_frame)
+
+    async def generate():
+        try:
+            while go2.is_connected:
+                try:
+                    result = await asyncio.wait_for(q.get(), timeout=5.0)
+                    yield f"data: {json.dumps(result)}\n\n"
+                except asyncio.TimeoutError:
+                    yield "data: {}\n\n"
+        finally:
+            vision_loop.remove_callback(on_frame)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
