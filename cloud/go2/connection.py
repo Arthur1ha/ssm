@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import math
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
@@ -127,7 +128,6 @@ class Go2Connection:
                 pass
 
     def _on_odom(self, msg: dict) -> None:
-        import math
         data = msg.get("data", {})
         pose = data.get("pose", {})
         pos = pose.get("position", {})
@@ -150,6 +150,7 @@ class Go2Connection:
                 pass
 
     def _on_low_state(self, msg: dict) -> None:
+        # poll-only: low_state is read via the property, no queue fan-out needed
         data = msg.get("data", {})
         self._low_state = {
             "battery_soc": data.get("bms_state", {}).get("soc"),
