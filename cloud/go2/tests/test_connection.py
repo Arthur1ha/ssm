@@ -131,3 +131,36 @@ def test_odom_queue_receives_updates():
     assert data["x"] == pytest.approx(3.0)
     conn.remove_odom_queue(q)
     assert q not in conn._odom_queues
+
+
+def test_move_velocity_raises_when_not_connected():
+    conn = Go2Connection()
+    with pytest.raises(RuntimeError, match="not connected"):
+        conn.move_velocity(0.3, 0.0, 0.0)
+
+
+def test_move_velocity_sends_wireless_controller():
+    conn = Go2Connection()
+    conn.is_connected = True
+    mock_pub_sub = MagicMock()
+    conn._conn = MagicMock()
+    conn._conn.datachannel.pub_sub = mock_pub_sub
+
+    conn.move_velocity(0.3, 0.1, -0.2)
+
+    mock_pub_sub.publish_without_callback.assert_called_once()
+    call_args = mock_pub_sub.publish_without_callback.call_args
+    topic = call_args[0][0]
+    data  = call_args[1]["data"]
+    assert "wirelesscontroller" in topic
+    assert data["ly"] == pytest.approx(0.3)    # vx → ly
+    assert data["lx"] == pytest.approx(-0.1)   # -vy → lx
+    assert data["rx"] == pytest.approx(0.2)    # -vyaw → rx
+
+
+def test_set_led_raises_for_unknown_color():
+    conn = Go2Connection()
+    conn.is_connected = True
+    conn._conn = MagicMock()
+    with pytest.raises(ValueError, match="Unknown color"):
+        asyncio.run(conn.set_led("pink"))

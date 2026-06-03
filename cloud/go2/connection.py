@@ -278,6 +278,44 @@ class Go2Connection:
         except ValueError:
             pass
 
+    def move_velocity(self, vx: float, vy: float, vyaw: float) -> None:
+        if not self.is_connected or not self._conn:
+            raise RuntimeError("Go2 not connected")
+        self._conn.datachannel.pub_sub.publish_without_callback(
+            RTC_TOPIC["WIRELESS_CONTROLLER"],
+            data={"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0},
+        )
+
+    async def balance_stand(self) -> None:
+        if not self.is_connected or not self._conn:
+            raise RuntimeError("Go2 not connected")
+        await self._conn.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC["SPORT_MOD"],
+            {"api_id": SPORT_CMD["BalanceStand"]},
+        )
+        self.fsm_state = "standing"
+
+    async def set_obstacle_avoidance(self, enabled: bool) -> None:
+        if not self.is_connected or not self._conn:
+            raise RuntimeError("Go2 not connected")
+        await self._conn.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC["OBSTACLES_AVOID"],
+            {"api_id": 1001, "parameter": {"enable": int(enabled)}},
+        )
+
+    async def set_led(self, color: str = "white", duration: int = 60) -> None:
+        _VALID_COLORS = {"white", "red", "yellow", "blue", "green", "cyan", "purple"}
+        if color not in _VALID_COLORS:
+            raise ValueError(
+                f"Unknown color {color!r}, choose from: {', '.join(sorted(_VALID_COLORS))}"
+            )
+        if not self.is_connected or not self._conn:
+            raise RuntimeError("Go2 not connected")
+        await self._conn.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC["VUI"],
+            {"api_id": 1001, "parameter": {"color": color, "time": duration}},
+        )
+
     def latest_frame_b64(self) -> str | None:
         if self._latest_frame is None:
             return None
