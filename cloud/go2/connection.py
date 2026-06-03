@@ -33,6 +33,9 @@ class Go2Connection:
         self._latest_frame: bytes | None = None
         self._robot_state: dict = {}
         self._state_queues: list[asyncio.Queue] = []
+        self._odom: dict = {}
+        self._low_state: dict = {}
+        self._odom_queues: list[asyncio.Queue] = []
         self._frame_ready: asyncio.Event | None = None
         self.fsm_state: str = "offline"
         self._exec_reset_task: asyncio.Task | None = None
@@ -70,6 +73,13 @@ class Go2Connection:
 
         self._conn.datachannel.pub_sub.subscribe(
             RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_state
+        )
+        await self._conn.datachannel.disableTrafficSaving(True)
+        self._conn.datachannel.pub_sub.subscribe(
+            RTC_TOPIC["ROBOTODOM"], self._on_odom
+        )
+        self._conn.datachannel.pub_sub.subscribe(
+            RTC_TOPIC["LOW_STATE"], self._on_low_state
         )
         self.is_connected = True
         self.fsm_state = "standing"
@@ -115,6 +125,38 @@ class Go2Connection:
                 q.put_nowait(self._robot_state.copy())
             except asyncio.QueueFull:
                 pass
+
+    def _on_odom(self, msg: dict) -> None:
+        import math
+        data = msg.get("data", {})
+        pose = data.get("pose", {})
+        pos = pose.get("position", {})
+        ori = pose.get("orientation", {})
+        qx, qy, qz, qw = (
+            ori.get("x", 0.0), ori.get("y", 0.0),
+            ori.get("z", 0.0), ori.get("w", 1.0),
+        )
+        heading = math.atan2(2.0 * (qw * qz + qx * qy),
+                             1.0 - 2.0 * (qy * qy + qz * qz))
+        self._odom = {
+            "x": pos.get("x", 0.0),
+            "y": pos.get("y", 0.0),
+            "heading": heading,
+        }
+        for q in self._odom_queues:
+            try:
+                q.put_nowait(self._odom.copy())
+            except asyncio.QueueFull:
+                pass
+
+    def _on_low_state(self, msg: dict) -> None:
+        data = msg.get("data", {})
+        self._low_state = {
+            "battery_soc": data.get("bms_state", {}).get("soc"),
+            "power_v":     data.get("power_v"),
+            "imu_rpy":     data.get("imu_state", {}).get("rpy", [0.0, 0.0, 0.0]),
+            "foot_force":  data.get("foot_force", [0, 0, 0, 0]),
+        }
 
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
@@ -213,6 +255,25 @@ class Go2Connection:
     def remove_state_queue(self, q: asyncio.Queue) -> None:
         try:
             self._state_queues.remove(q)
+        except ValueError:
+            pass
+
+    @property
+    def odom(self) -> dict:
+        return self._odom.copy()
+
+    @property
+    def low_state(self) -> dict:
+        return self._low_state.copy()
+
+    def new_odom_queue(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=20)
+        self._odom_queues.append(q)
+        return q
+
+    def remove_odom_queue(self, q: asyncio.Queue) -> None:
+        try:
+            self._odom_queues.remove(q)
         except ValueError:
             pass
 

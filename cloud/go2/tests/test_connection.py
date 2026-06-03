@@ -70,3 +70,64 @@ def test_latest_frame_b64_returns_base64_string():
     result = conn.latest_frame_b64()
     assert result == base64.b64encode(b"\xff\xd8\xff").decode()
     assert isinstance(result, str)
+
+
+def test_initial_odom_and_lowstate():
+    conn = Go2Connection()
+    assert conn.odom == {}
+    assert conn.low_state == {}
+
+
+def test_on_odom_parses_position_and_heading():
+    import math
+    conn = Go2Connection()
+    msg = {
+        "data": {
+            "header": {"stamp": {"sec": 1000, "nanosec": 0}, "frame_id": "odom"},
+            "pose": {
+                "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+                "orientation": {"x": 0.0, "y": 0.0, "z": 0.7071, "w": 0.7071},
+            },
+        }
+    }
+    conn._on_odom(msg)
+    assert conn.odom["x"] == pytest.approx(1.0)
+    assert conn.odom["y"] == pytest.approx(2.0)
+    assert conn.odom["heading"] == pytest.approx(math.pi / 2, abs=0.01)
+
+
+def test_on_low_state_parses_battery_and_imu():
+    conn = Go2Connection()
+    msg = {
+        "data": {
+            "bms_state": {"soc": 75},
+            "power_v": 28.3,
+            "imu_state": {"rpy": [0.01, -0.01, 1.57]},
+            "foot_force": [90, 85, 80, 88],
+        }
+    }
+    conn._on_low_state(msg)
+    assert conn.low_state["battery_soc"] == 75
+    assert conn.low_state["power_v"] == pytest.approx(28.3)
+    assert conn.low_state["imu_rpy"][2] == pytest.approx(1.57)
+    assert conn.low_state["foot_force"] == [90, 85, 80, 88]
+
+
+def test_odom_queue_receives_updates():
+    conn = Go2Connection()
+    q = conn.new_odom_queue()
+    msg = {
+        "data": {
+            "header": {"stamp": {"sec": 1, "nanosec": 0}, "frame_id": "odom"},
+            "pose": {
+                "position": {"x": 3.0, "y": 4.0, "z": 0.0},
+                "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+            },
+        }
+    }
+    conn._on_odom(msg)
+    assert q.qsize() == 1
+    data = q.get_nowait()
+    assert data["x"] == pytest.approx(3.0)
+    conn.remove_odom_queue(q)
+    assert q not in conn._odom_queues
