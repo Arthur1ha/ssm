@@ -25,6 +25,7 @@ _FSM_NEXT: dict[str, dict[str, str]] = {
 }
 
 _EXEC_RESET_DELAY = 12.0  # seconds before auto-reset executing → standing
+_VALID_LED_COLORS = frozenset({"white", "red", "yellow", "blue", "green", "cyan", "purple"})
 
 
 class Go2Connection:
@@ -304,10 +305,9 @@ class Go2Connection:
         )
 
     async def set_led(self, color: str = "white", duration: int = 60) -> None:
-        _VALID_COLORS = {"white", "red", "yellow", "blue", "green", "cyan", "purple"}
-        if color not in _VALID_COLORS:
+        if color not in _VALID_LED_COLORS:
             raise ValueError(
-                f"Unknown color {color!r}, choose from: {', '.join(sorted(_VALID_COLORS))}"
+                f"Unknown color {color!r}, choose from: {', '.join(sorted(_VALID_LED_COLORS))}"
             )
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")

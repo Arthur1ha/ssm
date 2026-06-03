@@ -160,7 +160,17 @@ def test_move_velocity_sends_wireless_controller():
 
 def test_set_led_raises_for_unknown_color():
     conn = Go2Connection()
-    conn.is_connected = True
-    conn._conn = MagicMock()
     with pytest.raises(ValueError, match="Unknown color"):
         asyncio.run(conn.set_led("pink"))
+
+
+def test_balance_stand_raises_when_not_connected():
+    conn = Go2Connection()
+    with pytest.raises(RuntimeError, match="not connected"):
+        asyncio.run(conn.balance_stand())
+
+
+def test_set_obstacle_avoidance_raises_when_not_connected():
+    conn = Go2Connection()
+    with pytest.raises(RuntimeError, match="not connected"):
+        asyncio.run(conn.set_obstacle_avoidance(True))
