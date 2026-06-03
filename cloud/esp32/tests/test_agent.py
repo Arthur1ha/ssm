@@ -225,3 +225,58 @@ class TestBeliefHistory:
                 if len(agent._belief_history) > 10:
                     agent._belief_history.pop(0)
         assert len(agent._belief_history) == 10
+
+
+class TestRunIntent:
+    def _make_agent_with_llm(self, content: str):
+        from unittest.mock import AsyncMock
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=content))
+        state = MagicMock(spec=ESP32State)
+        state.get_manifest.return_value = {
+            "capabilities": ["SET_STATE", "SET_COLOR"],
+            "resource_tags": ["lighting"],
+        }
+        return ESP32Agent(state, llm=mock_llm)
+
+    @pytest.mark.asyncio
+    async def test_returns_task_ids(self):
+        agent = self._make_agent_with_llm(
+            '[{"device_id": "esp32_desk_led", "action": "SET_COLOR", "params": {"r": 255, "g": 200, "b": 100, "brightness": 180}}]'
+        )
+        with patch("cloud.esp32.tools.publish_task"):
+            result = await agent.run_intent("s1", "暖色调", ["esp32_desk_led"])
+        assert result["status"] == "dispatched"
+        assert len(result["task_ids"]) == 1
+        assert result["task_ids"][0] == "s1_t0"
+
+    @pytest.mark.asyncio
+    async def test_publishes_correct_mqtt_command(self):
+        agent = self._make_agent_with_llm(
+            '[{"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {"state": "OFF"}}]'
+        )
+        with patch("cloud.esp32.tools.publish_task") as mock_pub:
+            await agent.run_intent("s1", "关灯", ["esp32_desk_led"])
+        mock_pub.assert_called_once()
+        args = mock_pub.call_args[0]
+        assert args[0] == "esp32_desk_led"
+        assert args[2] == "SET_STATE"
+        assert args[3] == {"state": "OFF"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_invalid_llm_response(self):
+        agent = self._make_agent_with_llm("not valid json")
+        with patch("cloud.esp32.tools.publish_task"):
+            result = await agent.run_intent("s1", "开灯", ["esp32_desk_led"])
+        assert result["task_ids"] == []
+        assert result["status"] == "dispatched"
+
+    @pytest.mark.asyncio
+    async def test_skips_malformed_commands(self):
+        agent = self._make_agent_with_llm(
+            '[{"device_id": "esp32_desk_led"}, {"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {}}]'
+        )
+        with patch("cloud.esp32.tools.publish_task") as mock_pub:
+            result = await agent.run_intent("s1", "开灯", ["esp32_desk_led"])
+        assert len(result["task_ids"]) == 1
+        mock_pub.assert_called_once()
