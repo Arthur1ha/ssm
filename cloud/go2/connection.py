@@ -5,6 +5,26 @@ import logging
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
 
+_FSM_AVAILABLE: dict[str, list[str]] = {
+    "offline":    [],
+    "connecting": [],
+    "lying":      ["StandUp"],
+    "standing":   ["StandDown", "Move", "Hello", "Stretch", "Dance1", "Dance2"],
+    "moving":     ["StopMove"],
+    "executing":  ["StopMove"],
+}
+
+_FSM_NEXT: dict[str, dict[str, str]] = {
+    "lying":     {"StandUp":   "standing"},
+    "standing":  {"StandDown": "lying", "Move": "moving",
+                  "Hello": "executing", "Stretch": "executing",
+                  "Dance1": "executing", "Dance2": "executing"},
+    "moving":    {"StopMove": "standing"},
+    "executing": {"StopMove": "standing"},
+}
+
+_EXEC_RESET_DELAY = 12.0  # seconds before auto-reset executing → standing
+
 
 class Go2Connection:
     def __init__(self) -> None:
@@ -14,6 +34,12 @@ class Go2Connection:
         self._robot_state: dict = {}
         self._state_queues: list[asyncio.Queue] = []
         self._frame_ready: asyncio.Event | None = None
+        self.fsm_state: str = "offline"
+        self._exec_reset_task: asyncio.Task | None = None
+
+    @property
+    def available_actions(self) -> list[str]:
+        return _FSM_AVAILABLE.get(self.fsm_state, [])
 
     def _get_frame_event(self) -> asyncio.Event:
         if self._frame_ready is None:
@@ -22,6 +48,7 @@ class Go2Connection:
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
         """建立 Remote 模式 WebRTC 连接。应作为 asyncio.create_task() 调用。"""
+        self.fsm_state = "connecting"
         if self._conn:
             await self._conn.disconnect()
 
@@ -45,6 +72,7 @@ class Go2Connection:
             RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_state
         )
         self.is_connected = True
+        self.fsm_state = "lying"
         logging.info("[Go2] WebRTC 连接成功")
 
         # track 事件在 connect() 内部触发，此处直接从 transceiver 取 track 消费
@@ -65,6 +93,9 @@ class Go2Connection:
 
     async def disconnect(self) -> None:
         self.is_connected = False
+        self.fsm_state = "offline"
+        if self._exec_reset_task and not self._exec_reset_task.done():
+            self._exec_reset_task.cancel()
         self._frame_ready = None
         if self._conn:
             await self._conn.disconnect()
@@ -93,18 +124,41 @@ class Go2Connection:
             {"api_id": 1002, "parameter": {"name": mode}},
         )
 
+    def _schedule_exec_reset(self) -> None:
+        if self._exec_reset_task and not self._exec_reset_task.done():
+            self._exec_reset_task.cancel()
+
+        async def _reset():
+            await asyncio.sleep(_EXEC_RESET_DELAY)
+            if self.fsm_state == "executing":
+                self.fsm_state = "standing"
+
+        self._exec_reset_task = asyncio.create_task(_reset())
+
     async def send_command(self, cmd: str, params: dict | None = None) -> None:
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
         api_id = SPORT_CMD.get(cmd)
         if api_id is None:
             raise ValueError(f"Unknown command: {cmd}")
+
+        next_state = _FSM_NEXT.get(self.fsm_state, {}).get(cmd)
+        if next_state is None:
+            raise ValueError(
+                f"'{cmd}' 在当前状态 '{self.fsm_state}' 下不可用，"
+                f"可用动作: {self.available_actions}"
+            )
+
         options: dict = {"api_id": api_id}
         if params:
             options["parameter"] = params
         await self._conn.datachannel.pub_sub.publish_request_new(
             RTC_TOPIC["SPORT_MOD"], options
         )
+
+        self.fsm_state = next_state
+        if next_state == "executing":
+            self._schedule_exec_reset()
 
     async def _consume_video(self, track) -> None:
         import io, time

@@ -12,7 +12,7 @@ class RunRequest(BaseModel):
     device_ids: list = []
 
 
-@router.post("/api/esp32/run")
+@router.post("/api/esp32/intents")
 async def esp32_run(req: RunRequest):
     agent = get_agent()
     if agent is None:

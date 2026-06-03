@@ -1,15 +1,47 @@
 import asyncio
 import json
+import logging
 import os
+import time
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-import logging
-
 from cloud.go2.connection import go2
 from cloud.go2.vision import vision_loop
+
+_DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
+
+
+def _register_go2(serial: str) -> None:
+    try:
+        devices = json.loads(_DEVICES_FILE.read_text()) if _DEVICES_FILE.exists() else {}
+    except Exception:
+        devices = {}
+    devices["go2"] = {
+        "unit_id":      "go2",
+        "slug":         "go2",
+        "name":         "Go2 机器狗",
+        "agent_type":   "robot",
+        "hw_platform":  "go2",
+        "serial":       serial,
+        "capabilities": ["sport", "move", "vision", "rules", "chat"],
+        "ts":           int(time.time()),
+    }
+    _DEVICES_FILE.write_text(json.dumps(devices, ensure_ascii=False, indent=2))
+    logging.info("[Go2] 已注册到 devices.json (slug=go2)")
+
+
+def _unregister_go2() -> None:
+    try:
+        devices = json.loads(_DEVICES_FILE.read_text()) if _DEVICES_FILE.exists() else {}
+    except Exception:
+        return
+    devices.pop("go2", None)
+    _DEVICES_FILE.write_text(json.dumps(devices, ensure_ascii=False, indent=2))
+    logging.info("[Go2] 已从 devices.json 移除")
 
 router = APIRouter()
 
@@ -17,7 +49,7 @@ router = APIRouter()
 _active_rule_cb = None
 
 
-@router.post("/api/go2/connect")
+@router.post("/api/go2/connection")
 async def go2_connect():
     email    = os.getenv("GO2_EMAIL", "")
     password = os.getenv("GO2_PASSWORD", "")
@@ -32,6 +64,8 @@ async def go2_connect():
         if not t.cancelled() and t.exception():
             go2._last_error = str(t.exception())
             return
+
+        _register_go2(serial)
 
         from cloud.go2.tools import check_rules, go2_sport
 
@@ -69,19 +103,22 @@ async def go2_connect():
     return {"status": "connecting"}
 
 
-@router.post("/api/go2/disconnect")
+@router.delete("/api/go2/connection")
 async def go2_disconnect():
     vision_loop.stop()
     await go2.disconnect()
+    _unregister_go2()
     return {"status": "disconnected"}
 
 
-@router.get("/api/go2/status")
+@router.get("/api/go2/connection")
 def go2_status():
     return {
-        "connected": go2.is_connected,
-        "state": go2._robot_state,
-        "error": getattr(go2, "_last_error", None),
+        "connected":        go2.is_connected,
+        "fsm_state":        go2.fsm_state,
+        "available_actions": go2.available_actions,
+        "state":            go2._robot_state,
+        "error":            getattr(go2, "_last_error", None),
     }
 
 
@@ -95,7 +132,7 @@ async def go2_video():
     )
 
 
-@router.get("/api/go2/state")
+@router.get("/api/go2/connection/stream")
 async def go2_state():
     async def sse_gen():
         q = go2.new_state_queue()
@@ -121,7 +158,7 @@ class ModeRequest(BaseModel):
     mode: str
 
 
-@router.post("/api/go2/command")
+@router.post("/api/go2/commands")
 async def go2_command(req: CommandRequest):
     try:
         await go2.send_command(req.cmd, req.params or None)
@@ -132,7 +169,7 @@ async def go2_command(req: CommandRequest):
     return {"ok": True}
 
 
-@router.post("/api/go2/mode")
+@router.put("/api/go2/mode")
 async def go2_mode(req: ModeRequest):
     if req.mode not in ("normal", "ai", "mcf"):
         raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
@@ -154,7 +191,7 @@ async def go2_chat(req: ChatRequest):
     return await run_agent(req.session_id, req.message)
 
 
-@router.get("/api/go2/vision/latest")
+@router.get("/api/go2/vision")
 def go2_vision_latest():
     """返回最近一次 OpenCV 检测的结构化结果。"""
     if vision_loop.latest is None:

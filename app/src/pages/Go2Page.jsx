@@ -124,7 +124,7 @@ function Go2DevicePage({ onBack }) {
   /* ── 状态轮询 ── */
   const pollStatus = useCallback(async () => {
     try {
-      const d = await fetch("/api/go2/status").then(r => r.json());
+      const d = await fetch("/api/go2/connection").then(r => r.json());
       if (d.connected && status !== "connected") { setStatus("connected"); setError(""); }
       else if (!d.connected && status === "connected") { setStatus("idle"); setRobot(null); }
       else if (!d.connected && status === "connecting" && d.error) { setStatus("error"); setError(d.error); }
@@ -139,7 +139,7 @@ function Go2DevicePage({ onBack }) {
   /* ── SSE ── */
   useEffect(() => {
     if (status !== "connected") return;
-    const es = new EventSource("/api/go2/state");
+    const es = new EventSource("/api/go2/connection/stream");
     esRef.current = es;
     es.onmessage = e => {
       try { const d = JSON.parse(e.data); if (d.mode !== undefined) setRobot(d); } catch (_) {}
@@ -151,13 +151,13 @@ function Go2DevicePage({ onBack }) {
   const connect = useCallback(async () => {
     setError(""); setStatus("connecting");
     try {
-      const r = await fetch("/api/go2/connect", { method: "POST" });
+      const r = await fetch("/api/go2/connection", { method: "POST" });
       if (!r.ok) throw new Error((await r.json()).detail || "连接失败");
     } catch (e) { setStatus("error"); setError(String(e)); }
   }, []);
 
   useEffect(() => {
-    fetch("/api/go2/status")
+    fetch("/api/go2/connection")
       .then(r => r.json())
       .then(d => { if (d.connected) { setStatus("connected"); setError(""); } else connect(); })
       .catch(() => connect());
@@ -167,19 +167,19 @@ function Go2DevicePage({ onBack }) {
 
   const disconnect = async () => {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    await fetch("/api/go2/disconnect", { method: "POST" });
+    await fetch("/api/go2/connection", { method: "DELETE" });
     setStatus("idle"); setRobot(null);
   };
 
   /* ── 指令 ── */
-  const sendCmd = (cmd, params) => fetch("/api/go2/command", {
+  const sendCmd = (cmd, params) => fetch("/api/go2/commands", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cmd, params: params || {} }),
   });
 
   const switchMode = async m => {
     await fetch("/api/go2/mode", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: m }),
     });
     setMode(m);

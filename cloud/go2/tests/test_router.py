@@ -18,7 +18,7 @@ def client():
 
 
 def test_status_disconnected(client):
-    r = client.get("/api/go2/status")
+    r = client.get("/api/go2/connection")
     assert r.status_code == 200
     data = r.json()
     assert data["connected"] is False
@@ -26,7 +26,7 @@ def test_status_disconnected(client):
 
 
 def test_command_503_when_not_connected(client):
-    r = client.post("/api/go2/command", json={"cmd": "StandUp", "params": {}})
+    r = client.post("/api/go2/commands", json={"cmd": "StandUp", "params": {}})
     assert r.status_code == 503
 
 
@@ -34,7 +34,7 @@ def test_command_400_for_unknown_cmd(client):
     conn_module.go2.is_connected = True
     conn_module.go2._conn = object()  # fake — ValueError raised before _conn is used
     try:
-        r = client.post("/api/go2/command", json={"cmd": "FlyToMoon", "params": {}})
+        r = client.post("/api/go2/commands", json={"cmd": "FlyToMoon", "params": {}})
         assert r.status_code == 400
         assert "Unknown command" in r.json()["detail"]
     finally:
@@ -51,6 +51,6 @@ def test_connect_500_when_env_missing(client, monkeypatch):
     monkeypatch.delenv("GO2_EMAIL", raising=False)
     monkeypatch.delenv("GO2_PASSWORD", raising=False)
     monkeypatch.delenv("GO2_SERIAL", raising=False)
-    r = client.post("/api/go2/connect")
+    r = client.post("/api/go2/connection")
     assert r.status_code == 500
     assert "未配置" in r.json()["detail"]

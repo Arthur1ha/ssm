@@ -669,7 +669,7 @@ function ChatSheet({ open, onClose, agents, unitData }) {
 
     try {
       // ① NLU parse — 同时识别 intent_type
-      const res = await fetch('/api/nlu', {
+      const res = await fetch('/api/intent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: t, devices: subs }),
@@ -937,7 +937,11 @@ function RulesScreen() {
   };
 
   const handleToggle = async (rule_id, enabled) => {
-    await fetch(`/api/rules/${rule_id}/toggle?enabled=${!enabled}`, { method: 'PATCH' });
+    await fetch(`/api/rules/${rule_id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !enabled }),
+    });
     load();
   };
 
