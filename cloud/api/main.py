@@ -10,9 +10,93 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 from cloud.go2.router import router as go2_router
+from contextlib import asynccontextmanager
+import paho.mqtt.client as _mqtt_lib
+from cloud.esp32.state import ESP32State
+from cloud.esp32 import tools as esp32_tools
+from cloud.esp32 import agent as esp32_agent_mod
+from cloud.esp32.router import router as esp32_router
 
-app = FastAPI()
+_esp32_state: ESP32State = ESP32State()
+_esp32_mqtt_client = None
+
+
+def _on_esp32_connect(client, userdata, flags, rc):
+    if rc == 0:
+        client.subscribe([
+            ("ssm/agents/+/manifest", 0),
+            ("ssm/agents/+/state",    0),
+            ("ssm/agents/+/event",    0),
+            ("ssm/agents/+/report",   0),
+            ("ssm/result/+/+",        0),
+        ])
+        print("[ESP32Agent MQTT] Connected and subscribed")
+
+
+def _on_esp32_message(client, userdata, msg):
+    topic = msg.topic
+    try:
+        payload = json.loads(msg.payload.decode())
+    except Exception:
+        payload = {}
+
+    parts = topic.split("/")
+    if len(parts) == 4 and parts[0] == "ssm" and parts[1] == "agents":
+        unit_id  = parts[2]
+        msg_type = parts[3]
+        if msg_type == "manifest" and isinstance(payload, dict):
+            _esp32_state.on_manifest(unit_id, payload)
+        if msg_type in ("state", "event", "report") and isinstance(payload, dict):
+            _esp32_state.on_agent_msg(unit_id, msg_type, payload)
+        if msg_type == "event":
+            suffix = unit_id.split("_")[-1]
+            if suffix in ("light", "ir", "sound"):
+                agent = esp32_agent_mod.get_agent()
+                if agent:
+                    agent.push_sensor_event(unit_id, payload)
+
+    elif len(parts) == 4 and parts[1] == "result":
+        task_id = parts[3]
+        if isinstance(payload, dict):
+            _esp32_state.store_task_result(task_id, payload)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global _esp32_mqtt_client
+    broker_host = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
+    broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+
+    _esp32_mqtt_client = _mqtt_lib.Client(client_id="esp32_agent", clean_session=True)
+    _esp32_mqtt_client.username_pw_set(
+        os.getenv("MQTT_USER", "ssm_user"),
+        os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r"),
+    )
+    _esp32_mqtt_client.on_connect = _on_esp32_connect
+    _esp32_mqtt_client.on_message = _on_esp32_message
+    _esp32_mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)
+
+    try:
+        _esp32_mqtt_client.connect(broker_host, broker_port, keepalive=60)
+        _esp32_mqtt_client.loop_start()
+        print(f"[ESP32Agent MQTT] Connecting to {broker_host}:{broker_port}...")
+    except Exception as e:
+        print(f"[ESP32Agent MQTT] Connection failed: {e}")
+
+    esp32_tools.init(_esp32_mqtt_client)
+    agent = esp32_agent_mod.init(_esp32_state)
+    agent.start()
+
+    yield
+
+    _esp32_mqtt_client.loop_stop()
+    _esp32_mqtt_client.disconnect()
+    print("[ESP32Agent MQTT] Disconnected")
+
+
+app = FastAPI(lifespan=lifespan)
 app.include_router(go2_router)
+app.include_router(esp32_router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 client = OpenAI(
@@ -237,6 +321,70 @@ def list_devices():
     ]
 
 
+def _go2_skills(available_actions: list[str]) -> list[dict]:
+    """根据当前 FSM 状态生成机器可读的技能描述（JSON Schema）。"""
+    skills = []
+    sport_cmds = [a for a in available_actions
+                  if a in {"StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"}]
+    if sport_cmds:
+        skills.append({
+            "id": "go2_sport",
+            "description": "执行预定义动作",
+            "endpoint": "/api/go2/command",
+            "method": "POST",
+            "inputSchema": {
+                "type": "object", "required": ["cmd"],
+                "properties": {"cmd": {"type": "string", "enum": sport_cmds}},
+            },
+        })
+    if "Move" in available_actions:
+        skills.append({
+            "id": "go2_move",
+            "description": "持续移动机器狗，发送后需调用 StopMove 停止",
+            "endpoint": "/api/go2/command",
+            "method": "POST",
+            "inputSchema": {
+                "type": "object", "required": ["cmd", "params"],
+                "properties": {
+                    "cmd": {"type": "string", "enum": ["Move"]},
+                    "params": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "number", "description": "前后速度 m/s，正值前进"},
+                            "y": {"type": "number", "description": "左右速度 m/s，正值左移"},
+                            "z": {"type": "number", "description": "旋转速度 rad/s，正值左转"},
+                        },
+                    },
+                },
+            },
+        })
+    if "StopMove" in available_actions:
+        skills.append({
+            "id": "go2_stop",
+            "description": "停止当前移动或动作",
+            "endpoint": "/api/go2/command",
+            "method": "POST",
+            "inputSchema": {
+                "type": "object", "required": ["cmd"],
+                "properties": {"cmd": {"type": "string", "enum": ["StopMove"]}},
+            },
+        })
+    skills.append({
+        "id": "go2_chat",
+        "description": "自然语言控制，可描述意图或提问，智能体自动选择工具执行",
+        "endpoint": "/api/go2/chat",
+        "method": "POST",
+        "inputSchema": {
+            "type": "object", "required": ["message"],
+            "properties": {
+                "session_id": {"type": "string", "default": "default"},
+                "message":    {"type": "string", "description": "自然语言指令或问题"},
+            },
+        },
+    })
+    return skills
+
+
 @app.get("/api/devices/{slug}/agent")
 def device_agent_card(slug: str):
     """Agent Card —— 机器可读的设备能力描述，供其他 AI Agent 自动发现和调用。"""
@@ -245,7 +393,7 @@ def device_agent_card(slug: str):
         raise HTTPException(status_code=404, detail=f"设备 '{slug}' 不存在或未上线")
 
     base_url = os.getenv("PUBLIC_BASE_URL", "")
-    return {
+    card: dict = {
         "name":          device.get("name", slug),
         "slug":          slug,
         "unit_id":       device.get("unit_id", ""),
@@ -257,3 +405,11 @@ def device_agent_card(slug: str):
         "agent_tag":     device.get("agent_tag", ""),
         "ts":            device.get("ts"),
     }
+
+    if slug == "go2":
+        from cloud.go2.connection import go2 as _go2
+        card["state"] = _go2.fsm_state
+        card["available_actions"] = _go2.available_actions
+        card["skills"] = _go2_skills(_go2.available_actions)
+
+    return card
