@@ -1352,9 +1352,9 @@ function playAudioB64(b64) {
 }
 
 const GO2_STATIC_DEVICE = {
-  unit_id:      "go2_main",
-  agent_id:     "go2_main",
-  slug:         "go2-air",
+  unit_id:      "go2",
+  agent_id:     "go2",
+  slug:         "go2",
   name:         "Go2 Air",
   agent_type:   "robot",
   capabilities: ["MOVE", "STAND_UP", "SIT_DOWN", "HELLO", "STRETCH", "DANCE"],
@@ -1500,10 +1500,11 @@ function App() {
   const hashMatch = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (hashMatch) {
     const slug = hashMatch[1];
-    if (slug === "go2-air") {
+    if (slug === "go2") {
       return <Go2DevicePage onBack={() => navigate('#')} />;
     }
     const device = agents.find(a => a.slug === slug || (a.unit_id || a.agent_id) === slug);
+    if (!device) { navigate('#'); return null; }
     return (
       <DeviceDetailPage
         slug={slug}
