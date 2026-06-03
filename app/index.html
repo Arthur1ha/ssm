@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0B0B0E">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>SSM · Nearby</title>
+  <title>SSM</title>
   <link rel="manifest" href="manifest.json">
   <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
@@ -34,14 +34,24 @@
   </style>
 </head>
 <body>
-  <!-- Core MQTT modules (plain JS, available as globals before React boots) -->
+  <!-- Plain JS globals (load before React) -->
+  <script src="src/config.js"></script>
+  <script src="src/utils/geo.js"></script>
+  <script src="src/utils/agentMeta.js"></script>
   <script src="src/MqttBus.js"></script>
   <script src="src/AgentRegistry.js"></script>
   <script src="src/ISMTracker.js"></script>
 
   <div id="root"></div>
 
+  <!-- JSX components (dependency order) -->
+  <script type="text/babel" src="src/components/Icon.jsx"></script>
+  <script type="text/babel" src="src/components/RadarScan.jsx"></script>
+  <script type="text/babel" src="src/components/DeviceCard.jsx"></script>
   <script type="text/babel" src="src/pages/Go2Page.jsx"></script>
+  <script type="text/babel" src="src/pages/DiscoverPage.jsx"></script>
+  <script type="text/babel" src="src/pages/DevicesPage.jsx"></script>
+  <script type="text/babel" src="src/pages/RulesPage.jsx"></script>
   <script type="text/babel" src="src/app.jsx"></script>
 
 </body>

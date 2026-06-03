@@ -1,16 +1,7 @@
-/* SSM PWA — Nearby device discovery + control via MQTT */
+/* SSM PWA — root app: routing, chat sheet, device detail, MQTT bootstrap */
 const { useState, useEffect, useRef, useCallback } = React;
 
-const BROKER_URL  = (location.protocol === 'https:')
-  ? `wss://${location.host}/mqtt`
-  : 'ws://47.116.137.202:9001';
-const BROKER_USER = 'ssm_user';
-const BROKER_PASS = 'Wl4sErQrlrpEbm7r';
-const LIME             = '#C8FF3E';
-const NEARBY_RADIUS_M  = 300;   // only show devices within this distance
-const POPUP_RADIUS_M   = 5000;    // trigger discovery popup within this distance
-
-/* ── Hash 路由工具 ────────────────────────────────────────────────── */
+/* ── Hash 路由 ──────────────────────────────────────────────────── */
 function useHash() {
   const [hash, setHash] = React.useState(window.location.hash);
   React.useEffect(() => {
@@ -18,581 +9,45 @@ function useHash() {
     window.addEventListener('hashchange', handler);
     return () => window.removeEventListener('hashchange', handler);
   }, []);
-  return hash;  // 例如 "#/devices/desk-lamp" 或 ""
+  return hash;
 }
 
-function navigate(hash) {
-  window.location.hash = hash;  // 触发 hashchange，不刷新页面
+/* ── TTS 音频播放 ────────────────────────────────────────────────── */
+// Android Chrome 要求用户首次手势后解锁 AudioContext，
+// 之后 MQTT 触发的 Audio.play() 才不会被自动播放策略拦截。
+let _audioUnlocked = false;
+function _unlockAudio() {
+  if (_audioUnlocked) return;
+  _audioUnlocked = true;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ctx.resume().then(() => ctx.close()).catch(() => {});
+  } catch (e) {}
+}
+document.addEventListener('pointerdown', _unlockAudio, { passive: true });
+
+function _base64ToBlob(b64, mimeType) {
+  const bin   = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
 }
 
-const ICONS = {
-  search:   "M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0",
-  home:     "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 22V12h6v10",
-  arrow:    "M5 12h14M12 5l7 7-7 7",
-  check:    "M20 6L9 17l-5-5",
-  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06-.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
-  bulb:     "M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.8-1.6 5.2-4 6.4V17a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-1.6C5.6 14.2 4 11.8 4 9a7 7 0 0 1 8-7z",
-  volume:   "M11 5L6 9H2v6h4l5 4V5zM19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07",
-  zap:      "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
-  mic:      "M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8",
-  sun:      "M12 17A5 5 0 1 0 12 7a5 5 0 0 0 0 10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42",
-  wifi:     "M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01",
-  x:        "M18 6L6 18M6 6l12 12",
-  list:     "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
-};
-
-function Icon({ name, size = 18, sw = 1.75, color = "currentColor" }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"
-      style={{ display: 'block', flexShrink: 0 }}>
-      <path d={ICONS[name] || ICONS.wifi}/>
-    </svg>
-  );
-}
-
-/* ── Location helpers ───────────────────────────────────────────── */
-function haversine(lat1, lng1, lat2, lng2) {
-  const R = 6371000;
-  const f1 = lat1 * Math.PI / 180, f2 = lat2 * Math.PI / 180;
-  const df = (lat2 - lat1) * Math.PI / 180;
-  const dl = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(df/2)**2 + Math.cos(f1)*Math.cos(f2)*Math.sin(dl/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
-
-function formatDist(m) {
-  if (m == null) return null;
-  return m < 1000 ? `${Math.round(m)}m` : `${(m/1000).toFixed(1)}km`;
-}
-
-/* ── Agent metadata helpers ─────────────────────────────────────── */
-function getAgentMeta(agent) {
-  const n = (agent.name || '').toLowerCase();
-  if (n.includes('led') || n.includes('rgb') || n.includes('ws2812') || n.includes('ring')) return { icon: 'bulb', color: '#FF9A5A', label: 'LED 灯' };
-  if (n.includes('buz'))                       return { icon: 'volume',   color: '#E26BFF', label: '蜂鸣器' };
-  if (n.includes('ir'))                        return { icon: 'zap',      color: '#6B6CFF', label: 'IR 传感器' };
-  if (n.includes('sound') || n.includes('mic'))return { icon: 'mic',      color: '#E26BFF', label: '声音传感器' };
-  if (n.includes('light') || n.includes('lux'))return { icon: 'sun',      color: LIME,      label: '光线传感器' };
-  if (agent.agent_type === 'sensor')           return { icon: 'wifi',     color: '#7EE8A2', label: '传感器' };
-  if (agent.agent_type === 'actuator')         return { icon: 'settings', color: '#FF9A5A', label: '执行器' };
-  if (agent.agent_type === 'robot')            return { icon: 'zap',      color: LIME,      label: '机器人' };
-  return { icon: 'wifi', color: '#7EE8A2', label: '设备' };
-}
-
-function getStateLabel(agent, unitData) {
-  const uid = agent.unit_id || agent.agent_id;
-  const s   = (unitData[uid] || {}).state || {};
-  const n   = (agent.name || '').toLowerCase();
-  if (n.includes('led') || n.includes('rgb')) return s.ism || (s.state === 'OFF' ? '已关闭' : '待命');
-  if (n.includes('buz'))   return s.ism || '待命';
-  if (n.includes('ir'))    return s.presence !== undefined ? (s.presence ? '有人' : '无人') : '监测中';
-  if (n.includes('sound')) return s.detected ? '检测到声音' : '静默';
-  if (n.includes('light')) return s.level || (s.lux !== undefined ? `${s.lux} lux` : '监测中');
-  return '在线';
-}
-
-function getSensorReading(agent, unitData) {
-  const uid = agent.unit_id || agent.agent_id;
-  const d   = unitData[uid] || {};
-  const s   = d.state || d.event || {};
-  const n   = (agent.name || '').toLowerCase();
-  if (n.includes('light') || n.includes('lux')) {
-    const map = { DARK: ['暗', '#6B6CFF'], DIM: ['微亮', '#7EE8A2'], NORMAL: ['正常', '#C8FF3E'], BRIGHT: ['强光', '#FFD060'] };
-    const [label, color] = map[s.level] || ['...', 'rgba(255,255,255,0.25)'];
-    return { value: label, color };
+function playAudioB64(b64) {
+  if (!b64) return;
+  try {
+    const blob  = _base64ToBlob(b64, 'audio/mpeg');
+    const url   = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => URL.revokeObjectURL(url);
+    audio.onerror = () => URL.revokeObjectURL(url);
+    audio.play().catch(err => console.warn('[Speech] play() blocked:', err));
+  } catch (e) {
+    console.warn('[Speech] playAudioB64 error:', e);
   }
-  if (n.includes('ir')) {
-    if (s.presence === undefined) return { value: '...', color: 'rgba(255,255,255,0.25)' };
-    return s.presence ? { value: '有人', color: '#C8FF3E' } : { value: '无人', color: 'rgba(255,255,255,0.35)' };
-  }
-  if (n.includes('sound') || n.includes('mic')) {
-    const ev = d.event || {};
-    const recentDetect = ev.detected && (Date.now() / 1000 - (ev.ts || 0) < 5);
-    return recentDetect
-      ? { value: '检测到声音', color: '#E26BFF' }
-      : { value: '静默', color: 'rgba(255,255,255,0.25)' };
-  }
-  return { value: '...', color: 'rgba(255,255,255,0.25)' };
 }
 
-function isAgentActive(agent, unitData) {
-  const uid = agent.unit_id || agent.agent_id;
-  const s   = (unitData[uid] || {}).state || {};
-  const n   = (agent.name || '').toLowerCase();
-  if (n.includes('led') || n.includes('rgb')) return s.ism && s.ism !== 'OFF' && s.ism !== 'IDLE';
-  if (n.includes('ir'))    return !!s.detected;
-  if (n.includes('sound')) return !!s.detected;
-  return true;
-}
-
-/* ── Radar helpers ──────────────────────────────────────────────── */
-function bearing(lat1, lng1, lat2, lng2) {
-  const f1 = lat1 * Math.PI / 180, f2 = lat2 * Math.PI / 180;
-  const dl = (lng2 - lng1) * Math.PI / 180;
-  const y  = Math.sin(dl) * Math.cos(f2);
-  const x  = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-}
-
-// angular distance between two angles (0-180)
-function angleDiff(a, b) {
-  const d = Math.abs((a - b + 360) % 360);
-  return d > 180 ? 360 - d : d;
-}
-
-/* ── RadarScan — real GPS positions, sweep ping effect ─────────── */
-const RADAR_R     = 100;   // px, usable radius inside 240×240 canvas
-const RADAR_MAX_M = 500;   // meters mapped to full radius
-
-function RadarScan({ agents, phoneLoc }) {
-  const canvasRef   = useRef(null);
-  const agentsRef   = useRef(agents);
-  const phoneLocRef = useRef(phoneLoc);
-
-  useEffect(() => { agentsRef.current   = agents;   }, [agents]);
-  useEffect(() => { phoneLocRef.current = phoneLoc; }, [phoneLoc]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const SIZE = 240;
-    const dpr  = window.devicePixelRatio || 1;
-    canvas.width  = SIZE * dpr;
-    canvas.height = SIZE * dpr;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-
-    let sweep     = 0;
-    let prevSweep = 0;
-    const pingAge = {};
-
-    function hexAlpha(hex, a) {
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      return `rgba(${r},${g},${b},${a})`;
-    }
-
-    function agentRadarPos(agent, phone) {
-      if (!phone || agent._lat == null) return null;
-      const dist = haversine(phone.lat, phone.lng, agent._lat, agent._lng);
-      const brng  = bearing(phone.lat, phone.lng, agent._lat, agent._lng);
-      const r     = Math.min(dist / RADAR_MAX_M, 1) * RADAR_R;
-      const rad   = brng * Math.PI / 180;
-      return { x: 120 + Math.sin(rad) * r, y: 120 - Math.cos(rad) * r, bearing: brng };
-    }
-
-    function draw() {
-      const agts  = agentsRef.current;
-      const phone = phoneLocRef.current;
-
-      ctx.clearRect(0, 0, SIZE, SIZE);
-
-      // rings
-      const RINGS = [
-        { r: RADAR_R * 100 / RADAR_MAX_M, label: '100m' },
-        { r: RADAR_R * 250 / RADAR_MAX_M, label: '250m' },
-        { r: RADAR_R,                      label: `${RADAR_MAX_M}m` },
-      ].filter(rr => rr.r <= RADAR_R);
-      RINGS.forEach(({ r, label }) => {
-        ctx.strokeStyle = 'rgba(200,255,62,0.1)';
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(120, 120, r, 0, Math.PI * 2); ctx.stroke();
-        ctx.fillStyle = 'rgba(200,255,62,0.3)';
-        ctx.font = '8px monospace'; ctx.textAlign = 'center';
-        ctx.fillText(label, 120, 120 - r - 2);
-      });
-
-      // crosshairs
-      ctx.strokeStyle = 'rgba(200,255,62,0.06)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath(); ctx.moveTo(0, 120); ctx.lineTo(SIZE, 120); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(120, 0); ctx.lineTo(120, SIZE); ctx.stroke();
-      ctx.setLineDash([]);
-
-      // N label
-      ctx.fillStyle = 'rgba(200,255,62,0.4)';
-      ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
-      ctx.fillText('N', 120, 14);
-
-      // sweep cone + arm
-      const sweepRad = sweep * Math.PI / 180;
-      ctx.save();
-      ctx.translate(120, 120);
-      ctx.rotate(sweepRad);
-
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, RADAR_R, -6 * Math.PI / 180, 24 * Math.PI / 180);
-      ctx.closePath();
-      ctx.fillStyle = 'rgba(200,255,62,0.08)';
-      ctx.fill();
-
-      const armGrad = ctx.createLinearGradient(0, 0, RADAR_R, 0);
-      armGrad.addColorStop(0, 'rgba(200,255,62,0.9)');
-      armGrad.addColorStop(1, 'rgba(200,255,62,0)');
-      ctx.strokeStyle = armGrad;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = 'rgba(200,255,62,0.5)';
-      ctx.shadowBlur = 8;
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(RADAR_R, 0); ctx.stroke();
-      ctx.shadowBlur = 0;
-      ctx.restore();
-
-      // advance sweep & detect pings
-      prevSweep = sweep;
-      sweep     = (sweep + 1.2) % 360;
-      agts.forEach(a => {
-        const pos = agentRadarPos(a, phone);
-        if (!pos) return;
-        const uid  = a.unit_id || a.agent_id;
-        const d    = angleDiff(sweep,     pos.bearing);
-        const prev = angleDiff(prevSweep, pos.bearing);
-        if (d < 4 && prev >= 4) pingAge[uid] = 0;
-      });
-      Object.keys(pingAge).forEach(k => { pingAge[k]++; });
-
-      // device dots
-      agts.forEach(a => {
-        const uid  = a.unit_id || a.agent_id;
-        const meta = getAgentMeta(a);
-        const pos  = agentRadarPos(a, phone);
-        if (!pos) return;
-
-        const { x, y } = pos;
-        const age  = pingAge[uid] ?? 999;
-        const ping = age < 45;
-        const glow = ping ? Math.max(0, 1 - age / 45) : 0;
-        const col  = a._online ? meta.color : 'rgba(255,255,255,0.25)';
-        const isHex = col.startsWith('#');
-
-        if (ping && glow > 0.05) {
-          ctx.beginPath();
-          ctx.arc(x, y, 10 + glow * 12, 0, Math.PI * 2);
-          ctx.strokeStyle = isHex ? hexAlpha(col, glow * 0.7) : col;
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
-
-        ctx.beginPath(); ctx.arc(x, y, 10, 0, Math.PI * 2);
-        ctx.fillStyle = a._online && isHex ? hexAlpha(col, 0.16) : 'rgba(255,255,255,0.06)';
-        ctx.fill();
-
-        ctx.strokeStyle = col;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = col;
-        ctx.shadowBlur = ping ? 8 + glow * 10 : 4;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-
-        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = col; ctx.fill();
-      });
-
-      // phone dot
-      ctx.beginPath(); ctx.arc(120, 120, 6, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff';
-      ctx.shadowColor = 'rgba(255,255,255,0.5)';
-      ctx.shadowBlur = 12;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#0B0B0E';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      rafId = requestAnimationFrame(draw);
-    }
-
-    let rafId = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(rafId);
-  }, []);
-
-  return (
-    <canvas ref={canvasRef} style={{ display: 'block', width: 240, height: 240, margin: '0 auto' }}/>
-  );
-}
-
-/* ── SensorCard — read-only device row ──────────────────────────── */
-function SensorCard({ agent, unitData }) {
-  const uid     = agent.unit_id || agent.agent_id;
-  const meta    = getAgentMeta(agent);
-  const reading = getSensorReading(agent, unitData);
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
-      marginBottom: 8, borderRadius: 18,
-      background: 'rgba(255,255,255,0.03)',
-      border: '1px solid rgba(255,255,255,0.05)',
-    }}>
-      <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
-        background: `${meta.color}18`, color: meta.color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Icon name={meta.icon} size={19}/>
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {agent.name || uid}
-        </div>
-        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginTop: 2 }}>
-          {meta.label} · 只读
-        </div>
-      </div>
-      <span style={{ fontSize: 14, fontWeight: 600, color: reading.color, fontFamily: 'monospace', flexShrink: 0 }}>
-        {reading.value}
-      </span>
-      <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-        background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
-        boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
-    </div>
-  );
-}
-
-/* ── ActuatorCard — with quick-control buttons ───────────────────── */
-function ActuatorCard({ agent, unitData }) {
-  const uid    = agent.unit_id || agent.agent_id;
-  const meta   = getAgentMeta(agent);
-  const active = isAgentActive(agent, unitData);
-  const n      = (agent.name || '').toLowerCase();
-  const cmdTopic = agent.topics?.command;
-
-  const sendCmd = (cmd, extra = {}) => {
-    if (!cmdTopic) return;
-    mqttBus.publish(cmdTopic, { cmd, ...extra });
-  };
-
-  const stateData = (unitData[uid] || {}).state || {};
-  const ism = stateData.ism || 'OFF';
-
-  const btnBase = {
-    flex: 1, padding: '7px 4px', borderRadius: 999, fontSize: 12,
-    cursor: 'pointer', fontFamily: 'inherit', border: 'none',
-    transition: 'background 0.15s, color 0.15s',
-  };
-  const btnActive = (color) => ({
-    ...btnBase,
-    background: color, color: '#0B0B0E', fontWeight: 600,
-    boxShadow: `0 0 10px ${color}60`,
-  });
-  const btnIdle = {
-    ...btnBase,
-    background: 'rgba(255,255,255,0.07)',
-    border: '1px solid rgba(255,255,255,0.09)',
-    color: 'rgba(255,255,255,0.55)',
-  };
-
-  let controls = null;
-  if (n.includes('led') || n.includes('rgb') || n.includes('ws2812')) {
-    const isOff = (ism === 'OFF');
-    controls = (
-      <div style={{ display: 'flex', gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
-        <button onClick={() => sendCmd('SET_STATE', { state: isOff ? 'BRIGHT' : 'OFF' })}
-          style={isOff ? btnIdle : btnActive(meta.color)}>
-          {isOff ? '开灯' : '关灯'}
-        </button>
-        <button onClick={() => sendCmd('SET_STATE', { state: 'DIM' })}
-          style={ism === 'DIM' ? btnActive(meta.color) : btnIdle}>
-          微光
-        </button>
-        <button onClick={() => sendCmd('BLINK', { r: 255, g: 180, b: 30, count: 3 })}
-          style={ism === 'BLINK' ? btnActive(meta.color) : btnIdle}>
-          闪烁
-        </button>
-      </div>
-    );
-  } else if (n.includes('buz')) {
-    controls = (
-      <div style={{ display: 'flex', gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
-        <button onClick={() => sendCmd('PLAY', { pattern: 'NOTIFY' })}
-          style={ism === 'NOTIFY' ? btnActive(meta.color) : btnIdle}>
-          通知音
-        </button>
-        <button onClick={() => sendCmd('PLAY', { pattern: 'ALERT' })}
-          style={ism === 'ALERT' ? btnActive('#FF5252') : btnIdle}>
-          警报
-        </button>
-        <button onClick={() => sendCmd('STOP')}
-          style={ism === 'SILENT' ? btnActive(LIME) : btnIdle}>
-          停止
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      onClick={() => navigate('#/devices/' + (agent.slug || uid))}
-      style={{
-        padding: '12px 14px', marginBottom: 10, borderRadius: 18,
-        background: active
-          ? `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`
-          : 'rgba(255,255,255,0.04)',
-        border: `1px solid ${active ? meta.color + '40' : 'rgba(255,255,255,0.07)'}`,
-        cursor: 'pointer',
-      }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
-          background: active ? meta.color : 'rgba(255,255,255,0.06)',
-          color: active ? '#0B0B0E' : meta.color,
-          display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Icon name={meta.icon} size={19}/>
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {agent.name || uid}
-          </div>
-          <div style={{ fontSize: 11, color: active ? meta.color : 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'monospace' }}>
-            {getStateLabel(agent, unitData)}
-          </div>
-        </div>
-        <div style={{ flexShrink: 0, color: 'rgba(255,255,255,0.3)' }}>
-          <Icon name="arrow" size={13} sw={2}/>
-        </div>
-        <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-          background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
-          boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
-      </div>
-      {controls}
-    </div>
-  );
-}
-
-/* ── DiscoverScreen — radar-only spatial view ───────────────────── */
-function DiscoverScreen({ agents, connected, phoneLoc, locError }) {
-  const sensorCnt   = agents.filter(a => a.agent_type !== 'actuator').length;
-  const actuatorCnt = agents.filter(a => a.agent_type === 'actuator').length;
-
-  return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(60% 45% at 50% 40%, rgba(200,255,62,0.06), transparent 70%)', pointerEvents: 'none' }}/>
-      {/* Header */}
-      <div style={{ padding: '14px 20px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
-        <div>
-          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>附近</span>
-          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginLeft: 10 }}>
-            {agents.length === 0 ? '扫描中…' : `${agents.length} 个在线`}
-          </span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 10, color: phoneLoc ? 'rgba(200,255,62,0.6)' : 'rgba(255,255,255,0.3)', fontFamily: 'monospace' }}>
-            {phoneLoc ? `${phoneLoc.lat.toFixed(3)}, ${phoneLoc.lng.toFixed(3)}` : locError || '定位中…'}
-          </span>
-          <div style={{ width: 6, height: 6, borderRadius: '50%',
-            background: connected ? LIME : '#FF5252',
-            boxShadow: connected ? `0 0 6px ${LIME}` : 'none' }}/>
-        </div>
-      </div>
-      {/* Centered radar */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
-        <RadarScan agents={agents} phoneLoc={phoneLoc}/>
-        {/* Stats */}
-        <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', gap: 28 }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 20, fontWeight: 300, color: LIME }}>{sensorCnt}</div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', marginTop: 3 }}>传感器</div>
-          </div>
-          <div style={{ width: 1, height: 28, background: 'rgba(255,255,255,0.08)' }}/>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 20, fontWeight: 300, color: '#FF9A5A' }}>{actuatorCnt}</div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontFamily: 'monospace', marginTop: 3 }}>执行器</div>
-          </div>
-        </div>
-        {agents.length === 0 && (
-          <div style={{ marginTop: 18, fontSize: 12, color: 'rgba(255,255,255,0.25)' }}>等待 ESP32 上线...</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ── DevicesScreen — all devices: actuators + sensors ───────────── */
-function DevicesScreen({ agents, unitData }) {
-  const robots     = agents.filter(a => a.agent_type === 'robot');
-  const actuators  = agents.filter(a => a.agent_type === 'actuator');
-  const sensors    = agents.filter(a => a.agent_type !== 'actuator' && a.agent_type !== 'robot');
-  const activeCount = actuators.filter(a => isAgentActive(a, unitData)).length;
-
-  const sectionLabel = (text) => (
-    <div style={{ padding: '4px 2px 8px', marginTop: 6 }}>
-      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
-        color: 'rgba(255,255,255,0.28)', fontWeight: 600 }}>{text}</span>
-    </div>
-  );
-
-  return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(50% 30% at 80% 5%, rgba(226,107,255,0.18), transparent 70%)', pointerEvents: 'none' }}/>
-      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
-        <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>设备</span>
-        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-          {agents.length} 个 · {activeCount} 活跃
-        </span>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
-        paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
-        {agents.length === 0 ? (
-          <div style={{ padding: '60px 20px', textAlign: 'center' }}>
-            <div style={{ width: 60, height: 60, borderRadius: '50%', background: 'rgba(255,255,255,0.04)', margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Icon name="wifi" size={24} color="rgba(255,255,255,0.25)"/>
-            </div>
-            <div style={{ fontSize: 20, fontWeight: 300, marginBottom: 8 }}>等待设备上线</div>
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', lineHeight: 1.6, maxWidth: 220, margin: '0 auto' }}>
-              确认 ESP32 已连接到 MQTT Broker
-            </div>
-          </div>
-        ) : (
-          <>
-            {robots.length > 0 && (
-              <>
-                {sectionLabel('机器人')}
-                {robots.map(a => {
-                  const meta = getAgentMeta(a);
-                  const slug = a.slug || a.unit_id || a.agent_id;
-                  return (
-                    <div key={a.unit_id || a.agent_id}
-                      onClick={() => navigate('#/devices/' + slug)}
-                      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
-                        marginBottom: 8, borderRadius: 18, cursor: 'pointer',
-                        background: `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`,
-                        border: `1px solid ${meta.color}40` }}>
-                      <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
-                        background: meta.color, color: '#0B0B0E',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <Icon name={meta.icon} size={19}/>
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 500 }}>{a.name || slug}</div>
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', marginTop: 2 }}>{meta.label} · 点击控制</div>
-                      </div>
-                      <Icon name="arrow" size={16} color="rgba(255,255,255,0.3)"/>
-                    </div>
-                  );
-                })}
-              </>
-            )}
-            {actuators.length > 0 && (
-              <>
-                {sectionLabel('执行器')}
-                {actuators.map(a => <ActuatorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>)}
-              </>
-            )}
-            {sensors.length > 0 && (
-              <>
-                {sectionLabel('传感器')}
-                {sensors.map(a => <SensorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>)}
-              </>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ── ChatSheet — bottom sheet, context persists across open/close ─ */
+/* ── ChatSheet — bottom sheet，跨开关保持对话上下文 ─────────────── */
 const SUGGESTIONS = ['开灯，暖白', '红色 LED', '播放通知音', '关闭 LED'];
 
 function ChatSheet({ open, onClose, agents, unitData }) {
@@ -600,15 +55,13 @@ function ChatSheet({ open, onClose, agents, unitData }) {
   actuatorsRef.current = agents.filter(a => a.agent_type === 'actuator');
   const subs = actuatorsRef.current;
 
-  const [messages, setMessages]     = useState([
-    { role: 'assistant', text: '需要控制什么设备？', actions: [] }
-  ]);
-  const [input, setInput]           = useState('');
-  const [thinking, setThinking]     = useState(false);
+  const [messages, setMessages]         = useState([{ role: 'assistant', text: '需要控制什么设备？', actions: [] }]);
+  const [input, setInput]               = useState('');
+  const [thinking, setThinking]         = useState(false);
   const [thinkingText, setThinkingText] = useState('');
-  const [kbOffset, setKbOffset]     = useState(0);
-  const [pendingRule, setPendingRule] = useState(null);
-  const [savingRule, setSavingRule]   = useState(false);
+  const [kbOffset, setKbOffset]         = useState(0);
+  const [pendingRule, setPendingRule]   = useState(null);
+  const [savingRule, setSavingRule]     = useState(false);
   const endRef   = useRef(null);
   const inputRef = useRef(null);
 
@@ -668,7 +121,6 @@ function ChatSheet({ open, onClose, agents, unitData }) {
     setThinkingText('解析意图...');
 
     try {
-      // ① NLU parse — 同时识别 intent_type
       const res = await fetch('/api/intent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -682,13 +134,11 @@ function ChatSheet({ open, onClose, agents, unitData }) {
       setThinking(false);
       setThinkingText('');
 
-      // ② 按 intent_type 分流
       if (intent_type === 'define_rule' && rule) {
         setPendingRule(rule);
         return;
       }
 
-      // ③ execute 流程：订阅 feedback → 发布 intent
       setThinking(true);
       setThinkingText('正在规划...');
       const feedbackTopic = `ssm/feedback/${session_id}`;
@@ -760,11 +210,9 @@ function ChatSheet({ open, onClose, agents, unitData }) {
         transition: 'transform 0.38s cubic-bezier(0.32, 0.72, 0, 1), bottom 0.22s ease, height 0.22s ease',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
-        {/* handle */}
         <div style={{ padding: '10px 0 2px', display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
           <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.12)' }}/>
         </div>
-        {/* header */}
         <div style={{ padding: '6px 20px 10px', display: 'flex', alignItems: 'center', gap: 10,
           flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
           <div style={{ width: 30, height: 30, borderRadius: 10, background: LIME, color: '#0B0B0E',
@@ -781,7 +229,6 @@ function ChatSheet({ open, onClose, agents, unitData }) {
             <Icon name="x" size={14}/>
           </button>
         </div>
-        {/* messages */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
           {messages.map((m, i) => (
             <div key={i} style={{ maxWidth: '82%', alignSelf: m.role==='user'?'flex-end':'flex-start', display:'flex', flexDirection:'column', gap:6 }}>
@@ -821,7 +268,6 @@ function ChatSheet({ open, onClose, agents, unitData }) {
           )}
           <div ref={endRef}/>
         </div>
-        {/* rule preview card */}
         {pendingRule && (
           <div style={{ padding: '0 16px 10px', flexShrink: 0 }}>
             <div style={{ background: 'rgba(200,255,62,0.07)', border: '1px solid rgba(200,255,62,0.22)',
@@ -851,7 +297,6 @@ function ChatSheet({ open, onClose, agents, unitData }) {
             </div>
           </div>
         )}
-        {/* suggestions */}
         {messages.length <= 1 && (
           <div style={{ padding:'0 12px 8px', display:'flex', gap:6, overflowX:'auto', scrollbarWidth:'none', flexShrink:0 }}>
             {SUGGESTIONS.map(s => (
@@ -863,7 +308,6 @@ function ChatSheet({ open, onClose, agents, unitData }) {
             ))}
           </div>
         )}
-        {/* input */}
         <div style={{ padding:'8px 12px', paddingBottom:'calc(12px + env(safe-area-inset-bottom, 0px))',
           borderTop:'1px solid rgba(255,255,255,0.05)', flexShrink:0 }}>
           <div style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 6px 6px 16px',
@@ -918,90 +362,7 @@ function PersistentInputBar({ onOpen }) {
   );
 }
 
-/* ── RulesScreen ─────────────────────────────────────────────────── */
-function RulesScreen() {
-  const [rules, setRules] = useState([]);
-
-  const load = async () => {
-    try {
-      const r = await fetch('/api/rules');
-      setRules(await r.json());
-    } catch {}
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const handleDelete = async (rule_id) => {
-    await fetch(`/api/rules/${rule_id}`, { method: 'DELETE' });
-    load();
-  };
-
-  const handleToggle = async (rule_id, enabled) => {
-    await fetch(`/api/rules/${rule_id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !enabled }),
-    });
-    load();
-  };
-
-  return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
-        background: 'radial-gradient(50% 30% at 50% 5%, rgba(200,255,62,0.1), transparent 70%)' }}/>
-      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
-        <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>规则</span>
-        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-          {rules.filter(r => r.enabled).length} 启用 · {rules.length} 总计
-        </span>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
-        paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
-        {rules.length === 0 ? (
-          <div style={{ padding: '60px 20px', textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 13, lineHeight: 2 }}>
-            还没有规则<br/>
-            <span style={{ fontSize: 12 }}>在对话框里说"检测到人就开灯"来创建</span>
-          </div>
-        ) : rules.map(rule => (
-          <div key={rule.rule_id} style={{
-            display: 'flex', alignItems: 'center', gap: 12,
-            padding: '13px 14px', marginBottom: 8, borderRadius: 18,
-            background: rule.enabled ? 'rgba(200,255,62,0.05)' : 'rgba(255,255,255,0.03)',
-            border: `1px solid ${rule.enabled ? 'rgba(200,255,62,0.16)' : 'rgba(255,255,255,0.06)'}`,
-          }}>
-            <div onClick={() => handleToggle(rule.rule_id, rule.enabled)}
-              style={{ width: 38, height: 22, borderRadius: 11, flexShrink: 0, cursor: 'pointer',
-                background: rule.enabled ? LIME : 'rgba(255,255,255,0.12)', position: 'relative',
-                transition: 'background 0.2s' }}>
-              <div style={{ position: 'absolute', top: 3, left: rule.enabled ? 18 : 3,
-                width: 16, height: 16, borderRadius: '50%',
-                background: '#0B0B0E', transition: 'left 0.2s' }}/>
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 500,
-                color: rule.enabled ? '#fff' : 'rgba(255,255,255,0.4)',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {rule.name}
-              </div>
-              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', fontFamily: 'monospace', marginTop: 2 }}>
-                {rule.trigger?.agent_tag}.{rule.trigger?.event} → {rule.action?.resource_tag}
-              </div>
-            </div>
-            <button onClick={() => handleDelete(rule.rule_id)}
-              style={{ width: 28, height: 28, borderRadius: '50%', flexShrink: 0, padding: 0,
-                background: 'rgba(255,82,82,0.1)', border: '1px solid rgba(255,82,82,0.2)',
-                color: 'rgba(255,82,82,0.7)', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Icon name="x" size={12}/>
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* ── DeviceDiscoveryCard — GPS proximity popup ──────────────────── */
+/* ── DeviceDiscoveryCard — GPS 附近弹出 ─────────────────────────── */
 function DeviceDiscoveryCard({ agent, unitData, onDismiss, onGo }) {
   const meta    = getAgentMeta(agent);
   const reading = agent.agent_type !== 'actuator'
@@ -1057,7 +418,7 @@ function DeviceDiscoveryCard({ agent, unitData, onDismiss, onGo }) {
   );
 }
 
-/* ── TabBar — 3 tabs ────────────────────────────────────────────── */
+/* ── TabBar ──────────────────────────────────────────────────────── */
 function TabBar({ tab, setTab, deviceBadge }) {
   const tabs = [
     { id: 'discover', icon: 'search', label: '附近' },
@@ -1098,7 +459,7 @@ function TabBar({ tab, setTab, deviceBadge }) {
   );
 }
 
-/* ── DeviceDetailPage — 单设备全屏控制 + 对话页 ───────────────────── */
+/* ── DeviceDetailPage — 单设备全屏控制 + 对话 ───────────────────── */
 function DeviceDetailPage({ slug, device, unitData, onBack }) {
   const [messages, setMessages] = React.useState([
     { role: 'assistant', text: device ? `你好，我是 ${device.name}，有什么可以帮你？` : '设备连接中…' }
@@ -1167,13 +528,8 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
       paddingTop: 'env(safe-area-inset-top, 0px)',
       display: 'flex', flexDirection: 'column',
     }}>
-      {/* ── 顶部导航栏 ── */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '12px 16px',
-        borderBottom: '1px solid rgba(255,255,255,0.06)',
-        flexShrink: 0,
-      }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
         <button onClick={onBack} style={{
           background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
           color: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '6px 12px',
@@ -1186,27 +542,20 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
           </svg>
           返回
         </button>
-
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+          <div style={{ width: 34, height: 34, borderRadius: 10, flexShrink: 0,
             background: `${meta.color}18`, color: meta.color,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
+            display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Icon name={meta.icon} size={17}/>
           </div>
           <div>
             <div style={{ fontSize: 15, fontWeight: 600 }}>{device?.name || slug}</div>
-            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>
-              {ism}
-            </div>
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{ism}</div>
           </div>
         </div>
-
         <a href={agentCardUrl} target="_blank" rel="noopener" style={{
           padding: '6px 12px', borderRadius: 10, fontSize: 12,
-          background: `${meta.color}15`,
-          border: `1px solid ${meta.color}35`,
+          background: `${meta.color}15`, border: `1px solid ${meta.color}35`,
           color: meta.color, textDecoration: 'none',
           display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0,
         }}>
@@ -1214,14 +563,8 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
           Agent 接入
         </a>
       </div>
-
-      {/* ── 快捷控制按钮 ── */}
       {device && (
-        <div style={{
-          padding: '12px 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.06)',
-          flexShrink: 0,
-        }}>
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={() => sendCmd('SET_STATE', { state: ism === 'OFF' ? 'BRIGHT' : 'OFF' })}
               style={ism !== 'OFF' ? btnOn : btnOff}>
@@ -1236,16 +579,9 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
           </div>
         </div>
       )}
-
-      {/* ── 聊天区域 ── */}
-      <div style={{
-        flex: 1, overflowY: 'auto', padding: '14px 16px',
-        display: 'flex', flexDirection: 'column', gap: 10,
-      }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.map((m, i) => (
-          <div key={i} style={{
-            maxWidth: '82%', alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-          }}>
+          <div key={i} style={{ maxWidth: '82%', alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
             <div style={{
               padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
               borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
@@ -1256,13 +592,10 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
           </div>
         ))}
         {thinking && (
-          <div style={{
-            alignSelf: 'flex-start', padding: '10px 14px',
+          <div style={{ alignSelf: 'flex-start', padding: '10px 14px',
             borderRadius: '4px 18px 18px 18px',
-            background: 'rgba(255,255,255,0.06)',
-            border: '1px solid rgba(255,255,255,0.07)',
-            display: 'flex', gap: 4, alignItems: 'center',
-          }}>
+            background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.07)',
+            display: 'flex', gap: 4, alignItems: 'center' }}>
             <span className="typing-dot"/>
             <span className="typing-dot" style={{ animationDelay: '.14s' }}/>
             <span className="typing-dot" style={{ animationDelay: '.28s' }}/>
@@ -1270,31 +603,18 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
         )}
         <div ref={endRef}/>
       </div>
-
-      {/* ── 输入框 ── */}
-      <div style={{
-        padding: '8px 12px',
-        paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
-        borderTop: '1px solid rgba(255,255,255,0.06)',
-        flexShrink: 0,
-      }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '6px 6px 6px 16px',
-          background: 'rgba(30,29,38,0.95)',
-          border: '1px solid rgba(255,255,255,0.09)',
-          borderRadius: 999,
-        }}>
+      <div style={{ padding: '8px 12px', paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
+        borderTop: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 6px 6px 16px',
+          background: 'rgba(30,29,38,0.95)', border: '1px solid rgba(255,255,255,0.09)', borderRadius: 999 }}>
           <input
             ref={inputRef}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && !e.isComposing && sendChat()}
             placeholder="告诉灯要做什么…"
-            style={{
-              flex: 1, background: 'transparent', border: 'none',
-              color: '#fff', fontSize: 14, fontFamily: 'inherit', outline: 'none',
-            }}
+            style={{ flex: 1, background: 'transparent', border: 'none',
+              color: '#fff', fontSize: 14, fontFamily: 'inherit', outline: 'none' }}
           />
           <button onClick={sendChat} disabled={!input.trim() || thinking} style={{
             width: 38, height: 38, borderRadius: 999, flexShrink: 0,
@@ -1312,44 +632,9 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
   );
 }
 
-/* ── App ────────────────────────────────────────────────────────── */
+/* ── App ─────────────────────────────────────────────────────────── */
 const EXCL_TYPES = new Set(['decision', 'supervisor']);
 const EXCL_PLAT  = new Set(['pc', 'pwa']);
-
-/* ── 服务端 TTS 音频播放 ─────────────────────────────────────── */
-// Android Chrome 要求：用户首次手势后解锁 AudioContext，
-// 之后 MQTT 触发的 Audio.play() 才不会被自动播放策略拦截。
-let _audioUnlocked = false;
-function _unlockAudio() {
-  if (_audioUnlocked) return;
-  _audioUnlocked = true;
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    ctx.resume().then(() => ctx.close()).catch(() => {});
-  } catch (e) {}
-}
-document.addEventListener('pointerdown', _unlockAudio, { passive: true });
-
-function _base64ToBlob(b64, mimeType) {
-  const bin   = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mimeType });
-}
-
-function playAudioB64(b64) {
-  if (!b64) return;
-  try {
-    const blob  = _base64ToBlob(b64, 'audio/mpeg');
-    const url   = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => URL.revokeObjectURL(url);
-    audio.onerror = () => URL.revokeObjectURL(url);
-    audio.play().catch(err => console.warn('[Speech] play() blocked:', err));
-  } catch (e) {
-    console.warn('[Speech] playAudioB64 error:', e);
-  }
-}
 
 const GO2_STATIC_DEVICE = {
   unit_id:      "go2",
@@ -1361,34 +646,30 @@ const GO2_STATIC_DEVICE = {
 };
 
 function App() {
-  const [tab, setTab]                     = useState('discover');
-  const [sheetOpen, setSheetOpen]         = useState(false);
-  const [connected, setConnected]         = useState(false);
-  const [agents, setAgents]               = useState([GO2_STATIC_DEVICE]);
-  const [unitData, setUnitData]           = useState({});
-  const [phoneLoc, setPhoneLoc]           = useState(null);
-  const [locError, setLocError]           = useState(null);
+  const [tab, setTab]                         = useState('discover');
+  const [sheetOpen, setSheetOpen]             = useState(false);
+  const [connected, setConnected]             = useState(false);
+  const [agents, setAgents]                   = useState([GO2_STATIC_DEVICE]);
+  const [unitData, setUnitData]               = useState({});
+  const [phoneLoc, setPhoneLoc]               = useState(null);
+  const [locError, setLocError]               = useState(null);
   const [discoveryDevice, setDiscoveryDevice] = useState(null);
-  const currentHash = useHash();
-  const seenPopupDevices = useRef(new Set());
-  const agentsRef        = useRef([]);
-  const phoneLocRef      = useRef(null);
-  const onlineIdsRef     = useRef(new Set());
+  const currentHash        = useHash();
+  const seenPopupDevices   = useRef(new Set());
+  const agentsRef          = useRef([]);
+  const phoneLocRef        = useRef(null);
+  const onlineIdsRef       = useRef(new Set());
 
-  useEffect(() => { agentsRef.current = agents; }, [agents]);
+  useEffect(() => { agentsRef.current  = agents;   }, [agents]);
   useEffect(() => { phoneLocRef.current = phoneLoc; }, [phoneLoc]);
 
-  // re-run proximity check whenever agents change; clear seen state for devices that just came back online
   useEffect(() => {
     const loc = phoneLocRef.current;
     const currentIds = new Set(agents.map(a => a.unit_id || a.agent_id));
-
-    // device was absent last render but is online now → just reconnected, allow popup again
     currentIds.forEach(uid => {
       if (!onlineIdsRef.current.has(uid)) seenPopupDevices.current.delete(uid);
     });
     onlineIdsRef.current = currentIds;
-
     if (!loc) return;
     agents.forEach(agent => {
       if (agent._lat == null || agent._lng == null) return;
@@ -1411,10 +692,7 @@ function App() {
         console.log('[GPS] phone loc:', loc, 'agents:', agentsRef.current.length);
         agentsRef.current.forEach(agent => {
           const uid = agent.unit_id || agent.agent_id;
-          if (agent._lat == null || agent._lng == null) {
-            console.log('[GPS] skip (no loc):', uid);
-            return;
-          }
+          if (agent._lat == null || agent._lng == null) { console.log('[GPS] skip (no loc):', uid); return; }
           const dist = Math.round(haversine(loc.lat, loc.lng, agent._lat, agent._lng));
           console.log('[GPS]', uid, 'dist:', dist, 'm / threshold:', POPUP_RADIUS_M, 'm | seen:', seenPopupDevices.current.has(uid));
           if (seenPopupDevices.current.has(uid)) return;
@@ -1441,7 +719,6 @@ function App() {
       setAgents([GO2_STATIC_DEVICE, ...mqttAgents]);
     });
 
-    // 设备重新上线（含快速重启未触发 LWT 的情况）→ 清除弹窗去重记录，允许再次弹窗
     registry.addEventListener('reconnect', ({ detail }) => {
       agentsRef.current.forEach(agent => {
         if (agent.parent_id === detail.parentId) {
@@ -1477,7 +754,6 @@ function App() {
         name: 'human_supervisor', hw_platform: 'pwa',
         ts: Math.floor(Date.now() / 1000),
       }, { retain: true });
-      // F1: 订阅 DeskAgent 语音 topic（连接建立后订阅，重连也会重新执行）
       mqttBus.subscribe('ssm/agents/desk/speech');
     });
     mqttBus.addEventListener('disconnect', () => setConnected(false));
@@ -1486,7 +762,6 @@ function App() {
     mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
   }, []);
 
-  // F1: speech 事件处理器 — 收到服务端 TTS 音频直接播放
   useEffect(() => {
     const handleSpeech = (e) => {
       const { audio } = e.detail || {};
@@ -1496,7 +771,6 @@ function App() {
     return () => mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
   }, []);
 
-  // Hash 路由分发：#/devices/{slug|unit_id} → 设备详情页
   const hashMatch = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (hashMatch) {
     const slug = hashMatch[1];
@@ -1524,8 +798,7 @@ function App() {
     }}>
       <div style={{ position: 'relative', height: '100%' }}>
         {tab === 'discover' && (
-          <DiscoverScreen agents={agents} connected={connected}
-            phoneLoc={phoneLoc} locError={locError}/>
+          <DiscoverScreen agents={agents} connected={connected} phoneLoc={phoneLoc} locError={locError}/>
         )}
         {tab === 'devices' && (
           <DevicesScreen agents={agents} unitData={unitData}/>
