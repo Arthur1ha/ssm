@@ -280,3 +280,52 @@ class TestRunIntent:
             result = await agent.run_intent("s1", "开灯", ["esp32_desk_led"])
         assert len(result["task_ids"]) == 1
         mock_pub.assert_called_once()
+
+
+from fastapi.testclient import TestClient
+from fastapi import FastAPI
+from cloud.esp32.router import router as esp32_router
+import cloud.esp32.agent as agent_mod
+
+
+class TestRouter:
+    def setup_method(self):
+        from unittest.mock import AsyncMock
+        mock_llm = MagicMock()
+        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(
+            content='[{"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {"state": "BRIGHT"}}]'
+        ))
+        mock_state = MagicMock(spec=ESP32State)
+        mock_state.get_manifest.return_value = {"capabilities": ["SET_STATE"]}
+        agent_mod._agent = ESP32Agent(mock_state, llm=mock_llm)
+
+        app = FastAPI()
+        app.include_router(esp32_router)
+        self.client = TestClient(app)
+
+    def test_run_returns_200(self):
+        with patch("cloud.esp32.tools.publish_task"):
+            resp = self.client.post("/api/esp32/run", json={
+                "session_id": "test_s1",
+                "goal": "开灯",
+                "device_ids": ["esp32_desk_led"],
+            })
+        assert resp.status_code == 200
+
+    def test_run_returns_task_ids(self):
+        with patch("cloud.esp32.tools.publish_task"):
+            resp = self.client.post("/api/esp32/run", json={
+                "session_id": "test_s1",
+                "goal": "开灯",
+                "device_ids": ["esp32_desk_led"],
+            })
+        data = resp.json()
+        assert "task_ids" in data
+        assert data["status"] == "dispatched"
+
+    def test_run_returns_503_when_no_agent(self):
+        agent_mod._agent = None
+        resp = self.client.post("/api/esp32/run", json={
+            "session_id": "s1", "goal": "开灯", "device_ids": []
+        })
+        assert resp.status_code == 503
