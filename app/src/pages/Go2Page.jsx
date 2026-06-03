@@ -102,7 +102,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
 
 /* ─────────────────────────────────────────────────────────── */
 
-function Go2DevicePage({ onBack }) {
+function Go2DevicePage({ onBack, messages, onAppend }) {
   const { useState, useEffect, useRef, useCallback } = React;
 
   const LIME   = "#C8FF3E";
@@ -111,13 +111,11 @@ function Go2DevicePage({ onBack }) {
   const PANEL  = "#0C0F1A";
   const BORDER = "rgba(200,255,62,0.1)";
 
-  const [status,      setStatus]   = useState("idle");
-  const [robotState,  setRobot]    = useState(null);
-  const [error,       setError]    = useState("");
-  const [mode,        setMode]     = useState("normal");
-  const [chatMsg,     setChatMsg]  = useState("");
-  const [chatResp,    setChatResp] = useState("");
-  const [chatLoading, setChatLoad] = useState(false);
+  const [status,       setStatus]    = useState("idle");
+  const [robotState,   setRobot]     = useState(null);
+  const [error,        setError]     = useState("");
+  const [mode,         setMode]      = useState("normal");
+  const [chatThinking, setChatThink] = useState(false);
   const esRef   = useRef(null);
   const pollRef = useRef(null);
 
@@ -202,30 +200,28 @@ function Go2DevicePage({ onBack }) {
 
   const handleStop = useCallback(() => sendCmd("StopMove"), []);
 
+  const connected = status === "connected";
+  const busy      = status === "connecting";
+
   /* ── AI 对话 ── */
-  const sendChat = useCallback(async () => {
-    if (!chatMsg.trim() || !connected || chatLoading) return;
-    const msg = chatMsg.trim();
-    setChatMsg("");
-    setChatLoad(true);
-    setChatResp("");
+  const sendChat = useCallback(async (text) => {
+    if (!connected || chatThinking) return;
+    onAppend({ role: 'user', text });
+    setChatThink(true);
     try {
       const r = await fetch("/api/go2/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg }),
+        body: JSON.stringify({ message: text }),
       });
       const d = await r.json();
-      setChatResp(d.response || "");
+      onAppend({ role: 'assistant', text: d.response || "已处理", actions: [] });
     } catch (_) {
-      setChatResp("请求失败，请检查连接");
+      onAppend({ role: 'assistant', text: "请求失败，请检查连接", actions: [] });
     } finally {
-      setChatLoad(false);
+      setChatThink(false);
     }
-  }, [chatMsg, connected, chatLoading]);
-
-  const connected = status === "connected";
-  const busy      = status === "connecting";
+  }, [connected, chatThinking, onAppend]);
 
   const statusColor = { idle: "#444", connecting: "#f0a500", connected: LIME, error: "#ff4455" }[status];
   const statusLabel = { idle: "OFFLINE", connecting: "CONNECTING", connected: "ONLINE", error: "ERROR" }[status];
@@ -440,55 +436,18 @@ function Go2DevicePage({ onBack }) {
         </div>
 
         {/* ── AI 对话区 ── */}
-        <div style={{ padding: "10px 14px 4px",
-          borderTop: `1px solid ${BORDER}`, marginTop: 10 }}>
+        <div style={{ borderTop: `1px solid ${BORDER}`, marginTop: 10,
+          display: "flex", flexDirection: "column", minHeight: 200, flex: 1 }}>
           <div style={{ fontSize: 9, color: "#252525", letterSpacing: "0.2em",
-            marginBottom: 7 }}>AI AGENT</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <input
-              value={chatMsg}
-              onChange={e => setChatMsg(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && sendChat()}
-              placeholder={connected ? "对话控制，如：站起来跳个舞" : "未连接"}
-              disabled={!connected || chatLoading}
-              style={{
-                flex: 1,
-                background: "rgba(200,255,62,0.025)",
-                border: `1px solid ${connected ? "rgba(200,255,62,0.1)" : "#181818"}`,
-                borderRadius: 5, padding: "9px 11px",
-                color: connected ? "#bbb" : "#2a2a2a",
-                fontSize: 11, fontFamily: "inherit",
-                outline: "none",
-                WebkitTapHighlightColor: "transparent",
-              }}
-            />
-            <button
-              onClick={sendChat}
-              disabled={!connected || chatLoading || !chatMsg.trim()}
-              style={{
-                background: connected && chatMsg.trim() && !chatLoading ? DIM : "transparent",
-                color: connected && chatMsg.trim() && !chatLoading ? LIME : "#222",
-                border: `1px solid ${connected && chatMsg.trim() ? "rgba(200,255,62,0.25)" : "#181818"}`,
-                borderRadius: 5, padding: "9px 14px",
-                fontSize: 11, fontFamily: "inherit",
-                cursor: connected && chatMsg.trim() && !chatLoading ? "pointer" : "not-allowed",
-                letterSpacing: "0.08em",
-                WebkitTapHighlightColor: "transparent",
-                transition: "all 0.1s",
-              }}
-            >{chatLoading ? "···" : "发送"}</button>
-          </div>
-          {chatResp && (
-            <div style={{
-              marginTop: 8, padding: "9px 11px",
-              background: "rgba(200,255,62,0.02)",
-              border: "1px solid rgba(200,255,62,0.07)",
-              borderRadius: 5, fontSize: 11,
-              color: "rgba(200,255,62,0.55)",
-              letterSpacing: "0.03em", lineHeight: 1.5,
-              animation: "fadeIn 0.2s ease",
-            }}>{chatResp}</div>
-          )}
+            padding: "10px 14px 0" }}>AI AGENT</div>
+          <ChatPanel
+            messages={messages}
+            thinking={chatThinking}
+            onSend={sendChat}
+            placeholder={connected ? "对话控制，如：站起来跳个舞" : "未连接"}
+            variant="inline"
+            disabled={!connected}
+          />
         </div>
 
       </div>
