@@ -224,3 +224,106 @@ async def go2_vision_stream():
             vision_loop.remove_callback(on_frame)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ── 导航端点 ─────────────────────────────────────────────────────
+
+class TagLocationRequest(BaseModel):
+    name: str
+
+
+class NavigateRequest(BaseModel):
+    name: str
+
+
+class PatrolRequest(BaseModel):
+    stops: list[str]
+
+
+class ObstacleAvoidanceRequest(BaseModel):
+    enabled: bool
+
+
+class LedRequest(BaseModel):
+    color: str = "white"
+    duration: int = 60
+
+
+@router.post("/api/go2/navigation/locations")
+async def nav_tag_location(req: TagLocationRequest):
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    odom = go2.odom
+    if not odom:
+        raise HTTPException(status_code=503, detail="暂无 Odom 数据")
+    from cloud.go2 import spatial_memory
+    result = spatial_memory.tag_location(req.name, odom)
+    return {"ok": True, "message": result}
+
+
+@router.get("/api/go2/navigation/locations")
+def nav_list_locations():
+    from cloud.go2 import spatial_memory
+    return spatial_memory.list_locations()
+
+
+@router.delete("/api/go2/navigation/locations/{name}")
+def nav_delete_location(name: str):
+    from cloud.go2 import spatial_memory
+    deleted = spatial_memory.delete_location(name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"地点「{name}」不存在")
+    return {"ok": True}
+
+
+@router.post("/api/go2/navigation/go")
+async def nav_go(req: NavigateRequest):
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    from cloud.go2.navigator import navigator
+    asyncio.create_task(navigator.go_to(req.name))
+    return {"ok": True, "message": f"开始导航到「{req.name}」"}
+
+
+@router.post("/api/go2/navigation/patrol")
+async def nav_start_patrol(req: PatrolRequest):
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    if not req.stops:
+        raise HTTPException(status_code=400, detail="stops 不能为空")
+    from cloud.go2.navigator import navigator
+    await navigator.start_patrol(req.stops)
+    return {"ok": True, "stops": req.stops}
+
+
+@router.delete("/api/go2/navigation/patrol")
+def nav_stop():
+    from cloud.go2.navigator import navigator
+    navigator.stop()
+    return {"ok": True}
+
+
+@router.get("/api/go2/navigation/state")
+def nav_state():
+    from cloud.go2.navigator import navigator
+    s = navigator.state
+    return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
+
+
+@router.put("/api/go2/obstacle-avoidance")
+async def set_obstacle_avoidance(req: ObstacleAvoidanceRequest):
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    await go2.set_obstacle_avoidance(req.enabled)
+    return {"ok": True, "enabled": req.enabled}
+
+
+@router.put("/api/go2/led")
+async def set_led(req: LedRequest):
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    try:
+        await go2.set_led(req.color, req.duration)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "color": req.color, "duration": req.duration}

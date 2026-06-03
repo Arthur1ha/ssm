@@ -54,3 +54,35 @@ def test_connect_500_when_env_missing(client, monkeypatch):
     r = client.post("/api/go2/connection")
     assert r.status_code == 500
     assert "未配置" in r.json()["detail"]
+
+
+def test_tag_location_503_when_not_connected(client):
+    r = client.post("/api/go2/navigation/locations", json={"name": "门口"})
+    assert r.status_code == 503
+
+
+def test_list_locations_returns_list(client):
+    r = client.get("/api/go2/navigation/locations")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_nav_state_returns_mode(client):
+    r = client.get("/api/go2/navigation/state")
+    assert r.status_code == 200
+    assert "mode" in r.json()
+
+
+def test_obstacle_avoidance_400_bad_payload(client):
+    r = client.put("/api/go2/obstacle-avoidance", json={})
+    assert r.status_code == 422
+
+
+def test_led_400_unknown_color(client):
+    import cloud.go2.connection as conn_module
+    conn_module.go2.is_connected = True
+    try:
+        r = client.put("/api/go2/led", json={"color": "pink", "duration": 30})
+        assert r.status_code == 400
+    finally:
+        conn_module.go2.is_connected = False
