@@ -1,5 +1,5 @@
 # main.py — 云端编排器入口
-# MQTT 事件循环：传感器事件 → RuleEngine / DeskAgent，用户意图 → 编排图
+# MQTT 事件循环：用户意图 → 编排图
 
 import os
 import json
@@ -15,8 +15,6 @@ import paho.mqtt.client as mqtt_lib
 from shared_state import SharedState
 import tools as agent_tools
 from graph import build_orchestrator
-from rule_engine import RuleEngine
-from desk_agent import DeskAgent
 
 BROKER_HOST   = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
 BROKER_PORT   = int(os.getenv("MQTT_BROKER_PORT", "1883"))
@@ -92,11 +90,6 @@ def on_message(client, userdata, msg):
         if msg_type in ("state", "event", "report") and isinstance(payload, dict):
             state.on_agent_msg(unit_id, msg_type, payload)
 
-        if msg_type == "event":
-            suffix = unit_id.split("_")[-1]
-            if suffix in ("light", "ir", "sound"):
-                print(f"[Event] {unit_id} changed: {payload}")
-                event_queue.put({"trigger": "sensor", "payload": payload, "unit_id": unit_id})
         return
 
     # ssm/intent/{session_id} → 编排图
@@ -137,10 +130,6 @@ mqtt_client.on_disconnect = on_disconnect
 
 agent_tools.init(state, mqtt_client)
 orchestrator = build_orchestrator()
-rule_engine  = RuleEngine(state, agent_tools.do_publish_task)
-
-desk_agent = DeskAgent(state, agent_tools.do_publish_task, agent_tools.do_publish)
-desk_agent.start()
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
 mqtt_client.loop_start()
@@ -177,12 +166,6 @@ while True:
             except Exception as e:
                 print(f"[Main] 编排图异常: {e}")
             continue
-
-        if trigger == "sensor":
-            unit_id = event.get("unit_id", "")
-            print(f"[Main] RuleEngine for unit={unit_id}")
-            rule_engine.match_and_fire(unit_id, event["payload"])
-            desk_agent.push_sensor_event(unit_id, event["payload"])
 
     except Exception as e:
         import traceback
