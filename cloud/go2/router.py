@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from cloud.go2.connection import go2
+from cloud.go2.drive import drive
+from cloud.go2.reactive_mind import reactive_mind
 from cloud.go2.vision import vision_loop
 
 _DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
@@ -47,6 +49,7 @@ router = APIRouter()
 
 # 当前注册的视觉规则回调，重连时先移除再重注册，防止重复触发
 _active_rule_cb = None
+_active_drive_cb = None
 
 
 @router.post("/api/go2/connection")
@@ -60,43 +63,25 @@ async def go2_connect():
     go2._last_error = None
 
     def _on_connect_done(t: asyncio.Task) -> None:
-        global _active_rule_cb
+        global _active_rule_cb, _active_drive_cb
         if not t.cancelled() and t.exception():
             go2._last_error = str(t.exception())
             return
 
         _register_go2(serial)
 
-        from cloud.go2.tools import check_rules, go2_sport
-
-        # 移除上一次连接遗留的回调
         if _active_rule_cb is not None:
             vision_loop.remove_callback(_active_rule_cb)
+        if _active_drive_cb is not None:
+            vision_loop.remove_callback(_active_drive_cb)
 
-        def _rule_cb(result) -> None:
-            """OpenCV 检测结果 → 关键词 → 规则引擎 → 动作"""
-            parts = []
-            if result["persons"]["detected"]:
-                parts.append("人")
-            if result["faces"]["detected"]:
-                parts.append("脸")
-            if not parts:
-                return
-            observation = "，".join(parts)
-            triggered = check_rules(observation)
-            if not triggered:
-                return
-            try:
-                loop = asyncio.get_running_loop()
-                for action in triggered:
-                    loop.create_task(go2_sport(action))
-                    logging.info("[Go2Rules] vision→rule fired: %s", action)
-            except RuntimeError:
-                pass
+        _active_rule_cb  = reactive_mind.on_vision_frame
+        _active_drive_cb = drive.on_vision_frame
 
-        _active_rule_cb = _rule_cb
         vision_loop.start(lambda: go2._latest_frame)
-        vision_loop.add_callback(_rule_cb)
+        vision_loop.add_callback(reactive_mind.on_vision_frame)
+        vision_loop.add_callback(drive.on_vision_frame)
+        drive.start()
 
     task = asyncio.create_task(go2.connect(email, password, serial, region))
     task.add_done_callback(_on_connect_done)
@@ -106,6 +91,7 @@ async def go2_connect():
 @router.delete("/api/go2/connection")
 async def go2_disconnect():
     vision_loop.stop()
+    drive.stop()
     await go2.disconnect()
     _unregister_go2()
     return {"status": "disconnected"}
@@ -188,7 +174,20 @@ class ChatRequest(BaseModel):
 @router.post("/api/go2/chat")
 async def go2_chat(req: ChatRequest):
     from cloud.go2.agent import run_agent
-    return await run_agent(req.session_id, req.message)
+    drive.user_interrupt = True
+    try:
+        return await run_agent(req.session_id, req.message)
+    finally:
+        drive.user_interrupt = False
+
+
+@router.get("/api/go2/mind/last_decision")
+def go2_mind_last_decision():
+    """返回 ReactiveMind 上次 LLM 推理的决策结果。"""
+    d = reactive_mind.last_decision
+    if d is None:
+        return {"decision": None}
+    return {"decision": d}
 
 
 @router.get("/api/go2/vision")
@@ -247,6 +246,10 @@ class ObstacleAvoidanceRequest(BaseModel):
 class LedRequest(BaseModel):
     color: str = "white"
     duration: int = 60
+
+
+class PersonalityRequest(BaseModel):
+    prompt: str
 
 
 @router.post("/api/go2/navigation/locations")
@@ -327,3 +330,27 @@ async def set_led(req: LedRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "color": req.color, "duration": req.duration}
+
+
+@router.get("/api/go2/drive/state")
+def go2_drive_state():
+    return drive.state_snapshot
+
+
+@router.get("/api/go2/memory")
+def go2_memory():
+    from cloud.go2.episode_memory import episode_memory
+    return {"entries": episode_memory.entries()}
+
+
+@router.get("/api/go2/personality")
+def go2_personality_get():
+    from cloud.go2.personality import get_system_prompt
+    return {"prompt": get_system_prompt()}
+
+
+@router.post("/api/go2/personality")
+def go2_personality_set(req: PersonalityRequest):
+    from cloud.go2.personality import set_personality
+    set_personality(req.prompt)
+    return {"ok": True, "prompt": req.prompt}
