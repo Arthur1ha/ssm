@@ -12,7 +12,7 @@ _FSM_AVAILABLE: dict[str, list[str]] = {
     "lying":      ["StandUp"],
     "standing":   ["StandDown", "Move", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"],
     "moving":     ["Move", "StopMove"],
-    "executing":  ["StopMove"],
+    "executing":  ["StopMove", "Hello", "Stretch", "Dance1", "Dance2"],
 }
 
 _FSM_NEXT: dict[str, dict[str, str]] = {
@@ -21,7 +21,9 @@ _FSM_NEXT: dict[str, dict[str, str]] = {
                   "Hello": "executing", "Stretch": "executing",
                   "Dance1": "executing", "Dance2": "executing"},
     "moving":    {"StopMove": "standing"},
-    "executing": {"StopMove": "standing"},
+    "executing": {"StopMove": "standing",
+                  "Hello": "executing", "Stretch": "executing",
+                  "Dance1": "executing", "Dance2": "executing"},
 }
 
 _EXEC_RESET_DELAY = 12.0  # seconds before auto-reset executing → standing
@@ -124,11 +126,21 @@ class Go2Connection:
     def _on_state(self, msg: dict) -> None:
         data = msg.get("data", {})
         inner = data.get("data", data) if isinstance(data, dict) else {}
+        progress = float(inner.get("progress") or 0.0)
         self._robot_state = {
             "mode":        inner.get("mode"),
+            "progress":    progress,
             "body_height": inner.get("body_height"),
             "velocity":    inner.get("velocity"),
         }
+        # 动作完成检测：progress 从执行中(>0)归零时立即复位 FSM
+        if (self.fsm_state == "executing"
+                and getattr(self, "_last_progress", 0.0) > 0.05
+                and progress < 0.05):
+            self.fsm_state = "standing"
+            if self._exec_reset_task and not self._exec_reset_task.done():
+                self._exec_reset_task.cancel()
+        self._last_progress = progress
         for q in self._state_queues:
             try:
                 q.put_nowait(self._robot_state.copy())
