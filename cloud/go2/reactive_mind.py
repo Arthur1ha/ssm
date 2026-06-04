@@ -17,17 +17,13 @@ logger = logging.getLogger(__name__)
 _AUTONOMY_COOLDOWN_S = 15   # 两次自主行为之间的最小间隔
 _ACTION_COOLDOWN_S   = 30   # 同一动作的默认冷却
 
-# 移动动作：action key → go2_move 参数
-_MOVE_ACTIONS: dict[str, dict] = {
-    "move_forward":  {"direction": "forward"},
-    "move_backward": {"direction": "backward"},
-    "move_left":     {"direction": "left"},
-    "move_right":    {"direction": "right"},
-    "turn_left":     {"direction": "turn_left"},
-    "turn_right":    {"direction": "turn_right"},
+# 遥控模式下的即时反应动作：只做姿态和转向，不走动
+_TURN_ACTIONS: dict[str, dict] = {
+    "turn_left":  {"direction": "turn_left"},
+    "turn_right": {"direction": "turn_right"},
 }
 
-_ALL_ACTIONS = sorted(_VALID_SPORT_CMDS) + sorted(_MOVE_ACTIONS)
+_ALL_ACTIONS = sorted(_VALID_SPORT_CMDS) + sorted(_TURN_ACTIONS)
 
 
 def _frame_to_observation(frame: VisionFrame) -> str:
@@ -108,8 +104,8 @@ class ReactiveMind:
             f"冷却中的动作：{cooldown_str}\n"
             f"可用动作：\n"
             f"  姿态类：{', '.join(sorted(_VALID_SPORT_CMDS))}\n"
-            f"  移动类：{', '.join(sorted(_MOVE_ACTIONS))}（移动持续约 1s）\n\n"
-            f"决定你想做什么（或什么都不做）。\n"
+            f"  转向类：{', '.join(sorted(_TURN_ACTIONS))}（用于朝向变化方向）\n\n"
+            f"决定你想做什么（或什么都不做）。不要走动，只做姿态或转向。\n"
             f"直接输出 JSON，不含代码块：{{\"action\": \"动作名或null\", \"reason\": \"一句话\"}}"
         )
 
@@ -143,7 +139,7 @@ class ReactiveMind:
                 if action in _VALID_SPORT_CMDS:
                     await go2_sport(action)
                 else:
-                    await go2_move(**_MOVE_ACTIONS[action])
+                    await go2_move(**_TURN_ACTIONS[action])
                 self._action_cooldowns[action] = time.time()
                 self._last_autonomous_ts = time.time()
                 episode_memory.add(EventType.ACTION_TAKEN, f"自主响应：执行了 {action}（{reason}）")

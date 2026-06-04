@@ -41,6 +41,7 @@ class Go2Connection:
         self._frame_ready: asyncio.Event | None = None
         self.fsm_state: str = "offline"
         self._exec_reset_task: asyncio.Task | None = None
+        self._voxel_raw: dict | None = None       # 最新一帧体素地图原始消息
 
     @property
     def available_actions(self) -> list[str]:
@@ -82,6 +83,9 @@ class Go2Connection:
         )
         self._conn.datachannel.pub_sub.subscribe(
             RTC_TOPIC["LOW_STATE"], self._on_low_state
+        )
+        self._conn.datachannel.pub_sub.subscribe(
+            RTC_TOPIC["ULIDAR_ARRAY"], self._on_voxel_map
         )
         self.is_connected = True
         self.fsm_state = "standing"
@@ -149,6 +153,28 @@ class Go2Connection:
                 q.put_nowait(self._odom.copy())
             except asyncio.QueueFull:
                 pass
+
+    def _on_voxel_map(self, msg: dict) -> None:
+        self._voxel_raw = msg
+        if not hasattr(self, "_voxel_dumped"):
+            self._voxel_dumped = False
+        if not self._voxel_dumped:
+            import json, pathlib
+            try:
+                def _safe(obj, depth=0):
+                    if depth > 6: return str(obj)
+                    if isinstance(obj, dict): return {k: _safe(v, depth+1) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [_safe(x, depth+1) for x in obj[:50]] + ([f"...{len(obj)} total"] if len(obj) > 50 else [])
+                    if isinstance(obj, bytes): return {"__bytes_len__": len(obj), "__hex__": obj[:64].hex()}
+                    try: json.dumps(obj); return obj
+                    except: return str(obj)
+                out = pathlib.Path("/home/eliott/ssm/logs/voxel_sample.json")
+                out.write_text(json.dumps(_safe(msg), indent=2, ensure_ascii=False))
+                logging.info("[Go2] 体素地图样本已保存到 logs/voxel_sample.json")
+                self._voxel_dumped = True
+            except Exception as e:
+                logging.warning("[Go2] 体素地图保存失败: %s", e)
 
     def _on_low_state(self, msg: dict) -> None:
         # poll-only: low_state is read via the property, no queue fan-out needed
@@ -315,6 +341,10 @@ class Go2Connection:
             RTC_TOPIC["VUI"],
             {"api_id": 1001, "parameter": {"color": color, "time": duration}},
         )
+
+    @property
+    def voxel_raw(self) -> dict | None:
+        return self._voxel_raw
 
     def latest_frame_b64(self) -> str | None:
         if self._latest_frame is None:

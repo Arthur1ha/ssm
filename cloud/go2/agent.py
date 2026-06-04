@@ -1,8 +1,11 @@
 import asyncio
 import json
+import logging
 import re
 import sys as _sys
 from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -25,9 +28,11 @@ class Go2AgentState(TypedDict):
 
 async def planner_node(state: Go2AgentState) -> Go2AgentState:
     if not go2.is_connected:
+        logger.info("[Agent/planner] Go2 未连接，提前退出")
         return {**state, "planned_tools": [], "early_exit": True,
                 "response_text": "Go2 当前未连接，请先通过「连接」按钮建立连接。"}
 
+    logger.info("[Agent/planner] 用户指令: %s", state["user_msg"])
     prompt = (
         f"你是 Go2 机器狗控制智能体。根据用户指令生成工具调用列表。\n"
         f"{TOOL_DESCRIPTIONS}\n\n"
@@ -40,6 +45,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     )
     resp = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
     content = resp.content.strip()
+    logger.debug("[Agent/planner] LLM 原始输出: %s", content)
     content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
     idx_s, idx_e = content.find("["), content.rfind("]")
     try:
@@ -47,6 +53,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     except Exception:
         tools_raw = []
     planned = [t for t in tools_raw if isinstance(t, dict) and "tool" in t]
+    logger.info("[Agent/planner] 规划工具调用: %s", json.dumps(planned, ensure_ascii=False))
     return {**state, "planned_tools": planned, "early_exit": False}
 
 
@@ -60,12 +67,15 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
         params = call.get("params", {})
         fn = TOOL_FN_MAP.get(tool_name)
         if fn is None:
+            logger.warning("[Agent/executor] 未知工具: %s", tool_name)
             results.append({"tool": tool_name, "result": f"未知工具: {tool_name}"})
             continue
+        logger.info("[Agent/executor] 调用 %s  参数=%s", tool_name, json.dumps(params, ensure_ascii=False))
         try:
             result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
         except Exception as exc:
             result = f"执行失败: {exc}"
+        logger.info("[Agent/executor] %s 返回: %s", tool_name, result)
         results.append({"tool": tool_name, "result": result})
 
     results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
@@ -83,6 +93,7 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
     except Exception:
         response_text = "指令已执行完成。"
 
+    logger.info("[Agent/executor] 最终回复: %s", response_text)
     return {**state, "tool_results": results, "response_text": response_text}
 
 

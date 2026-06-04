@@ -102,6 +102,70 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
 
 /* ─────────────────────────────────────────────────────────── */
 
+function WaypointMap({ locations, LIME, BORDER }) {
+  const W = 280, H = 130, PAD = 22;
+
+  if (locations.length === 0) {
+    return (
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`}
+        style={{ border: `1px solid ${BORDER}`, borderRadius: 4, display: "block" }}>
+        <text x={W / 2} y={H / 2} textAnchor="middle" dominantBaseline="middle"
+          fill="#1e1e1e" fontSize="10" fontFamily="'Share Tech Mono',monospace"
+          letterSpacing="2">NO DATA</text>
+      </svg>
+    );
+  }
+
+  const xs = locations.map(l => l.x);
+  const ys = locations.map(l => l.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+  const scale = Math.min((W - PAD * 2) / rangeX, (H - PAD * 2) / rangeY, 55);
+  const offX = (W - PAD * 2 - rangeX * scale) / 2;
+  const offY = (H - PAD * 2 - rangeY * scale) / 2;
+  const toSvg = (x, y) => ({
+    sx: PAD + offX + (x - minX) * scale,
+    sy: H - PAD - offY - (y - minY) * scale,
+  });
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`}
+      style={{ border: `1px solid ${BORDER}`, borderRadius: 4, display: "block",
+        background: "rgba(200,255,62,0.012)" }}>
+      <defs>
+        <filter id="wp-glow">
+          <feGaussianBlur stdDeviation="1.8" result="blur" />
+          <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+      </defs>
+      <line x1={W / 2} y1={0} x2={W / 2} y2={H} stroke="rgba(200,255,62,0.04)" strokeWidth="0.5" />
+      <line x1={0} y1={H / 2} x2={W} y2={H / 2} stroke="rgba(200,255,62,0.04)" strokeWidth="0.5" />
+      {locations.length > 1 && locations.map((loc, i) => {
+        if (i === 0) return null;
+        const { sx: x1, sy: y1 } = toSvg(locations[i - 1].x, locations[i - 1].y);
+        const { sx: x2, sy: y2 } = toSvg(loc.x, loc.y);
+        return <line key={`ln${i}`} x1={x1} y1={y1} x2={x2} y2={y2}
+          stroke="rgba(200,255,62,0.1)" strokeWidth="0.8" strokeDasharray="3,3" />;
+      })}
+      {locations.map((loc, i) => {
+        const { sx, sy } = toSvg(loc.x, loc.y);
+        return (
+          <g key={loc.name}>
+            <circle cx={sx} cy={sy} r={3.5} fill={LIME} fillOpacity="0.85"
+              filter="url(#wp-glow)" />
+            <text x={sx + 6} y={sy} fontSize="7.5" dominantBaseline="middle"
+              fontFamily="'Share Tech Mono',monospace"
+              fill="rgba(200,255,62,0.5)" letterSpacing="0.3">{loc.name}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────── */
+
 function Go2DevicePage({ onBack, messages, onAppend }) {
   const { useState, useEffect, useRef, useCallback } = React;
 
@@ -111,11 +175,18 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   const PANEL  = "#0C0F1A";
   const BORDER = "rgba(200,255,62,0.1)";
 
-  const [status,       setStatus]    = useState("idle");
-  const [robotState,   setRobot]     = useState(null);
-  const [error,        setError]     = useState("");
-  const [mode,         setMode]      = useState("normal");
-  const [chatThinking, setChatThink] = useState(false);
+  const [status,        setStatus]     = useState("idle");
+  const [robotState,    setRobot]      = useState(null);
+  const [error,         setError]      = useState("");
+  const [autonomyMode,  setAutonomyMode] = useState("remote");
+  const [chatThinking,  setChatThink]  = useState(false);
+  const [wpOpen,       setWpOpen]    = useState(false);
+  const [locations,    setLocations] = useState([]);
+  const [tagName,      setTagName]   = useState("");
+  const [wpLoading,    setWpLoading] = useState(false);
+  const [navigating,   setNavigating]= useState(null);
+  const [homing,       setHoming]    = useState(false);
+  const [settingHome,  setSettingHome]= useState(false);
   const esRef   = useRef(null);
   const pollRef = useRef(null);
 
@@ -175,13 +246,23 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     body: JSON.stringify({ cmd, params: params || {} }),
   });
 
-  const switchMode = async m => {
-    await fetch("/api/go2/mode", {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: m }),
-    });
-    setMode(m);
+  const switchAutonomy = async m => {
+    try {
+      await fetch("/api/go2/autonomy", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: m }),
+      });
+      setAutonomyMode(m);
+    } catch (_) {}
   };
+
+  useEffect(() => {
+    if (status === "connected") {
+      fetch("/api/go2/autonomy").then(r => r.json()).then(d => setAutonomyMode(d.mode)).catch(() => {});
+    } else {
+      setAutonomyMode("remote");
+    }
+  }, [status]);
 
   /* ── 摇杆回调 ── */
   // 左摇杆：dx右正→y负(右移)，dy下正→x负(后退)
@@ -199,6 +280,64 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   }, []);
 
   const handleStop = useCallback(() => sendCmd("StopMove"), []);
+
+  /* ── 地点管理 ── */
+  const fetchLocations = useCallback(async () => {
+    try {
+      const data = await fetch("/api/go2/navigation/locations").then(r => r.json());
+      setLocations(Array.isArray(data) ? data : []);
+    } catch (_) {}
+  }, []);
+
+  const tagLocation = useCallback(async () => {
+    if (!tagName.trim()) return;
+    setWpLoading(true);
+    try {
+      await fetch("/api/go2/navigation/locations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: tagName.trim() }),
+      });
+      setTagName("");
+      await fetchLocations();
+    } catch (_) {} finally { setWpLoading(false); }
+  }, [tagName, fetchLocations]);
+
+  const deleteLocation = useCallback(async (name) => {
+    try {
+      await fetch(`/api/go2/navigation/locations/${encodeURIComponent(name)}`, { method: "DELETE" });
+      await fetchLocations();
+    } catch (_) {}
+  }, [fetchLocations]);
+
+  const navigateTo = useCallback(async (name) => {
+    setNavigating(name);
+    try {
+      await fetch("/api/go2/navigation/go", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+    } catch (_) {} finally { setNavigating(null); }
+  }, []);
+
+  useEffect(() => { if (wpOpen) fetchLocations(); }, [wpOpen, fetchLocations]);
+
+  const goHome = useCallback(async () => {
+    if (!connected || homing) return;
+    setHoming(true);
+    try {
+      await fetch("/api/go2/navigation/home/go", { method: "POST" });
+    } catch (_) {} finally { setHoming(false); }
+  }, [connected, homing]);
+
+  const setHome = useCallback(async () => {
+    if (!connected || settingHome) return;
+    setSettingHome(true);
+    try {
+      await fetch("/api/go2/navigation/home", { method: "PUT" });
+    } catch (_) {} finally { setSettingHome(false); }
+  }, [connected, settingHome]);
 
   const connected = status === "connected";
   const busy      = status === "connecting";
@@ -225,12 +364,6 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
 
   const statusColor = { idle: "#444", connecting: "#f0a500", connected: LIME, error: "#ff4455" }[status];
   const statusLabel = { idle: "OFFLINE", connecting: "CONNECTING", connected: "ONLINE", error: "ERROR" }[status];
-
-  const MODES = [
-    { key: "normal", label: "标准" },
-    { key: "ai",     label: "AI 避障" },
-    { key: "mcf",    label: "MCF" },
-  ];
 
   const ACTIONS = [
     ["站起", "StandUp"],  ["挥手",  "Hello"],   ["舞蹈1", "Dance1"],
@@ -261,7 +394,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   };
 
   return (
-    <div style={{ background: BG, color: "#ccc", minHeight: "100vh",
+    <div style={{ background: BG, color: "#ccc", height: "100vh",
       fontFamily: "'Share Tech Mono','Courier New',monospace",
       display: "flex", flexDirection: "column" }}>
 
@@ -364,7 +497,6 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
               display: "flex", justifyContent: "space-between",
               fontSize: 9, color: `${LIME}75`, letterSpacing: "0.1em",
               pointerEvents: "none" }}>
-              <span>MODE {robotState.mode ?? "--"}</span>
               <span>H {typeof robotState.body_height === "number"
                 ? robotState.body_height.toFixed(3) : "--"}m</span>
               <span>VX {Array.isArray(robotState.velocity)
@@ -374,22 +506,30 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
           )}
         </div>
 
-        {/* 模式切换 */}
-        <div style={{ display: "flex", gap: 6, padding: "8px 14px",
+        {/* 自主模式切换 */}
+        <div style={{ display: "flex", gap: 6, padding: "0 14px 8px",
           borderBottom: `1px solid ${BORDER}` }}>
-          {MODES.map(({ key, label }) => (
-            <button key={key} onClick={() => connected && switchMode(key)} style={{
-              flex: 1, padding: "7px 4px",
-              background: mode === key ? DIM : "transparent",
-              color: mode === key ? LIME : "#303030",
-              border: `1px solid ${mode === key ? "rgba(200,255,62,0.3)" : "#181818"}`,
-              borderRadius: 4, fontSize: 11, fontWeight: 700,
-              cursor: connected ? "pointer" : "not-allowed",
-              letterSpacing: "0.07em", fontFamily: "inherit",
-              WebkitTapHighlightColor: "transparent",
-              transition: "all 0.15s",
-            }}>{label}</button>
-          ))}
+          {[
+            { key: "remote",       label: "遥控模式",   icon: "◎" },
+            { key: "free_explore", label: "自由探索",   icon: "◈" },
+          ].map(({ key, label, icon }) => {
+            const active = autonomyMode === key;
+            const accent = key === "free_explore" ? "#f0a500" : LIME;
+            return (
+              <button key={key} onClick={() => connected && switchAutonomy(key)} style={{
+                flex: 1, padding: "8px 4px",
+                background: active ? `${accent}18` : "transparent",
+                color: active ? accent : "#2a2a2a",
+                border: `1px solid ${active ? `${accent}40` : "#181818"}`,
+                borderRadius: 4, fontSize: 11, fontWeight: 700,
+                cursor: connected ? "pointer" : "not-allowed",
+                letterSpacing: "0.07em", fontFamily: "inherit",
+                WebkitTapHighlightColor: "transparent",
+                transition: "all 0.15s",
+                boxShadow: active ? `0 0 10px ${accent}20` : "none",
+              }}>{icon} {label}</button>
+            );
+          })}
         </div>
 
         {/* 摇杆区 */}
@@ -433,6 +573,171 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
             }}>
             ■ STOP
           </button>
+        </div>
+
+        {/* ── HOME ── */}
+        <div style={{ padding: "8px 14px 0", display: "flex", gap: 6 }}>
+          <button disabled={!connected || homing}
+            onClick={goHome}
+            className="g2-act"
+            style={{
+              flex: 1, padding: "11px 0",
+              background: connected ? "rgba(200,255,62,0.07)" : "rgba(255,255,255,0.02)",
+              color: connected ? LIME : "#1e1e1e",
+              border: `1px solid ${connected ? "rgba(200,255,62,0.28)" : "#141414"}`,
+              borderRadius: 5, fontSize: 12, fontWeight: 700,
+              cursor: connected ? "pointer" : "not-allowed",
+              fontFamily: "inherit", letterSpacing: "0.12em",
+              WebkitTapHighlightColor: "transparent", transition: "all 0.1s",
+            }}>
+            {homing ? "···" : "⌂ HOME"}
+          </button>
+          <button disabled={!connected || settingHome}
+            onClick={setHome}
+            className="g2-act"
+            style={{
+              padding: "11px 14px",
+              background: connected ? "rgba(200,255,62,0.03)" : "transparent",
+              color: connected ? "rgba(200,255,62,0.45)" : "#1e1e1e",
+              border: `1px solid ${connected ? "rgba(200,255,62,0.14)" : "#141414"}`,
+              borderRadius: 5, fontSize: 10, fontWeight: 700,
+              cursor: connected ? "pointer" : "not-allowed",
+              fontFamily: "inherit", letterSpacing: "0.1em",
+              WebkitTapHighlightColor: "transparent", transition: "all 0.1s",
+              whiteSpace: "nowrap",
+            }}>
+            {settingHome ? "···" : "SET HOME"}
+          </button>
+        </div>
+
+        {/* ── 快速标记 ── */}
+        <div style={{ padding: "8px 14px 0", display: "flex", gap: 6 }}>
+          <input value={tagName} onChange={e => setTagName(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && connected && tagLocation()}
+            placeholder="标记当前位置..."
+            disabled={!connected}
+            style={{
+              flex: 1, background: "rgba(200,255,62,0.03)",
+              border: `1px solid ${BORDER}`, borderRadius: 5,
+              padding: "10px 12px", fontSize: 11,
+              color: connected ? "#aaa" : "#2a2a2a",
+              fontFamily: "inherit", outline: "none", letterSpacing: "0.05em",
+            }} />
+          <button onClick={tagLocation}
+            disabled={!connected || !tagName.trim() || wpLoading}
+            className="g2-act"
+            style={{
+              padding: "10px 16px",
+              background: connected && tagName.trim() ? DIM : "transparent",
+              color: connected && tagName.trim() ? LIME : "#252525",
+              border: `1px solid ${connected && tagName.trim() ? "rgba(200,255,62,0.3)" : "#1a1a1a"}`,
+              borderRadius: 5, fontSize: 10, fontWeight: 700,
+              cursor: connected && tagName.trim() ? "pointer" : "not-allowed",
+              fontFamily: "inherit", letterSpacing: "0.1em",
+              WebkitTapHighlightColor: "transparent", whiteSpace: "nowrap",
+              transition: "all 0.1s",
+            }}>
+            {wpLoading ? "···" : "TAG"}
+          </button>
+        </div>
+
+        {/* ── WAYPOINTS ── */}
+        <div style={{ borderTop: `1px solid ${BORDER}`, marginTop: 8 }}>
+          <button onClick={() => setWpOpen(o => !o)} style={{
+            width: "100%", background: "none", border: "none",
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "10px 14px", cursor: "pointer",
+            fontFamily: "inherit", WebkitTapHighlightColor: "transparent",
+          }}>
+            <span style={{ fontSize: 9, color: "#252525", letterSpacing: "0.2em" }}>WAYPOINTS</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {locations.length > 0 && (
+                <span style={{ fontSize: 9, color: "rgba(200,255,62,0.35)",
+                  letterSpacing: "0.1em" }}>{locations.length} PTS</span>
+              )}
+              <span style={{ fontSize: 10, color: "#2a2a2a", display: "inline-block",
+                transform: wpOpen ? "rotate(180deg)" : "rotate(0deg)",
+                transition: "transform 0.2s" }}>▾</span>
+            </span>
+          </button>
+
+          {wpOpen && (
+            <div style={{ padding: "0 14px 14px", animation: "fadeIn 0.15s ease" }}>
+              <WaypointMap locations={locations} LIME={LIME} BORDER={BORDER} />
+
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                {locations.length === 0 && (
+                  <div style={{ fontSize: 10, color: "#1e1e1e", textAlign: "center",
+                    padding: "10px 0", letterSpacing: "0.15em" }}>— NO WAYPOINTS —</div>
+                )}
+                {locations.map(loc => (
+                  <div key={loc.name} style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    background: "rgba(200,255,62,0.025)",
+                    border: `1px solid ${BORDER}`,
+                    borderRadius: 4, padding: "7px 10px",
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, color: "rgba(200,255,62,0.7)",
+                        letterSpacing: "0.05em", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{loc.name}</div>
+                      <div style={{ fontSize: 9, color: "#2e2e2e", letterSpacing: "0.07em", marginTop: 2 }}>
+                        ({loc.x.toFixed(2)}, {loc.y.toFixed(2)})&nbsp;
+                        {(loc.heading * 180 / Math.PI).toFixed(0)}°
+                      </div>
+                    </div>
+                    <button onClick={() => navigateTo(loc.name)}
+                      disabled={!connected || navigating === loc.name}
+                      style={{
+                        background: connected ? "rgba(200,255,62,0.07)" : "transparent",
+                        color: connected ? "rgba(200,255,62,0.6)" : "#1e1e1e",
+                        border: `1px solid ${connected ? "rgba(200,255,62,0.2)" : "#181818"}`,
+                        borderRadius: 3, fontSize: 9, padding: "4px 8px",
+                        cursor: connected ? "pointer" : "not-allowed",
+                        fontFamily: "inherit", letterSpacing: "0.1em",
+                        WebkitTapHighlightColor: "transparent",
+                      }}>
+                      {navigating === loc.name ? "···" : "GO"}
+                    </button>
+                    <button onClick={() => deleteLocation(loc.name)} style={{
+                      background: "rgba(255,68,85,0.06)", color: "#ff4455",
+                      border: "1px solid rgba(255,68,85,0.15)",
+                      borderRadius: 3, fontSize: 11, padding: "3px 7px",
+                      cursor: "pointer", fontFamily: "inherit", lineHeight: 1,
+                      WebkitTapHighlightColor: "transparent",
+                    }}>×</button>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <input value={tagName} onChange={e => setTagName(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && connected && tagLocation()}
+                  placeholder="标记当前位置名称..."
+                  disabled={!connected}
+                  style={{
+                    flex: 1, background: "rgba(200,255,62,0.03)",
+                    border: `1px solid ${BORDER}`, borderRadius: 4,
+                    padding: "7px 10px", fontSize: 11,
+                    color: connected ? "#aaa" : "#2a2a2a",
+                    fontFamily: "inherit", outline: "none", letterSpacing: "0.05em",
+                  }} />
+                <button onClick={tagLocation}
+                  disabled={!connected || !tagName.trim() || wpLoading}
+                  style={{
+                    background: connected && tagName.trim() ? DIM : "transparent",
+                    color: connected && tagName.trim() ? LIME : "#252525",
+                    border: `1px solid ${connected && tagName.trim() ? "rgba(200,255,62,0.3)" : "#1a1a1a"}`,
+                    borderRadius: 4, fontSize: 10, padding: "7px 12px",
+                    cursor: connected && tagName.trim() ? "pointer" : "not-allowed",
+                    fontFamily: "inherit", letterSpacing: "0.1em",
+                    WebkitTapHighlightColor: "transparent", whiteSpace: "nowrap",
+                  }}>
+                  {wpLoading ? "···" : "TAG"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── AI 对话区 ── */}

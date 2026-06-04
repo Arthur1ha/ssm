@@ -1,5 +1,6 @@
 import asyncio
 import math
+import random
 import time
 from enum import Enum
 from typing import Optional
@@ -14,8 +15,8 @@ TURN_SPEED         = 0.5
 KP_YAW             = 0.8
 STUCK_CHECK_INTERVAL = 2.0
 STUCK_DISTANCE     = 0.05
-STUCK_BACKUP_TIME  = 1.0
-MAX_RETRIES        = 3
+STUCK_BACKUP_TIME  = 2.5
+MAX_RETRIES        = 6
 TRAJ_INTERVAL      = 5.0
 
 
@@ -48,10 +49,18 @@ class Navigator:
         self.mode   = NavMode.GOING_TO
         self.target = name
         try:
+            await go2.set_obstacle_avoidance(True)
+        except Exception:
+            pass
+        try:
             result = await self._navigate_to(loc)
         finally:
             self.mode   = NavMode.IDLE
             self.target = None
+            try:
+                await go2.set_obstacle_avoidance(False)
+            except Exception:
+                pass
         return result
 
     async def start_patrol(self, stops: list[str]) -> None:
@@ -111,14 +120,12 @@ class Navigator:
                     (odom["x"] - last_pos["x"]) ** 2 +
                     (odom["y"] - last_pos["y"]) ** 2
                 )
-                if moved < STUCK_DISTANCE:
+                # 只有在前进阶段（朝向已对准）位移不足才算卡死，纯转向阶段不计入
+                if moved < STUCK_DISTANCE and abs(heading_error) <= HEADING_THRESHOLD:
                     go2.move_velocity(0, 0, 0)
                     if retries >= MAX_RETRIES:
                         return f"无法到达「{loc['name']}」，已重试 {retries} 次"
-                    await asyncio.sleep(0.3)
-                    go2.move_velocity(-WALK_SPEED, 0.0, 0.0)
-                    await asyncio.sleep(STUCK_BACKUP_TIME)
-                    go2.move_velocity(0, 0, 0)
+                    await self._escape_obstacle()
                     return await self._navigate_to(loc, retries + 1)
                 last_pos         = {"x": odom["x"], "y": odom["y"]}
                 last_stuck_check = now
@@ -129,14 +136,40 @@ class Navigator:
 
             await asyncio.sleep(0.1)
 
+    async def _escape_obstacle(self) -> None:
+        # 后退
+        go2.move_velocity(-WALK_SPEED, 0.0, 0.0)
+        await asyncio.sleep(STUCK_BACKUP_TIME)
+        go2.move_velocity(0, 0, 0)
+        # 随机左转或右转，角度在 60°-120° 之间
+        turn_sign = 1.0 if random.random() > 0.5 else -1.0
+        turn_time = random.uniform(0.8, 1.4)
+        go2.move_velocity(0.0, 0.0, TURN_SPEED * turn_sign)
+        await asyncio.sleep(turn_time)
+        go2.move_velocity(0, 0, 0)
+        # 稍微前进一步，离开障碍物附近
+        go2.move_velocity(WALK_SPEED, 0.0, 0.0)
+        await asyncio.sleep(0.6)
+        go2.move_velocity(0, 0, 0)
+
     async def _patrol_loop(self, stops: list[str]) -> None:
-        while True:
-            for name in stops:
-                self.target = name
-                loc = await spatial_memory.find_location(name)
-                if loc is not None:
-                    await self._navigate_to(loc)
-                await asyncio.sleep(2.0)
+        try:
+            await go2.set_obstacle_avoidance(True)
+        except Exception:
+            pass
+        try:
+            while True:
+                for name in stops:
+                    self.target = name
+                    loc = await spatial_memory.find_location(name)
+                    if loc is not None:
+                        await self._navigate_to(loc)
+                    await asyncio.sleep(2.0)
+        finally:
+            try:
+                await go2.set_obstacle_avoidance(False)
+            except Exception:
+                pass
 
 
 def _normalize_angle(angle: float) -> float:

@@ -9,6 +9,7 @@ from typing import Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from cloud.go2.connection import go2
 from cloud.go2.tools import go2_sport, go2_move, go2_observe, get_text_llm, _VALID_SPORT_CMDS
 from cloud.go2.vision import VisionFrame
 from cloud.go2.personality import get_system_prompt
@@ -16,15 +17,9 @@ from cloud.go2.episode_memory import episode_memory, EventType
 
 logger = logging.getLogger(__name__)
 
-_CURIOSITY_THRESHOLD   = 120  # 2 分钟无事件 → EXPLORING
+_CURIOSITY_THRESHOLD   = 30  # 半分钟无事件 → EXPLORING
 _PERSON_GONE_TIMEOUT   = 30   # 人消失 30s → 回 IDLE
-_SOCIAL_CHECK_INTERVAL = 30   # SOCIAL 状态下每 30s 主动检查
-
-_EXPLORE_MOVES: dict[str, dict] = {
-    "turn_left":    {"direction": "turn_left"},
-    "turn_right":   {"direction": "turn_right"},
-    "move_forward": {"direction": "forward"},
-}
+_SOCIAL_CHECK_INTERVAL = 8    # SOCIAL 状态下每 8s 主动检查
 
 
 class MotivationalState(str, Enum):
@@ -104,43 +99,107 @@ class Drive:
                     self._state = MotivationalState.IDLE
 
     async def _do_explore(self) -> None:
-        memory_ctx = episode_memory.format_context()
-        prompt = (
-            f"{memory_ctx}\n\n"
-            f"你现在感到无聊，想主动探索一下环境。\n"
-            f"可用移动动作：{', '.join(_EXPLORE_MOVES)}\n"
-            f"可用姿态动作：{', '.join(sorted(_VALID_SPORT_CMDS))}\n\n"
-            f"选择一个探索行为（转向观察或移动一小步）。\n"
-            f"直接输出 JSON，不含代码块：{{\"action\": \"动作名\", \"reason\": \"一句话\"}}"
-        )
-        try:
-            resp = await get_text_llm().ainvoke([
-                SystemMessage(content=get_system_prompt()),
-                HumanMessage(content=prompt),
-            ])
-            content = re.sub(r"```(?:json)?\n?", "", resp.content.strip()).strip().rstrip("`")
-            decision = json.loads(content)
-        except Exception as exc:
-            logger.warning("[Drive] 探索推理失败: %s", exc)
-            return
+        _MAX_STEPS = 15
+        history: list[dict] = []
+        logger.info("[Drive] 开始自主探索会话")
 
-        action = decision.get("action")
-        reason = decision.get("reason", "")
-        if not action:
-            return
+        for step in range(_MAX_STEPS):
+            if self.user_interrupt or self._person_present:
+                logger.info("[Drive] EXPLORING 被打断 step=%d", step)
+                break
 
-        try:
-            if action in _VALID_SPORT_CMDS:
-                await go2_sport(action)
-            elif action in _EXPLORE_MOVES:
-                await go2_move(**_EXPLORE_MOVES[action])
-            else:
-                return
+            from cloud.go2 import spatial_memory
+            odom = go2.odom
+            odom_str = (
+                f"x={odom['x']:.2f}, y={odom['y']:.2f}, heading={odom['heading']:.2f}"
+                if odom else "未知"
+            )
+            locations = spatial_memory.list_locations()
+            loc_str = ", ".join(l["name"] for l in locations) if locations else "无"
+            history_str = "\n".join(
+                f"  步骤{h['step']}: [{h['tool']}] {h['reason']} → {h['result']}"
+                for h in history
+            ) or "  （尚未执行任何步骤）"
+
+            prompt = (
+                f"{episode_memory.format_context()}\n\n"
+                f"你正在自主探索环境，当前第 {step + 1} 步（最多 {_MAX_STEPS} 步）。\n"
+                f"当前位置：{odom_str}\n"
+                f"已知地点：{loc_str}\n\n"
+                f"本次探索历史：\n{history_str}\n\n"
+                f"可用工具：\n"
+                f"  go2_move     → direction: forward/backward/left/right/turn_left/turn_right\n"
+                f"  go2_sport    → cmd: {', '.join(sorted(_VALID_SPORT_CMDS))}\n"
+                f"  go2_observe  → question: 想观察什么\n"
+                f"  navigator_go → name: 导航到已知地点\n"
+                f"  tag_location → name: 给当前位置命名并保存\n"
+                f"  stop         → 结束探索（累了/满足了/想休息）\n\n"
+                f"直接输出 JSON，不含代码块：\n"
+                f"{{\"tool\": \"工具名\", \"params\": {{...}}, \"reason\": \"一句话\", \"done\": false}}"
+            )
+
+            try:
+                resp = await get_text_llm().ainvoke([
+                    SystemMessage(content=get_system_prompt()),
+                    HumanMessage(content=prompt),
+                ])
+                content = re.sub(r"```(?:json)?\n?", "", resp.content.strip()).strip().rstrip("`")
+                decision = json.loads(content)
+            except Exception as exc:
+                logger.warning("[Drive] 探索推理失败 step=%d: %s", step, exc)
+                break
+
+            tool   = decision.get("tool", "")
+            reason = decision.get("reason", "")
+
+            if decision.get("done") or tool == "stop":
+                logger.info("[Drive] EXPLORING 自主结束 step=%d：%s", step, reason)
+                episode_memory.add(EventType.ACTION_TAKEN, f"探索结束：{reason}")
+                break
+
+            logger.info("[Drive] EXPLORING step=%d  tool=%s  reason=%s", step, tool, reason)
+            result = await self._exec_explore_tool(tool, decision.get("params", {}))
+            logger.info("[Drive] EXPLORING step=%d  result=%s", step, result)
+
+            history.append({"step": step + 1, "tool": tool, "reason": reason, "result": result})
+            episode_memory.add(
+                EventType.ACTION_TAKEN,
+                f"探索步骤{step + 1}[{tool}]：{reason} → {result}",
+            )
             self._last_action_ts = time.time()
-            episode_memory.add(EventType.ACTION_TAKEN, f"自主探索：执行了 {action}（{reason}）")
-            logger.info("[Drive] EXPLORING 执行 %s：%s", action, reason)
+
+        logger.info("[Drive] 探索会话结束，共 %d 步", len(history))
+
+    async def _exec_explore_tool(self, tool: str, params: dict) -> str:
+        try:
+            if tool == "go2_move":
+                await go2_move(direction=params.get("direction", "forward"))
+                return "移动完成"
+            elif tool == "go2_sport":
+                return await go2_sport(params.get("cmd", ""))
+            elif tool == "go2_observe":
+                return await go2_observe(params.get("question", "描述当前场景"))
+            elif tool == "navigator_go":
+                from cloud.go2.navigator import navigator
+                name = params.get("name", "")
+                nav_task = asyncio.create_task(navigator.go_to(name))
+                while not nav_task.done():
+                    if self.user_interrupt or self._person_present:
+                        nav_task.cancel()
+                        navigator.stop()
+                        return "导航被打断"
+                    await asyncio.sleep(0.5)
+                return nav_task.result()
+            elif tool == "tag_location":
+                from cloud.go2 import spatial_memory
+                odom = go2.odom
+                if not odom:
+                    return "无法标记：odom 数据不可用"
+                return spatial_memory.tag_location(params.get("name", "unknown"), odom)
+            else:
+                return f"未知工具: {tool}"
         except Exception as exc:
-            logger.warning("[Drive] 探索执行失败: %s", exc)
+            return f"执行失败: {exc}"
 
     async def _do_social(self) -> None:
         try:
