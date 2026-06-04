@@ -7,6 +7,7 @@ from typing import Optional
 
 from cloud.go2.connection import go2
 from cloud.go2 import spatial_memory
+from cloud.go2.astar import astar
 
 ARRIVAL_THRESHOLD  = 0.3
 HEADING_THRESHOLD  = 0.25
@@ -53,7 +54,12 @@ class Navigator:
         except Exception:
             pass
         try:
-            result = await self._navigate_to(loc)
+            grid_obj = go2.occupancy_grid
+            if grid_obj is not None:
+                path = self._plan_path(loc)
+                if path and len(path) > 1:
+                    return await self._follow_path(path, grid_obj, loc)
+            return await self._navigate_to(loc)
         finally:
             self.mode   = NavMode.IDLE
             self.target = None
@@ -61,7 +67,6 @@ class Navigator:
                 await go2.set_obstacle_avoidance(False)
             except Exception:
                 pass
-        return result
 
     async def start_patrol(self, stops: list[str]) -> None:
         self.stop()
@@ -135,6 +140,46 @@ class Navigator:
                 last_traj_tick = now
 
             await asyncio.sleep(0.1)
+
+    def _plan_path(self, goal_loc: dict) -> list[tuple[int, int]] | None:
+        grid_obj = go2.occupancy_grid
+        if grid_obj is None:
+            return None
+        odom = go2.odom
+        if not odom:
+            return None
+        start = grid_obj.odom_to_grid(odom["x"], odom["y"])
+        goal  = grid_obj.odom_to_grid(goal_loc["x"], goal_loc["y"])
+        if not grid_obj.is_free(*start):
+            return None
+        return astar(grid_obj.grid, start, goal)
+
+    async def _follow_path(self, path: list[tuple[int, int]], grid_obj, goal_loc: dict) -> str:
+        WAYPOINT_RADIUS = 0.3
+        REPLAN_INTERVAL = 3.0
+
+        last_replan = time.monotonic()
+        i = 1  # skip start node
+
+        while i < len(path):
+            wx, wy = grid_obj.grid_to_odom(*path[i])
+            waypoint = {"name": goal_loc["name"], "x": wx, "y": wy}
+
+            result = await self._navigate_to(waypoint, retries=0)
+            if "无法到达" in result:
+                return result
+
+            i += 1
+
+            if time.monotonic() - last_replan >= REPLAN_INTERVAL:
+                new_path = self._plan_path(goal_loc)
+                if new_path and len(new_path) > 1:
+                    path = new_path
+                    grid_obj = go2.occupancy_grid or grid_obj
+                    i = 1
+                last_replan = time.monotonic()
+
+        return await self._navigate_to(goal_loc)
 
     async def _escape_obstacle(self) -> None:
         # 后退
