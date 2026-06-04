@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import random
 import time
@@ -19,6 +20,7 @@ STUCK_DISTANCE     = 0.05
 STUCK_BACKUP_TIME  = 2.5
 MAX_RETRIES        = 6
 TRAJ_INTERVAL      = 5.0
+MAX_SPIN_TIME      = 10.0
 
 
 class NavMode(str, Enum):
@@ -49,16 +51,23 @@ class Navigator:
             return f"找不到地点「{name}」，请先用 tag_location 保存"
         self.mode   = NavMode.GOING_TO
         self.target = name
+        self._task  = asyncio.current_task()
         try:
             await go2.set_obstacle_avoidance(True)
         except Exception:
             pass
         try:
+            deadline = time.monotonic() + 10.0
+            while go2.occupancy_grid is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
             grid_obj = go2.occupancy_grid
             if grid_obj is not None:
                 path = self._plan_path(loc)
+                logging.info("[Nav] A* 路径点数: %s", len(path) if path else None)
                 if path and len(path) > 1:
                     return await self._follow_path(path, grid_obj, loc)
+            else:
+                logging.warning("[Nav] 体素地图 10 秒内未就绪，降级直线导航")
             return await self._navigate_to(loc)
         finally:
             self.mode   = NavMode.IDLE
@@ -89,11 +98,16 @@ class Navigator:
         last_stuck_check = time.monotonic()
         last_traj_tick   = time.monotonic()
         last_pos = {"x": 0.0, "y": 0.0}
+        spin_start: Optional[float] = None
         odom = go2.odom
         if odom:
             last_pos = {"x": odom["x"], "y": odom["y"]}
 
         while True:
+            if self.mode == NavMode.IDLE:
+                go2.move_velocity(0, 0, 0)
+                return "导航已取消"
+
             odom = go2.odom
             if not odom:
                 await asyncio.sleep(0.1)
@@ -110,15 +124,25 @@ class Navigator:
             target_heading = math.atan2(dy, dx)
             heading_error  = _normalize_angle(target_heading - odom["heading"])
 
+            now = time.monotonic()
+
             if abs(heading_error) > HEADING_THRESHOLD:
+                if spin_start is None:
+                    spin_start = now
+                elif now - spin_start > MAX_SPIN_TIME:
+                    # 长时间无法对准朝向，视为被障碍物干扰，触发脱困
+                    go2.move_velocity(0, 0, 0)
+                    if retries >= MAX_RETRIES:
+                        return f"无法到达「{loc['name']}」，已重试 {retries} 次"
+                    await self._escape_obstacle()
+                    return await self._navigate_to(loc, retries + 1)
                 sign = 1.0 if heading_error > 0 else -1.0
                 go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
             else:
+                spin_start = None
                 vx   = min(WALK_SPEED, dist * 0.8)
                 vyaw = KP_YAW * heading_error
                 go2.move_velocity(vx, 0.0, vyaw)
-
-            now = time.monotonic()
 
             if now - last_stuck_check >= STUCK_CHECK_INTERVAL:
                 moved = math.sqrt(
