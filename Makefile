@@ -35,7 +35,7 @@ broker:
 api:
 	@pkill -9 -f "uvicorn cloud.api.main" || true
 	@sleep 1
-	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload
+	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082
 
 # ── Orchestrator ─────────────────────────────────────────────
 orchestrator:

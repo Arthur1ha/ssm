@@ -279,7 +279,10 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     sendCmd("Move", { x: 0, y: 0, z: parseFloat((-dx * 0.8).toFixed(2)) });
   }, []);
 
-  const handleStop = useCallback(() => sendCmd("StopMove"), []);
+  const handleStop = useCallback(async () => {
+    if (autonomyMode === "free_explore") await switchAutonomy("remote");
+    sendCmd("StopMove");
+  }, [autonomyMode]);
 
   /* ── 地点管理 ── */
   const fetchLocations = useCallback(async () => {
@@ -323,6 +326,9 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
 
   useEffect(() => { if (wpOpen) fetchLocations(); }, [wpOpen, fetchLocations]);
 
+  const connected = status === "connected";
+  const busy      = status === "connecting";
+
   const goHome = useCallback(async () => {
     if (!connected || homing) return;
     setHoming(true);
@@ -338,9 +344,6 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
       await fetch("/api/go2/navigation/home", { method: "PUT" });
     } catch (_) {} finally { setSettingHome(false); }
   }, [connected, settingHome]);
-
-  const connected = status === "connected";
-  const busy      = status === "connecting";
 
   /* ── AI 对话 ── */
   const sendChat = useCallback(async (text) => {
@@ -394,7 +397,9 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   };
 
   return (
-    <div style={{ background: BG, color: "#ccc", height: "100vh",
+    <div style={{ background: BG, color: "#ccc",
+      position: "fixed", inset: 0,
+      paddingTop: "env(safe-area-inset-top, 0px)",
       fontFamily: "'Share Tech Mono','Courier New',monospace",
       display: "flex", flexDirection: "column" }}>
 
@@ -558,7 +563,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
         {/* STOP 按钮 */}
         <div style={{ padding: "8px 14px 0" }}>
           <button disabled={!connected}
-            onClick={() => connected && sendCmd("StopMove")}
+            onClick={() => connected && handleStop()}
             className="g2-stop"
             style={{
               width: "100%", padding: "11px 0",
@@ -575,13 +580,12 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
           </button>
         </div>
 
-        {/* ── HOME ── */}
-        <div style={{ padding: "8px 14px 0", display: "flex", gap: 6 }}>
-          <button disabled={!connected || homing}
-            onClick={goHome}
+        {/* ── GO HOME ── */}
+        <div style={{ padding: "8px 14px 0" }}>
+          <button disabled={!connected || homing} onClick={goHome}
             className="g2-act"
             style={{
-              flex: 1, padding: "11px 0",
+              width: "100%", padding: "11px 0",
               background: connected ? "rgba(200,255,62,0.07)" : "rgba(255,255,255,0.02)",
               color: connected ? LIME : "#1e1e1e",
               border: `1px solid ${connected ? "rgba(200,255,62,0.28)" : "#141414"}`,
@@ -591,53 +595,6 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
               WebkitTapHighlightColor: "transparent", transition: "all 0.1s",
             }}>
             {homing ? "···" : "⌂ HOME"}
-          </button>
-          <button disabled={!connected || settingHome}
-            onClick={setHome}
-            className="g2-act"
-            style={{
-              padding: "11px 14px",
-              background: connected ? "rgba(200,255,62,0.03)" : "transparent",
-              color: connected ? "rgba(200,255,62,0.45)" : "#1e1e1e",
-              border: `1px solid ${connected ? "rgba(200,255,62,0.14)" : "#141414"}`,
-              borderRadius: 5, fontSize: 10, fontWeight: 700,
-              cursor: connected ? "pointer" : "not-allowed",
-              fontFamily: "inherit", letterSpacing: "0.1em",
-              WebkitTapHighlightColor: "transparent", transition: "all 0.1s",
-              whiteSpace: "nowrap",
-            }}>
-            {settingHome ? "···" : "SET HOME"}
-          </button>
-        </div>
-
-        {/* ── 快速标记 ── */}
-        <div style={{ padding: "8px 14px 0", display: "flex", gap: 6 }}>
-          <input value={tagName} onChange={e => setTagName(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && connected && tagLocation()}
-            placeholder="标记当前位置..."
-            disabled={!connected}
-            style={{
-              flex: 1, background: "rgba(200,255,62,0.03)",
-              border: `1px solid ${BORDER}`, borderRadius: 5,
-              padding: "10px 12px", fontSize: 11,
-              color: connected ? "#aaa" : "#2a2a2a",
-              fontFamily: "inherit", outline: "none", letterSpacing: "0.05em",
-            }} />
-          <button onClick={tagLocation}
-            disabled={!connected || !tagName.trim() || wpLoading}
-            className="g2-act"
-            style={{
-              padding: "10px 16px",
-              background: connected && tagName.trim() ? DIM : "transparent",
-              color: connected && tagName.trim() ? LIME : "#252525",
-              border: `1px solid ${connected && tagName.trim() ? "rgba(200,255,62,0.3)" : "#1a1a1a"}`,
-              borderRadius: 5, fontSize: 10, fontWeight: 700,
-              cursor: connected && tagName.trim() ? "pointer" : "not-allowed",
-              fontFamily: "inherit", letterSpacing: "0.1em",
-              WebkitTapHighlightColor: "transparent", whiteSpace: "nowrap",
-              transition: "all 0.1s",
-            }}>
-            {wpLoading ? "···" : "TAG"}
           </button>
         </div>
 
@@ -734,6 +691,22 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
                     WebkitTapHighlightColor: "transparent", whiteSpace: "nowrap",
                   }}>
                   {wpLoading ? "···" : "TAG"}
+                </button>
+              </div>
+
+              <div style={{ marginTop: 6 }}>
+                <button disabled={!connected || settingHome} onClick={setHome}
+                  style={{
+                    width: "100%", padding: "7px 0",
+                    background: connected ? "rgba(200,255,62,0.03)" : "transparent",
+                    color: connected ? "rgba(200,255,62,0.45)" : "#1e1e1e",
+                    border: `1px solid ${connected ? "rgba(200,255,62,0.14)" : "#141414"}`,
+                    borderRadius: 4, fontSize: 10, fontWeight: 700,
+                    cursor: connected ? "pointer" : "not-allowed",
+                    fontFamily: "inherit", letterSpacing: "0.1em",
+                    WebkitTapHighlightColor: "transparent", whiteSpace: "nowrap",
+                  }}>
+                  {settingHome ? "···" : "SET HOME"}
                 </button>
               </div>
             </div>

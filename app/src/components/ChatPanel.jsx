@@ -8,11 +8,13 @@ const _LIME = '#C8FF3E';
 function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
                      variant, disabled, open, children }) {
   const [input,  setInput]  = useState('');
-  const endRef   = useRef(null);
+  const msgsRef  = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (msgsRef.current) {
+      msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
+    }
   }, [messages, thinking]);
 
   // sheet variant: 随 open 变化聚焦输入框
@@ -33,7 +35,7 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
 
       {/* 消息气泡区 */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px',
+      <div ref={msgsRef} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px',
         display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.map((m, i) => (
           <div key={i} style={{ maxWidth: '82%',
@@ -80,7 +82,7 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
             )}
           </div>
         )}
-        <div ref={endRef}/>
+        <div/>
       </div>
 
       {/* 扩展插槽（pendingRule 卡片、快捷建议等） */}

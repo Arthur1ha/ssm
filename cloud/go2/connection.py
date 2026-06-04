@@ -10,7 +10,7 @@ _FSM_AVAILABLE: dict[str, list[str]] = {
     "offline":    [],
     "connecting": [],
     "lying":      ["StandUp"],
-    "standing":   ["StandDown", "Move", "Hello", "Stretch", "Dance1", "Dance2"],
+    "standing":   ["StandDown", "Move", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"],
     "moving":     ["Move", "StopMove"],
     "executing":  ["StopMove"],
 }
