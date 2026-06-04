@@ -4,11 +4,14 @@ import re
 import sys as _sys
 from typing import TypedDict
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
+from cloud.go2.personality import get_system_prompt
+from cloud.go2.episode_memory import episode_memory, EventType
+
 from cloud.go2.connection import go2
-from cloud.go2.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm, check_rules, go2_sport
+from cloud.go2.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm
 
 
 class Go2AgentState(TypedDict):
@@ -65,14 +68,6 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
             result = f"执行失败: {exc}"
         results.append({"tool": tool_name, "result": result})
 
-        if tool_name == "go2_observe":
-            for action in check_rules(result):
-                try:
-                    await go2_sport(action)
-                    results.append({"tool": "rule_trigger", "result": f"规则触发: {action}"})
-                except Exception as exc:
-                    results.append({"tool": "rule_trigger", "result": f"规则触发失败: {exc}"})
-
     results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
     prompt = (
         f"用户说：'{state['user_msg']}'\n"
@@ -80,7 +75,10 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
         f"用 1 句简短中文告诉用户结果，语气自然，不提技术细节。"
     )
     try:
-        resp = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
+        resp = await get_text_llm().ainvoke([
+            SystemMessage(content=get_system_prompt()),
+            HumanMessage(content=prompt),
+        ])
         response_text = resp.content.strip()
     except Exception:
         response_text = "指令已执行完成。"
@@ -117,6 +115,7 @@ def _get_agent():
 
 
 async def run_agent(session_id: str, message: str) -> dict:
+    episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
     state = await _get_agent().ainvoke({
         "session_id":    session_id,
         "user_msg":      message,

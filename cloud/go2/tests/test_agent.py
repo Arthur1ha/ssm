@@ -246,42 +246,6 @@ def test_run_agent_executes_sport_command(monkeypatch):
     conn_mod.go2.is_connected = False
 
 
-def test_run_agent_triggers_rule_after_observe(tmp_path, monkeypatch):
-    import cloud.go2.agent as agent_mod
-    import cloud.go2.connection as conn_mod
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    conn_mod.go2.is_connected = True
-    conn_mod.go2._latest_frame = b"\xff\xd8\xff"
-
-    rules_file = tmp_path / "rules.json"
-    rules_file.write_text(json.dumps([
-        {"trigger": "人", "action": "Hello", "cooldown_s": 30, "last_triggered": 0}
-    ]))
-    monkeypatch.setattr(agent_mod, "RULES_FILE", rules_file)
-
-    mock_vision = MagicMock()
-    mock_vision.ainvoke = AsyncMock(return_value=MagicMock(content="画面中有一个人"))
-    monkeypatch.setattr(agent_mod, "get_vision_llm", lambda: mock_vision)
-
-    mock_text = MagicMock()
-    mock_text.ainvoke = AsyncMock(return_value=MagicMock(content="我看到有人，已挥手问好"))
-    monkeypatch.setattr(agent_mod, "get_text_llm", lambda: mock_text)
-
-    async def fake_planner(state):
-        return {**state, "planned_tools": [{"tool": "go2_observe", "params": {"question": "有没有人"}}],
-                "early_exit": False}
-
-    with patch.object(conn_mod.go2, "send_command", new_callable=AsyncMock) as mock_cmd:
-        with patch.object(agent_mod, "planner_node", side_effect=fake_planner):
-            result = asyncio.run(agent_mod.run_agent("s1", "看看有没有人"))
-
-    mock_cmd.assert_called_once_with("Hello")
-    assert "rule_trigger" in result["actions_taken"]
-
-    conn_mod.go2.is_connected = False
-    conn_mod.go2._latest_frame = None
-
 
 # ── /api/go2/chat 路由测试 ────────────────────────────────────────
 
@@ -331,3 +295,105 @@ def test_new_tools_in_fn_map():
                  "go2_set_obstacle_avoidance", "go2_set_led"):
         assert name in TOOL_FN_MAP, f"{name} missing from TOOL_FN_MAP"
         assert name in TOOL_DESCRIPTIONS, f"{name} missing from TOOL_DESCRIPTIONS"
+
+
+# ── ReactiveMind 性格与记忆集成测试 ──────────────────────────────────
+
+def test_autonomous_reason_uses_system_message(monkeypatch):
+    import cloud.go2.reactive_mind as rm_mod
+    from cloud.go2.episode_memory import EpisodeMemory
+    from langchain_core.messages import SystemMessage
+
+    fresh_memory = EpisodeMemory()
+    monkeypatch.setattr(rm_mod, "episode_memory", fresh_memory)
+
+    captured = []
+
+    async def fake_ainvoke(messages):
+        captured.extend(messages)
+        return MagicMock(content='{"action": null, "reason": "平静"}')
+
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = fake_ainvoke
+    monkeypatch.setattr(rm_mod, "get_text_llm", lambda: mock_llm)
+
+    mind = rm_mod.ReactiveMind()
+    frame = {
+        "ts": time.time(), "persons": {"detected": False, "count": 0},
+        "faces": {"detected": False, "count": 0},
+        "changed": True, "change_type": "none",
+    }
+    asyncio.run(mind._autonomous_reason(frame))
+
+    assert any(isinstance(m, SystemMessage) for m in captured)
+
+
+def test_autonomous_reason_records_action_taken_in_memory(monkeypatch):
+    import cloud.go2.reactive_mind as rm_mod
+    import cloud.go2.connection as conn_mod
+    from cloud.go2.episode_memory import EpisodeMemory
+
+    fresh_memory = EpisodeMemory()
+    monkeypatch.setattr(rm_mod, "episode_memory", fresh_memory)
+
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = AsyncMock(
+        return_value=MagicMock(content='{"action": "Hello", "reason": "有人进入"}')
+    )
+    monkeypatch.setattr(rm_mod, "get_text_llm", lambda: mock_llm)
+
+    conn_mod.go2.is_connected = True
+    with patch.object(conn_mod.go2, "send_command", new_callable=AsyncMock):
+        mind = rm_mod.ReactiveMind()
+        frame = {
+            "ts": time.time(), "persons": {"detected": True, "count": 1},
+            "faces": {"detected": False, "count": 0},
+            "changed": True, "change_type": "person_entered",
+        }
+        asyncio.run(mind._autonomous_reason(frame))
+    conn_mod.go2.is_connected = False
+
+    assert any("Hello" in e["content"] for e in fresh_memory.entries())
+
+
+def test_run_agent_records_user_command_in_memory(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.connection as conn_mod
+    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.episode_memory as mem_mod
+
+    fresh_memory = EpisodeMemory()
+    monkeypatch.setattr(mem_mod, "episode_memory", fresh_memory)
+    monkeypatch.setattr(agent_mod, "episode_memory", fresh_memory)
+
+    conn_mod.go2.is_connected = False
+    asyncio.run(agent_mod.run_agent("s1", "测试指令"))
+
+    assert any("测试指令" in e["content"] for e in fresh_memory.entries())
+
+
+def test_executor_uses_system_message_for_response(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.connection as conn_mod
+    from langchain_core.messages import SystemMessage
+
+    conn_mod.go2.is_connected = True
+
+    captured = []
+
+    async def fake_ainvoke(messages):
+        captured.extend(messages)
+        return MagicMock(content="好的，已执行")
+
+    mock_llm = MagicMock()
+    mock_llm.ainvoke = fake_ainvoke
+    monkeypatch.setattr(agent_mod, "get_text_llm", lambda: mock_llm)
+
+    async def fake_planner(state):
+        return {**state, "planned_tools": [], "early_exit": False}
+
+    with patch.object(agent_mod, "planner_node", side_effect=fake_planner):
+        asyncio.run(agent_mod.run_agent("s1", "你好"))
+
+    assert any(isinstance(m, SystemMessage) for m in captured)
+    conn_mod.go2.is_connected = False
