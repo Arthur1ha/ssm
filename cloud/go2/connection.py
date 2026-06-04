@@ -87,6 +87,9 @@ class Go2Connection:
         self._conn.datachannel.pub_sub.subscribe(
             RTC_TOPIC["ULIDAR_ARRAY"], self._on_voxel_map
         )
+        self._conn.datachannel.pub_sub.subscribe(
+            RTC_TOPIC["GRID_MAP"], self._on_grid_map
+        )
         self.is_connected = True
         self.fsm_state = "standing"
         logging.info("[Go2] WebRTC 连接成功")
@@ -154,11 +157,10 @@ class Go2Connection:
             except asyncio.QueueFull:
                 pass
 
-    def _on_voxel_map(self, msg: dict) -> None:
-        self._voxel_raw = msg
-        if not hasattr(self, "_voxel_dumped"):
-            self._voxel_dumped = False
-        if not self._voxel_dumped:
+    def _on_grid_map(self, msg: dict) -> None:
+        if not hasattr(self, "_grid_dumped"):
+            self._grid_dumped = False
+        if not self._grid_dumped:
             import json, pathlib
             try:
                 def _safe(obj, depth=0):
@@ -169,12 +171,15 @@ class Go2Connection:
                     if isinstance(obj, bytes): return {"__bytes_len__": len(obj), "__hex__": obj[:64].hex()}
                     try: json.dumps(obj); return obj
                     except: return str(obj)
-                out = pathlib.Path("/home/eliott/ssm/logs/voxel_sample.json")
+                out = pathlib.Path("/home/eliott/ssm/logs/grid_sample.json")
                 out.write_text(json.dumps(_safe(msg), indent=2, ensure_ascii=False))
-                logging.info("[Go2] 体素地图样本已保存到 logs/voxel_sample.json")
-                self._voxel_dumped = True
+                logging.info("[Go2] 2D栅格地图样本已保存到 logs/grid_sample.json")
+                self._grid_dumped = True
             except Exception as e:
-                logging.warning("[Go2] 体素地图保存失败: %s", e)
+                logging.warning("[Go2] 栅格地图保存失败: %s", e)
+
+    def _on_voxel_map(self, msg: dict) -> None:
+        self._voxel_raw = msg
 
     def _on_low_state(self, msg: dict) -> None:
         # poll-only: low_state is read via the property, no queue fan-out needed
@@ -345,6 +350,13 @@ class Go2Connection:
     @property
     def voxel_raw(self) -> dict | None:
         return self._voxel_raw
+
+    @property
+    def occupancy_grid(self):
+        if self._voxel_raw is None:
+            return None
+        from cloud.go2.occupancy_grid import OccupancyGrid
+        return OccupancyGrid(self._voxel_raw)
 
     def latest_frame_b64(self) -> str | None:
         if self._latest_frame is None:
