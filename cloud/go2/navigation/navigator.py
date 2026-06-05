@@ -53,10 +53,6 @@ class Navigator:
         self.target = name
         self._task  = asyncio.current_task()
         try:
-            await go2.set_obstacle_avoidance(True)
-        except Exception:
-            pass
-        try:
             deadline = time.monotonic() + 10.0
             while go2.occupancy_grid is None and time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
@@ -72,10 +68,6 @@ class Navigator:
         finally:
             self.mode   = NavMode.IDLE
             self.target = None
-            try:
-                await go2.set_obstacle_avoidance(False)
-            except Exception:
-                pass
 
     async def start_patrol(self, stops: list[str]) -> None:
         self.stop()
@@ -119,6 +111,9 @@ class Navigator:
 
             if dist < ARRIVAL_THRESHOLD:
                 go2.move_velocity(0, 0, 0)
+                target_h = loc.get("heading")
+                if target_h is not None:
+                    await self._align_heading(target_h)
                 return f"已到达「{loc['name']}」"
 
             target_heading = math.atan2(dy, dx)
@@ -205,6 +200,20 @@ class Navigator:
 
         return await self._navigate_to(goal_loc)
 
+    async def _align_heading(self, target_heading: float) -> None:
+        while True:
+            odom = go2.odom
+            if not odom:
+                await asyncio.sleep(0.05)
+                continue
+            error = _normalize_angle(target_heading - odom["heading"])
+            if abs(error) <= HEADING_THRESHOLD:
+                go2.move_velocity(0, 0, 0)
+                return
+            sign = 1.0 if error > 0 else -1.0
+            go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
+            await asyncio.sleep(0.05)
+
     async def _escape_obstacle(self) -> None:
         # 后退
         go2.move_velocity(-WALK_SPEED, 0.0, 0.0)
@@ -222,23 +231,13 @@ class Navigator:
         go2.move_velocity(0, 0, 0)
 
     async def _patrol_loop(self, stops: list[str]) -> None:
-        try:
-            await go2.set_obstacle_avoidance(True)
-        except Exception:
-            pass
-        try:
-            while True:
-                for name in stops:
-                    self.target = name
-                    loc = await spatial_memory.find_location(name)
-                    if loc is not None:
-                        await self._navigate_to(loc)
-                    await asyncio.sleep(2.0)
-        finally:
-            try:
-                await go2.set_obstacle_avoidance(False)
-            except Exception:
-                pass
+        while True:
+            for name in stops:
+                self.target = name
+                loc = await spatial_memory.find_location(name)
+                if loc is not None:
+                    await self._navigate_to(loc)
+                await asyncio.sleep(2.0)
 
 
 def _normalize_angle(angle: float) -> float:
