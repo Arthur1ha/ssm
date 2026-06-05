@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
-from cloud.go2.personality import get_system_prompt
-from cloud.go2.episode_memory import episode_memory, EventType
+from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 
 from cloud.go2.connection import go2
-from cloud.go2.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm
+from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm
 
 
 class Go2AgentState(TypedDict):

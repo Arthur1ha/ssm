@@ -10,9 +10,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from cloud.go2.connection import go2
-from cloud.go2.drive import drive
-from cloud.go2.reactive_mind import reactive_mind
-from cloud.go2.vision import vision_loop
+from cloud.go2.navigation.drive import drive
+from cloud.go2.agentcore.skills.reactive import reactive_mind
+from cloud.go2.agentcore.skills.vision import vision_loop
 
 _DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
 

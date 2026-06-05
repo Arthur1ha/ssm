@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-MEMORY_DB = Path(__file__).parent / "spatial_memory.db"
+MEMORY_DB = Path(__file__).parent / "spatial.db"
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -67,7 +67,7 @@ async def _llm_find(query: str) -> Optional[dict]:
 
 
 def _get_text_llm():
-    from cloud.go2.tools import get_text_llm
+    from cloud.go2.agentcore.tools.tools import get_text_llm
     return get_text_llm()
 
 

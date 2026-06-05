@@ -7,10 +7,10 @@ from typing import Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from cloud.go2.vision import VisionFrame
-from cloud.go2.tools import check_rules, go2_sport, go2_move, get_text_llm, _VALID_SPORT_CMDS
-from cloud.go2.personality import get_system_prompt
-from cloud.go2.episode_memory import episode_memory, EventType
+from cloud.go2.agentcore.skills.vision import VisionFrame
+from cloud.go2.agentcore.tools.tools import check_rules, go2_sport, go2_move, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 
 logger = logging.getLogger(__name__)
 

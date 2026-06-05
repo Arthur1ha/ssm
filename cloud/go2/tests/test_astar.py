@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from cloud.go2.astar import astar
+from cloud.go2.navigation.astar import astar
 
 def _free_grid(nx=20, ny=20) -> np.ndarray:
     return np.zeros((ny, nx), dtype=bool)

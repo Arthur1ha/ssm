@@ -7,8 +7,8 @@ from enum import Enum
 from typing import Optional
 
 from cloud.go2.connection import go2
-from cloud.go2 import spatial_memory
-from cloud.go2.astar import astar
+from cloud.go2.agentcore.memory import spatial as spatial_memory
+from cloud.go2.navigation.astar import astar
 
 ARRIVAL_THRESHOLD  = 0.3
 HEADING_THRESHOLD  = 0.25

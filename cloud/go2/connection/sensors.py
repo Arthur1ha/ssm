@@ -83,7 +83,7 @@ class Go2Sensors:
     def occupancy_grid(self):
         if self._voxel_raw is None:
             return None
-        from cloud.go2.occupancy_grid import OccupancyGrid
+        from cloud.go2.navigation.occupancy_grid import OccupancyGrid
         return OccupancyGrid(self._voxel_raw)
 
     # ── 队列管理 ──────────────────────────────────────────────────────────

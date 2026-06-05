@@ -11,7 +11,7 @@ from cloud.go2.connection import go2
 
 # ── 规则存储 ──────────────────────────────────────────────────────
 
-RULES_FILE = Path(__file__).parent / "rules.json"
+RULES_FILE = Path(__file__).parent.parent.parent / "rules.json"
 
 
 def load_rules() -> list:
@@ -167,19 +167,19 @@ async def go2_tag_location(name: str) -> str:
     odom = go2.odom
     if not odom:
         return "暂无位置数据，请确认 Odom 订阅正常"
-    from cloud.go2 import spatial_memory
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
     return spatial_memory.tag_location(name, odom)
 
 
 async def go2_navigate_to(name: str) -> str:
     if not go2.is_connected:
         return "Go2 未连接"
-    from cloud.go2.navigator import navigator
+    from cloud.go2.navigation.navigator import navigator
     return await navigator.go_to(name)
 
 
 def go2_list_locations() -> str:
-    from cloud.go2 import spatial_memory
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
     locs = spatial_memory.list_locations()
     if not locs:
         return "暂无保存的地点，请先用 go2_tag_location 保存地点"

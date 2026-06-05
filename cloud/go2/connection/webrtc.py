@@ -4,9 +4,9 @@ import logging
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
 
-from cloud.go2.fsm import Go2FSM
-from cloud.go2.sensors import Go2Sensors
-from cloud.go2.video import Go2Video
+from cloud.go2.connection.fsm import Go2FSM
+from cloud.go2.connection.sensors import Go2Sensors
+from cloud.go2.connection.video import Go2Video
 
 _VALID_LED_COLORS = frozenset({"white", "red", "yellow", "blue", "green", "cyan", "purple"})
 

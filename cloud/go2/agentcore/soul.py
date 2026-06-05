@@ -1,4 +1,3 @@
-# cloud/go2/personality.py
 import json
 from pathlib import Path
 

@@ -1,4 +1,3 @@
-# cloud/go2/drive.py
 import asyncio
 import json
 import logging
@@ -10,10 +9,10 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.tools import go2_sport, go2_move, go2_observe, get_text_llm, _VALID_SPORT_CMDS
-from cloud.go2.vision import VisionFrame
-from cloud.go2.personality import get_system_prompt
-from cloud.go2.episode_memory import episode_memory, EventType
+from cloud.go2.agentcore.tools.tools import go2_sport, go2_move, go2_observe, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.skills.vision import VisionFrame
+from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +107,7 @@ class Drive:
                 logger.info("[Drive] EXPLORING 被打断 step=%d", step)
                 break
 
-            from cloud.go2 import spatial_memory
+            from cloud.go2.agentcore.memory import spatial as spatial_memory
             odom = go2.odom
             odom_str = (
                 f"x={odom['x']:.2f}, y={odom['y']:.2f}, heading={odom['heading']:.2f}"
@@ -180,7 +179,7 @@ class Drive:
             elif tool == "go2_observe":
                 return await go2_observe(params.get("question", "描述当前场景"))
             elif tool == "navigator_go":
-                from cloud.go2.navigator import navigator
+                from cloud.go2.navigation.navigator import navigator
                 name = params.get("name", "")
                 nav_task = asyncio.create_task(navigator.go_to(name))
                 while not nav_task.done():
@@ -191,7 +190,7 @@ class Drive:
                     await asyncio.sleep(0.5)
                 return nav_task.result()
             elif tool == "tag_location":
-                from cloud.go2 import spatial_memory
+                from cloud.go2.agentcore.memory import spatial as spatial_memory
                 odom = go2.odom
                 if not odom:
                     return "无法标记：odom 数据不可用"

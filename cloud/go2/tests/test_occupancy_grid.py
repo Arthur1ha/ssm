@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from cloud.go2.occupancy_grid import OccupancyGrid
+from cloud.go2.navigation.occupancy_grid import OccupancyGrid
 
 def _make_msg(positions: list[list[int]]) -> dict:
     return {

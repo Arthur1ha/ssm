@@ -1,4 +1,11 @@
 {
+  "phone_ui": {
+    "unit_id": "phone_ui",
+    "agent_type": "supervisor",
+    "name": "human_supervisor",
+    "hw_platform": "pwa",
+    "ts": 1780622842
+  },
   "pc_llm_agent": {
     "unit_id": "pc_llm_agent",
     "agent_type": "decision",
@@ -8,12 +15,5 @@
       "manifest": "ssm/agents/pc_llm_agent/manifest",
       "state": "ssm/agents/pc_llm_agent/state"
     }
-  },
-  "phone_ui": {
-    "unit_id": "phone_ui",
-    "agent_type": "supervisor",
-    "name": "human_supervisor",
-    "hw_platform": "pwa",
-    "ts": 1780480365
   }
 }
