@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import math
-import random
 import time
 from enum import Enum
 from typing import Optional
@@ -10,20 +9,24 @@ from cloud.go2.connection import go2
 from cloud.go2.agentcore.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
 
-ARRIVAL_THRESHOLD  = 0.3
-HEADING_THRESHOLD  = 0.25
-WALK_SPEED         = 0.3
-TURN_SPEED         = 0.5
-KP_YAW             = 0.8
-STUCK_CHECK_INTERVAL = 2.0
-STUCK_DISTANCE     = 0.05
-STUCK_BACKUP_TIME  = 2.5
-MAX_RETRIES        = 6
-TRAJ_INTERVAL      = 5.0
-MIN_LINEAR_VEL     = 0.1   # m/s，path_following 最低线速度
-LOOKAHEAD_DIST     = 0.6   # m，路径前瞻距离
-REPLAN_INTERVAL    = 3.0   # s，重规划间隔
-MAX_SPIN_TIME      = 10.0
+logger = logging.getLogger(__name__)
+
+ARRIVAL_THRESHOLD    = 0.3    # m
+HEADING_THRESHOLD    = 0.25   # rad，对齐朝向误差上限
+WALK_SPEED           = 0.3    # m/s
+TURN_SPEED           = 0.5    # rad/s
+KP_YAW               = 0.8
+STUCK_CHECK_INTERVAL = 6.0    # s
+STUCK_DISTANCE       = 0.30   # m，卡住判定
+MAX_RETRIES          = 6
+TRAJ_INTERVAL        = 5.0    # s
+MIN_LINEAR_VEL       = 0.1    # m/s，路径跟随最低线速度
+LOOKAHEAD_DIST       = 0.6    # m，前瞻距离
+REPLAN_INTERVAL      = 1.0    # s，重规划间隔
+MAX_PATH_DEVIATION   = 0.8    # m，偏离路径超过此值立即重规划
+MAX_SPIN_TIME        = 10.0   # s，初始转向超时
+# 偏角超过此值时纯转向，否则边走边修正
+PATH_HEADING_INHIBIT = 0.5    # rad (~28°)
 
 
 class NavMode(str, Enum):
@@ -34,10 +37,12 @@ class NavMode(str, Enum):
 
 class Navigator:
     def __init__(self) -> None:
-        self.mode: NavMode        = NavMode.IDLE
+        self.mode: NavMode         = NavMode.IDLE
         self.target: Optional[str] = None
         self.patrol_stops: list[str] = []
         self._task: Optional[asyncio.Task] = None
+        self.current_path: list[tuple[int, int]] | None = None
+        self.current_grid_obj = None
 
     @property
     def state(self) -> dict:
@@ -48,29 +53,43 @@ class Navigator:
             "odom":         go2.odom,
         }
 
+    # ── 公开接口 ──────────────────────────────────────────────────────────
+
     async def go_to(self, name: str) -> str:
         loc = await spatial_memory.find_location(name)
         if loc is None:
+            logger.warning("[Go2/Nav] 找不到地点「%s」", name)
             return f"找不到地点「{name}」，请先用 tag_location 保存"
         self.mode   = NavMode.GOING_TO
         self.target = name
         self._task  = asyncio.current_task()
+        odom = go2.odom
+        logger.info(
+            "[Go2/Nav] 开始导航 → 「%s」(%.2f, %.2f)  当前位置=(%.2f, %.2f)",
+            name, loc["x"], loc["y"],
+            odom.get("x", 0.0) if odom else 0.0,
+            odom.get("y", 0.0) if odom else 0.0,
+        )
         try:
+            # 等待体素地图就绪（最多 10 秒），有图则走 A*，否则直线导航
             deadline = time.monotonic() + 10.0
             while go2.occupancy_grid is None and time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
-            grid_obj = go2.occupancy_grid
-            if grid_obj is not None:
+            if go2.occupancy_grid is not None:
                 path = self._plan_path(loc)
-                logging.info("[Nav] A* 路径点数: %s", len(path) if path else None)
+                logger.info("[Go2/Nav] A* 路径点数: %s", len(path) if path else "无路径")
                 if path and len(path) > 1:
+                    # 用规划时最新的地图，确保路径格索引与坐标系一致
+                    grid_obj = go2.occupancy_grid
                     return await self._follow_path(path, grid_obj, loc)
             else:
-                logging.warning("[Nav] 体素地图 10 秒内未就绪，降级直线导航")
+                logger.warning("[Go2/Nav] 体素地图 10 秒内未就绪，降级直线导航")
             return await self._navigate_to(loc)
         finally:
-            self.mode   = NavMode.IDLE
-            self.target = None
+            self.mode             = NavMode.IDLE
+            self.target           = None
+            self.current_path     = None
+            self.current_grid_obj = None
 
     async def start_patrol(self, stops: list[str]) -> None:
         self.stop()
@@ -89,9 +108,11 @@ class Navigator:
         except RuntimeError:
             pass
 
+    # ── 直线导航（无地图降级）────────────────────────────────────────────
+
     async def _navigate_to(self, loc: dict, retries: int = 0) -> str:
         odom_init = go2.odom
-        last_pos = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
+        last_pos  = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
         last_stuck_check = time.monotonic()
         last_traj_tick   = time.monotonic()
         spin_start: Optional[float] = None
@@ -114,21 +135,22 @@ class Navigator:
 
             if dist < ARRIVAL_THRESHOLD:
                 go2.move_velocity(0, 0, 0)
-                target_h = loc.get("heading")
-                if target_h is not None:
-                    await self._align_heading(target_h)
+                if loc.get("heading") is not None:
+                    await self._align_heading(loc["heading"])
+                logger.info("[Go2/Nav] 到达「%s」pos=(%.2f,%.2f)", loc["name"], odom["x"], odom["y"])
                 return f"已到达「{loc['name']}」"
 
             target_heading = math.atan2(dy, dx)
             heading_error  = _normalize_angle(target_heading - odom["heading"])
 
-            # ── 阶段一：初始转向（不前进）──
+            # 阶段一：初始转向
             if phase == "initial_rotation":
                 if abs(heading_error) <= HEADING_THRESHOLD:
                     phase = "path_following"
                     spin_start = None
                     last_pos = {"x": odom["x"], "y": odom["y"]}
                     last_stuck_check = now
+                    logger.info("[Go2/Nav] 初始转向完成，开始前进 dist=%.2fm", dist)
                 else:
                     if spin_start is None:
                         spin_start = now
@@ -138,12 +160,13 @@ class Navigator:
                             return f"无法到达「{loc['name']}」，已重试 {retries} 次"
                         await self._escape_obstacle()
                         return await self._navigate_to(loc, retries + 1)
-                    sign = 1.0 if heading_error > 0 else -1.0
-                    go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
+                    vyaw = KP_YAW * heading_error
+                    vyaw = math.copysign(max(0.15, min(TURN_SPEED, abs(vyaw))), vyaw)
+                    go2.move_velocity(0.0, 0.0, vyaw)
 
-            # ── 阶段二：前进（含航向比例修正）──
+            # 阶段二：前进（含比例航向修正）
             if phase == "path_following":
-                if abs(heading_error) > HEADING_THRESHOLD:
+                if abs(heading_error) > PATH_HEADING_INHIBIT:
                     sign = 1.0 if heading_error > 0 else -1.0
                     go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
                 else:
@@ -156,11 +179,16 @@ class Navigator:
                         (odom["x"] - last_pos["x"]) ** 2 +
                         (odom["y"] - last_pos["y"]) ** 2
                     )
-                    if moved < STUCK_DISTANCE and abs(heading_error) <= HEADING_THRESHOLD:
+                    if moved < STUCK_DISTANCE:
                         go2.move_velocity(0, 0, 0)
                         if retries >= MAX_RETRIES:
                             return f"无法到达「{loc['name']}」，已重试 {retries} 次"
                         await self._escape_obstacle()
+                        new_grid = go2.occupancy_grid
+                        if new_grid is not None:
+                            new_path = self._plan_path(loc)
+                            if new_path and len(new_path) > 1:
+                                return await self._follow_path(new_path, new_grid, loc)
                         return await self._navigate_to(loc, retries + 1)
                     last_pos         = {"x": odom["x"], "y": odom["y"]}
                     last_stuck_check = now
@@ -171,6 +199,8 @@ class Navigator:
 
             await asyncio.sleep(0.1)
 
+    # ── A* 路径跟随 ───────────────────────────────────────────────────────
+
     def _plan_path(self, goal_loc: dict) -> list[tuple[int, int]] | None:
         grid_obj = go2.occupancy_grid
         if grid_obj is None:
@@ -178,13 +208,19 @@ class Navigator:
         odom = go2.odom
         if not odom:
             return None
-        start = grid_obj.odom_to_grid(odom["x"], odom["y"])
-        goal  = grid_obj.odom_to_grid(goal_loc["x"], goal_loc["y"])
-        if not grid_obj.is_free(*start):
+        start    = grid_obj.odom_to_grid(odom["x"], odom["y"])
+        goal_raw = grid_obj.odom_to_grid(goal_loc["x"], goal_loc["y"])
+        goal     = _nearest_free_cell(grid_obj, goal_raw, max_r=20)
+        if goal is None:
+            logger.warning("[Go2/Nav] A* 终点半径 1m 内无自由格 %s，降级直线", goal_raw)
             return None
+        if goal != goal_raw:
+            logger.debug("[Go2/Nav] A* 终点修正 %s → %s", goal_raw, goal)
         return astar(grid_obj.grid, start, goal)
 
     async def _follow_path(self, path: list[tuple[int, int]], grid_obj, goal_loc: dict) -> str:
+        self.current_path     = path
+        self.current_grid_obj = grid_obj
         last_replan      = time.monotonic()
         last_stuck_check = time.monotonic()
         last_traj_tick   = time.monotonic()
@@ -202,7 +238,7 @@ class Navigator:
                 await asyncio.sleep(0.1)
                 continue
 
-            # 剔除已经过的路径节点（距机器人 < ARRIVAL_THRESHOLD 的节点）
+            # 剔除已经过的节点
             while len(path) > 1:
                 wx, wy = grid_obj.grid_to_odom(*path[0])
                 if math.sqrt((wx - odom["x"]) ** 2 + (wy - odom["y"]) ** 2) < ARRIVAL_THRESHOLD:
@@ -212,24 +248,24 @@ class Navigator:
 
             now = time.monotonic()
 
-            # 检查是否已到达终点
+            # 检查是否已到终点
             dx_goal = goal_loc["x"] - odom["x"]
             dy_goal = goal_loc["y"] - odom["y"]
             if math.sqrt(dx_goal ** 2 + dy_goal ** 2) < ARRIVAL_THRESHOLD:
                 go2.move_velocity(0, 0, 0)
-                target_h = goal_loc.get("heading")
-                if target_h is not None:
-                    await self._align_heading(target_h)
+                if goal_loc.get("heading") is not None:
+                    await self._align_heading(goal_loc["heading"])
+                logger.info("[Go2/Nav] 到达「%s」pos=(%.2f,%.2f)", goal_loc["name"], odom["x"], odom["y"])
                 return f"已到达「{goal_loc['name']}」"
 
-            # 取前方 lookahead 点作为临时目标
-            lx, ly = _find_lookahead_on_path(path, grid_obj, odom["x"], odom["y"], goal_loc)
+            # 前瞻目标点
+            lx, ly = _find_lookahead_on_path(path, grid_obj, odom["x"], odom["y"], odom["heading"], goal_loc)
             dx = lx - odom["x"]
             dy = ly - odom["y"]
             target_heading = math.atan2(dy, dx)
             heading_error  = _normalize_angle(target_heading - odom["heading"])
 
-            if abs(heading_error) > HEADING_THRESHOLD:
+            if abs(heading_error) > PATH_HEADING_INHIBIT:
                 sign = 1.0 if heading_error > 0 else -1.0
                 go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
             else:
@@ -238,22 +274,41 @@ class Navigator:
                 vyaw = KP_YAW * heading_error
                 go2.move_velocity(vx, 0.0, vyaw)
 
-            # stuck 检测（仅在前进阶段）
+            # 偏离路径检测：超过阈值立即重规划，不等定时器
+            deviation = _distance_to_path(path, grid_obj, odom["x"], odom["y"])
+            if deviation > MAX_PATH_DEVIATION:
+                logger.info("[Go2/Nav] 偏离路径 %.2fm，立即重规划", deviation)
+                new_path = self._plan_path(goal_loc)
+                if new_path and len(new_path) > 1:
+                    path     = new_path
+                    grid_obj = go2.occupancy_grid or grid_obj
+                    self.current_path     = path
+                    self.current_grid_obj = grid_obj
+                last_replan = now
+
+            # 卡住检测
             if now - last_stuck_check >= STUCK_CHECK_INTERVAL:
                 moved = math.sqrt(
                     (odom["x"] - last_pos["x"]) ** 2 +
                     (odom["y"] - last_pos["y"]) ** 2
                 )
-                if moved < STUCK_DISTANCE and abs(heading_error) <= HEADING_THRESHOLD:
+                if moved < STUCK_DISTANCE:
                     go2.move_velocity(0, 0, 0)
                     retries += 1
                     if retries >= MAX_RETRIES:
                         return f"无法到达「{goal_loc['name']}」，已重试 {retries} 次"
                     await self._escape_obstacle()
+                    new_path = self._plan_path(goal_loc)
+                    if new_path and len(new_path) > 1:
+                        path     = new_path
+                        grid_obj = go2.occupancy_grid or grid_obj
+                        self.current_path     = path
+                        self.current_grid_obj = grid_obj
                     fresh = go2.odom
                     if fresh:
                         last_pos = {"x": fresh["x"], "y": fresh["y"]}
                     last_stuck_check = time.monotonic()
+                    retries = 0  # escape 成功后重置，避免长距离导航过早放弃
                     continue
                 last_pos         = {"x": odom["x"], "y": odom["y"]}
                 last_stuck_check = now
@@ -264,17 +319,21 @@ class Navigator:
                 if new_path and len(new_path) > 1:
                     path     = new_path
                     grid_obj = go2.occupancy_grid or grid_obj
+                    self.current_path     = path
+                    self.current_grid_obj = grid_obj
                 last_replan = now
 
-            # 轨迹记录
             if now - last_traj_tick >= TRAJ_INTERVAL:
                 spatial_memory.record_trajectory_tick(odom)
                 last_traj_tick = now
 
             await asyncio.sleep(0.1)
 
+    # ── 辅助方法 ──────────────────────────────────────────────────────────
+
     async def _align_heading(self, target_heading: float) -> None:
-        while True:
+        deadline = time.monotonic() + MAX_SPIN_TIME
+        while time.monotonic() < deadline:
             odom = go2.odom
             if not odom:
                 await asyncio.sleep(0.05)
@@ -283,24 +342,24 @@ class Navigator:
             if abs(error) <= HEADING_THRESHOLD:
                 go2.move_velocity(0, 0, 0)
                 return
-            sign = 1.0 if error > 0 else -1.0
-            go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
+            vyaw = KP_YAW * error
+            vyaw = math.copysign(max(0.15, min(TURN_SPEED, abs(vyaw))), vyaw)
+            go2.move_velocity(0.0, 0.0, vyaw)
             await asyncio.sleep(0.05)
+        go2.move_velocity(0, 0, 0)
+        logger.warning("[Go2/Nav] _align_heading 超时，目标朝向=%.2f", target_heading)
 
     async def _escape_obstacle(self) -> None:
-        # 后退
+        import random
         go2.move_velocity(-WALK_SPEED, 0.0, 0.0)
-        await asyncio.sleep(STUCK_BACKUP_TIME)
+        await asyncio.sleep(1.5)
         go2.move_velocity(0, 0, 0)
-        # 随机左转或右转，角度在 60°-120° 之间
         turn_sign = 1.0 if random.random() > 0.5 else -1.0
-        turn_time = random.uniform(0.8, 1.4)
         go2.move_velocity(0.0, 0.0, TURN_SPEED * turn_sign)
-        await asyncio.sleep(turn_time)
+        await asyncio.sleep(random.uniform(0.8, 1.2))
         go2.move_velocity(0, 0, 0)
-        # 稍微前进一步，离开障碍物附近
         go2.move_velocity(WALK_SPEED, 0.0, 0.0)
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.5)
         go2.move_velocity(0, 0, 0)
 
     async def _patrol_loop(self, stops: list[str]) -> None:
@@ -309,21 +368,36 @@ class Navigator:
                 self.target = name
                 loc = await spatial_memory.find_location(name)
                 if loc is not None:
+                    grid_obj = go2.occupancy_grid
+                    if grid_obj is not None:
+                        path = self._plan_path(loc)
+                        if path and len(path) > 1:
+                            grid_obj = go2.occupancy_grid
+                            await self._follow_path(path, grid_obj, loc)
+                            await asyncio.sleep(2.0)
+                            continue
                     await self._navigate_to(loc)
                 await asyncio.sleep(2.0)
 
+
+# ── 模块级辅助函数 ────────────────────────────────────────────────────────
 
 def _find_lookahead_on_path(
     path: list[tuple[int, int]],
     grid_obj,
     robot_x: float,
     robot_y: float,
+    robot_heading: float,
     goal_loc: dict,
 ) -> tuple[float, float]:
-    """返回路径上第一个距机器人 >= LOOKAHEAD_DIST 的点；若不存在则返回终点。"""
     for ix, iy in path:
         wx, wy = grid_obj.grid_to_odom(ix, iy)
-        if math.sqrt((wx - robot_x) ** 2 + (wy - robot_y) ** 2) >= LOOKAHEAD_DIST:
+        dx, dy = wx - robot_x, wy - robot_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < LOOKAHEAD_DIST:
+            continue
+        # 只选前方点（与当前朝向点积 > 0，排除身后点）
+        if math.cos(robot_heading) * dx + math.sin(robot_heading) * dy > 0:
             return wx, wy
     return goal_loc["x"], goal_loc["y"]
 
@@ -334,6 +408,49 @@ def _normalize_angle(angle: float) -> float:
     while angle < -math.pi:
         angle += 2.0 * math.pi
     return angle
+
+
+def _distance_to_path(
+    path: list[tuple[int, int]],
+    grid_obj,
+    robot_x: float,
+    robot_y: float,
+) -> float:
+    """返回机器人到路径最近节点的距离（米）。"""
+    min_d2 = float("inf")
+    for ix, iy in path:
+        wx, wy = grid_obj.grid_to_odom(ix, iy)
+        d2 = (wx - robot_x) ** 2 + (wy - robot_y) ** 2
+        if d2 < min_d2:
+            min_d2 = d2
+    return math.sqrt(min_d2) if min_d2 < float("inf") else 0.0
+
+
+def _nearest_free_cell(
+    grid_obj, cell: tuple[int, int], max_r: int = 40
+) -> tuple[int, int] | None:
+    """BFS 搜索最近的自由格，不会穿越障碍选到墙另一侧。"""
+    from collections import deque
+    if grid_obj.is_free(*cell):
+        return cell
+    queue: deque = deque([(cell, 0)])
+    visited: set = {cell}
+    dirs = [(1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)]
+    while queue:
+        (ix, iy), dist = queue.popleft()
+        if dist >= max_r:
+            continue
+        for dx, dy in dirs:
+            nb = (ix + dx, iy + dy)
+            if nb in visited:
+                continue
+            visited.add(nb)
+            if not (0 <= nb[0] < grid_obj.width[0] and 0 <= nb[1] < grid_obj.width[1]):
+                continue
+            if grid_obj.is_free(*nb):
+                return nb
+            queue.append((nb, dist + 1))
+    return None
 
 
 navigator = Navigator()

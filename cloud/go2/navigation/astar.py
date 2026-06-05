@@ -26,7 +26,9 @@ def astar(
         return in_bounds(ix, iy) and not grid[iy, ix]
 
     def h(ix, iy):
-        return math.sqrt((ix - goal[0]) ** 2 + (iy - goal[1]) ** 2)
+        dx = abs(ix - goal[0])
+        dy = abs(iy - goal[1])
+        return (dx + dy) + (1.414 - 2.0) * min(dx, dy)
 
     DIRS = [
         (1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
