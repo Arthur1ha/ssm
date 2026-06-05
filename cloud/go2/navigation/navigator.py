@@ -20,6 +20,9 @@ STUCK_DISTANCE     = 0.05
 STUCK_BACKUP_TIME  = 2.5
 MAX_RETRIES        = 6
 TRAJ_INTERVAL      = 5.0
+MIN_LINEAR_VEL     = 0.1   # m/s，path_following 最低线速度
+LOOKAHEAD_DIST     = 0.6   # m，路径前瞻距离
+REPLAN_INTERVAL    = 3.0   # s，重规划间隔
 MAX_SPIN_TIME      = 10.0
 
 
@@ -87,13 +90,12 @@ class Navigator:
             pass
 
     async def _navigate_to(self, loc: dict, retries: int = 0) -> str:
+        odom_init = go2.odom
+        last_pos = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
         last_stuck_check = time.monotonic()
         last_traj_tick   = time.monotonic()
-        last_pos = {"x": 0.0, "y": 0.0}
         spin_start: Optional[float] = None
-        odom = go2.odom
-        if odom:
-            last_pos = {"x": odom["x"], "y": odom["y"]}
+        phase = "initial_rotation"
 
         while True:
             if self.mode == NavMode.IDLE:
@@ -108,6 +110,7 @@ class Navigator:
             dx   = loc["x"] - odom["x"]
             dy   = loc["y"] - odom["y"]
             dist = math.sqrt(dx * dx + dy * dy)
+            now  = time.monotonic()
 
             if dist < ARRIVAL_THRESHOLD:
                 go2.move_velocity(0, 0, 0)
@@ -119,40 +122,48 @@ class Navigator:
             target_heading = math.atan2(dy, dx)
             heading_error  = _normalize_angle(target_heading - odom["heading"])
 
-            now = time.monotonic()
+            # ── 阶段一：初始转向（不前进）──
+            if phase == "initial_rotation":
+                if abs(heading_error) <= HEADING_THRESHOLD:
+                    phase = "path_following"
+                    spin_start = None
+                    last_pos = {"x": odom["x"], "y": odom["y"]}
+                    last_stuck_check = now
+                else:
+                    if spin_start is None:
+                        spin_start = now
+                    elif now - spin_start > MAX_SPIN_TIME:
+                        go2.move_velocity(0, 0, 0)
+                        if retries >= MAX_RETRIES:
+                            return f"无法到达「{loc['name']}」，已重试 {retries} 次"
+                        await self._escape_obstacle()
+                        return await self._navigate_to(loc, retries + 1)
+                    sign = 1.0 if heading_error > 0 else -1.0
+                    go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
 
-            if abs(heading_error) > HEADING_THRESHOLD:
-                if spin_start is None:
-                    spin_start = now
-                elif now - spin_start > MAX_SPIN_TIME:
-                    # 长时间无法对准朝向，视为被障碍物干扰，触发脱困
-                    go2.move_velocity(0, 0, 0)
-                    if retries >= MAX_RETRIES:
-                        return f"无法到达「{loc['name']}」，已重试 {retries} 次"
-                    await self._escape_obstacle()
-                    return await self._navigate_to(loc, retries + 1)
-                sign = 1.0 if heading_error > 0 else -1.0
-                go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
-            else:
-                spin_start = None
-                vx   = min(WALK_SPEED, dist * 0.8)
-                vyaw = KP_YAW * heading_error
-                go2.move_velocity(vx, 0.0, vyaw)
+            # ── 阶段二：前进（含航向比例修正）──
+            if phase == "path_following":
+                if abs(heading_error) > HEADING_THRESHOLD:
+                    sign = 1.0 if heading_error > 0 else -1.0
+                    go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
+                else:
+                    vx   = max(MIN_LINEAR_VEL, min(WALK_SPEED, dist * 0.8))
+                    vyaw = KP_YAW * heading_error
+                    go2.move_velocity(vx, 0.0, vyaw)
 
-            if now - last_stuck_check >= STUCK_CHECK_INTERVAL:
-                moved = math.sqrt(
-                    (odom["x"] - last_pos["x"]) ** 2 +
-                    (odom["y"] - last_pos["y"]) ** 2
-                )
-                # 只有在前进阶段（朝向已对准）位移不足才算卡死，纯转向阶段不计入
-                if moved < STUCK_DISTANCE and abs(heading_error) <= HEADING_THRESHOLD:
-                    go2.move_velocity(0, 0, 0)
-                    if retries >= MAX_RETRIES:
-                        return f"无法到达「{loc['name']}」，已重试 {retries} 次"
-                    await self._escape_obstacle()
-                    return await self._navigate_to(loc, retries + 1)
-                last_pos         = {"x": odom["x"], "y": odom["y"]}
-                last_stuck_check = now
+                if now - last_stuck_check >= STUCK_CHECK_INTERVAL:
+                    moved = math.sqrt(
+                        (odom["x"] - last_pos["x"]) ** 2 +
+                        (odom["y"] - last_pos["y"]) ** 2
+                    )
+                    if moved < STUCK_DISTANCE and abs(heading_error) <= HEADING_THRESHOLD:
+                        go2.move_velocity(0, 0, 0)
+                        if retries >= MAX_RETRIES:
+                            return f"无法到达「{loc['name']}」，已重试 {retries} 次"
+                        await self._escape_obstacle()
+                        return await self._navigate_to(loc, retries + 1)
+                    last_pos         = {"x": odom["x"], "y": odom["y"]}
+                    last_stuck_check = now
 
             if now - last_traj_tick >= TRAJ_INTERVAL:
                 spatial_memory.record_trajectory_tick(odom)
@@ -174,31 +185,93 @@ class Navigator:
         return astar(grid_obj.grid, start, goal)
 
     async def _follow_path(self, path: list[tuple[int, int]], grid_obj, goal_loc: dict) -> str:
-        WAYPOINT_RADIUS = 0.3
-        REPLAN_INTERVAL = 3.0
+        last_replan      = time.monotonic()
+        last_stuck_check = time.monotonic()
+        last_traj_tick   = time.monotonic()
+        retries          = 0
+        odom_init        = go2.odom
+        last_pos = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
 
-        last_replan = time.monotonic()
-        i = 1  # skip start node
+        while True:
+            if self.mode == NavMode.IDLE:
+                go2.move_velocity(0, 0, 0)
+                return "导航已取消"
 
-        while i < len(path):
-            wx, wy = grid_obj.grid_to_odom(*path[i])
-            waypoint = {"name": goal_loc["name"], "x": wx, "y": wy}
+            odom = go2.odom
+            if not odom:
+                await asyncio.sleep(0.1)
+                continue
 
-            result = await self._navigate_to(waypoint, retries=0)
-            if "无法到达" in result:
-                return result
+            # 剔除已经过的路径节点（距机器人 < ARRIVAL_THRESHOLD 的节点）
+            while len(path) > 1:
+                wx, wy = grid_obj.grid_to_odom(*path[0])
+                if math.sqrt((wx - odom["x"]) ** 2 + (wy - odom["y"]) ** 2) < ARRIVAL_THRESHOLD:
+                    path = path[1:]
+                else:
+                    break
 
-            i += 1
+            now = time.monotonic()
 
-            if time.monotonic() - last_replan >= REPLAN_INTERVAL:
+            # 检查是否已到达终点
+            dx_goal = goal_loc["x"] - odom["x"]
+            dy_goal = goal_loc["y"] - odom["y"]
+            if math.sqrt(dx_goal ** 2 + dy_goal ** 2) < ARRIVAL_THRESHOLD:
+                go2.move_velocity(0, 0, 0)
+                target_h = goal_loc.get("heading")
+                if target_h is not None:
+                    await self._align_heading(target_h)
+                return f"已到达「{goal_loc['name']}」"
+
+            # 取前方 lookahead 点作为临时目标
+            lx, ly = _find_lookahead_on_path(path, grid_obj, odom["x"], odom["y"], goal_loc)
+            dx = lx - odom["x"]
+            dy = ly - odom["y"]
+            target_heading = math.atan2(dy, dx)
+            heading_error  = _normalize_angle(target_heading - odom["heading"])
+
+            if abs(heading_error) > HEADING_THRESHOLD:
+                sign = 1.0 if heading_error > 0 else -1.0
+                go2.move_velocity(0.0, 0.0, TURN_SPEED * sign)
+            else:
+                dist_to_lookahead = math.sqrt(dx ** 2 + dy ** 2)
+                vx   = max(MIN_LINEAR_VEL, min(WALK_SPEED, dist_to_lookahead * 0.8))
+                vyaw = KP_YAW * heading_error
+                go2.move_velocity(vx, 0.0, vyaw)
+
+            # stuck 检测（仅在前进阶段）
+            if now - last_stuck_check >= STUCK_CHECK_INTERVAL:
+                moved = math.sqrt(
+                    (odom["x"] - last_pos["x"]) ** 2 +
+                    (odom["y"] - last_pos["y"]) ** 2
+                )
+                if moved < STUCK_DISTANCE and abs(heading_error) <= HEADING_THRESHOLD:
+                    go2.move_velocity(0, 0, 0)
+                    retries += 1
+                    if retries >= MAX_RETRIES:
+                        return f"无法到达「{goal_loc['name']}」，已重试 {retries} 次"
+                    await self._escape_obstacle()
+                    fresh = go2.odom
+                    if fresh:
+                        last_pos = {"x": fresh["x"], "y": fresh["y"]}
+                    last_stuck_check = time.monotonic()
+                    continue
+                last_pos         = {"x": odom["x"], "y": odom["y"]}
+                last_stuck_check = now
+
+            # 定期重规划
+            if now - last_replan >= REPLAN_INTERVAL:
                 new_path = self._plan_path(goal_loc)
                 if new_path and len(new_path) > 1:
-                    path = new_path
+                    path     = new_path
                     grid_obj = go2.occupancy_grid or grid_obj
-                    i = 1
-                last_replan = time.monotonic()
+                last_replan = now
 
-        return await self._navigate_to(goal_loc)
+            # 轨迹记录
+            if now - last_traj_tick >= TRAJ_INTERVAL:
+                spatial_memory.record_trajectory_tick(odom)
+                last_traj_tick = now
+
+            await asyncio.sleep(0.1)
 
     async def _align_heading(self, target_heading: float) -> None:
         while True:
@@ -238,6 +311,21 @@ class Navigator:
                 if loc is not None:
                     await self._navigate_to(loc)
                 await asyncio.sleep(2.0)
+
+
+def _find_lookahead_on_path(
+    path: list[tuple[int, int]],
+    grid_obj,
+    robot_x: float,
+    robot_y: float,
+    goal_loc: dict,
+) -> tuple[float, float]:
+    """返回路径上第一个距机器人 >= LOOKAHEAD_DIST 的点；若不存在则返回终点。"""
+    for ix, iy in path:
+        wx, wy = grid_obj.grid_to_odom(ix, iy)
+        if math.sqrt((wx - robot_x) ** 2 + (wy - robot_y) ** 2) >= LOOKAHEAD_DIST:
+            return wx, wy
+    return goal_loc["x"], goal_loc["y"]
 
 
 def _normalize_angle(angle: float) -> float:
