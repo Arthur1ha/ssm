@@ -73,18 +73,15 @@ async def go2_connect():
 
         if _active_rule_cb is not None:
             vision_loop.remove_callback(_active_rule_cb)
+            _active_rule_cb = None
         if _active_drive_cb is not None:
             vision_loop.remove_callback(_active_drive_cb)
             _active_drive_cb = None
 
-        # 默认遥控模式：只注册 ReactiveMind，Drive 不启动
-        _autonomy_mode  = "remote"
-        _active_rule_cb = reactive_mind.on_vision_frame
+        # 默认完全遥控：不启动 VisionLoop，不注册任何回调
+        _autonomy_mode = "manual"
 
-        vision_loop.start(lambda: go2._latest_frame)
-        vision_loop.add_callback(reactive_mind.on_vision_frame)
-
-        from cloud.go2 import spatial_memory as _sm
+        from cloud.go2.agentcore.memory import spatial as _sm
         _sm.tag_location("home", {"x": 0.0, "y": 0.0, "heading": 0.0})
         logging.info("[Go2] 已将起点标记为 home (0, 0, 0)")
 
@@ -100,7 +97,7 @@ async def go2_disconnect():
     drive.stop()
     _active_rule_cb  = None
     _active_drive_cb = None
-    _autonomy_mode   = "remote"
+    _autonomy_mode   = "manual"
     await go2.disconnect()
     _unregister_go2()
     return {"status": "disconnected"}
@@ -153,14 +150,32 @@ class ModeRequest(BaseModel):
     mode: str
 
 
+class VelocityRequest(BaseModel):
+    vx: float = 0.0
+    vy: float = 0.0
+    vyaw: float = 0.0
+
+
 @router.post("/api/go2/commands")
 async def go2_command(req: CommandRequest):
     try:
         await go2.send_command(req.cmd, req.params or None)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"ok": True}
+
+
+@router.post("/api/go2/velocity")
+async def go2_velocity(req: VelocityRequest):
+    """WIRELESS_CONTROLLER 速度控制，无 ack，适合摇杆实时输入。"""
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    try:
+        go2.move_velocity(req.vx, req.vy, req.vyaw)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     return {"ok": True}
 
 
@@ -272,20 +287,20 @@ async def nav_tag_location(req: TagLocationRequest):
     odom = go2.odom
     if not odom:
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
-    from cloud.go2 import spatial_memory
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
     result = spatial_memory.tag_location(req.name, odom)
     return {"ok": True, "message": result}
 
 
 @router.get("/api/go2/navigation/locations")
 def nav_list_locations():
-    from cloud.go2 import spatial_memory
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
     return spatial_memory.list_locations()
 
 
 @router.delete("/api/go2/navigation/locations/{name}")
 def nav_delete_location(name: str):
-    from cloud.go2 import spatial_memory
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
     deleted = spatial_memory.delete_location(name)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"地点「{name}」不存在")
@@ -296,7 +311,7 @@ def nav_delete_location(name: str):
 async def nav_go(req: NavigateRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
-    from cloud.go2.navigator import navigator
+    from cloud.go2.navigation.navigator import navigator
     asyncio.create_task(navigator.go_to(req.name))
     return {"ok": True, "message": f"开始导航到「{req.name}」"}
 
@@ -307,21 +322,21 @@ async def nav_start_patrol(req: PatrolRequest):
         raise HTTPException(status_code=503, detail="Go2 未连接")
     if not req.stops:
         raise HTTPException(status_code=400, detail="stops 不能为空")
-    from cloud.go2.navigator import navigator
+    from cloud.go2.navigation.navigator import navigator
     await navigator.start_patrol(req.stops)
     return {"ok": True, "stops": req.stops}
 
 
 @router.delete("/api/go2/navigation/patrol")
 def nav_stop():
-    from cloud.go2.navigator import navigator
+    from cloud.go2.navigation.navigator import navigator
     navigator.stop()
     return {"ok": True}
 
 
 @router.get("/api/go2/navigation/state")
 def nav_state():
-    from cloud.go2.navigator import navigator
+    from cloud.go2.navigation.navigator import navigator
     s = navigator.state
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
 
@@ -352,7 +367,7 @@ def go2_drive_state():
 
 @router.get("/api/go2/memory")
 def go2_memory():
-    from cloud.go2.episode_memory import episode_memory
+    from cloud.go2.agentcore.memory.episode import episode_memory
     return {"entries": episode_memory.entries()}
 
 
@@ -364,29 +379,36 @@ def go2_autonomy_get():
 @router.put("/api/go2/autonomy")
 async def go2_autonomy_set(req: AutonomyRequest):
     global _active_rule_cb, _active_drive_cb, _autonomy_mode
-    if req.mode not in ("remote", "free_explore"):
+    if req.mode not in ("manual", "reactive", "free_explore"):
         raise HTTPException(status_code=400, detail=f"未知自主模式: {req.mode}")
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     if req.mode == _autonomy_mode:
         return {"ok": True, "mode": _autonomy_mode}
 
-    if req.mode == "free_explore":
-        if _active_rule_cb is not None:
-            vision_loop.remove_callback(_active_rule_cb)
-            _active_rule_cb = None
+    # 先清理所有现有回调和服务
+    drive.stop()
+    if _active_drive_cb is not None:
+        vision_loop.remove_callback(_active_drive_cb)
+        _active_drive_cb = None
+    if _active_rule_cb is not None:
+        vision_loop.remove_callback(_active_rule_cb)
+        _active_rule_cb = None
+    vision_loop.stop()
+
+    if req.mode == "manual":
+        logging.info("[Go2] 自主模式 → 完全遥控")
+    elif req.mode == "reactive":
+        _active_rule_cb = reactive_mind.on_vision_frame
+        vision_loop.start(lambda: go2._latest_frame)
+        vision_loop.add_callback(reactive_mind.on_vision_frame)
+        logging.info("[Go2] 自主模式 → 自主反应")
+    else:  # free_explore
         _active_drive_cb = drive.on_vision_frame
+        vision_loop.start(lambda: go2._latest_frame)
         vision_loop.add_callback(drive.on_vision_frame)
         drive.start()
         logging.info("[Go2] 自主模式 → 自由探索")
-    else:
-        drive.stop()
-        if _active_drive_cb is not None:
-            vision_loop.remove_callback(_active_drive_cb)
-            _active_drive_cb = None
-        _active_rule_cb = reactive_mind.on_vision_frame
-        vision_loop.add_callback(reactive_mind.on_vision_frame)
-        logging.info("[Go2] 自主模式 → 遥控")
 
     _autonomy_mode = req.mode
     return {"ok": True, "mode": _autonomy_mode}
@@ -394,13 +416,13 @@ async def go2_autonomy_set(req: AutonomyRequest):
 
 @router.get("/api/go2/personality")
 def go2_personality_get():
-    from cloud.go2.personality import get_system_prompt
+    from cloud.go2.agentcore.soul import get_system_prompt
     return {"prompt": get_system_prompt()}
 
 
 @router.post("/api/go2/personality")
 def go2_personality_set(req: PersonalityRequest):
-    from cloud.go2.personality import set_personality
+    from cloud.go2.agentcore.soul import set_personality
     set_personality(req.prompt)
     return {"ok": True, "prompt": req.prompt}
 
@@ -444,7 +466,7 @@ async def nav_set_home():
     odom = go2.odom
     if not odom:
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
-    from cloud.go2 import spatial_memory
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
     result = spatial_memory.tag_location("home", odom)
     return {"ok": True, "message": result}
 
@@ -454,6 +476,6 @@ async def nav_go_home():
     """归位：导航回 home 点。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
-    from cloud.go2.navigator import navigator
+    from cloud.go2.navigation.navigator import navigator
     asyncio.create_task(navigator.go_to("home"))
     return {"ok": True, "message": "开始归位"}

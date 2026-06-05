@@ -92,11 +92,6 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         api_id = SPORT_CMD.get(cmd)
         if api_id is None:
             raise ValueError(f"Unknown command: {cmd}")
-        if cmd not in self.available_actions:
-            raise ValueError(
-                f"'{cmd}' 在当前状态 '{self.fsm_state}' 下不可用，"
-                f"可用动作: {self.available_actions}"
-            )
         options: dict = {"api_id": api_id}
         if params:
             options["parameter"] = params

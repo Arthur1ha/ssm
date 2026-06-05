@@ -1,21 +1,25 @@
 import asyncio
 
+_ALL_REMOTE = ["Move", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"]
+
 _FSM_AVAILABLE: dict[str, list[str]] = {
     "offline":    [],
     "connecting": [],
     "lying":      ["StandUp"],
-    "standing":   ["StandDown", "Move", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"],
-    "moving":     ["Move", "StopMove"],
-    "executing":  ["StopMove", "Hello", "Stretch", "Dance1", "Dance2"],
+    "standing":   ["StandDown"] + _ALL_REMOTE,
+    "moving":     _ALL_REMOTE,
+    "executing":  _ALL_REMOTE,
 }
 
 _FSM_NEXT: dict[str, dict[str, str]] = {
-    "lying":     {"StandUp":   "standing"},
+    "lying":     {"StandUp": "standing"},
     "standing":  {"StandDown": "lying", "Move": "moving",
                   "Hello": "executing", "Stretch": "executing",
                   "Dance1": "executing", "Dance2": "executing"},
-    "moving":    {"StopMove": "standing"},
-    "executing": {"StopMove": "standing",
+    "moving":    {"StopMove": "standing",
+                  "Hello": "executing", "Stretch": "executing",
+                  "Dance1": "executing", "Dance2": "executing"},
+    "executing": {"Move": "moving", "StopMove": "standing",
                   "Hello": "executing", "Stretch": "executing",
                   "Dance1": "executing", "Dance2": "executing"},
 }

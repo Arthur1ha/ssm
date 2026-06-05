@@ -178,7 +178,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   const [status,        setStatus]     = useState("idle");
   const [robotState,    setRobot]      = useState(null);
   const [error,         setError]      = useState("");
-  const [autonomyMode,  setAutonomyMode] = useState("remote");
+  const [autonomyMode,  setAutonomyMode] = useState("manual");
   const [chatThinking,  setChatThink]  = useState(false);
   const [wpOpen,       setWpOpen]    = useState(false);
   const [locations,    setLocations] = useState([]);
@@ -260,28 +260,32 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     if (status === "connected") {
       fetch("/api/go2/autonomy").then(r => r.json()).then(d => setAutonomyMode(d.mode)).catch(() => {});
     } else {
-      setAutonomyMode("remote");
+      setAutonomyMode("manual");
     }
   }, [status]);
 
   /* ── 摇杆回调 ── */
   // 左摇杆：dx右正→y负(右移)，dy下正→x负(后退)
+  const sendVelocity = (vx, vy, vyaw) => fetch("/api/go2/velocity", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vx, vy, vyaw }),
+  });
+
   const handleLeftMove = useCallback((dx, dy) => {
-    sendCmd("Move", {
-      x: parseFloat((-dy * 0.5).toFixed(2)),
-      y: parseFloat((-dx * 0.5).toFixed(2)),
-      z: 0,
-    });
+    sendVelocity(
+      parseFloat((-dy * 0.5).toFixed(2)),
+      parseFloat((-dx * 0.5).toFixed(2)),
+      0,
+    );
   }, []);
 
-  // 右摇杆：仅旋转，dx右正→z负(右转)
   const handleRightMove = useCallback((dx, _dy) => {
-    sendCmd("Move", { x: 0, y: 0, z: parseFloat((-dx * 0.8).toFixed(2)) });
+    sendVelocity(0, 0, parseFloat((-dx * 0.8).toFixed(2)));
   }, []);
 
   const handleStop = useCallback(async () => {
-    if (autonomyMode === "free_explore") await switchAutonomy("remote");
-    sendCmd("StopMove");
+    if (autonomyMode !== "manual") await switchAutonomy("manual");
+    sendVelocity(0, 0, 0);
   }, [autonomyMode]);
 
   /* ── 地点管理 ── */
@@ -296,12 +300,18 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     if (!tagName.trim()) return;
     setWpLoading(true);
     try {
-      await fetch("/api/go2/navigation/locations", {
+      const r = await fetch("/api/go2/navigation/locations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: tagName.trim() }),
       });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setError(d.detail || `标记失败 (${r.status})`);
+        return;
+      }
       setTagName("");
+      setError("");
       await fetchLocations();
     } catch (_) {} finally { setWpLoading(false); }
   }, [tagName, fetchLocations]);
@@ -325,6 +335,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   }, []);
 
   useEffect(() => { if (wpOpen) fetchLocations(); }, [wpOpen, fetchLocations]);
+  useEffect(() => { if (status === "connected") fetchLocations(); }, [status, fetchLocations]);
 
   const connected = status === "connected";
   const busy      = status === "connecting";
@@ -342,8 +353,9 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     setSettingHome(true);
     try {
       await fetch("/api/go2/navigation/home", { method: "PUT" });
+      await fetchLocations();
     } catch (_) {} finally { setSettingHome(false); }
-  }, [connected, settingHome]);
+  }, [connected, settingHome, fetchLocations]);
 
   /* ── AI 对话 ── */
   const sendChat = useCallback(async (text) => {
@@ -515,11 +527,14 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
         <div style={{ display: "flex", gap: 6, padding: "0 14px 8px",
           borderBottom: `1px solid ${BORDER}` }}>
           {[
-            { key: "remote",       label: "遥控模式",   icon: "◎" },
-            { key: "free_explore", label: "自由探索",   icon: "◈" },
+            { key: "manual",       label: "完全遥控", icon: "◎" },
+            { key: "reactive",     label: "自主反应", icon: "◉" },
+            { key: "free_explore", label: "自由探索", icon: "◈" },
           ].map(({ key, label, icon }) => {
             const active = autonomyMode === key;
-            const accent = key === "free_explore" ? "#f0a500" : LIME;
+            const accent = key === "free_explore" ? "#f0a500"
+                         : key === "reactive"     ? "#00d4ff"
+                         : LIME;
             return (
               <button key={key} onClick={() => connected && switchAutonomy(key)} style={{
                 flex: 1, padding: "8px 4px",
