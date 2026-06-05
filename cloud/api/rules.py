@@ -11,7 +11,7 @@ from pydantic import BaseModel
 router = APIRouter()
 
 _RULES_FILE  = Path(__file__).parent.parent / "orchestrator" / "rules.json"
-_MQTT_HOST   = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
+_MQTT_HOST   = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
 _MQTT_PORT   = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 _MQTT_USER   = os.getenv("MQTT_USER", "ssm_user")
 _MQTT_PASS   = os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r")

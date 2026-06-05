@@ -119,7 +119,16 @@ class Go2Connection:
             self._exec_reset_task.cancel()
         self._frame_ready = None
         if self._conn:
-            await self._conn.disconnect()
+            # 先关闭 PeerConnection，取消所有 pending aioice STUN transactions
+            try:
+                if hasattr(self._conn, "pc") and self._conn.pc:
+                    await self._conn.pc.close()
+            except Exception:
+                pass
+            try:
+                await self._conn.disconnect()
+            except Exception:
+                pass
             self._conn = None
         logging.info("[Go2] 已断开")
 

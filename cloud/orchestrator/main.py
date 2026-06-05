@@ -16,7 +16,7 @@ from shared_state import SharedState
 import tools as agent_tools
 from graph import build_orchestrator
 
-BROKER_HOST   = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
+BROKER_HOST   = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
 BROKER_PORT   = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 BROKER_USER   = os.getenv("MQTT_USER", "ssm_user")
 BROKER_PASSWD = os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r")

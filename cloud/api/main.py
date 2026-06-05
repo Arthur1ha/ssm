@@ -66,7 +66,7 @@ def _on_esp32_message(client, userdata, msg):
 @asynccontextmanager
 async def lifespan(app):
     global _esp32_mqtt_client
-    broker_host = os.getenv("MQTT_BROKER_HOST", "47.116.137.202")
+    broker_host = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
     broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
     _esp32_mqtt_client = _mqtt_lib.Client(client_id="esp32_agent", clean_session=True)
