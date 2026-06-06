@@ -1,7 +1,17 @@
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+logging.getLogger("cloud").setLevel(logging.INFO)
+
+_LOG_DIR = Path(__file__).parent.parent.parent / "logs"
+
+
+class _DropSnapshotLogs(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "video/snapshot" not in record.getMessage()
 
 import paho.mqtt.client as _mqtt_lib
 from dotenv import load_dotenv
@@ -65,6 +75,19 @@ def _on_esp32_message(client, userdata, msg):
 
 @asynccontextmanager
 async def lifespan(app):
+    logging.getLogger("uvicorn.access").addFilter(_DropSnapshotLogs())
+
+    # Go2 日志独立写 go2.log，不再冒泡到 uvicorn/api.log
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _go2_handler = logging.FileHandler(_LOG_DIR / "go2.log")
+    _go2_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    _go2_logger = logging.getLogger("cloud.go2")
+    _go2_logger.addHandler(_go2_handler)
+    _go2_logger.propagate = False
+
     global _esp32_mqtt_client
     broker_host = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
     broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))

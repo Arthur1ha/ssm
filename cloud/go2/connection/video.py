@@ -4,6 +4,8 @@ import io
 import logging
 import time
 
+logger = logging.getLogger(__name__)
+
 
 class Go2Video:
     def __init__(self) -> None:
@@ -18,13 +20,13 @@ class Go2Video:
 
     async def _consume_video(self, track) -> None:
         loop = asyncio.get_event_loop()
-        logging.info("[Go2] 视频采集开始")
+        logger.info("[Go2/Video] 采集开始")
         last_encode = 0.0
         while self.is_connected:
             try:
                 frame = await track.recv()  # 必须持续 drain，否则 aiortc 缓冲区积压
             except Exception as e:
-                logging.warning("[Go2] 视频 track 结束: %s", e)
+                logger.warning("[Go2/Video] track 结束: %s", e)
                 break
             now = time.monotonic()
             if now - last_encode < 0.04:  # ~25fps
@@ -42,7 +44,7 @@ class Go2Video:
                 self._get_frame_event().set()
             except Exception as e:
                 logging.debug("[Go2] 帧编码失败，跳过: %s", e)
-        logging.info("[Go2] 视频采集停止")
+        logger.info("[Go2/Video] 采集停止")
 
     async def mjpeg_generator(self):
         event = self._get_frame_event()

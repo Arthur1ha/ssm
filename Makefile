@@ -5,7 +5,7 @@
 # make ps / logs     查看进程 / 日志
 
 .PHONY: broker api orchestrator orchestrator-bg pwa pwa-bg ngrok ngrok-bg \
-        stop ps logs ngrok-url trace go2-logs go2-logs-window
+        stop ps logs ngrok-url trace go2-logs go2-state go2-logs-window
 
 SSM_DIR     := $(CURDIR)
 LOG_DIR     := $(SSM_DIR)/logs
@@ -33,9 +33,8 @@ broker:
 
 # ── API ──────────────────────────────────────────────────────
 api:
-	@pkill -9 -f "uvicorn cloud.api.main" || true
-	@sleep 1
-	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082
+	@mkdir -p $(LOG_DIR)
+	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 2>&1 | tee $(LOG_DIR)/api.log
 
 # ── Orchestrator ─────────────────────────────────────────────
 orchestrator:
@@ -96,7 +95,12 @@ trace:
 	done
 
 go2-logs:
-	@tail -f $(LOG_DIR)/api.log | grep --line-buffered --text -E "\[Go2\]|ERROR|WARNING"
+	@tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text -v "\[Go2/Status\]"
+
+go2-state:
+	@tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text "\[Go2/Status\]"
 
 go2-logs-window:
-	@tmux new-window -n go2 "tail -f $(LOG_DIR)/api.log | grep --line-buffered --text -E '\\[Go2\\]|ERROR|WARNING'"
+	@tmux new-window -n go2-events "tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text -v '\\[Go2/Status\\]'"
+	@tmux new-window -n go2-state  "tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text '\\[Go2/Status\\]'"
+

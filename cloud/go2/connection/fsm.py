@@ -1,4 +1,7 @@
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 _ALL_REMOTE = ["Move", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"]
 
@@ -30,19 +33,29 @@ _EXEC_RESET_DELAY = 12.0
 class Go2FSM:
     def __init__(self) -> None:
         super().__init__()
-        self.fsm_state: str = "offline"
+        self._fsm_state: str = "offline"
         self._exec_reset_task: asyncio.Task | None = None
         self._last_progress: float = 0.0
 
     @property
+    def fsm_state(self) -> str:
+        return self._fsm_state
+
+    @fsm_state.setter
+    def fsm_state(self, new: str) -> None:
+        if new != self._fsm_state:
+            logger.info("[Go2/FSM] %s → %s", self._fsm_state, new)
+        self._fsm_state = new
+
+    @property
     def available_actions(self) -> list[str]:
-        return _FSM_AVAILABLE.get(self.fsm_state, [])
+        return _FSM_AVAILABLE.get(self._fsm_state, [])
 
     def fsm_next(self, cmd: str) -> str | None:
-        return _FSM_NEXT.get(self.fsm_state, {}).get(cmd)
+        return _FSM_NEXT.get(self._fsm_state, {}).get(cmd)
 
     def _fsm_on_progress(self, progress: float) -> None:
-        if (self.fsm_state == "executing"
+        if (self._fsm_state == "executing"
                 and self._last_progress > 0.05
                 and progress < 0.05):
             self.fsm_state = "standing"
@@ -56,7 +69,7 @@ class Go2FSM:
 
         async def _reset():
             await asyncio.sleep(_EXEC_RESET_DELAY)
-            if self.fsm_state == "executing":
+            if self._fsm_state == "executing":
                 self.fsm_state = "standing"
 
         self._exec_reset_task = asyncio.create_task(_reset())

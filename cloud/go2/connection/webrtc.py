@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
@@ -8,7 +9,10 @@ from cloud.go2.connection.fsm import Go2FSM
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
 
+logger = logging.getLogger(__name__)
+
 _VALID_LED_COLORS = frozenset({"white", "red", "yellow", "blue", "green", "cyan", "purple"})
+_STATUS_INTERVAL  = 10.0
 
 
 class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
@@ -16,6 +20,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         super().__init__()
         self._conn: UnitreeWebRTCConnection | None = None
         self.is_connected: bool = False
+        self._status_task: asyncio.Task | None = None
 
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
@@ -37,18 +42,22 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             await self._conn.connect()
         except Exception as exc:
             self.is_connected = False
-            logging.error("[Go2] 连接失败: %s", exc)
+            logger.error("[Go2/Conn] 连接失败: %s", exc)
             raise
 
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LF_SPORT_MOD_STATE"], self._on_state)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["ROBOTODOM"],           self._on_odom)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LOW_STATE"],           self._on_low_state)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["ULIDAR_ARRAY"],        self._on_voxel_map)
+        # Native 解码器返回米制点云（ndarray N×3），比 LibVoxel 的格索引更易过滤地板
+        self._conn.datachannel.set_decoder(decoder_type="native")
+
+        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LF_SPORT_MOD_STATE"],          self._on_state)
+        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["ROBOTODOM"],                    self._on_odom)
+        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LOW_STATE"],                    self._on_low_state)
+        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["ULIDAR_ARRAY"],                 self._on_voxel_map)
+        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LIDAR_NAVIGATION_GLOBAL_PATH"], self._on_global_path)
         await self._conn.datachannel.disableTrafficSaving(True)
 
         self.is_connected = True
         self.fsm_state = "standing"
-        logging.info("[Go2] WebRTC 连接成功")
+        logger.info("[Go2/Conn] WebRTC 连接成功 serial=%s", serial)
 
         video_track = None
         for t in self._conn.pc.getTransceivers():
@@ -60,18 +69,22 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
         if video_track:
             asyncio.create_task(self._consume_video(video_track))
-            logging.info("[Go2] 视频 track 已找到，开始采集")
+            logger.info("[Go2/Conn] 视频 track 已找到，开始采集")
         else:
-            logging.warning("[Go2] 未找到视频 track，画面不可用")
+            logger.warning("[Go2/Conn] 未找到视频 track，画面不可用")
+
+        self._status_task = asyncio.create_task(self._status_loop())
 
     async def disconnect(self) -> None:
         self.is_connected = False
         self.fsm_state = "offline"
         if self._exec_reset_task and not self._exec_reset_task.done():
             self._exec_reset_task.cancel()
+        if self._status_task and not self._status_task.done():
+            self._status_task.cancel()
+            self._status_task = None
         self._frame_ready = None
         if self._conn:
-            # 先关闭 PeerConnection，取消所有 pending aioice STUN transactions
             try:
                 if hasattr(self._conn, "pc") and self._conn.pc:
                     await self._conn.pc.close()
@@ -82,7 +95,27 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             except Exception:
                 pass
             self._conn = None
-        logging.info("[Go2] 已断开")
+        logger.info("[Go2/Conn] 已断开")
+
+    # ── 定时状态快照 ──────────────────────────────────────────────────────
+
+    async def _status_loop(self) -> None:
+        from cloud.go2.navigation.navigator import navigator as _nav
+        while self.is_connected:
+            odom = self._odom
+            low  = self._low_state
+            hdg  = math.degrees(odom.get("heading", 0.0))
+            batt = low.get("battery_soc")
+            batt_str = f"{batt}%" if batt is not None else "?"
+            logger.info(
+                "[Go2/Status] fsm=%-10s | x=%+.2f y=%+.2f hdg=%+.1f° | batt=%s | nav=%-12s tgt=%s",
+                self.fsm_state,
+                odom.get("x", 0.0), odom.get("y", 0.0), hdg,
+                batt_str,
+                _nav.mode.value,
+                _nav.target or "-",
+            )
+            await asyncio.sleep(_STATUS_INTERVAL)
 
     # ── 命令发送 ──────────────────────────────────────────────────────────
 
@@ -96,12 +129,17 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if params:
             options["parameter"] = params
         await self._conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options)
+        logger.info("[Go2/Conn] 发送命令: %s params=%s", cmd, params)
 
         next_state = self.fsm_next(cmd)
         if next_state is not None:
-            self.fsm_state = next_state
-        if next_state == "executing":
-            self._schedule_exec_reset()
+            if next_state == self._fsm_state == "executing":
+                logger.info("[Go2/FSM] executing ↺ executing (打断，重新执行 %s)", cmd)
+                self._schedule_exec_reset()
+            else:
+                self.fsm_state = next_state
+                if next_state == "executing":
+                    self._schedule_exec_reset()
 
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
