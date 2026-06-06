@@ -1,3 +1,8 @@
+"""
+机器人内驱动系统，根据视觉感知自主切换行为状态。
+状态机：IDLE → SOCIAL（检测到人）/ EXPLORING（长时间无事件）。
+SOCIAL 状态下每 8s 观察并决策是否互动；EXPLORING 状态下 LLM 驱动最多 15 步自主探索。
+"""
 import asyncio
 import json
 import logging
@@ -29,6 +34,8 @@ class MotivationalState(str, Enum):
 
 
 class Drive:
+    """内驱动控制器，管理动机状态机和自主行为触发。"""
+
     def __init__(self) -> None:
         self._state          = MotivationalState.IDLE
         self._curiosity      = 0
@@ -51,6 +58,7 @@ class Drive:
     # ── Vision 回调 ────────────────────────────────────────────────
 
     def on_vision_frame(self, frame: VisionFrame) -> None:
+        """处理视觉帧：人出现时切 SOCIAL，人消失时记时，场景变化时写 episode 记忆。"""
         currently_present = frame["persons"]["detected"]
 
         if currently_present and not self._person_present:
@@ -73,6 +81,7 @@ class Drive:
     # ── 主循环 ─────────────────────────────────────────────────────
 
     async def _run_loop(self) -> None:
+        """主驱动循环，每秒推进好奇心计数并根据状态触发对应行为。"""
         while True:
             await asyncio.sleep(1)
             if self.user_interrupt:
@@ -98,6 +107,7 @@ class Drive:
                     self._state = MotivationalState.IDLE
 
     async def _do_explore(self) -> None:
+        """EXPLORING 状态：LLM 驱动的多步自主探索，最多 15 步，被人打断或用户打断时提前结束。"""
         _MAX_STEPS = 15
         history: list[dict] = []
         logger.info("[Drive] 开始自主探索会话")
@@ -170,6 +180,7 @@ class Drive:
         logger.info("[Drive] 探索会话结束，共 %d 步", len(history))
 
     async def _exec_explore_tool(self, tool: str, params: dict) -> str:
+        """执行探索中 LLM 决策的工具调用，导航工具可被打断。"""
         try:
             if tool == "go2_move":
                 await go2_move(direction=params.get("direction", "forward"))
@@ -201,6 +212,7 @@ class Drive:
             return f"执行失败: {exc}"
 
     async def _do_social(self) -> None:
+        """SOCIAL 状态：观察画面中的人，LLM 决策是否执行互动动作。"""
         try:
             observation = await go2_observe("描述画面中的人在做什么")
         except Exception as exc:
@@ -243,6 +255,7 @@ class Drive:
     # ── 生命周期 ───────────────────────────────────────────────────
 
     def start(self) -> None:
+        """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
         self._state          = MotivationalState.IDLE
@@ -252,6 +265,7 @@ class Drive:
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self) -> None:
+        """停止内驱动循环，取消后台任务。"""
         if self._task is not None:
             self._task.cancel()
             self._task = None

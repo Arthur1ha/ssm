@@ -1,3 +1,8 @@
+"""
+导航控制器，负责将机器人从当前位置引导到目标地点。
+有体素地图时走 A* 路径规划 + 前瞻跟随，无地图时降级直线导航。
+支持单次 go_to、多点巡逻 patrol，以及卡住逃脱和定期重规划。
+"""
 import asyncio
 import logging
 import math
@@ -36,6 +41,8 @@ class NavMode(str, Enum):
 
 
 class Navigator:
+    """核心导航类，管理导航任务的生命周期（go_to / patrol / stop）。"""
+
     def __init__(self) -> None:
         self.mode: NavMode         = NavMode.IDLE
         self.target: Optional[str] = None
@@ -56,6 +63,7 @@ class Navigator:
     # ── 公开接口 ──────────────────────────────────────────────────────────
 
     async def go_to(self, name: str) -> str:
+        """导航到空间记忆中的指定地点，有地图走 A*，否则降级直线。"""
         loc = await spatial_memory.find_location(name)
         if loc is None:
             logger.warning("[Go2/Nav] 找不到地点「%s」", name)
@@ -92,12 +100,14 @@ class Navigator:
             self.current_grid_obj = None
 
     async def start_patrol(self, stops: list[str]) -> None:
+        """启动巡逻任务，按顺序循环访问多个地点。"""
         self.stop()
         self.patrol_stops = stops
         self.mode = NavMode.PATROLLING
         self._task = asyncio.create_task(self._patrol_loop(stops))
 
     def stop(self) -> None:
+        """立即取消当前导航/巡逻任务并停止机器人。"""
         if self._task and not self._task.done():
             self._task.cancel()
         self.mode         = NavMode.IDLE
@@ -111,6 +121,7 @@ class Navigator:
     # ── 直线导航（无地图降级）────────────────────────────────────────────
 
     async def _navigate_to(self, loc: dict, retries: int = 0) -> str:
+        """直线导航：阶段1初始转向，阶段2前进+比例偏航修正，卡住则逃脱重试。"""
         odom_init = go2.odom
         last_pos  = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
         last_stuck_check = time.monotonic()
@@ -202,6 +213,7 @@ class Navigator:
     # ── A* 路径跟随 ───────────────────────────────────────────────────────
 
     def _plan_path(self, goal_loc: dict) -> list[tuple[int, int]] | None:
+        """用当前体素地图和里程计调用 A*，返回格索引路径，无法规划时返回 None。"""
         grid_obj = go2.occupancy_grid
         if grid_obj is None:
             return None
@@ -219,6 +231,7 @@ class Navigator:
         return astar(grid_obj.grid, start, goal)
 
     async def _follow_path(self, path: list[tuple[int, int]], grid_obj, goal_loc: dict) -> str:
+        """按 A* 路径前瞻跟随，含偏离立即重规划、卡住逃脱、定期重规划。"""
         self.current_path     = path
         self.current_grid_obj = grid_obj
         last_replan      = time.monotonic()
@@ -332,6 +345,7 @@ class Navigator:
     # ── 辅助方法 ──────────────────────────────────────────────────────────
 
     async def _align_heading(self, target_heading: float) -> None:
+        """到达目标后，原地旋转对齐保存的朝向，超时则放弃。"""
         deadline = time.monotonic() + MAX_SPIN_TIME
         while time.monotonic() < deadline:
             odom = go2.odom
@@ -350,6 +364,7 @@ class Navigator:
         logger.warning("[Go2/Nav] _align_heading 超时，目标朝向=%.2f", target_heading)
 
     async def _escape_obstacle(self) -> None:
+        """卡住时的逃脱序列：后退 → 随机转向 → 短暂前进。"""
         import random
         go2.move_velocity(-WALK_SPEED, 0.0, 0.0)
         await asyncio.sleep(1.5)
@@ -363,6 +378,7 @@ class Navigator:
         go2.move_velocity(0, 0, 0)
 
     async def _patrol_loop(self, stops: list[str]) -> None:
+        """巡逻循环内部实现，无限循环访问各站点，每站停留 2s。"""
         while True:
             for name in stops:
                 self.target = name
@@ -390,6 +406,7 @@ def _find_lookahead_on_path(
     robot_heading: float,
     goal_loc: dict,
 ) -> tuple[float, float]:
+    """在路径上找距机器人前方 LOOKAHEAD_DIST 处的目标点，无合适点则返回终点。"""
     for ix, iy in path:
         wx, wy = grid_obj.grid_to_odom(ix, iy)
         dx, dy = wx - robot_x, wy - robot_y
@@ -403,6 +420,7 @@ def _find_lookahead_on_path(
 
 
 def _normalize_angle(angle: float) -> float:
+    """将角度归一化到 [-π, π] 范围。"""
     while angle > math.pi:
         angle -= 2.0 * math.pi
     while angle < -math.pi:
@@ -416,7 +434,7 @@ def _distance_to_path(
     robot_x: float,
     robot_y: float,
 ) -> float:
-    """返回机器人到路径最近节点的距离（米）。"""
+    """返回机器人到路径最近节点的距离（米），用于判断是否需要重规划。"""
     min_d2 = float("inf")
     for ix, iy in path:
         wx, wy = grid_obj.grid_to_odom(ix, iy)
@@ -429,7 +447,7 @@ def _distance_to_path(
 def _nearest_free_cell(
     grid_obj, cell: tuple[int, int], max_r: int = 40
 ) -> tuple[int, int] | None:
-    """BFS 搜索最近的自由格，不会穿越障碍选到墙另一侧。"""
+    """BFS 找距 cell 最近的可通行格，目标点落在障碍内时使用，不会穿越障碍选到墙另一侧。"""
     from collections import deque
     if grid_obj.is_free(*cell):
         return cell

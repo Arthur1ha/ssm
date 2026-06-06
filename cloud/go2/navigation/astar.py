@@ -1,3 +1,7 @@
+"""
+A* 路径规划算法，支持 8 方向移动（上下左右 + 对角线）。
+输入占用栅格和起终点格索引，返回最短可行路径。
+"""
 import heapq
 import math
 import numpy as np
@@ -9,11 +13,7 @@ def astar(
     start: tuple[int, int],
     goal: tuple[int, int],
 ) -> Optional[list[tuple[int, int]]]:
-    """
-    grid: bool array shape (ny, nx), True = obstacle
-    start/goal: (ix, iy)
-    Returns [(ix, iy), ...] path, or None if unreachable.
-    """
+    """在占用栅格上搜索从 start 到 goal 的最短路径，不可达时返回 None。"""
     if start == goal:
         return [start]
 
