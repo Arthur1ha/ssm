@@ -245,7 +245,9 @@ class Drive:
             go2.move_velocity(0.0, 0.0, 0.0)
             new_odom = go2.odom
             pos = f"({new_odom['x']:.2f}, {new_odom['y']:.2f})" if new_odom else "未知"
-            return f"地图不可用，短距前进完成，当前位置 {pos}"
+            nav_summary = f"地图不可用，短距前进完成，当前位置 {pos}"
+            observation = await go2_observe("描述当前看到的场景，有什么值得继续探索的")
+            return f"{nav_summary} | 到达后观察：{observation}"
 
         target_x, target_y = target
         tmp_name = f"_explore_{int(time.time())}"
@@ -268,11 +270,15 @@ class Drive:
             dx   = new_odom["x"] - odom["x"]
             dy   = new_odom["y"] - odom["y"]
             dist = (dx ** 2 + dy ** 2) ** 0.5
-            return (
+            nav_summary = (
                 f"{result}，实际移动 {dist:.2f}m，"
                 f"当前位置 ({new_odom['x']:.2f}, {new_odom['y']:.2f})"
             )
-        return result
+        else:
+            nav_summary = result
+
+        observation = await go2_observe("描述当前看到的场景，有什么值得继续探索的")
+        return f"{nav_summary} | 到达后观察：{observation}"
 
     async def _do_social(self) -> None:
         """SOCIAL 状态：观察画面中的人，LLM 决策是否执行互动动作。"""
