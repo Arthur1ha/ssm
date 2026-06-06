@@ -14,10 +14,11 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.tools.tools import go2_sport, go2_move, go2_observe, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.tools.tools import go2_sport, go2_observe, get_text_llm, _VALID_SPORT_CMDS
 from cloud.go2.agentcore.skills.vision import VisionFrame
 from cloud.go2.agentcore.soul import get_system_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
+from cloud.go2.navigation import frontier as frontier_mod
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ class Drive:
             from cloud.go2.agentcore.memory import spatial as spatial_memory
             odom = go2.odom
             odom_str = (
-                f"x={odom['x']:.2f}, y={odom['y']:.2f}, heading={odom['heading']:.2f}"
+                f"x={odom['x']:.2f}, y={odom['y']:.2f}, heading={odom['heading']:.2f}rad"
                 if odom else "未知"
             )
             locations = spatial_memory.list_locations()
@@ -130,19 +131,29 @@ class Drive:
                 for h in history
             ) or "  （尚未执行任何步骤）"
 
+            # 射线投射：告诉 LLM 各方向实际可行距离，让方向选择有依据
+            grid_obj = go2.occupancy_grid
+            if grid_obj and odom:
+                dir_free = frontier_mod.raycast_directions(grid_obj, odom)
+                dir_str  = "  ".join(f"{d}:{v:.1f}m" for d, v in dir_free.items())
+            else:
+                dir_str = "地图未就绪"
+
             prompt = (
                 f"{episode_memory.format_context()}\n\n"
                 f"你正在自主探索环境，当前第 {step + 1} 步（最多 {_MAX_STEPS} 步）。\n"
                 f"当前位置：{odom_str}\n"
-                f"已知地点：{loc_str}\n\n"
+                f"已知地点：{loc_str}\n"
+                f"各方向可行空间：{dir_str}\n\n"
                 f"本次探索历史：\n{history_str}\n\n"
                 f"可用工具：\n"
-                f"  go2_move     → direction: forward/backward/left/right/turn_left/turn_right\n"
-                f"  go2_sport    → cmd: {', '.join(sorted(_VALID_SPORT_CMDS))}\n"
-                f"  go2_observe  → question: 想观察什么\n"
-                f"  navigator_go → name: 导航到已知地点\n"
-                f"  tag_location → name: 给当前位置命名并保存\n"
-                f"  stop         → 结束探索（累了/满足了/想休息）\n\n"
+                f"  explore_direction → direction: {'/'.join(frontier_mod.DIRECTIONS)}\n"
+                f"                      选择想去的方向，系统根据地图自动算出安全目标并导航过去\n"
+                f"  go2_sport         → cmd: {', '.join(sorted(_VALID_SPORT_CMDS))}\n"
+                f"  go2_observe       → question: 想观察什么\n"
+                f"  navigator_go      → name: 导航到已知地点\n"
+                f"  tag_location      → name: 给当前位置命名并保存\n"
+                f"  stop              → 结束探索（累了/满足了/想休息）\n\n"
                 f"直接输出 JSON，不含代码块：\n"
                 f"{{\"tool\": \"工具名\", \"params\": {{...}}, \"reason\": \"一句话\", \"done\": false}}"
             )
@@ -182,9 +193,8 @@ class Drive:
     async def _exec_explore_tool(self, tool: str, params: dict) -> str:
         """执行探索中 LLM 决策的工具调用，导航工具可被打断。"""
         try:
-            if tool == "go2_move":
-                await go2_move(direction=params.get("direction", "forward"))
-                return "移动完成"
+            if tool == "explore_direction":
+                return await self._exec_explore_direction(params.get("direction", "forward"))
             elif tool == "go2_sport":
                 return await go2_sport(params.get("cmd", ""))
             elif tool == "go2_observe":
@@ -210,6 +220,59 @@ class Drive:
                 return f"未知工具: {tool}"
         except Exception as exc:
             return f"执行失败: {exc}"
+
+    async def _exec_explore_direction(self, direction: str) -> str:
+        """explore_direction 工具的实现：用地图算出安全目标坐标，Navigator 闭环导过去。
+
+        地图不可用时降级为定时前进（2s）。
+        """
+        from cloud.go2.agentcore.memory import spatial as spatial_memory
+        from cloud.go2.navigation.navigator import navigator
+
+        odom = go2.odom
+        if not odom:
+            return "无法移动：odom 不可用"
+
+        grid_obj = go2.occupancy_grid
+        target   = frontier_mod.find_exploration_target(grid_obj, odom, direction) if grid_obj else None
+
+        if target is None:
+            # 地图不可用或该方向被堵死，降级：用 move_velocity 前进 2s
+            logger.info("[Drive] explore_direction 无地图/方向受阻，降级前进 2s")
+            import asyncio as _aio
+            go2.move_velocity(0.3, 0.0, 0.0)
+            await _aio.sleep(2.0)
+            go2.move_velocity(0.0, 0.0, 0.0)
+            new_odom = go2.odom
+            pos = f"({new_odom['x']:.2f}, {new_odom['y']:.2f})" if new_odom else "未知"
+            return f"地图不可用，短距前进完成，当前位置 {pos}"
+
+        target_x, target_y = target
+        tmp_name = f"_explore_{int(time.time())}"
+        spatial_memory.tag_location(tmp_name, {"x": target_x, "y": target_y, "heading": 0.0})
+
+        nav_task = asyncio.create_task(navigator.go_to(tmp_name))
+        try:
+            while not nav_task.done():
+                if self.user_interrupt or self._person_present:
+                    nav_task.cancel()
+                    navigator.stop()
+                    return "导航被打断"
+                await asyncio.sleep(0.5)
+            result = nav_task.result()
+        finally:
+            spatial_memory.delete_location(tmp_name)
+
+        new_odom = go2.odom
+        if new_odom:
+            dx   = new_odom["x"] - odom["x"]
+            dy   = new_odom["y"] - odom["y"]
+            dist = (dx ** 2 + dy ** 2) ** 0.5
+            return (
+                f"{result}，实际移动 {dist:.2f}m，"
+                f"当前位置 ({new_odom['x']:.2f}, {new_odom['y']:.2f})"
+            )
+        return result
 
     async def _do_social(self) -> None:
         """SOCIAL 状态：观察画面中的人，LLM 决策是否执行互动动作。"""
