@@ -113,6 +113,14 @@ class Drive:
         history: list[dict] = []
         logger.info("[Drive] 开始自主探索会话")
 
+        # 进入探索前先观察一次，让第一步决策有视觉上下文
+        try:
+            initial_obs = await go2_observe("描述当前看到的场景，有什么值得探索的")
+        except Exception as exc:
+            initial_obs = f"观察失败：{exc}"
+        episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
+        logger.info("[Drive] 探索初始观察：%s", initial_obs)
+
         for step in range(_MAX_STEPS):
             if self.user_interrupt or self._person_present:
                 logger.info("[Drive] EXPLORING 被打断 step=%d", step)
@@ -139,12 +147,16 @@ class Drive:
             else:
                 dir_str = "地图未就绪"
 
+            # 最新观察：上一步导航结果中已含到达后观察，否则用初始观察
+            last_obs = history[-1]["result"] if history else initial_obs
+
             prompt = (
                 f"{episode_memory.format_context()}\n\n"
                 f"你正在自主探索环境，当前第 {step + 1} 步（最多 {_MAX_STEPS} 步）。\n"
                 f"当前位置：{odom_str}\n"
                 f"已知地点：{loc_str}\n"
-                f"各方向可行空间：{dir_str}\n\n"
+                f"各方向可行空间：{dir_str}\n"
+                f"当前观察：{last_obs}\n\n"
                 f"本次探索历史：\n{history_str}\n\n"
                 f"可用工具：\n"
                 f"  explore_direction → direction: {'/'.join(frontier_mod.DIRECTIONS)}\n"
