@@ -150,7 +150,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         )
 
     def move_velocity(self, vx: float, vy: float, vyaw: float) -> None:
-        """发送速度指令，通过 WIRELESS_CONTROLLER 模拟摇杆输入。"""
+        """发送速度指令，通过 WIRELESS_CONTROLLER 模拟摇杆输入。
+
+        fire-and-forget（不等 ACK），适合摇杆高频实时输入，不阻塞导航循环。
+        坑：连接后不要自动 switch_mode("normal")——实测会让机器狗进入忽略遥控
+        的模式，WIRELESS_CONTROLLER 与 SPORT_MOD Move 都会失效；默认模式即可遥控。
+        """
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
         self._conn.datachannel.pub_sub.publish_without_callback(
