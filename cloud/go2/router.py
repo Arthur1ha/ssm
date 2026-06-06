@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from cloud.go2.connection import go2
@@ -121,6 +121,21 @@ async def go2_video():
     return StreamingResponse(
         go2.mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@router.get("/api/go2/video/snapshot")
+async def go2_video_snapshot():
+    """单帧 JPEG，供不支持 MJPEG 的浏览器（iOS Safari）轮询使用。"""
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    frame = go2._latest_frame
+    if frame is None:
+        raise HTTPException(status_code=503, detail="暂无画面")
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -334,6 +349,25 @@ def nav_stop():
     return {"ok": True}
 
 
+@router.post("/api/go2/stop")
+async def emergency_stop():
+    global _active_rule_cb, _active_drive_cb, _autonomy_mode
+    from cloud.go2.navigation.navigator import navigator
+    navigator.stop()
+    drive.stop()
+    if _active_drive_cb is not None:
+        vision_loop.remove_callback(_active_drive_cb)
+        _active_drive_cb = None
+    if _active_rule_cb is not None:
+        vision_loop.remove_callback(_active_rule_cb)
+        _active_rule_cb = None
+    vision_loop.stop()
+    _autonomy_mode = "manual"
+    if go2.is_connected:
+        await go2.move(0, 0, 0)
+    return {"ok": True, "mode": "manual"}
+
+
 @router.get("/api/go2/navigation/state")
 def nav_state():
     from cloud.go2.navigation.navigator import navigator
@@ -479,3 +513,115 @@ async def nav_go_home():
     from cloud.go2.navigation.navigator import navigator
     asyncio.create_task(navigator.go_to("home"))
     return {"ok": True, "message": "开始归位"}
+
+
+@router.get("/api/go2/map/debug")
+def go2_map_debug():
+    """返回原始体素消息的结构，用于诊断数据格式。"""
+    raw = go2.voxel_raw
+    if raw is None:
+        return {"error": "no voxel data yet"}
+
+    def _summarize(obj, depth=0):
+        if depth > 4:
+            return "..."
+        if isinstance(obj, dict):
+            return {k: _summarize(v, depth + 1) for k, v in obj.items()}
+        if isinstance(obj, list):
+            length = len(obj)
+            if length == 0:
+                return []
+            sample = obj[:6]
+            return {"__len__": length, "__sample__": [_summarize(x, depth + 1) for x in sample]}
+        return obj
+
+    return _summarize(raw)
+
+
+@router.get("/api/go2/map.png")
+def go2_map_image():
+    import io, math as _math
+    import numpy as np
+    from PIL import Image, ImageDraw
+    from cloud.go2.agentcore.memory import spatial as spatial_memory
+    from cloud.go2.navigation.navigator import navigator
+
+    SCALE = 3
+
+    grid_obj = go2.occupancy_grid
+    odom     = go2.odom
+
+    if grid_obj is None:
+        img = Image.new("RGB", (384, 384), (12, 14, 20))
+        d   = ImageDraw.Draw(img)
+        d.text((140, 188), "NO MAP", fill=(50, 60, 50))
+        buf = io.BytesIO(); img.save(buf, "PNG")
+        return Response(content=buf.getvalue(), media_type="image/png")
+
+    nx, ny = grid_obj.width[0], grid_obj.width[1]
+    W, H   = nx * SCALE, ny * SCALE
+
+    # 翻转行让 Y 轴朝上（北朝上）与世界坐标一致
+    arr = np.where(
+        grid_obj.grid[::-1, :, None],
+        np.array([70, 70, 70], dtype=np.uint8),   # 障碍：灰
+        np.array([14, 18, 28], dtype=np.uint8),   # 自由：深蓝黑
+    ).astype(np.uint8)
+    img = Image.fromarray(arr, "RGB").resize((W, H), Image.NEAREST)
+    d   = ImageDraw.Draw(img)
+
+    def g2i(ix, iy):
+        """grid cell → image pixel，Y 翻转后北朝上"""
+        return ix * SCALE + SCALE // 2, (ny - 1 - iy) * SCALE + SCALE // 2
+
+    # 机器狗内置导航规划的全局路径（蓝线）
+    global_path = go2.global_path
+    if len(global_path) > 1:
+        pts = []
+        for wp in global_path:
+            gx, gy = grid_obj.odom_to_grid(wp["x"], wp["y"])
+            pts.append(g2i(gx, gy))
+        d.line(pts, fill=(30, 120, 255), width=2)
+
+    # 保存的地点
+    for loc in spatial_memory.list_locations():
+        lx, ly = grid_obj.odom_to_grid(loc["x"], loc["y"])
+        px, py = g2i(lx, ly)
+        r = 5
+        color  = (255, 200, 0) if navigator.target == loc["name"] else (160, 200, 80)
+        d.ellipse([px-r, py-r, px+r, py+r], fill=color)
+        d.text((px + r + 2, py - 5), loc["name"], fill=color)
+
+    # 机器人（绿圆 + 朝向箭头）
+    if odom:
+        rix, riy = grid_obj.odom_to_grid(odom["x"], odom["y"])
+    else:
+        rix, riy = nx // 2, ny // 2
+    px, py = g2i(rix, riy)
+    r = 7
+    d.ellipse([px-r, py-r, px+r, py+r], fill=(0, 220, 100), outline=(0, 255, 80), width=2)
+    if odom:
+        heading = odom.get("heading", 0.0)
+        L = 14
+        ax = px + int(_math.cos(heading) * L)
+        ay = py - int(_math.sin(heading) * L)
+        d.line([px, py, ax, ay], fill=(0, 255, 80), width=3)
+
+    # 调试信息叠加
+    obs_total = int(grid_obj.grid.sum())
+    obs_pct   = obs_total * 100 // (nx * ny)
+    if odom:
+        d.text((4, H - 14),
+               f"x={odom['x']:.2f} y={odom['y']:.2f} h={_math.degrees(odom['heading']):.0f}°",
+               fill=(0, 180, 80))
+    d.text((4, 4),
+           f"orig=({grid_obj.origin[2]:.2f}z) res={grid_obj.resolution} "
+           f"Z={grid_obj.origin[2]:.2f}~{grid_obj.origin[2]+grid_obj.width[2]*grid_obj.resolution:.2f}m",
+           fill=(80, 80, 100))
+    d.text((4, 18),
+           f"obs={obs_total}/{nx*ny} ({obs_pct}%)",
+           fill=(180, 80, 80))
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")

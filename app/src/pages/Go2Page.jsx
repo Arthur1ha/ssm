@@ -1,6 +1,74 @@
 /* Go2DevicePage — Mobile 双摇杆界面
-   通信：MJPEG + SSE + REST   无 WebRTC 前端代码
+   通信：Snapshot 轮询 + SSE + REST   兼容 iOS Safari
 */
+
+function VideoCanvas({ connected }) {
+  const { useRef, useEffect } = React;
+  const canvasRef  = useRef(null);
+  const activeRef  = useRef(false);
+
+  useEffect(() => {
+    if (!connected) return;
+    activeRef.current = true;
+
+    const tick = async () => {
+      if (!activeRef.current) return;
+      try {
+        const res = await fetch(`/api/go2/video/snapshot?_=${Date.now()}`);
+        if (res.ok) {
+          const blob = await res.blob();
+          const url  = URL.createObjectURL(blob);
+          const img  = new Image();
+          img.onload = () => {
+            const c = canvasRef.current;
+            if (c) c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            URL.revokeObjectURL(url);
+            if (activeRef.current) requestAnimationFrame(tick);
+          };
+          img.onerror = () => { URL.revokeObjectURL(url); if (activeRef.current) setTimeout(tick, 200); };
+          img.src = url;
+          return;
+        }
+      } catch (_) {}
+      if (activeRef.current) setTimeout(tick, 200);
+    };
+
+    tick();
+    return () => { activeRef.current = false; };
+  }, [connected]);
+
+  return React.createElement("canvas", {
+    ref: canvasRef, width: 640, height: 360,
+    style: { width: "100%", height: "100%", display: "block" },
+  });
+}
+
+function MapCanvas({ connected }) {
+  const { useRef, useEffect } = React;
+  const imgRef    = useRef(null);
+  const activeRef = useRef(false);
+
+  useEffect(() => {
+    if (!connected) return;
+    activeRef.current = true;
+
+    const tick = () => {
+      if (!activeRef.current) return;
+      const el = imgRef.current;
+      if (el) el.src = `/api/go2/map.png?_=${Date.now()}`;
+    };
+
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => { activeRef.current = false; clearInterval(id); };
+  }, [connected]);
+
+  return React.createElement("img", {
+    ref: imgRef,
+    style: { width: "100%", height: "100%", display: "block", objectFit: "contain" },
+    alt: "occupancy map",
+  });
+}
 
 function VirtualJoystick({ onMove, onStop, disabled, label }) {
   const { useRef, useState, useEffect, useCallback } = React;
@@ -284,9 +352,9 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   }, []);
 
   const handleStop = useCallback(async () => {
-    if (autonomyMode !== "manual") await switchAutonomy("manual");
-    sendVelocity(0, 0, 0);
-  }, [autonomyMode]);
+    await fetch("/api/go2/stop", { method: "POST" });
+    setAutonomyMode("manual");
+  }, []);
 
   /* ── 地点管理 ── */
   const fetchLocations = useCallback(async () => {
@@ -480,26 +548,28 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
       {/* ── 可滚动主体 ── */}
       <div style={{ flex: 1, overflowY: "auto", paddingBottom: 24 }}>
 
-        {/* 视频 */}
-        <div style={{ position: "relative", width: "100%", aspectRatio: "16/9",
-          background: "#000", overflow: "hidden", flexShrink: 0 }}>
+        {/* 主显示区：2D 占用栅格地图 */}
+        <div style={{ position: "relative", width: "100%", aspectRatio: "1/1",
+          background: "#0a0c14", overflow: "hidden", flexShrink: 0 }}>
           {connected
-            ? <img src="/api/go2/video" alt="Go2 视频"
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            ? <MapCanvas connected={connected} />
             : <div style={{ width: "100%", height: "100%", display: "flex",
                 alignItems: "center", justifyContent: "center",
                 flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 11, color: "#172017", letterSpacing: "0.2em" }}>NO SIGNAL</div>
+                <div style={{ fontSize: 11, color: "#172017", letterSpacing: "0.2em" }}>NO MAP</div>
                 <div style={{ width: 28, height: 1, background: "#121812" }} />
                 <div style={{ fontSize: 9, color: "#0f170f", letterSpacing: "0.15em" }}>CONNECT TO ENABLE</div>
               </div>
           }
 
-          {/* 扫描线 */}
+          {/* 视频画中画：左上角 */}
           {connected && (
-            <div style={{ position: "absolute", inset: 0, pointerEvents: "none",
-              background: "linear-gradient(transparent 50%, rgba(0,0,0,0.04) 50%)",
-              backgroundSize: "100% 3px", opacity: 0.3 }} />
+            <div style={{ position: "absolute", top: 8, left: 8,
+              width: "32%", aspectRatio: "16/9",
+              background: "#000", border: "1px solid rgba(200,255,62,0.2)",
+              borderRadius: 3, overflow: "hidden", zIndex: 10 }}>
+              <VideoCanvas connected={connected} />
+            </div>
           )}
 
           {/* 角标 */}
@@ -518,7 +588,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
                 ? robotState.body_height.toFixed(3) : "--"}m</span>
               <span>VX {Array.isArray(robotState.velocity)
                 ? (robotState.velocity[0] ?? 0).toFixed(2) : "--"}</span>
-              <span style={{ animation: "blink 1.2s infinite" }}>● REC</span>
+              <span>LIDAR MAP</span>
             </div>
           )}
         </div>
