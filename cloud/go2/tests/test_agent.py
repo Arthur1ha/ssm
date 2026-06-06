@@ -372,6 +372,176 @@ def test_run_agent_records_user_command_in_memory(monkeypatch):
     assert any("测试指令" in e["content"] for e in fresh_memory.entries())
 
 
+# ── ReactiveMind 触发闸门测试 ────────────────────────────────────────
+
+def _vision_frame(persons=0, faces=0, changed=False, change_type="none"):
+    return {
+        "ts": time.time(),
+        "persons": {"detected": persons > 0, "count": persons},
+        "faces": {"detected": faces > 0, "count": faces},
+        "changed": changed, "change_type": change_type,
+    }
+
+
+async def _drain_tasks():
+    """等待 on_vision_frame 通过 create_task 派发的 fire-and-forget 协程全部完成。"""
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.gather(*pending)
+
+
+def test_on_vision_frame_triggers_on_face_change(monkeypatch):
+    """人数不变、只有人脸出现时，也应触发自主推理。"""
+    from cloud.go2.agentcore.skills import reactive as rm_mod
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: [])   # 隔离规则层
+    mind = rm_mod.ReactiveMind()
+
+    called = []
+    async def fake_reason(frame):
+        called.append(frame)
+    monkeypatch.setattr(mind, "_autonomous_reason", fake_reason)
+
+    async def run():
+        mind.on_vision_frame(_vision_frame(persons=0, faces=0))   # 基线
+        mind.on_vision_frame(_vision_frame(persons=0, faces=1))   # 露脸
+        await _drain_tasks()
+    asyncio.run(run())
+
+    assert len(called) == 1
+
+
+def test_on_vision_frame_triggers_on_person_change(monkeypatch):
+    """人数跨帧变化仍应触发（保持原有行为）。"""
+    from cloud.go2.agentcore.skills import reactive as rm_mod
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: [])   # 隔离规则层
+    mind = rm_mod.ReactiveMind()
+
+    called = []
+    async def fake_reason(frame):
+        called.append(frame)
+    monkeypatch.setattr(mind, "_autonomous_reason", fake_reason)
+
+    async def run():
+        mind.on_vision_frame(_vision_frame(persons=0, faces=0))
+        mind.on_vision_frame(_vision_frame(persons=1, faces=0))
+        await _drain_tasks()
+    asyncio.run(run())
+
+    assert len(called) == 1
+
+
+def test_on_vision_frame_no_trigger_when_steady(monkeypatch):
+    """画面无变化时不应触发。"""
+    from cloud.go2.agentcore.skills import reactive as rm_mod
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: [])   # 隔离规则层
+    mind = rm_mod.ReactiveMind()
+
+    called = []
+    async def fake_reason(frame):
+        called.append(frame)
+    monkeypatch.setattr(mind, "_autonomous_reason", fake_reason)
+
+    async def run():
+        mind.on_vision_frame(_vision_frame(persons=1, faces=1))
+        mind.on_vision_frame(_vision_frame(persons=1, faces=1))
+        await _drain_tasks()
+    asyncio.run(run())
+
+    assert len(called) == 0
+
+
+def test_on_vision_frame_executes_rule_action(monkeypatch):
+    """规则命中时应真正下发动作，而不只是写冷却。"""
+    from cloud.go2.agentcore.skills import reactive as rm_mod
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: ["Hello"])
+    dispatched = []
+    async def fake_sport(cmd):
+        dispatched.append(cmd)
+    monkeypatch.setattr(rm_mod, "go2_sport", fake_sport)
+    mind = rm_mod.ReactiveMind()
+
+    async def run():
+        mind.on_vision_frame(_vision_frame(persons=1, faces=0))
+        await _drain_tasks()
+    asyncio.run(run())
+
+    assert dispatched == ["Hello"]
+
+
+def test_rule_match_takes_priority_over_autonomous(monkeypatch):
+    """规则命中时跳过 LLM 自主推理，避免双重动作。"""
+    from cloud.go2.agentcore.skills import reactive as rm_mod
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: ["Hello"])
+    async def fake_sport(cmd):
+        pass
+    monkeypatch.setattr(rm_mod, "go2_sport", fake_sport)
+    mind = rm_mod.ReactiveMind()
+
+    reasoned = []
+    async def fake_reason(frame):
+        reasoned.append(frame)
+    monkeypatch.setattr(mind, "_autonomous_reason", fake_reason)
+
+    async def run():
+        mind.on_vision_frame(_vision_frame(persons=0, faces=0))   # 基线
+        mind.on_vision_frame(_vision_frame(persons=1, faces=1))   # 画面变化 + 规则命中
+        await _drain_tasks()
+    asyncio.run(run())
+
+    assert reasoned == []   # 规则优先，未走自主推理
+
+
+def test_go2_add_rule_strips_tool_prefix(tmp_path, monkeypatch):
+    """LLM 常把工具名混进 action（"go2_sport Hello"），应剥掉前缀只存动作名。"""
+    from cloud.go2.agentcore.tools import tools as tools_mod
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text("[]")
+    monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
+    result = tools_mod.go2_add_rule("人", "go2_sport Hello", cooldown_s=30)
+    assert "已添加规则" in result
+    saved = json.loads(rules_file.read_text())
+    assert saved[0]["action"] == "Hello"
+
+
+def test_go2_add_rule_normalizes_case(tmp_path, monkeypatch):
+    """大小写不敏感，归一到规范动作名。"""
+    from cloud.go2.agentcore.tools import tools as tools_mod
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text("[]")
+    monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
+    tools_mod.go2_add_rule("人", "hello")
+    saved = json.loads(rules_file.read_text())
+    assert saved[0]["action"] == "Hello"
+
+
+def test_go2_add_rule_rejects_truly_unknown(tmp_path, monkeypatch):
+    from cloud.go2.agentcore.tools import tools as tools_mod
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text("[]")
+    monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
+    result = tools_mod.go2_add_rule("人", "FlyToMoon")
+    assert "不支持" in result
+
+
+def test_dispatch_action_respects_cooldown(monkeypatch):
+    """同一动作处于冷却中时不重复下发（规则层与自主层共用冷却）。"""
+    from cloud.go2.agentcore.skills import reactive as rm_mod
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: ["Hello"])
+    dispatched = []
+    async def fake_sport(cmd):
+        dispatched.append(cmd)
+    monkeypatch.setattr(rm_mod, "go2_sport", fake_sport)
+    mind = rm_mod.ReactiveMind()
+    mind._action_cooldowns["Hello"] = time.time()   # 刚执行过，仍在冷却
+
+    async def run():
+        mind.on_vision_frame(_vision_frame(persons=1, faces=0))
+        await _drain_tasks()
+    asyncio.run(run())
+
+    assert dispatched == []
+
+
 def test_executor_uses_system_message_for_response(monkeypatch):
     import cloud.go2.agent as agent_mod
     import cloud.go2.connection as conn_mod

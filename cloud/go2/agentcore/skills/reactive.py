@@ -41,6 +41,11 @@ class ReactiveMind:
         self._last_autonomous_ts: float = 0.0
         # 规则层和自主层共用同一份冷却：action → last_triggered_ts
         self._action_cooldowns: dict[str, float] = {}
+        # 自主层自己跟踪人/脸数量，跨帧变化即视为"画面有变化"。
+        # 不复用 frame["changed"]——后者只看人数，且 HOG 全身在近距离常漏检，
+        # 人脸（Haar 正脸）在近距离更可靠，必须纳入触发。-1 表示尚无基线。
+        self._prev_person_count: int = -1
+        self._prev_face_count: int = -1
 
     @property
     def last_decision(self) -> Optional[dict]:
@@ -49,24 +54,58 @@ class ReactiveMind:
     def _in_action_cooldown(self, action: str) -> bool:
         return time.time() - self._action_cooldowns.get(action, 0) < _ACTION_COOLDOWN_S
 
+    # ── 单一执行口，规则层与自主层共用 ────────────────────────────
+
+    async def _dispatch_action(self, action: str, reason: str, source: str) -> None:
+        """真正下发一个动作：校验 → 共享冷却 → 执行 → 记忆 → 日志。"""
+        if action not in _ALL_ACTIONS:
+            logger.info("[ReactiveMind] 未知动作 %s，跳过", action)
+            return
+        if self._in_action_cooldown(action):
+            logger.info("[ReactiveMind] %s 冷却中，跳过（%s）", action, source)
+            return
+        try:
+            if action in _VALID_SPORT_CMDS:
+                await go2_sport(action)
+            else:
+                await go2_move(**_TURN_ACTIONS[action])
+        except Exception as exc:
+            logger.warning("[ReactiveMind] 执行失败: %s", exc)
+            return
+        self._action_cooldowns[action] = time.time()
+        episode_memory.add(EventType.ACTION_TAKEN, f"{source}：执行了 {action}（{reason}）")
+        logger.info("[ReactiveMind] %s 执行 %s：%s", source, action, reason)
+
     # ── 同步入口，由 vision_loop 回调 ─────────────────────────────
 
     def on_vision_frame(self, frame: VisionFrame) -> None:
         observation = _frame_to_observation(frame)
         rule_actions = check_rules(observation) if observation else []
 
-        # 规则触发的动作同步写入共享冷却
-        now = time.time()
-        for action in rule_actions:
-            self._action_cooldowns[action] = now
+        # 人数或脸数发生跨帧变化即视为"画面有变化"（首帧建立基线不算）
+        person_count = frame["persons"]["count"]
+        face_count   = frame["faces"]["count"]
+        changed = (
+            (self._prev_person_count >= 0 and person_count != self._prev_person_count)
+            or (self._prev_face_count >= 0 and face_count != self._prev_face_count)
+        )
+        self._prev_person_count = person_count
+        self._prev_face_count   = face_count
 
-        # 只有 changed=True 且规则层没有触发时，才启动自主推理
-        if frame["changed"] and not rule_actions:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._autonomous_reason(frame))
-            except RuntimeError:
-                pass
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        # 规则层（快速反射）优先：命中即执行，不再走 LLM 推理
+        if rule_actions:
+            for action in rule_actions:
+                loop.create_task(self._dispatch_action(action, "规则命中", "规则响应"))
+            return
+
+        # 规则未命中且画面变化 → 自主推理（LLM 兜底）
+        if changed:
+            loop.create_task(self._autonomous_reason(frame))
 
     # ── 异步自主推理 ──────────────────────────────────────────────
 
@@ -129,25 +168,11 @@ class ReactiveMind:
             "ts":           now,
             "frame_change": frame["change_type"],
         }
+        self._last_autonomous_ts = now
 
-        if action and action in _ALL_ACTIONS:
-            if self._in_action_cooldown(action):
-                logger.info("[ReactiveMind] %s 冷却中，跳过", action)
-                self._last_autonomous_ts = now
-                return
-            try:
-                if action in _VALID_SPORT_CMDS:
-                    await go2_sport(action)
-                else:
-                    await go2_move(**_TURN_ACTIONS[action])
-                self._action_cooldowns[action] = time.time()
-                self._last_autonomous_ts = time.time()
-                episode_memory.add(EventType.ACTION_TAKEN, f"自主响应：执行了 {action}（{reason}）")
-                logger.info("[ReactiveMind] 自主执行 %s：%s", action, reason)
-            except Exception as exc:
-                logger.warning("[ReactiveMind] 执行失败: %s", exc)
+        if action:
+            await self._dispatch_action(action, reason, "自主响应")
         else:
-            self._last_autonomous_ts = now
             logger.info("[ReactiveMind] 决定不行动：%s", reason)
 
 
