@@ -81,9 +81,6 @@ async def go2_connect():
         # 默认完全遥控：不启动 VisionLoop，不注册任何回调
         _autonomy_mode = "manual"
 
-        # 切到 normal 模式，确保 WIRELESS_CONTROLLER 可用（AI 模式会忽略遥控指令）
-        asyncio.create_task(go2.switch_mode("normal"))
-
         from cloud.go2.agentcore.memory import spatial as _sm
         _sm.tag_location("home", {"x": 0.0, "y": 0.0, "heading": 0.0})
         logging.info("[Go2] 已将起点标记为 home (0, 0, 0)")
