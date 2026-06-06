@@ -548,27 +548,27 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
       {/* ── 可滚动主体 ── */}
       <div style={{ flex: 1, overflowY: "auto", paddingBottom: 24 }}>
 
-        {/* 主显示区：2D 占用栅格地图 */}
-        <div style={{ position: "relative", width: "100%", aspectRatio: "1/1",
+        {/* 主显示区：视频画面 */}
+        <div style={{ position: "relative", width: "100%", aspectRatio: "16/9",
           background: "#0a0c14", overflow: "hidden", flexShrink: 0 }}>
           {connected
-            ? <MapCanvas connected={connected} />
+            ? <VideoCanvas connected={connected} />
             : <div style={{ width: "100%", height: "100%", display: "flex",
                 alignItems: "center", justifyContent: "center",
                 flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 11, color: "#172017", letterSpacing: "0.2em" }}>NO MAP</div>
+                <div style={{ fontSize: 11, color: "#172017", letterSpacing: "0.2em" }}>NO SIGNAL</div>
                 <div style={{ width: 28, height: 1, background: "#121812" }} />
                 <div style={{ fontSize: 9, color: "#0f170f", letterSpacing: "0.15em" }}>CONNECT TO ENABLE</div>
               </div>
           }
 
-          {/* 视频画中画：左上角 */}
+          {/* 地图画中画：左上角 */}
           {connected && (
             <div style={{ position: "absolute", top: 8, left: 8,
-              width: "32%", aspectRatio: "16/9",
-              background: "#000", border: "1px solid rgba(200,255,62,0.2)",
+              width: "28%", aspectRatio: "1/1",
+              background: "#0a0c14", border: "1px solid rgba(200,255,62,0.2)",
               borderRadius: 3, overflow: "hidden", zIndex: 10 }}>
-              <VideoCanvas connected={connected} />
+              <MapCanvas connected={connected} />
             </div>
           )}
 
@@ -588,7 +588,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
                 ? robotState.body_height.toFixed(3) : "--"}m</span>
               <span>VX {Array.isArray(robotState.velocity)
                 ? (robotState.velocity[0] ?? 0).toFixed(2) : "--"}</span>
-              <span>LIDAR MAP</span>
+              <span>LIVE CAM</span>
             </div>
           )}
         </div>
