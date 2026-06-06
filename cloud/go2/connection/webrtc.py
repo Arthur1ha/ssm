@@ -1,11 +1,9 @@
 import asyncio
-import json
 import logging
 import math
-import time
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
-from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD, DATA_CHANNEL_TYPE
+from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
 
 from cloud.go2.connection.fsm import Go2FSM
 from cloud.go2.connection.sensors import Go2Sensors
@@ -152,20 +150,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         )
 
     def move_velocity(self, vx: float, vy: float, vyaw: float) -> None:
-        """发送速度指令。用 SPORT_MOD Move（api_id=1008）fire-and-forget，不等 ACK。"""
+        """发送速度指令，通过 WIRELESS_CONTROLLER 模拟摇杆输入。"""
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
-        payload = {
-            "header": {"identity": {
-                "id": int(time.time() * 1000) % 2147483648,
-                "api_id": SPORT_CMD["Move"],
-            }},
-            "parameter": json.dumps({"x": vx, "y": vy, "z": vyaw}),
-        }
         self._conn.datachannel.pub_sub.publish_without_callback(
-            RTC_TOPIC["SPORT_MOD"],
-            data=payload,
-            msg_type=DATA_CHANNEL_TYPE["REQUEST"],
+            RTC_TOPIC["WIRELESS_CONTROLLER"],
+            data={"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0},
         )
 
     async def balance_stand(self) -> None:
