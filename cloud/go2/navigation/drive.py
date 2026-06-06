@@ -187,6 +187,7 @@ class Drive:
             if decision.get("done") or tool == "stop":
                 logger.info("[Drive] EXPLORING 自主结束 step=%d：%s", step, reason)
                 episode_memory.add(EventType.ACTION_TAKEN, f"探索结束：{reason}")
+                await self._return_home()
                 break
 
             logger.info("[Drive] EXPLORING step=%d  tool=%s  reason=%s", step, tool, reason)
@@ -232,6 +233,20 @@ class Drive:
                 return f"未知工具: {tool}"
         except Exception as exc:
             return f"执行失败: {exc}"
+
+    async def _return_home(self) -> None:
+        """探索结束后导航回 home 点，被打断时就地停止。"""
+        from cloud.go2.navigation.navigator import navigator
+        logger.info("[Drive] 探索结束，导航回 home")
+        nav_task = asyncio.create_task(navigator.go_to("home"))
+        while not nav_task.done():
+            if self.user_interrupt or self._person_present:
+                nav_task.cancel()
+                navigator.stop()
+                logger.info("[Drive] 回家导航被打断")
+                return
+            await asyncio.sleep(0.5)
+        logger.info("[Drive] 已回到 home：%s", nav_task.result())
 
     async def _exec_explore_direction(self, direction: str) -> str:
         """explore_direction 工具的实现：用地图算出安全目标坐标，Navigator 闭环导过去。
