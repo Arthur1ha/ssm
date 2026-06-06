@@ -135,17 +135,13 @@ async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) ->
 
 
 _OBSERVE_SYSTEM_PROMPT = (
-    "你是一只正在探索环境的机器狗 Go2 的视觉感知模块。"
-    "你看到的是机器狗前置摄像头拍到的画面。\n"
-    "请完成以下两件事：\n"
-    "1. 简要描述当前场景（房间布局、主要物体、人物）；\n"
-    "2. 指出画面中有哪些值得靠近探索的地点或物体（如角落、箱子、门、陌生物品等），"
-    "以及大致在哪个方向（左/右/前方）。\n"
-    "回答简洁，不超过 3 句话。"
+    "你是机器狗 Go2 的视觉感知模块。"
+    "图像来自机器狗前置摄像头，视角较低（约 30cm 离地）。"
+    "根据问题简洁作答，不超过 3 句话。"
 )
 
 
-async def go2_observe(question: str = "描述当前场景并指出值得探索的地方") -> str:
+async def go2_observe(question: str = "描述你看到的场景") -> str:
     from langchain_core.messages import SystemMessage
     frame_b64 = go2.latest_frame_b64()
     if not frame_b64:
