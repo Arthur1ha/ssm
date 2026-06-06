@@ -1,8 +1,10 @@
 import numpy as np
 
-Z_MIN_IDX = 5   # iz < this = floor, ignored
-Z_MAX_IDX = 36  # iz > this = ceiling, ignored
-INFLATE_RADIUS = 3  # obstacle inflation radius in cells (~0.15m)
+# Native 解码器返回米制坐标（世界系）。地板 ≈ z=0，用米制阈值过滤更可靠。
+Z_FLOOR_M  = 0.15   # m，低于此 = 地板/低矮地物，忽略
+Z_CEIL_M   = 1.50   # m，高于此 = 天花板，忽略
+INFLATE_RADIUS   = 3  # cells，障碍膨胀半径（~0.15m）
+CLEARANCE_RADIUS = 5  # cells，机器人脚印清除半径（~0.25m，覆盖 Go2 体宽）
 
 
 class OccupancyGrid:
@@ -11,21 +13,39 @@ class OccupancyGrid:
         self.resolution: float = d.get("resolution", 0.05)
         self.origin: list[float] = d.get("origin", [0.0, 0.0, 0.0])
         self.width: list[int] = d.get("width", [128, 128, 38])
-        self.grid: np.ndarray = self._build(d.get("data", {}).get("positions"))
+        # Native 解码器：data.data.points → ndarray(N,3)，单位米，世界系
+        self.grid: np.ndarray = self._build(d.get("data", {}).get("points"))
 
-    def _build(self, positions) -> np.ndarray:
+    def _build(self, points) -> np.ndarray:
         nx, ny = self.width[0], self.width[1]
         raw = np.zeros((ny, nx), dtype=bool)
-        if positions is None:
+        if points is None:
             return raw
-        pos = np.asarray(positions).reshape(-1, 3)
-        mask = (pos[:, 2] >= Z_MIN_IDX) & (pos[:, 2] <= Z_MAX_IDX)
-        pts = pos[mask]
-        if len(pts):
-            ix = np.clip(pts[:, 0], 0, nx - 1)
-            iy = np.clip(pts[:, 1], 0, ny - 1)
-            raw[iy, ix] = True
-        return self._inflate(raw)
+        pts = np.asarray(points)
+        if pts.ndim != 2 or pts.shape[1] < 3 or len(pts) == 0:
+            return raw
+        # Z 过滤：只保留地板以上、天花板以下的点
+        mask = (pts[:, 2] > Z_FLOOR_M) & (pts[:, 2] < Z_CEIL_M)
+        pts = pts[mask]
+        if len(pts) == 0:
+            return raw
+        # 米制坐标 → 格索引
+        ix = np.clip(((pts[:, 0] - self.origin[0]) / self.resolution).astype(int), 0, nx - 1)
+        iy = np.clip(((pts[:, 1] - self.origin[1]) / self.resolution).astype(int), 0, ny - 1)
+        raw[iy, ix] = True
+        inflated = self._inflate(raw)
+        self._clear_robot_footprint(inflated, nx, ny)
+        return inflated
+
+    def _clear_robot_footprint(self, grid: np.ndarray, nx: int, ny: int) -> None:
+        cx, cy = nx // 2, ny // 2
+        r = CLEARANCE_RADIUS
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx * dx + dy * dy <= r * r:
+                    y_idx, x_idx = cy + dy, cx + dx
+                    if 0 <= y_idx < ny and 0 <= x_idx < nx:
+                        grid[y_idx, x_idx] = False
 
     def _inflate(self, grid: np.ndarray) -> np.ndarray:
         if not grid.any():
