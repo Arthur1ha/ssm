@@ -351,6 +351,12 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     sendVelocity(0, 0, parseFloat((-dx * 0.8).toFixed(2)));
   }, []);
 
+  // 摇杆松手：只发速度归零，不触发紧急停止
+  const handleJoystickStop = useCallback(() => {
+    sendVelocity(0, 0, 0);
+  }, []);
+
+  // STOP 按钮：完整紧急停止（取消导航、停所有后台任务）
   const handleStop = useCallback(async () => {
     await fetch("/api/go2/stop", { method: "POST" });
     setAutonomyMode("manual");
@@ -626,10 +632,10 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
         <div style={{ padding: "18px 16px 12px",
           display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <VirtualJoystick
-            onMove={handleLeftMove} onStop={handleStop}
+            onMove={handleLeftMove} onStop={handleJoystickStop}
             disabled={!connected} label="MOVE" />
           <VirtualJoystick
-            onMove={handleRightMove} onStop={handleStop}
+            onMove={handleRightMove} onStop={handleJoystickStop}
             disabled={!connected} label="ROTATE" />
         </div>
 
