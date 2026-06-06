@@ -10,39 +10,56 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def _make_frame(person_detected: bool, count: int = 0,
+                face_detected: bool = False,
                 changed: bool = False, change_type: str = "none") -> dict:
     return {
         "ts": time.time(),
         "persons": {"detected": person_detected, "count": count},
-        "faces":   {"detected": False, "count": 0},
+        "faces":   {"detected": face_detected, "count": 1 if face_detected else 0},
         "changed":     changed,
         "change_type": change_type,
     }
 
 
 def test_initial_state_is_idle():
-    from cloud.go2.drive import Drive
+    from cloud.go2.navigation.drive import Drive
     d = Drive()
     assert d.state_snapshot["state"] == "IDLE"
     assert d.state_snapshot["curiosity"] == 0
 
 
-def test_on_vision_frame_person_enters_transitions_to_social(monkeypatch):
-    import cloud.go2.drive as drive_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+def test_on_vision_frame_person_with_face_transitions_to_social(monkeypatch):
+    """人脸可见（近距主动互动）才触发 SOCIAL。"""
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
 
     d = drive_mod.Drive()
-    d.on_vision_frame(_make_frame(person_detected=True, count=1, changed=True,
-                                  change_type="person_entered"))
+    d.on_vision_frame(_make_frame(person_detected=True, count=1, face_detected=True,
+                                  changed=True, change_type="person_entered"))
     assert d.state_snapshot["state"] == "SOCIAL"
     assert d._person_present is True
+    assert d._person_engaging is True
     assert d.state_snapshot["curiosity"] == 0
 
 
+def test_on_vision_frame_background_person_stays_idle(monkeypatch):
+    """远处背景人（无人脸）不切换 SOCIAL，探索不被打断。"""
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+
+    d = drive_mod.Drive()
+    d.on_vision_frame(_make_frame(person_detected=True, count=1, face_detected=False,
+                                  changed=True, change_type="person_entered"))
+    assert d.state_snapshot["state"] == "IDLE"
+    assert d._person_present is True
+    assert d._person_engaging is False
+
+
 def test_on_vision_frame_person_enter_records_vision_change(monkeypatch):
-    import cloud.go2.drive as drive_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     fresh = EpisodeMemory()
     monkeypatch.setattr(drive_mod, "episode_memory", fresh)
 
@@ -55,8 +72,8 @@ def test_on_vision_frame_person_enter_records_vision_change(monkeypatch):
 
 
 def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch):
-    import cloud.go2.drive as drive_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     fresh = EpisodeMemory()
     monkeypatch.setattr(drive_mod, "episode_memory", fresh)
 
@@ -69,28 +86,28 @@ def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch):
 
 
 def test_no_double_social_transition(monkeypatch):
-    import cloud.go2.drive as drive_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
 
     d = drive_mod.Drive()
-    frame = _make_frame(person_detected=True, count=1, changed=True,
-                        change_type="person_entered")
+    frame = _make_frame(person_detected=True, count=1, face_detected=True,
+                        changed=True, change_type="person_entered")
     d.on_vision_frame(frame)
-    d.on_vision_frame(frame)  # second call should not re-transition
+    d.on_vision_frame(frame)  # 第二次调用不应重复触发
     assert d.state_snapshot["state"] == "SOCIAL"
 
 
 def test_state_snapshot_contains_required_fields():
-    from cloud.go2.drive import Drive
+    from cloud.go2.navigation.drive import Drive
     snap = Drive().state_snapshot
     for key in ("state", "curiosity", "person_present", "last_action_ts"):
         assert key in snap
 
 
 def test_start_creates_task_and_resets_state(monkeypatch):
-    import cloud.go2.drive as drive_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
 
     d = drive_mod.Drive()
@@ -109,8 +126,8 @@ def test_start_creates_task_and_resets_state(monkeypatch):
 
 
 def test_stop_cancels_task(monkeypatch):
-    import cloud.go2.drive as drive_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
 
     d = drive_mod.Drive()
@@ -161,7 +178,7 @@ def test_personality_get_returns_prompt(client):
 
 
 def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
-    import cloud.go2.personality as pers_mod
+    import cloud.go2.agentcore.soul as pers_mod
     monkeypatch.setattr(pers_mod, "_PERSONALITY_FILE", tmp_path / "p.json")
     r = client.post("/api/go2/personality", json={"prompt": "严肃、话少的机器狗"})
     assert r.status_code == 200

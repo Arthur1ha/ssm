@@ -38,13 +38,14 @@ class Drive:
     """内驱动控制器，管理动机状态机和自主行为触发。"""
 
     def __init__(self) -> None:
-        self._state          = MotivationalState.IDLE
-        self._curiosity      = 0
-        self._person_present = False
-        self._last_person_ts = 0.0
-        self._last_action_ts = 0.0
-        self._social_tick    = 0
-        self.user_interrupt  = False
+        self._state           = MotivationalState.IDLE
+        self._curiosity       = 0
+        self._person_present  = False   # HOG 检测到人体（含远处背景人）
+        self._person_engaging = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
+        self._last_person_ts  = 0.0
+        self._last_action_ts  = 0.0
+        self._social_tick     = 0
+        self.user_interrupt   = False
         self._task: Optional[asyncio.Task] = None
 
     @property
@@ -59,15 +60,19 @@ class Drive:
     # ── Vision 回调 ────────────────────────────────────────────────
 
     def on_vision_frame(self, frame: VisionFrame) -> None:
-        """处理视觉帧：人出现时切 SOCIAL，人消失时记时，场景变化时写 episode 记忆。"""
-        currently_present = frame["persons"]["detected"]
+        """处理视觉帧：区分"远处背景人"和"主动互动人"，避免背景人打断探索。
 
+        _person_present：HOG 检测到人体（含远距坐着工作的人）
+        _person_engaging：人脸检测到，表示对方近距且面向镜头，判定为主动互动意图
+        仅 _person_engaging 才触发 SOCIAL 状态切换和探索中断。
+        """
+        currently_present  = frame["persons"]["detected"]
+        currently_engaging = frame["faces"]["detected"]
+
+        # 追踪人体 presence（用于 SOCIAL→IDLE 超时判断）
         if currently_present and not self._person_present:
             self._person_present = True
             self._curiosity = 0
-            if self._state == MotivationalState.IDLE:
-                self._state = MotivationalState.SOCIAL
-                self._social_tick = 0
             episode_memory.add(
                 EventType.VISION_CHANGE,
                 f"检测到 {frame['persons']['count']} 人进入画面",
@@ -76,7 +81,18 @@ class Drive:
             self._person_present = False
             self._last_person_ts = time.time()
             episode_memory.add(EventType.VISION_CHANGE, "画面中的人已离开")
-        elif frame["changed"] and frame["change_type"] != "none":
+
+        # 追踪主动互动信号（人脸可见）
+        if currently_engaging and not self._person_engaging:
+            self._person_engaging = True
+            if self._state == MotivationalState.IDLE:
+                self._state = MotivationalState.SOCIAL
+                self._social_tick = 0
+            episode_memory.add(EventType.VISION_CHANGE, "检测到面向镜头的人，进入社交模式")
+        elif not currently_engaging and self._person_engaging:
+            self._person_engaging = False
+
+        if frame["changed"] and frame["change_type"] != "none" and not currently_present and not self._person_present:
             episode_memory.add(EventType.VISION_CHANGE, f"视觉变化：{frame['change_type']}")
 
     # ── 主循环 ─────────────────────────────────────────────────────
@@ -122,8 +138,8 @@ class Drive:
         logger.info("[Drive] 探索初始观察：%s", initial_obs)
 
         for step in range(_MAX_STEPS):
-            if self.user_interrupt or self._person_present:
-                logger.info("[Drive] EXPLORING 被打断 step=%d", step)
+            if self.user_interrupt or self._person_engaging:
+                logger.info("[Drive] EXPLORING 被打断 step=%d（用户打断或检测到互动意图）", step)
                 break
 
             from cloud.go2.agentcore.memory import spatial as spatial_memory
@@ -217,7 +233,7 @@ class Drive:
                 name = params.get("name", "")
                 nav_task = asyncio.create_task(navigator.go_to(name))
                 while not nav_task.done():
-                    if self.user_interrupt or self._person_present:
+                    if self.user_interrupt or self._person_engaging:
                         nav_task.cancel()
                         navigator.stop()
                         return "导航被打断"
@@ -240,7 +256,7 @@ class Drive:
         logger.info("[Drive] 探索结束，导航回 home")
         nav_task = asyncio.create_task(navigator.go_to("home"))
         while not nav_task.done():
-            if self.user_interrupt or self._person_present:
+            if self.user_interrupt or self._person_engaging:
                 nav_task.cancel()
                 navigator.stop()
                 logger.info("[Drive] 回家导航被打断")
@@ -283,7 +299,7 @@ class Drive:
         nav_task = asyncio.create_task(navigator.go_to(tmp_name))
         try:
             while not nav_task.done():
-                if self.user_interrupt or self._person_present:
+                if self.user_interrupt or self._person_engaging:
                     nav_task.cancel()
                     navigator.stop()
                     return "导航被打断"
@@ -354,10 +370,11 @@ class Drive:
         """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
-        self._state          = MotivationalState.IDLE
-        self._curiosity      = 0
-        self._person_present = False
-        self._task           = asyncio.create_task(self._run_loop())
+        self._state           = MotivationalState.IDLE
+        self._curiosity       = 0
+        self._person_present  = False
+        self._person_engaging = False
+        self._task            = asyncio.create_task(self._run_loop())
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self) -> None:
