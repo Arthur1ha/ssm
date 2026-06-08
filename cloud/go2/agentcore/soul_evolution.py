@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from cloud.go2.agentcore.tools.tools import get_text_llm
+from cloud.go2.agentcore.memory.daily_summary import get_summary
 
 logger = logging.getLogger(__name__)
 
@@ -104,3 +105,18 @@ async def evolve_from_summary(
 
     await _regen_prompt(new_traits)
     return new_traits
+
+
+async def ensure_yesterday_evolved(traits_path: Optional[Path] = None) -> None:
+    """懒触发：若昨天有日摘要但尚未演化，则执行演化，不阻塞调用方。"""
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    traits = _load_traits(traits_path)
+    if (traits.get("last_evolved") or "") >= yesterday:
+        return
+
+    summary = get_summary(yesterday)
+    if not summary:
+        return
+
+    logger.info("[SoulEvolution] 昨天（%s）缺少性格演化，后台生成中...", yesterday)
+    await evolve_from_summary(yesterday, summary, traits_path=traits_path)

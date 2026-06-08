@@ -133,3 +133,54 @@ async def test_evolve_from_summary_handles_llm_parse_failure(tmp_path):
 
     assert result["curiosity"] == 70
     assert result["last_evolved"] == "2026-06-07"
+
+
+# --- ensure_yesterday_evolved ---
+
+@pytest.mark.asyncio
+async def test_ensure_yesterday_evolved_skips_if_already_evolved(tmp_path):
+    from cloud.go2.agentcore.soul_evolution import ensure_yesterday_evolved
+    from datetime import date, timedelta
+
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    traits_file = tmp_path / "traits.json"
+    traits_file.write_text(json.dumps({
+        "curiosity": 70, "extraversion": 45, "boldness": 60,
+        "last_evolved": yesterday,
+    }))
+
+    with patch("cloud.go2.agentcore.soul_evolution.evolve_from_summary", new_callable=AsyncMock) as mock_evo:
+        await ensure_yesterday_evolved(traits_path=traits_file)
+        mock_evo.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_yesterday_evolved_skips_if_no_summary(tmp_path):
+    from cloud.go2.agentcore.soul_evolution import ensure_yesterday_evolved
+
+    traits_file = tmp_path / "traits.json"
+    traits_file.write_text(json.dumps({
+        "curiosity": 70, "extraversion": 45, "boldness": 60, "last_evolved": None
+    }))
+
+    with patch("cloud.go2.agentcore.soul_evolution.get_summary", return_value=None), \
+         patch("cloud.go2.agentcore.soul_evolution.evolve_from_summary", new_callable=AsyncMock) as mock_evo:
+        await ensure_yesterday_evolved(traits_path=traits_file)
+        mock_evo.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_yesterday_evolved_triggers_when_summary_exists(tmp_path):
+    from cloud.go2.agentcore.soul_evolution import ensure_yesterday_evolved
+    from datetime import date, timedelta
+
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    traits_file = tmp_path / "traits.json"
+    traits_file.write_text(json.dumps({
+        "curiosity": 70, "extraversion": 45, "boldness": 60, "last_evolved": None
+    }))
+
+    with patch("cloud.go2.agentcore.soul_evolution.get_summary", return_value="今天探索了走廊。"), \
+         patch("cloud.go2.agentcore.soul_evolution.evolve_from_summary", new_callable=AsyncMock) as mock_evo:
+        await ensure_yesterday_evolved(traits_path=traits_file)
+        mock_evo.assert_called_once_with(yesterday, "今天探索了走廊。", traits_path=traits_file)
