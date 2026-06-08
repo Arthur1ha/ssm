@@ -97,10 +97,8 @@ def _normalize_sport_action(action: str) -> str | None:
     容错：LLM 常把工具名混进来（"go2_sport Hello"），剥前缀；大小写不敏感。
     """
     a = action.strip()
-    for prefix in ("go2_sport", "go2_move"):
-        if a.lower().startswith(prefix):
-            a = a[len(prefix):].strip()
-            break
+    if a.lower().startswith("go2_sport"):
+        a = a[len("go2_sport"):].strip()
     return _SPORT_CMD_BY_LOWER.get(a.lower())
 
 _DIRECTION_MAP = {
@@ -116,10 +114,11 @@ _DIRECTION_MAP = {
 async def go2_sport(cmd: str) -> str:
     if not go2.is_connected:
         return "Go2 未连接，请先建立连接"
-    if cmd not in _VALID_SPORT_CMDS:
+    canonical = _normalize_sport_action(cmd)
+    if canonical is None:
         return f"未知动作 {cmd}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
-    await go2.send_command(cmd)
-    return f"已执行 {cmd}"
+    await go2.send_command(canonical)
+    return f"已执行 {canonical}"
 
 
 async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) -> str:
@@ -250,11 +249,11 @@ TOOL_FN_MAP = {
 
 TOOL_DESCRIPTIONS = """\
 可用工具：
-- go2_sport(cmd): 执行预定义动作。cmd 取值：StandUp/StandDown/StopMove/Hello/Stretch/Dance1/Dance2
+- go2_sport(cmd): 执行预定义动作。cmd取值必须严格在下列范围内:StandUp/StandDown/StopMove/Hello/Stretch/Dance1/Dance2
 - go2_move(direction, speed=0.3, duration=1.0): 移动机器狗。direction: forward/backward/left/right/turn_left/turn_right
 - go2_observe(question="描述你看到的场景"): 用摄像头分析当前画面，返回视觉描述
 - go2_status(): 查询连接状态和机器狗当前姿态
-- go2_add_rule(trigger, action, cooldown_s=30): 添加视觉触发规则，检测到 trigger 关键词时自动执行 action。action 必须是动作名本身（StandUp/StandDown/StopMove/Hello/Stretch/Dance1/Dance2 之一），不要写成 "go2_sport Hello"
+- go2_add_rule(trigger, action, cooldown_s=30): 添加视觉触发规则，检测到 trigger 关键词时自动执行 action(同 go2_sport 的 cmd 取值）
 - go2_list_rules(): 列出当前所有视觉触发规则
 - go2_tag_location(name): 将当前位置保存为命名地点，供导航使用
 - go2_navigate_to(name): 导航到已保存的命名地点，支持模糊描述

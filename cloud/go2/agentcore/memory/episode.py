@@ -1,11 +1,14 @@
 """情节记忆：事件流的读写与持久化。"""
+import logging
 import sqlite3
 import time
 from collections import deque
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Optional
+
+logger = logging.getLogger(__name__), TypedDict
 
 EPISODES_DB = Path(__file__).parent / "episodes.db"
 _RETENTION_DAYS = 7
@@ -72,7 +75,9 @@ class EpisodeMemory:
     def _cleanup_old(self) -> None:
         cutoff = time.time() - _RETENTION_DAYS * 86400
         with self._get_conn() as c:
-            c.execute("DELETE FROM episodes WHERE ts < ?", (cutoff,))
+            deleted = c.execute("DELETE FROM episodes WHERE ts < ?", (cutoff,)).rowcount
+        if deleted:
+            logger.info("[EpisodeMemory] 清理过期记录 %d 条（保留 %d 天）", deleted, _RETENTION_DAYS)
 
     def _load_recent(self) -> None:
         with self._get_conn() as c:
@@ -83,6 +88,7 @@ class EpisodeMemory:
             ).fetchall()
         for ts, event_type, content in reversed(rows):
             self._buffer.append({"ts": ts, "event_type": event_type, "content": content})
+        logger.info("[EpisodeMemory] 加载历史记录 %d 条", len(rows))
 
     def add(self, event_type: EventType, content: str) -> None:
         """写入一条事件，同时持久化到 SQLite。"""
@@ -97,6 +103,7 @@ class EpisodeMemory:
                 "INSERT INTO episodes (ts, event_type, content) VALUES (?, ?, ?)",
                 (entry["ts"], entry["event_type"], entry["content"]),
             )
+        logger.debug("[EpisodeMemory] +%s %s", event_type.value, content)
 
     def entries(self) -> list[MemoryEntry]:
         """返回内存缓冲中的最近事件列表。"""

@@ -52,7 +52,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
 
     logger.info("[Go2/Agent] 用户指令: %s", state["user_msg"])
     prompt = (
-        f"你是 Go2 机器狗控制智能体。根据用户指令生成工具调用列表。\n"
+        f"你是 Go2 机器狗控制智能体。根据指令生成工具调用列表。\n"
         f"{TOOL_DESCRIPTIONS}\n\n"
         f"【记忆上下文】\n{memory_context}\n\n"
         f"用户指令：{state['user_msg']}\n\n"
@@ -80,6 +80,30 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     return {**state, "memory_context": memory_context, "planned_tools": planned, "early_exit": False}
 
 
+async def _generate_response(user_msg: str, memory_context: str, results: list) -> str:
+    if not results:
+        prompt = (
+            f"【记忆上下文】\n{memory_context}\n\n"
+            f"用户问：'{user_msg}'\n"
+            f"用机器狗 Go2 的第一人称口吻回答，像在和主人说话。没有相关记忆就直接说不记得了。"
+        )
+    else:
+        results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
+        prompt = (
+            f"用户说：'{user_msg}'\n"
+            f"执行结果：\n{results_text}\n"
+            f"用机器狗 Go2 的第一人称口吻用一句话回应，像在和主人说话，不提工具名或技术细节。"
+        )
+    try:
+        resp = await get_text_llm().ainvoke([
+            SystemMessage(content=get_system_prompt()),
+            HumanMessage(content=prompt),
+        ])
+        return resp.content.strip()
+    except Exception:
+        return "指令已执行完成。"
+
+
 async def executor_node(state: Go2AgentState) -> Go2AgentState:
     if state.get("early_exit"):
         return state
@@ -101,30 +125,7 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
         logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
         results.append({"tool": tool_name, "result": result})
 
-    # 无工具调用 → 纯记忆问答：LLM 基于记忆上下文直接回答
-    if not results:
-        prompt = (
-            f"【记忆上下文】\n{state.get('memory_context', '')}\n\n"
-            f"用户问：'{state['user_msg']}'\n"
-            f"根据记忆上下文，用自然的中文回答用户。如果记忆中没有相关信息，如实说不记得。"
-        )
-    else:
-        results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
-        prompt = (
-            f"用户说：'{state['user_msg']}'\n"
-            f"执行结果：\n{results_text}\n"
-            f"用 1 句简短中文告诉用户结果，语气自然，不提技术细节。"
-        )
-
-    try:
-        resp = await get_text_llm().ainvoke([
-            SystemMessage(content=get_system_prompt()),
-            HumanMessage(content=prompt),
-        ])
-        response_text = resp.content.strip()
-    except Exception:
-        response_text = "指令已执行完成。"
-
+    response_text = await _generate_response(state["user_msg"], state.get("memory_context", ""), results)
     logger.info("[Go2/Agent] 最终回复: %s", response_text)
     return {**state, "tool_results": results, "response_text": response_text}
 
@@ -220,29 +221,7 @@ async def run_agent_stream(session_id: str, message: str):
 
     yield {"type": "thinking", "text": "整理回复…"}
 
-    if not results:
-        prompt = (
-            f"【记忆上下文】\n{state.get('memory_context', '')}\n\n"
-            f"用户问：'{message}'\n"
-            f"根据记忆上下文，用自然的中文回答用户。如果记忆中没有相关信息，如实说不记得。"
-        )
-    else:
-        results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
-        prompt = (
-            f"用户说：'{message}'\n"
-            f"执行结果：\n{results_text}\n"
-            f"用 1 句简短中文告诉用户结果，语气自然，不提技术细节。"
-        )
-
-    try:
-        resp = await get_text_llm().ainvoke([
-            SystemMessage(content=get_system_prompt()),
-            HumanMessage(content=prompt),
-        ])
-        response_text = resp.content.strip()
-    except Exception:
-        response_text = "指令已执行完成。"
-
+    response_text = await _generate_response(message, state.get("memory_context", ""), results)
     logger.info("[Go2/Agent] 最终回复: %s", response_text)
     episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
 

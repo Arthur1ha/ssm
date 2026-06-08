@@ -1,7 +1,10 @@
+import logging
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 MEMORY_DB = Path(__file__).parent / "spatial.db"
 
@@ -31,6 +34,7 @@ def tag_location(name: str, odom: dict) -> str:
             "VALUES (?, ?, ?, ?, '', ?, 1)",
             (name, odom["x"], odom["y"], odom["heading"], time.time()),
         )
+    logger.info("[SpatialMemory] 保存地点「%s」(%.2f, %.2f)", name, odom["x"], odom["y"])
     return f"已保存地点「{name}」({odom['x']:.2f}, {odom['y']:.2f})"
 
 
@@ -54,6 +58,7 @@ async def _llm_find(query: str) -> Optional[dict]:
     if not rows:
         return None
     names = [r[0] for r in rows]
+    logger.info("[SpatialMemory] 精确匹配失败，LLM 模糊查找「%s」，候选：%s", query, names)
     prompt = (
         f"用户想去的地点：「{query}」\n"
         f"已知地点列表：{names}\n"
@@ -62,7 +67,9 @@ async def _llm_find(query: str) -> Optional[dict]:
     resp = await _get_text_llm().ainvoke([HumanMessage(content=prompt)])
     matched = resp.content.strip().strip('"').strip("'")
     if matched == "null" or matched not in names:
+        logger.info("[SpatialMemory] LLM 未找到匹配地点")
         return None
+    logger.info("[SpatialMemory] LLM 匹配结果：「%s」", matched)
     return await find_location(matched)
 
 

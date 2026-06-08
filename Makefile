@@ -36,7 +36,7 @@ api:
 	@mkdir -p $(LOG_DIR)
 	@pkill -9 -f "[u]vicorn cloud.api.main" || true
 	@sleep 1
-	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 2>&1 | tee $(LOG_DIR)/api.log
+	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload 2>&1 | tee $(LOG_DIR)/api.log
 
 # ── Orchestrator ─────────────────────────────────────────────
 orchestrator:

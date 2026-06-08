@@ -370,7 +370,7 @@ class Drive:
         action = decision.get("action")
         reason = decision.get("reason", "")
         _publish_thought({"type": "think", "text": reason})
-        if action and action in _VALID_SPORT_CMDS:
+        if action:
             try:
                 await go2_sport(action)
                 self._last_action_ts = time.time()
