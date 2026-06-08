@@ -34,7 +34,7 @@ broker:
 # ── API ──────────────────────────────────────────────────────
 api:
 	@mkdir -p $(LOG_DIR)
-	@pkill -f "[u]vicorn cloud.api.main" || true
+	@pkill -9 -f "[u]vicorn cloud.api.main" || true
 	@sleep 1
 	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 2>&1 | tee $(LOG_DIR)/api.log
 
@@ -68,11 +68,11 @@ ngrok-bg:
 
 # ── 停止 ─────────────────────────────────────────────────────
 stop:
-	@pkill -f "[m]osquitto"                || true
-	@pkill -f "[u]vicorn cloud.api.main"   || true
-	@pkill -f "cloud/orchestrator/main.py" || true
-	@pkill -f "[h]ttp.server 8081"         || true
-	@pkill -f "[n]grok"                    || true
+	@pkill -9 -f "[m]osquitto"                || true
+	@pkill -9 -f "[u]vicorn cloud.api.main"   || true
+	@pkill -9 -f "cloud/orchestrator/main.py" || true
+	@pkill -9 -f "[h]ttp.server 8081"         || true
+	@pkill -9 -f "[n]grok"                    || true
 	@echo "All SSM services stopped."
 
 # ── 工具 ─────────────────────────────────────────────────────
