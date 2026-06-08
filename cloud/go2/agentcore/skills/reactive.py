@@ -14,6 +14,16 @@ from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 
 logger = logging.getLogger(__name__)
 
+_THOUGHT_TOPIC = "ssm/agents/go2/thought"
+
+
+def _publish_thought(payload: dict) -> None:
+    from cloud.api.main import get_mqtt_client
+    client = get_mqtt_client()
+    if client:
+        client.publish(_THOUGHT_TOPIC, json.dumps(payload, ensure_ascii=False))
+
+
 _AUTONOMY_COOLDOWN_S = 15   # 两次自主行为之间的最小间隔
 _ACTION_COOLDOWN_S   = 30   # 同一动作的默认冷却
 
@@ -71,10 +81,12 @@ class ReactiveMind:
                 await go2_move(**_TURN_ACTIONS[action])
         except Exception as exc:
             logger.warning("[ReactiveMind] 执行失败: %s", exc)
+            _publish_thought({"type": "act", "text": f"尝试执行{action}，但失败了：{exc}"})
             return
         self._action_cooldowns[action] = time.time()
         episode_memory.add(EventType.ACTION_TAKEN, f"{source}：执行了 {action}（{reason}）")
         logger.info("[ReactiveMind] %s 执行 %s：%s", source, action, reason)
+        _publish_thought({"type": "act", "text": f"执行了{action}"})
 
     # ── 同步入口，由 vision_loop 回调 ─────────────────────────────
 
@@ -169,6 +181,8 @@ class ReactiveMind:
             "frame_change": frame["change_type"],
         }
         self._last_autonomous_ts = now
+
+        _publish_thought({"type": "think", "text": reason})
 
         if action:
             await self._dispatch_action(action, reason, "自主响应")

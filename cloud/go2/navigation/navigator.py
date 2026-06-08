@@ -321,7 +321,7 @@ class Navigator:
                     if fresh:
                         last_pos = {"x": fresh["x"], "y": fresh["y"]}
                     last_stuck_check = time.monotonic()
-                    retries = 0  # escape 成功后重置，避免长距离导航过早放弃
+                    # 不重置 retries，累计超过 MAX_RETRIES 则放弃
                     continue
                 last_pos         = {"x": odom["x"], "y": odom["y"]}
                 last_stuck_check = now

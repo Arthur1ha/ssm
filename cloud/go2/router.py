@@ -221,6 +221,26 @@ async def go2_chat(req: ChatRequest):
         drive.user_interrupt = False
 
 
+@router.post("/api/go2/chat/stream")
+async def go2_chat_stream(req: ChatRequest):
+    """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
+    from cloud.go2.agent import run_agent_stream
+
+    async def sse_gen():
+        drive.user_interrupt = True
+        try:
+            async for event in run_agent_stream(req.session_id, req.message):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            drive.user_interrupt = False
+
+    return StreamingResponse(
+        sse_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/api/go2/mind/last_decision")
 def go2_mind_last_decision():
     """返回 ReactiveMind 上次 LLM 推理的决策结果。"""

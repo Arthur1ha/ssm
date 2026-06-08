@@ -41,6 +41,20 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
           <div key={i} style={{ maxWidth: '82%',
             alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
             display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {m.role !== 'user' && m.role !== 'step' && m.agentName && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)',
+                paddingLeft: 4, marginBottom: -2 }}>{m.agentName}</div>
+            )}
+            {m.role === 'step' ? (
+              <div style={{
+                padding: '7px 12px', fontSize: 13, lineHeight: 1.5,
+                borderRadius: 12,
+                background: 'rgba(255,255,255,0.03)',
+                color: 'rgba(255,255,255,0.45)',
+                border: '1px solid rgba(255,255,255,0.06)',
+                fontStyle: 'italic',
+              }}>{m.text}</div>
+            ) : (
             <div style={{
               padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
               borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
@@ -48,6 +62,7 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
               color: m.role === 'user' ? '#0B0B0E' : '#fff',
               border: m.role === 'user' ? 'none' : '1px solid rgba(255,255,255,0.07)',
             }}>{m.text}</div>
+            )}
             {m.actions?.map((ac, ai) => (
               <div key={ai} style={{ display: 'flex', alignItems: 'center', gap: 8,
                 padding: '7px 11px',

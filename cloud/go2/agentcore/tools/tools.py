@@ -137,7 +137,7 @@ async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) ->
 _OBSERVE_SYSTEM_PROMPT = (
     "你是机器狗 Go2 的视觉感知模块。"
     "图像来自机器狗前置摄像头，视角较低（约 30cm 离地）。"
-    "根据问题简洁作答，不超过 3 句话。"
+    "根据问题简洁作答."
 )
 
 

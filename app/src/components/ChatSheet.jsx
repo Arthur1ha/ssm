@@ -39,16 +39,16 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
       });
       const saved = pendingRule;
       setPendingRule(null);
-      onAppend({ role: 'assistant', text: `规则「${saved.name}」已保存，条件触发时自动执行。`, actions: [] });
+      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: `规则「${saved.name}」已保存，条件触发时自动执行。`, actions: [] });
     } catch {
-      onAppend({ role: 'assistant', text: '规则保存失败，请重试。', actions: [] });
+      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '规则保存失败，请重试。', actions: [] });
     }
     setSavingRule(false);
   };
 
   const handleCancelRule = () => {
     setPendingRule(null);
-    onAppend({ role: 'assistant', text: '已取消，规则未保存。', actions: [] });
+    onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '已取消，规则未保存。', actions: [] });
   };
 
   const send = async (text) => {
@@ -58,7 +58,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
     onAppend({ role: 'user', text: t });
 
     if (subs.length === 0) {
-      onAppend({ role: 'assistant', text: '附近没有发现可控设备，请确认 ESP32 已上线。', actions: [] });
+      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '附近没有发现可控设备，请确认 ESP32 已上线。', actions: [] });
       return;
     }
 
@@ -75,7 +75,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
       const nluData = await res.json();
       const { session_id, nlu_feedback, intent_type, requirements, rule } = nluData;
 
-      onAppend({ role: 'assistant', text: nlu_feedback, actions: [] });
+      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: nlu_feedback, actions: [] });
       setThinking(false);
       setThinkingText('');
 
@@ -93,7 +93,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
         mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
         setThinking(false);
         setThinkingText('');
-        onAppend({ role: 'assistant', text: '操作超时，设备可能无响应', actions: [] });
+        onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '操作超时，设备可能无响应', actions: [] });
       }, 60000);
 
       function handleFeedback(e) {
@@ -105,7 +105,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
             mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
             setThinking(false);
             setThinkingText('');
-            onAppend({ role: 'assistant', text: '操作超时，设备可能无响应', actions: [] });
+            onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '操作超时，设备可能无响应', actions: [] });
           }, 40000);
           setThinkingText(stage === 'planning' ? '正在规划...' : '正在执行...');
         } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
@@ -113,7 +113,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
           mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
           setThinking(false);
           setThinkingText('');
-          onAppend({ role: 'assistant', text, actions: [] });
+          onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text, actions: [] });
         }
       }
       mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
@@ -129,7 +129,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
     } catch (e) {
       setThinking(false);
       setThinkingText('');
-      onAppend({ role: 'assistant', text: '服务暂时无响应，请稍后重试。', actions: [] });
+      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '服务暂时无响应，请稍后重试。', actions: [] });
     }
   };
 

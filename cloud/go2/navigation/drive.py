@@ -22,9 +22,20 @@ from cloud.go2.navigation import frontier as frontier_mod
 
 logger = logging.getLogger(__name__)
 
-_CURIOSITY_THRESHOLD   = 30  # 半分钟无事件 → EXPLORING
+_THOUGHT_TOPIC = "ssm/agents/go2/thought"
+
+
+def _publish_thought(payload: dict) -> None:
+    from cloud.api.main import get_mqtt_client
+    import json as _json
+    client = get_mqtt_client()
+    if client:
+        client.publish(_THOUGHT_TOPIC, _json.dumps(payload, ensure_ascii=False))
+
+
+_CURIOSITY_THRESHOLD   = 10   # 3s 无事件 → EXPLORING
 _PERSON_GONE_TIMEOUT   = 30   # 人消失 30s → 回 IDLE
-_SOCIAL_CHECK_INTERVAL = 8    # SOCIAL 状态下每 8s 主动检查
+_SOCIAL_CHECK_INTERVAL = 5    # SOCIAL 状态下每 8s 主动检查
 
 
 class MotivationalState(str, Enum):
@@ -136,6 +147,7 @@ class Drive:
             initial_obs = f"观察失败：{exc}"
         episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
         logger.info("[Drive] 探索初始观察：%s", initial_obs)
+        _publish_thought({"type": "think", "text": initial_obs})
 
         for step in range(_MAX_STEPS):
             if self.user_interrupt or self._person_engaging:
@@ -203,12 +215,15 @@ class Drive:
             if decision.get("done") or tool == "stop":
                 logger.info("[Drive] EXPLORING 自主结束 step=%d：%s", step, reason)
                 episode_memory.add(EventType.ACTION_TAKEN, f"探索结束：{reason}")
+                _publish_thought({"type": "think", "text": reason})
                 await self._return_home()
                 break
 
             logger.info("[Drive] EXPLORING step=%d  tool=%s  reason=%s", step, tool, reason)
+            _publish_thought({"type": "think", "text": reason})
             result = await self._exec_explore_tool(tool, decision.get("params", {}))
             logger.info("[Drive] EXPLORING step=%d  result=%s", step, result)
+            _publish_thought({"type": "act", "text": str(result)})
 
             history.append({"step": step + 1, "tool": tool, "reason": reason, "result": result})
             episode_memory.add(
@@ -332,6 +347,7 @@ class Drive:
             return
 
         episode_memory.add(EventType.OBSERVATION, f"社交观察：{observation}")
+        _publish_thought({"type": "think", "text": observation})
         memory_ctx = episode_memory.format_context()
         prompt = (
             f"{memory_ctx}\n\n"
@@ -353,12 +369,14 @@ class Drive:
 
         action = decision.get("action")
         reason = decision.get("reason", "")
+        _publish_thought({"type": "think", "text": reason})
         if action and action in _VALID_SPORT_CMDS:
             try:
                 await go2_sport(action)
                 self._last_action_ts = time.time()
                 episode_memory.add(EventType.ACTION_TAKEN, f"社交互动：执行了 {action}（{reason}）")
                 logger.info("[Drive] SOCIAL 执行 %s：%s", action, reason)
+                _publish_thought({"type": "act", "text": f"执行了{action}"})
             except Exception as exc:
                 logger.warning("[Drive] 社交执行失败: %s", exc)
         else:
@@ -378,10 +396,12 @@ class Drive:
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self) -> None:
-        """停止内驱动循环，取消后台任务。"""
+        """停止内驱动循环，取消后台任务，同时停止 navigator 避免孤儿导航 task。"""
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        from cloud.go2.navigation.navigator import navigator
+        navigator.stop()
         logger.info("[Drive] 内驱动循环已停止")
 
 

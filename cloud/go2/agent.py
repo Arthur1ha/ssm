@@ -172,3 +172,79 @@ async def run_agent(session_id: str, message: str) -> dict:
         "response":      state["response_text"],
         "actions_taken": [r["tool"] for r in state["tool_results"]],
     }
+
+
+async def run_agent_stream(session_id: str, message: str):
+    """逐步执行并 yield 事件 dict，供 SSE 流式端点使用。"""
+    episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
+
+    base_state = {
+        "session_id":     session_id,
+        "user_msg":       message,
+        "memory_context": "",
+        "planned_tools":  [],
+        "tool_results":   [],
+        "response_text":  "",
+        "early_exit":     False,
+    }
+
+    yield {"type": "thinking", "text": "正在理解指令…"}
+    state = await planner_node(base_state)
+
+    if state.get("early_exit"):
+        yield {"type": "response", "text": state["response_text"]}
+        yield {"type": "done"}
+        return
+
+    results = []
+    for call in state["planned_tools"]:
+        tool_name = call.get("tool", "")
+        params    = call.get("params", {})
+        fn        = TOOL_FN_MAP.get(tool_name)
+
+        yield {"type": "thinking", "text": f"执行 {tool_name}…"}
+
+        if fn is None:
+            logger.warning("[Go2/Agent] 未知工具: %s", tool_name)
+            result = f"未知工具: {tool_name}"
+        else:
+            logger.info("[Go2/Agent] 调用 %s 参数=%s", tool_name, json.dumps(params, ensure_ascii=False))
+            try:
+                result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
+            except Exception as exc:
+                result = f"执行失败: {exc}"
+            logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
+
+        results.append({"tool": tool_name, "result": result})
+        yield {"type": "tool_done", "tool": tool_name, "result": str(result)}
+
+    yield {"type": "thinking", "text": "整理回复…"}
+
+    if not results:
+        prompt = (
+            f"【记忆上下文】\n{state.get('memory_context', '')}\n\n"
+            f"用户问：'{message}'\n"
+            f"根据记忆上下文，用自然的中文回答用户。如果记忆中没有相关信息，如实说不记得。"
+        )
+    else:
+        results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
+        prompt = (
+            f"用户说：'{message}'\n"
+            f"执行结果：\n{results_text}\n"
+            f"用 1 句简短中文告诉用户结果，语气自然，不提技术细节。"
+        )
+
+    try:
+        resp = await get_text_llm().ainvoke([
+            SystemMessage(content=get_system_prompt()),
+            HumanMessage(content=prompt),
+        ])
+        response_text = resp.content.strip()
+    except Exception:
+        response_text = "指令已执行完成。"
+
+    logger.info("[Go2/Agent] 最终回复: %s", response_text)
+    episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
+
+    yield {"type": "response", "text": response_text}
+    yield {"type": "done"}

@@ -33,6 +33,11 @@ _esp32_state: ESP32State = ESP32State()
 _esp32_mqtt_client = None
 
 
+def get_mqtt_client():
+    """返回 API 层共享的 MQTT 客户端，供 go2 模块 publish 使用。"""
+    return _esp32_mqtt_client
+
+
 def _on_esp32_connect(client, userdata, flags, rc):
     if rc == 0:
         client.subscribe([

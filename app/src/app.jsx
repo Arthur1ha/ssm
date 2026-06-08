@@ -35,8 +35,8 @@ function App() {
   const [locError, setLocError]               = useState(null);
   const [discoveryDevice, setDiscoveryDevice] = useState(null);
   const [chatHistories, setChatHistories]     = useState({
-    main: [{ role: 'assistant', text: '你好，需要我做什么？', actions: [] }],
-    go2:  [{ role: 'assistant', text: '需要 Go2 做什么？', actions: [] }],
+    main: [{ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '你好，需要我做什么？', actions: [] }],
+    go2:  [{ role: 'assistant', agent: 'go2', agentName: 'Go2', text: '需要 Go2 做什么？', actions: [] }],
   });
 
   const appendMessage = (context, msg) => {
@@ -149,6 +149,19 @@ function App() {
     mqttBus.addEventListener('reconnect',  () => setConnected(false));
 
     mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
+
+    mqttBus.subscribe('ssm/agents/go2/thought');
+    const go2ThoughtListener = (e) => {
+      const ev = e.detail;
+      if (!ev || !ev.type) return;
+      if (ev.type === 'think') {
+        appendMessage('main', { role: 'assistant', agent: 'go2', agentName: 'Go2', text: ev.text });
+      } else if (ev.type === 'act') {
+        appendMessage('main', { role: 'step', agent: 'go2', text: ev.text });
+      }
+    };
+    mqttBus.addEventListener('topic:ssm/agents/go2/thought', go2ThoughtListener);
+    return () => mqttBus.removeEventListener('topic:ssm/agents/go2/thought', go2ThoughtListener);
   }, []);
 
   useEffect(() => {
@@ -179,7 +192,7 @@ function App() {
         device={device}
         unitData={unitData}
         onBack={() => navigate('#')}
-        messages={chatHistories[devCtx] ?? [{ role: 'assistant', text: `你好，我是 ${device.name}，有什么可以帮你？` }]}
+        messages={chatHistories[devCtx] ?? [{ role: 'assistant', agent: devCtx, agentName: device.name, text: `你好，我是 ${device.name}，有什么可以帮你？` }]}
         onAppend={msg => appendMessage(devCtx, msg)}
       />
     );

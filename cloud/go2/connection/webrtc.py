@@ -75,6 +75,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
         self._status_task = asyncio.create_task(self._status_loop())
 
+        # 激活 Sport 模块：连接后不发 SPORT_MOD 命令时 WIRELESS_CONTROLLER 会被静默忽略
+        try:
+            await self.balance_stand()
+        except Exception:
+            pass
+
     async def disconnect(self) -> None:
         self.is_connected = False
         self.fsm_state = "offline"
@@ -128,7 +134,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         options: dict = {"api_id": api_id}
         if params:
             options["parameter"] = params
-        await self._conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options)
+        try:
+            await self._conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options)
+        except Exception as exc:
+            self.is_connected = False
+            self.fsm_state = "offline"
+            raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
         logger.info("[Go2/Conn] 发送命令: %s params=%s", cmd, params)
 
         next_state = self.fsm_next(cmd)
@@ -158,10 +169,15 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         """
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
-        self._conn.datachannel.pub_sub.publish_without_callback(
-            RTC_TOPIC["WIRELESS_CONTROLLER"],
-            data={"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0},
-        )
+        try:
+            self._conn.datachannel.pub_sub.publish_without_callback(
+                RTC_TOPIC["WIRELESS_CONTROLLER"],
+                data={"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0},
+            )
+        except Exception as exc:
+            self.is_connected = False
+            self.fsm_state = "offline"
+            raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
 
     async def balance_stand(self) -> None:
         if not self.is_connected or not self._conn:

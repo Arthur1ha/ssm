@@ -248,6 +248,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
   const [error,         setError]      = useState("");
   const [autonomyMode,  setAutonomyMode] = useState("manual");
   const [chatThinking,  setChatThink]  = useState(false);
+  const [thinkingText,  setThinkText]  = useState("");
   const [wpOpen,       setWpOpen]    = useState(false);
   const [locations,    setLocations] = useState([]);
   const [tagName,      setTagName]   = useState("");
@@ -282,6 +283,27 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
       try { const d = JSON.parse(e.data); if (d.mode !== undefined) setRobot(d); } catch (_) {}
     };
     return () => { es.close(); esRef.current = null; };
+  }, [status]);
+
+  /* ── MQTT 思维流 ── */
+  const onAppendRef = useRef(onAppend);
+  useEffect(() => { onAppendRef.current = onAppend; });
+
+  useEffect(() => {
+    if (status !== "connected") return;
+    const eventType = "topic:ssm/agents/go2/thought";
+    const listener = (e) => {
+      const ev = e.detail;
+      if (!ev || !ev.type) return;
+      if (ev.type === "think") {
+        onAppendRef.current({ role: 'assistant', agent: 'go2', agentName: 'Go2', text: ev.text });
+      } else if (ev.type === "act") {
+        onAppendRef.current({ role: 'step', agent: 'go2', text: ev.text });
+      }
+    };
+    mqttBus.subscribe("ssm/agents/go2/thought");
+    mqttBus.addEventListener(eventType, listener);
+    return () => mqttBus.removeEventListener(eventType, listener);
   }, [status]);
 
   /* ── 连接 ── */
@@ -431,23 +453,49 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
     } catch (_) {} finally { setSettingHome(false); }
   }, [connected, settingHome, fetchLocations]);
 
-  /* ── AI 对话 ── */
+  /* ── AI 对话（SSE 流式） ── */
   const sendChat = useCallback(async (text) => {
     if (!connected || chatThinking) return;
     onAppend({ role: 'user', text });
     setChatThink(true);
+    setThinkText("正在理解指令…");
     try {
-      const r = await fetch("/api/go2/chat", {
+      const r = await fetch("/api/go2/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text }),
       });
-      const d = await r.json();
-      onAppend({ role: 'assistant', text: d.response || "已处理", actions: [] });
+      const reader  = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if (ev.type === "thinking") {
+              setThinkText(ev.text);
+            } else if (ev.type === "tool_done") {
+              onAppend({ role: 'step', agent: 'go2', text: `↳ ${ev.tool}: ${ev.result}` });
+            } else if (ev.type === "response") {
+              onAppend({ role: 'assistant', agent: 'go2', agentName: 'Go2', text: ev.text });
+            } else if (ev.type === "done") {
+              setChatThink(false);
+              setThinkText("");
+            }
+          } catch (_) {}
+        }
+      }
     } catch (_) {
-      onAppend({ role: 'assistant', text: "请求失败，请检查连接", actions: [] });
+      onAppend({ role: 'assistant', agent: 'go2', agentName: 'Go2', text: "请求失败，请检查连接" });
     } finally {
       setChatThink(false);
+      setThinkText("");
     }
   }, [connected, chatThinking, onAppend]);
 
@@ -812,6 +860,7 @@ function Go2DevicePage({ onBack, messages, onAppend }) {
           <ChatPanel
             messages={messages}
             thinking={chatThinking}
+            thinkingText={thinkingText}
             onSend={sendChat}
             placeholder={connected ? "对话控制，如：站起来跳个舞" : "未连接"}
             variant="inline"
