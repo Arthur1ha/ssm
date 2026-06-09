@@ -13,6 +13,7 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 import paho.mqtt.client as mqtt_lib
 
 from shared_state import SharedState
+from cloud.cards.registry import CardRegistry
 import tools as agent_tools
 from graph import build_orchestrator
 
@@ -23,6 +24,7 @@ BROKER_PASSWD = os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r")
 PC_AGENT_ID   = os.getenv("PC_AGENT_ID", "pc_decision")
 
 state = SharedState()
+registry = CardRegistry()   # 编排器进程自有 CardRegistry（MQTT retained 保证与 api 同源）
 event_queue: queue.Queue = queue.Queue()
 _connected  = False
 _announced  = False
@@ -45,6 +47,8 @@ def _subscribe_and_announce(client):
         ("ssm/intent/+",          0),
         ("ssm/result/+/+",        0),
     ])
+    # card 和 manifest topic 由 CardRegistry 统一订阅（card-driven 规划用）
+    registry.subscribe(client)
     client.publish("ssm/decision/active", "true", retain=True)
     client.publish(
         f"ssm/agents/{PC_AGENT_ID}/manifest",
@@ -67,10 +71,14 @@ def _subscribe_and_announce(client):
 
 def on_message(client, userdata, msg):
     topic = msg.topic
+    raw = msg.payload.decode()
     try:
-        payload = json.loads(msg.payload.decode())
+        payload = json.loads(raw)
     except Exception:
-        payload = msg.payload.decode()
+        payload = raw
+
+    # CardRegistry 处理 card 与 manifest topic（更新 card-driven 规划注册表）
+    registry.handle_message(topic, raw)
 
     if topic == "ssm/decision/active":
         state.set_decision_active(payload == "true" or payload is True)
@@ -128,7 +136,7 @@ mqtt_client.on_connect    = on_connect
 mqtt_client.on_message    = on_message
 mqtt_client.on_disconnect = on_disconnect
 
-agent_tools.init(state, mqtt_client)
+agent_tools.init(state, mqtt_client, registry)
 orchestrator = build_orchestrator()
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
