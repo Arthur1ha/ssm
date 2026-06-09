@@ -39,15 +39,14 @@ def on_connect(client, userdata, flags, rc):
 
 def _subscribe_and_announce(client):
     client.subscribe([
-        ("ssm/agents/+/manifest", 0),
-        ("ssm/agents/+/state",    0),
-        ("ssm/agents/+/event",    0),
-        ("ssm/agents/+/report",   0),
-        ("ssm/decision/active",   0),
-        ("ssm/intent/+",          0),
-        ("ssm/result/+/+",        0),
+        ("ssm/agents/+/state",  0),
+        ("ssm/agents/+/event",  0),
+        ("ssm/agents/+/report", 0),
+        ("ssm/decision/active", 0),
+        ("ssm/intent/+",        0),
+        ("ssm/result/+/+",      0),
     ])
-    # card 和 manifest topic 由 CardRegistry 统一订阅（card-driven 规划用）
+    # card 和 manifest topic 由 CardRegistry 统一订阅
     registry.subscribe(client)
     client.publish("ssm/decision/active", "true", retain=True)
     client.publish(
