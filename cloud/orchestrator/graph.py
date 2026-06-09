@@ -1,5 +1,6 @@
-# graph.py — 用户意图编排图
+# graph.py — 多智能体编排图
 # Planner → Dispatcher → Evaluator → Responder
+# 支持 ESP32（MQTT）和 Go2（HTTP）两种传输协议
 
 import os
 import re
@@ -12,6 +13,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 
 import tools as _t
+
+_API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:8082")
 
 
 def _make_llm():
@@ -47,43 +50,38 @@ def build_orchestrator():
         session_id = state["session_id"]
         _t.do_publish_feedback(session_id, "planning", "正在规划控制方案...")
 
-        registry = _t._state.get_capability_registry()
-        if not registry:
+        all_devices = _t._state.get_all_devices()
+        if not all_devices:
             _t.do_publish_feedback(session_id, "failed",
-                "抱歉，我还没有发现附近的设备，请确认 ESP32 已上线。")
+                "抱歉，我还没有发现任何在线设备，请确认设备已连接。")
             return {**state, "planned_tasks": [], "early_exit": True}
 
-        uid_tags = {}
-        for tag, device_ids in registry.items():
-            for uid in device_ids:
-                uid_tags.setdefault(uid, []).append(tag)
-
         lines = []
-        for uid, tags in uid_tags.items():
-            m = _t._state.get_manifest(uid)
-            if m:
-                caps = json.dumps(m.get("capabilities", []), ensure_ascii=False)
-                lines.append(f"设备 {uid}（标签: {', '.join(tags)}）能力: {caps}")
-        device_str = "\n".join(lines) if lines else "无可用设备"
+        for uid, m in all_devices.items():
+            hw = m.get("hw_platform", "unknown")
+            caps = json.dumps(m.get("capabilities", []), ensure_ascii=False)
+            tags = m.get("resource_tags", [])
+            tag_str = f"  标签: {', '.join(tags)}" if tags else ""
+            lines.append(f"- {uid}（平台: {hw}）能力: {caps}{tag_str}")
+        device_str = "\n".join(lines)
 
         prompt = (
-            f"你是 SSM 智能家居控制中枢。根据用户意图生成设备控制任务列表。\n\n"
+            f"你是 SSM 多智能体控制中枢。根据用户意图，为合适的设备生成控制任务。\n\n"
             f"用户原话：{state['user_msg']}\n"
             f"意图解析：{json.dumps(state['requirements'], ensure_ascii=False)}\n\n"
-            f"可用设备：\n{device_str}\n\n"
-            f"规则：\n"
-            f"1. 将 requirements 中的 resource_tag 与设备标签匹配\n"
-            f"2. 将 action 直接映射为设备操作（严格一对一，每条 requirement 只生成一个任务）：\n"
-            f"   brighten/on → SET_STATE state=BRIGHT\n"
-            f"   dim → SET_STATE state=DIM（禁止先生成 OFF 再 DIM，直接 DIM）\n"
-            f"   off → SET_STATE state=OFF\n"
-            f"   set_color → SET_COLOR（选择合适的 r/g/b/brightness）\n"
-            f"   notify → PLAY pattern=NOTIFY\n"
-            f"   alert → PLAY pattern=ALERT\n"
-            f"3. 用户描述场景（如读书、睡眠）时，选择合适的 SET_COLOR 参数\n"
-            f"4. 严格限制：每条 requirement 只生成一个任务，禁止为同一设备生成多个串行任务\n\n"
-            f"直接输出 JSON 数组，不含代码块或解释，每项包含 device_id、action、params。\n"
-            f"示例：[{{\"device_id\": \"esp32_desk_led\", \"action\": \"SET_STATE\", \"params\": {{\"state\": \"BRIGHT\"}}}}]"
+            f"当前在线设备：\n{device_str}\n\n"
+            f"路由规则：\n"
+            f"1. hw_platform=esp32 的设备 → 使用 MQTT 动作，action 只能是：\n"
+            f"   SET_STATE（params: {{state: BRIGHT|DIM|OFF}}）\n"
+            f"   SET_COLOR（params: {{r,g,b,brightness: 0-255}}）\n"
+            f"   PLAY（params: {{pattern: NOTIFY|ALERT}}）\n"
+            f"   每条 requirement 严格一个任务，禁止同一设备生成多个串行任务\n"
+            f"2. hw_platform=go2 的设备 → 使用 action=CHAT，\n"
+            f"   params: {{\"message\": \"简洁中文指令\"}}，由 Go2 智能体进一步解析\n\n"
+            f"输出 JSON 数组，不含代码块，每项包含 device_id、action、params。\n"
+            f"示例：\n"
+            f'  [{{"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {{"state": "BRIGHT"}}}},\n'
+            f'   {{"device_id": "go2", "action": "CHAT", "params": {{"message": "请坐下"}}}}]'
         )
 
         try:
@@ -123,13 +121,31 @@ def build_orchestrator():
             return {**state, "early_exit": True}
 
         _t.do_publish_feedback(session_id, "executing", "正在控制设备...")
+
+        pre_results = {}
         for task in tasks:
-            _t.do_publish_task(
-                task["device_id"], task["task_id"],
-                task["action"], task["params"], session_id,
-            )
-            print(f"[Dispatcher] → {task['device_id']} {task['action']} task_id={task['task_id']}")
-        return state
+            manifest  = _t._state.get_manifest(task["device_id"])
+            hw        = (manifest or {}).get("hw_platform", "esp32")
+
+            if hw == "go2":
+                # HTTP 委托到 Go2 智能体，同步等待响应
+                instruction = task["params"].get("message", state["user_msg"])
+                result = _t.do_dispatch_http(
+                    f"{_API_BASE}/api/go2/chat",
+                    {"session_id": session_id, "message": instruction},
+                )
+                status = "ok" if "error" not in result else "error"
+                pre_results[task["task_id"]] = {"result": status, **result}
+                print(f"[Dispatcher] go2 HTTP → {instruction!r} → {status}")
+            else:
+                # MQTT 派发到 ESP32
+                _t.do_publish_task(
+                    task["device_id"], task["task_id"],
+                    task["action"], task["params"], session_id,
+                )
+                print(f"[Dispatcher] mqtt → {task['device_id']} {task['action']} task_id={task['task_id']}")
+
+        return {**state, "task_results": pre_results}
 
     # ── Evaluator ─────────────────────────────────────────────
     def evaluator_node(state: OrchestratorState) -> OrchestratorState:
@@ -139,23 +155,24 @@ def build_orchestrator():
         if not tasks:
             return state
 
-        deadline = _time.time() + 5.0
-        results = {}
-        while _time.time() < deadline:
-            for task in tasks:
-                tid = task["task_id"]
-                if tid not in results:
-                    r = _t._state.get_task_result(tid)
-                    if r:
-                        results[tid] = r
-            if len(results) == len(tasks):
-                break
-            _time.sleep(0.2)
+        results = dict(state.get("task_results", {}))  # 已含 go2 同步结果
 
-        for task in tasks:
-            tid = task["task_id"]
-            if tid not in results:
-                results[tid] = {"result": "timeout", "task_id": tid}
+        # 轮询等待 MQTT 结果（ESP32 任务）
+        mqtt_tasks = [t for t in tasks if t["task_id"] not in results]
+        if mqtt_tasks:
+            deadline = _time.time() + 5.0
+            while _time.time() < deadline:
+                for task in list(mqtt_tasks):
+                    r = _t._state.get_task_result(task["task_id"])
+                    if r:
+                        results[task["task_id"]] = r
+                        mqtt_tasks.remove(task)
+                if not mqtt_tasks:
+                    break
+                _time.sleep(0.2)
+
+            for task in mqtt_tasks:
+                results[task["task_id"]] = {"result": "timeout", "task_id": task["task_id"]}
 
         print(f"[Evaluator] results: {results}")
         return {**state, "task_results": results}
@@ -173,8 +190,11 @@ def build_orchestrator():
         ok_count  = statuses.count("ok")
         stage     = "done" if ok_count == len(results) else ("partial" if ok_count > 0 else "failed")
 
-        fallbacks = {"done": "好的，指令已全部执行！", "partial": "部分指令已执行。",
-                     "failed": "设备未响应，请检查连接后重试。"}
+        fallbacks = {
+            "done":    "好的，指令已全部执行！",
+            "partial": "部分指令已执行。",
+            "failed":  "设备未响应，请检查连接后重试。",
+        }
         try:
             if stage == "done":
                 prompt = (f"用户说：'{state['user_msg']}'。设备已全部执行成功。"
@@ -183,11 +203,11 @@ def build_orchestrator():
                 prompt = (f"用户说：'{state['user_msg']}'。部分设备成功（{statuses}）。"
                           f"用1句简短中文说明并给出建议。")
             else:
-                tried = [f"{t['action']}({t['params']})" for t in state.get("planned_tasks", [])]
+                tried   = [f"{t['action']}({t['params']})" for t in state.get("planned_tasks", [])]
                 reasons = {k: v.get("result") for k, v in results.items()}
-                prompt = (f"用户说：'{state['user_msg']}'。"
-                          f"系统尝试对设备执行{tried}但失败（{reasons}）。"
-                          f"用1句简短友好中文告诉用户设备控制失败，建议检查设备连接，不提技术细节。")
+                prompt  = (f"用户说：'{state['user_msg']}'。"
+                           f"系统尝试{tried}但失败（{reasons}）。"
+                           f"用1句简短友好中文告诉用户失败，建议检查设备连接，不提技术细节。")
             resp = llm.invoke([HumanMessage(content=prompt)])
             text = resp.content.strip()
         except Exception:

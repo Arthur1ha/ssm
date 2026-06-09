@@ -70,7 +70,28 @@ class SharedState:
     def get_manifest(self, unit_id: str) -> Optional[dict]:
         with self._lock:
             m = self._manifests.get(unit_id)
-            return json.loads(json.dumps(m)) if m else None
+            if m:
+                return json.loads(json.dumps(m))
+        # 非 MQTT 注册设备（如 Go2）回落到 devices.json
+        try:
+            if _DEVICES_FILE.exists():
+                return json.loads(_DEVICES_FILE.read_text()).get(unit_id)
+        except Exception:
+            pass
+        return None
+
+    def get_all_devices(self) -> dict:
+        """所有已知设备：MQTT 注册 + 文件注册（如 Go2）合并，key = unit_id。"""
+        with self._lock:
+            devices = json.loads(json.dumps(self._manifests))
+        try:
+            if _DEVICES_FILE.exists():
+                for uid, d in json.loads(_DEVICES_FILE.read_text()).items():
+                    if uid not in devices:
+                        devices[uid] = d
+        except Exception:
+            pass
+        return devices
 
     def _flush_devices(self):
         try:
