@@ -1,126 +1,44 @@
-import json
-import os
-from pathlib import Path
+"""cloud.api.devices — /api/devices 相关端点。
+
+设备列表和 Agent Card 数据来自 CardRegistry，
+Registry 由 api/main.py 的 MQTT 回调维护。
+"""
 
 from fastapi import APIRouter, HTTPException
 
+from cloud.cards.registry import get_registry
+
 router = APIRouter()
-
-_DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
-
-
-def _load_devices() -> dict:
-    try:
-        return json.loads(_DEVICES_FILE.read_text()) if _DEVICES_FILE.exists() else {}
-    except Exception:
-        return {}
-
-
-def _find_device_by_slug(slug: str) -> dict | None:
-    for device in _load_devices().values():
-        if device.get("slug") == slug:
-            return device
-    return None
-
-
-def _go2_skills(available_actions: list[str], base_url: str) -> list[dict]:
-    skills = []
-    sport_cmds = [a for a in available_actions
-                  if a in {"StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"}]
-    if sport_cmds:
-        skills.append({
-            "id": "go2_sport",
-            "description": "执行预定义动作",
-            "endpoint": f"{base_url}/api/go2/commands",
-            "method": "POST",
-            "inputSchema": {
-                "type": "object", "required": ["cmd"],
-                "properties": {"cmd": {"type": "string", "enum": sport_cmds}},
-            },
-        })
-    if "Move" in available_actions:
-        skills.append({
-            "id": "go2_move",
-            "description": "持续移动机器狗，发送后需调用 StopMove 停止",
-            "endpoint": f"{base_url}/api/go2/commands",
-            "method": "POST",
-            "inputSchema": {
-                "type": "object", "required": ["cmd", "params"],
-                "properties": {
-                    "cmd": {"type": "string", "enum": ["Move"]},
-                    "params": {
-                        "type": "object",
-                        "properties": {
-                            "x": {"type": "number", "description": "前后速度 m/s，正值前进"},
-                            "y": {"type": "number", "description": "左右速度 m/s，正值左移"},
-                            "z": {"type": "number", "description": "旋转速度 rad/s，正值左转"},
-                        },
-                    },
-                },
-            },
-        })
-    if "StopMove" in available_actions:
-        skills.append({
-            "id": "go2_stop",
-            "description": "停止当前移动或动作",
-            "endpoint": f"{base_url}/api/go2/commands",
-            "method": "POST",
-            "inputSchema": {
-                "type": "object", "required": ["cmd"],
-                "properties": {"cmd": {"type": "string", "enum": ["StopMove"]}},
-            },
-        })
-    return skills
 
 
 @router.get("/api/devices")
 def list_devices():
-    devices = [d for d in _load_devices().values() if d.get("slug")]
+    """返回所有已注册设备的精简列表（slug/name/agent_type/online）。
+
+    数据来源为 CardRegistry，仅包含已收到 manifest 或自描述 card 的设备。
+    Go2 在 Task 2 接入前不会出现在此列表。
+    """
+    cards = get_registry().get_all_cards()
     return [
         {
-            "unit_id":    d.get("unit_id"),
-            "name":       d.get("name"),
-            "slug":       d.get("slug"),
-            "agent_type": d.get("agent_type"),
-            "online":     True,
+            "unit_id":    card.get("slug"),   # registry 以 slug 索引，unit_id 对外沿用 slug
+            "name":       card.get("name"),
+            "slug":       card.get("slug"),
+            "agent_type": card.get("agent_type"),
+            "online":     card.get("online", False),
         }
-        for d in devices
+        for card in cards.values()
     ]
 
 
 @router.get("/api/devices/{slug}/agent")
 def device_agent_card(slug: str):
-    """Agent Card —— 机器可读的设备能力描述，供其他 AI Agent 自动发现和调用。"""
-    base_url = os.getenv("PUBLIC_BASE_URL", "")
+    """返回指定设备的完整 Agent Card（机器可读能力描述）。
 
-    if slug == "go2":
-        from cloud.go2.connection import go2 as _go2
-        return {
-            "name":              "Go2 机器狗",
-            "slug":              "go2",
-            "unit_id":           "go2",
-            "agent_type":        "robot",
-            "online":            _go2.is_connected,
-            "talk_to":           f"{base_url}/#/devices/go2",
-            "capabilities":      ["sport", "move", "vision", "rules", "chat"],
-            "state":             _go2.fsm_state,
-            "available_actions": _go2.available_actions,
-            "skills":            _go2_skills(_go2.available_actions, base_url),
-        }
-
-    device = _find_device_by_slug(slug)
-    if not device:
+    供其他 AI Agent 或 PWA 自动发现和调用设备能力。
+    Go2 在 Task 2 接入前会返回 404。
+    """
+    card = get_registry().get_card(slug)
+    if card is None:
         raise HTTPException(status_code=404, detail=f"设备 '{slug}' 不存在或未上线")
-
-    return {
-        "name":          device.get("name", slug),
-        "slug":          slug,
-        "unit_id":       device.get("unit_id", ""),
-        "agent_type":    device.get("agent_type", ""),
-        "online":        True,
-        "talk_to":       f"{base_url}/#/devices/{slug}",
-        "capabilities":  device.get("capabilities", []),
-        "resource_tags": device.get("resource_tags", []),
-        "agent_tag":     device.get("agent_tag", ""),
-        "ts":            device.get("ts"),
-    }
+    return card

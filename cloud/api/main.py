@@ -28,6 +28,7 @@ from cloud.go2.router import router as go2_router
 from cloud.api.nlu import router as nlu_router
 from cloud.api.rules import router as rules_router
 from cloud.api.devices import router as devices_router
+from cloud.cards.registry import get_registry
 
 _esp32_state: ESP32State = ESP32State()
 _esp32_mqtt_client = None
@@ -42,15 +43,20 @@ def _on_esp32_connect(client, userdata, flags, rc):
             ("ssm/agents/+/report",   0),
             ("ssm/result/+/+",        0),
         ])
+        get_registry().subscribe(client)
         print("[ESP32Agent MQTT] Connected and subscribed")
 
 
 def _on_esp32_message(client, userdata, msg):
     topic = msg.topic
+    raw = msg.payload.decode()
     try:
-        payload = json.loads(msg.payload.decode())
+        payload = json.loads(raw)
     except Exception:
         payload = {}
+
+    # CardRegistry 处理 card 和 manifest topic（更新设备注册表）
+    get_registry().handle_message(topic, raw)
 
     parts = topic.split("/")
     if len(parts) == 4 and parts[0] == "ssm" and parts[1] == "agents":
