@@ -34,7 +34,7 @@ def init_mqtt(client) -> None:
     _mqtt_client = client
 
 
-def _build_go2_card(serial: str) -> dict:
+def _build_go2_card() -> dict:
     """构建 Go2 完整 Agent Card dict，符合 AgentCard schema。
 
     state 字段从 go2 连接对象实时读取，保证 card 发布时状态准确。
@@ -59,7 +59,7 @@ def _build_go2_card(serial: str) -> dict:
                     "required": ["message"],
                     "properties": {"message": {"type": "string"}},
                 },
-                "invoke": {"action": ""},
+                "invoke": {"action": "CHAT"},
             },
             {
                 "id": "go2_sport",
@@ -74,7 +74,7 @@ def _build_go2_card(serial: str) -> dict:
                         }
                     },
                 },
-                "invoke": {"action": ""},
+                "invoke": {"action": "SPORT"},
             },
             {
                 "id": "go2_navigate",
@@ -85,7 +85,7 @@ def _build_go2_card(serial: str) -> dict:
                     "required": ["name"],
                     "properties": {"name": {"type": "string"}},
                 },
-                "invoke": {"action": ""},
+                "invoke": {"action": "NAVIGATE"},
             },
         ],
         "state": {
@@ -95,8 +95,8 @@ def _build_go2_card(serial: str) -> dict:
     }
 
 
-def _publish_go2_card(serial: str) -> None:
-    """向 MQTT broker 发布 Go2 card（retained=True）。
+def _publish_go2_card() -> None:
+    """向 MQTT broker 发布 Go2 card（retained=True，qos=1）。
 
     若 MQTT 客户端尚未注入则静默失败，不影响连接流程。
     """
@@ -104,15 +104,15 @@ def _publish_go2_card(serial: str) -> None:
         logging.warning("[Go2] MQTT 客户端未注入，跳过 card 发布")
         return
     try:
-        card = _build_go2_card(serial)
-        _mqtt_client.publish(GO2_CARD_TOPIC, json.dumps(card, ensure_ascii=False), retain=True)
+        card = _build_go2_card()
+        _mqtt_client.publish(GO2_CARD_TOPIC, json.dumps(card, ensure_ascii=False), retain=True, qos=1)
         logging.info("[Go2] 已发布 retained card 到 %s", GO2_CARD_TOPIC)
     except Exception as exc:
         logging.error("[Go2] 发布 card 失败: %s", exc)
 
 
 def _clear_go2_card() -> None:
-    """清除 broker 上的 Go2 retained card（发布空 payload）。
+    """清除 broker 上的 Go2 retained card（发布空 payload，qos=1）。
 
     若 MQTT 客户端尚未注入则静默失败，不影响断开流程。
     """
@@ -120,7 +120,7 @@ def _clear_go2_card() -> None:
         logging.warning("[Go2] MQTT 客户端未注入，跳过 card 清除")
         return
     try:
-        _mqtt_client.publish(GO2_CARD_TOPIC, "", retain=True)
+        _mqtt_client.publish(GO2_CARD_TOPIC, "", retain=True, qos=1)
         logging.info("[Go2] 已清除 retained card: %s", GO2_CARD_TOPIC)
     except Exception as exc:
         logging.error("[Go2] 清除 card 失败: %s", exc)
@@ -179,7 +179,7 @@ async def go2_connect():
             return
 
         _register_go2(serial)
-        _publish_go2_card(serial)
+        _publish_go2_card()
 
         if _active_rule_cb is not None:
             vision_loop.remove_callback(_active_rule_cb)

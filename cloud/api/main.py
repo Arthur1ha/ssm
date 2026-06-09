@@ -110,7 +110,7 @@ async def lifespan(app):
 
     # LWT：api 进程意外崩溃时，broker 自动清空 Go2 retained card，防止幽灵设备
     # paho 要求 will_set 在 connect() 之前调用
-    _esp32_mqtt_client.will_set("ssm/agents/go2/card", "", retain=True, qos=1)
+    _esp32_mqtt_client.will_set(go2_router_module.GO2_CARD_TOPIC, "", retain=True, qos=1)
 
     try:
         _esp32_mqtt_client.connect(broker_host, broker_port, keepalive=60)

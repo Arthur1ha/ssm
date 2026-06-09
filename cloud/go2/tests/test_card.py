@@ -1,6 +1,5 @@
 """cloud.go2.tests.test_card — 验证 _build_go2_card 返回的结构符合 AgentCard 规格。"""
 
-import importlib
 import json
 import sys
 import types
@@ -48,37 +47,37 @@ class TestBuildGo2Card:
 
     def test_top_level_fields_present(self):
         """card 必须包含 slug / name / description / agent_type / online / transport / skills / state。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         for field in ("slug", "name", "description", "agent_type", "online", "transport", "skills", "state"):
             assert field in card, f"缺少字段: {field}"
 
     def test_slug_is_go2(self):
         """slug 必须为 'go2'。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         assert card["slug"] == "go2"
 
     def test_transport_kind_and_endpoint(self):
         """transport.kind 必须为 'http'，endpoint 必须为 '/api/go2/chat'。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         assert card["transport"]["kind"] == "http"
         assert card["transport"]["endpoint"] == "/api/go2/chat"
 
     def test_skills_count_and_ids(self):
         """必须包含 go2_chat、go2_sport、go2_navigate 三个 skill。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         skill_ids = {s["id"] for s in card["skills"]}
         assert skill_ids == {"go2_chat", "go2_sport", "go2_navigate"}
 
     def test_skills_have_required_fields(self):
         """每个 skill 必须有 id / name / tags / params_schema / invoke 字段。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         for skill in card["skills"]:
             for field in ("id", "name", "tags", "params_schema", "invoke"):
                 assert field in skill, f"skill '{skill.get('id')}' 缺少字段: {field}"
 
     def test_go2_sport_enum_values(self):
         """go2_sport skill 的 cmd enum 必须包含全部 6 个预定义动作。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         sport = next(s for s in card["skills"] if s["id"] == "go2_sport")
         enum_values = sport["params_schema"]["properties"]["cmd"]["enum"]
         assert set(enum_values) == {"StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"}
@@ -87,18 +86,18 @@ class TestBuildGo2Card:
         """state.fsm 和 state.available_actions 必须来自 go2 连接对象。"""
         self.go2_stub.fsm_state = "standing"
         self.go2_stub.available_actions = ["Hello"]
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         assert card["state"]["fsm"] == "standing"
         assert card["state"]["available_actions"] == ["Hello"]
 
     def test_online_is_true(self):
         """连接后发布的 card online 字段必须为 True。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         assert card["online"] is True
 
     def test_card_is_json_serializable(self):
         """card 必须可以被 json.dumps 序列化（用于 MQTT publish）。"""
-        card = self.router_mod._build_go2_card("SN123")
+        card = self.router_mod._build_go2_card()
         serialized = json.dumps(card, ensure_ascii=False)
         restored = json.loads(serialized)
         assert restored["slug"] == "go2"
@@ -114,7 +113,7 @@ class TestPublishClearGo2Card:
         """_publish_go2_card 在客户端注入后应调用 publish，retain=True。"""
         mock_client = MagicMock()
         self.router_mod.init_mqtt(mock_client)
-        self.router_mod._publish_go2_card("SN123")
+        self.router_mod._publish_go2_card()
         mock_client.publish.assert_called_once()
         args, kwargs = mock_client.publish.call_args
         assert args[0] == "ssm/agents/go2/card"
@@ -134,7 +133,7 @@ class TestPublishClearGo2Card:
     def test_publish_silent_when_no_client(self):
         """_mqtt_client 为 None 时，_publish_go2_card 静默失败，不抛异常。"""
         self.router_mod._mqtt_client = None
-        self.router_mod._publish_go2_card("SN123")  # 不应抛异常
+        self.router_mod._publish_go2_card()  # 不应抛异常
 
     def test_clear_silent_when_no_client(self):
         """_mqtt_client 为 None 时，_clear_go2_card 静默失败，不抛异常。"""
