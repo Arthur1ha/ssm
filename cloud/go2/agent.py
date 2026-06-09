@@ -23,6 +23,8 @@ from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_
 class Go2AgentState(TypedDict):
     session_id:     str
     user_msg:       str
+    skill_id:       str
+    params:         dict
     memory_context: str
     planned_tools:  list
     tool_results:   list
@@ -31,6 +33,16 @@ class Go2AgentState(TypedDict):
 
 
 async def planner_node(state: Go2AgentState) -> Go2AgentState:
+    # 若上游已确定 skill_id，直接跳过 LLM 重规划
+    if state.get("skill_id"):
+        logger.info("[Go2/Agent] skill_id=%s 直接路由，跳过规划", state["skill_id"])
+        return {
+            **state,
+            "action":        state["skill_id"],
+            "planned_tools": [{"tool": state["skill_id"], "params": state.get("params") or {}}],
+            "early_exit":    False,
+        }
+
     if not go2.is_connected:
         logger.info("[Go2/Agent] Go2 未连接，提前退出")
         return {**state, "planned_tools": [], "early_exit": True,
@@ -157,11 +169,22 @@ def _get_agent():
     return _agent
 
 
-async def run_agent(session_id: str, message: str) -> dict:
+async def run_agent(
+    session_id: str,
+    message: str,
+    skill_id: str | None = None,
+    params: dict | None = None,
+) -> dict:
+    """执行 Go2 智能体。
+
+    若提供 skill_id，planner_node 将跳过 LLM 规划直接路由到对应工具。
+    """
     episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
     state = await _get_agent().ainvoke({
         "session_id":     session_id,
         "user_msg":       message,
+        "skill_id":       skill_id or "",
+        "params":         params or {},
         "memory_context": "",
         "planned_tools":  [],
         "tool_results":   [],

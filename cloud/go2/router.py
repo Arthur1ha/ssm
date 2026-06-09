@@ -8,8 +8,6 @@ import asyncio
 import json
 import logging
 import os
-import time
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -19,8 +17,6 @@ from cloud.go2.connection import go2
 from cloud.go2.navigation.drive import drive
 from cloud.go2.agentcore.skills.reactive import reactive_mind
 from cloud.go2.agentcore.skills.vision import vision_loop
-
-_DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
 
 # MQTT 客户端，由 api/main.py 通过 init_mqtt() 注入
 _mqtt_client = None
@@ -126,34 +122,6 @@ def _clear_go2_card() -> None:
         logging.error("[Go2] 清除 card 失败: %s", exc)
 
 
-def _register_go2(serial: str) -> None:
-    try:
-        devices = json.loads(_DEVICES_FILE.read_text()) if _DEVICES_FILE.exists() else {}
-    except Exception:
-        devices = {}
-    devices["go2"] = {
-        "unit_id":      "go2",
-        "slug":         "go2",
-        "name":         "Go2 机器狗",
-        "agent_type":   "robot",
-        "hw_platform":  "go2",
-        "serial":       serial,
-        "capabilities": ["sport", "move", "vision", "rules", "chat"],
-        "ts":           int(time.time()),
-    }
-    _DEVICES_FILE.write_text(json.dumps(devices, ensure_ascii=False, indent=2))
-    logging.info("[Go2] 已注册到 devices.json (slug=go2)")
-
-
-def _unregister_go2() -> None:
-    try:
-        devices = json.loads(_DEVICES_FILE.read_text()) if _DEVICES_FILE.exists() else {}
-    except Exception:
-        return
-    devices.pop("go2", None)
-    _DEVICES_FILE.write_text(json.dumps(devices, ensure_ascii=False, indent=2))
-    logging.info("[Go2] 已从 devices.json 移除")
-
 router = APIRouter()
 
 # 当前注册的视觉回调句柄，重连时先移除再重注册，防止重复触发
@@ -178,7 +146,6 @@ async def go2_connect():
             go2._last_error = str(t.exception())
             return
 
-        _register_go2(serial)
         _publish_go2_card()
 
         if _active_rule_cb is not None:
@@ -209,7 +176,6 @@ async def go2_disconnect():
     _active_drive_cb = None
     _autonomy_mode   = "manual"
     await go2.disconnect()
-    _unregister_go2()
     _clear_go2_card()
     return {"status": "disconnected"}
 
@@ -320,6 +286,8 @@ async def go2_mode(req: ModeRequest):
 class ChatRequest(BaseModel):
     session_id: str = "default"
     message: str
+    skill_id: str | None = None
+    params: dict | None = None
 
 
 @router.post("/api/go2/chat")
@@ -327,7 +295,7 @@ async def go2_chat(req: ChatRequest):
     from cloud.go2.agent import run_agent
     drive.user_interrupt = True
     try:
-        return await run_agent(req.session_id, req.message)
+        return await run_agent(req.session_id, req.message, skill_id=req.skill_id, params=req.params)
     finally:
         drive.user_interrupt = False
 
