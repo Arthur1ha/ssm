@@ -4,7 +4,7 @@
 """
 
 from __future__ import annotations
-from typing import TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class SkillInvoke(TypedDict):
@@ -30,11 +30,13 @@ class SkillDef(TypedDict):
 class Transport(TypedDict):
     """传输层配置，描述如何与该智能体通信。
 
-    kind = "mqtt"：通过 MQTT 发布任务消息。
+    kind = "mqtt"：通过 MQTT 发布任务消息，task_topic 为目标 topic 模板。
     kind = "http"：通过 HTTP 调用 endpoint。
     """
 
-    kind: str   # "mqtt" | "http"
+    kind: Literal["mqtt", "http"]
+    task_topic: NotRequired[str]   # mqtt only: ssm/task/{slug}/{task_id}
+    endpoint: NotRequired[str]     # http only: /api/go2/chat 等
 
 
 class AgentCard(TypedDict):

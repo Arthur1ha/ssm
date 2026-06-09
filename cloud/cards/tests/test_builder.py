@@ -209,3 +209,54 @@ class TestParseCard:
     def test_state_正确(self):
         """state 应保持原值。"""
         assert self.card["state"]["fsm"] == "idle"
+
+
+# ── PLAY action 测试 ───────────────────────────────────────────
+
+def test_PLAY_skill_使用_pattern_参数():
+    """PLAY skill 的 params_schema 应使用 pattern 字段，枚举 NOTIFY/ALERT。"""
+    manifest = {
+        "unit_id": "esp32_desk_buzzer",
+        "agent_type": "actuator",
+        "capabilities": [
+            {"action": "PLAY", "params": ["pattern"]},
+        ],
+    }
+    card = build_card_from_manifest(manifest)
+    assert len(card["skills"]) == 1
+    skill = card["skills"][0]
+    assert skill["id"] == "play_sound"
+    assert skill["invoke"]["action"] == "PLAY"
+    schema = skill["params_schema"]
+    assert "pattern" in schema["required"]
+    assert schema["properties"]["pattern"]["enum"] == ["NOTIFY", "ALERT"]
+
+
+# ── manifest 覆盖写入测试 ─────────────────────────────────────
+
+def test_第二次_manifest_覆盖第一次():
+    """相同 unit_id 的 manifest 重发时应覆盖旧 card（如 ESP32 重启）。"""
+    from cloud.cards.registry import CardRegistry
+    registry = CardRegistry()
+
+    manifest_v1 = {
+        "unit_id": "esp32_desk_led",
+        "slug": "desk-lamp",
+        "agent_type": "actuator",
+        "name": "ws2812_ring_v1",
+        "capabilities": [{"action": "SET_STATE", "params": ["state"]}],
+    }
+    manifest_v2 = {
+        "unit_id": "esp32_desk_led",
+        "slug": "desk-lamp",
+        "agent_type": "actuator",
+        "name": "ws2812_ring_v2",
+        "capabilities": [{"action": "SET_STATE", "params": ["state"]}, {"action": "BLINK", "params": ["count"]}],
+    }
+
+    registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(manifest_v1))
+    registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(manifest_v2))
+
+    card = registry.get_card("desk-lamp")
+    assert card["name"] == "ws2812_ring_v2"
+    assert len(card["skills"]) == 2

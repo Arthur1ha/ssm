@@ -37,12 +37,12 @@ _esp32_mqtt_client = None
 def _on_esp32_connect(client, userdata, flags, rc):
     if rc == 0:
         client.subscribe([
-            ("ssm/agents/+/manifest", 0),
-            ("ssm/agents/+/state",    0),
-            ("ssm/agents/+/event",    0),
-            ("ssm/agents/+/report",   0),
-            ("ssm/result/+/+",        0),
+            ("ssm/agents/+/state",  0),
+            ("ssm/agents/+/event",  0),
+            ("ssm/agents/+/report", 0),
+            ("ssm/result/+/+",      0),
         ])
+        # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
         print("[ESP32Agent MQTT] Connected and subscribed")
 
