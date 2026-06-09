@@ -1,3 +1,9 @@
+"""cloud.go2.router — Go2 机器狗 FastAPI 路由。
+
+负责 Go2 连接/断开/控制的全部 HTTP 端点，以及连接状态变更时的
+MQTT 控制面管理（发布/清除 retained card）。
+"""
+
 import asyncio
 import json
 import logging
@@ -15,6 +21,109 @@ from cloud.go2.agentcore.skills.reactive import reactive_mind
 from cloud.go2.agentcore.skills.vision import vision_loop
 
 _DEVICES_FILE = Path(__file__).parent.parent / "orchestrator" / "devices.json"
+
+# MQTT 客户端，由 api/main.py 通过 init_mqtt() 注入
+_mqtt_client = None
+
+GO2_CARD_TOPIC = "ssm/agents/go2/card"
+
+
+def init_mqtt(client) -> None:
+    """注入 api 进程的 MQTT 客户端，供发布/清除 Go2 card 使用。"""
+    global _mqtt_client
+    _mqtt_client = client
+
+
+def _build_go2_card(serial: str) -> dict:
+    """构建 Go2 完整 Agent Card dict，符合 AgentCard schema。
+
+    state 字段从 go2 连接对象实时读取，保证 card 发布时状态准确。
+    """
+    return {
+        "slug": "go2",
+        "name": "Go2 机器狗",
+        "description": "四足机器人，支持运动控制、导航和视觉感知",
+        "agent_type": "robot",
+        "online": True,
+        "transport": {
+            "kind": "http",
+            "endpoint": "/api/go2/chat",
+        },
+        "skills": [
+            {
+                "id": "go2_chat",
+                "name": "对话 / 自然语言控制",
+                "tags": ["conversation", "robot"],
+                "params_schema": {
+                    "type": "object",
+                    "required": ["message"],
+                    "properties": {"message": {"type": "string"}},
+                },
+                "invoke": {"action": ""},
+            },
+            {
+                "id": "go2_sport",
+                "name": "预定义动作",
+                "tags": ["motion", "robot"],
+                "params_schema": {
+                    "type": "object",
+                    "required": ["cmd"],
+                    "properties": {
+                        "cmd": {
+                            "enum": ["StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"]
+                        }
+                    },
+                },
+                "invoke": {"action": ""},
+            },
+            {
+                "id": "go2_navigate",
+                "name": "导航到命名地点",
+                "tags": ["navigation", "robot"],
+                "params_schema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {"name": {"type": "string"}},
+                },
+                "invoke": {"action": ""},
+            },
+        ],
+        "state": {
+            "fsm": go2.fsm_state,
+            "available_actions": go2.available_actions,
+        },
+    }
+
+
+def _publish_go2_card(serial: str) -> None:
+    """向 MQTT broker 发布 Go2 card（retained=True）。
+
+    若 MQTT 客户端尚未注入则静默失败，不影响连接流程。
+    """
+    if _mqtt_client is None:
+        logging.warning("[Go2] MQTT 客户端未注入，跳过 card 发布")
+        return
+    try:
+        card = _build_go2_card(serial)
+        _mqtt_client.publish(GO2_CARD_TOPIC, json.dumps(card, ensure_ascii=False), retain=True)
+        logging.info("[Go2] 已发布 retained card 到 %s", GO2_CARD_TOPIC)
+    except Exception as exc:
+        logging.error("[Go2] 发布 card 失败: %s", exc)
+
+
+def _clear_go2_card() -> None:
+    """清除 broker 上的 Go2 retained card（发布空 payload）。
+
+    若 MQTT 客户端尚未注入则静默失败，不影响断开流程。
+    """
+    if _mqtt_client is None:
+        logging.warning("[Go2] MQTT 客户端未注入，跳过 card 清除")
+        return
+    try:
+        _mqtt_client.publish(GO2_CARD_TOPIC, "", retain=True)
+        logging.info("[Go2] 已清除 retained card: %s", GO2_CARD_TOPIC)
+    except Exception as exc:
+        logging.error("[Go2] 清除 card 失败: %s", exc)
 
 
 def _register_go2(serial: str) -> None:
@@ -70,6 +179,7 @@ async def go2_connect():
             return
 
         _register_go2(serial)
+        _publish_go2_card(serial)
 
         if _active_rule_cb is not None:
             vision_loop.remove_callback(_active_rule_cb)
@@ -100,6 +210,7 @@ async def go2_disconnect():
     _autonomy_mode   = "manual"
     await go2.disconnect()
     _unregister_go2()
+    _clear_go2_card()
     return {"status": "disconnected"}
 
 

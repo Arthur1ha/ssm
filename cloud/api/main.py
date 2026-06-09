@@ -24,6 +24,7 @@ from cloud.esp32 import agent as esp32_agent_mod
 from cloud.esp32 import tools as esp32_tools
 from cloud.esp32.router import router as esp32_router
 from cloud.esp32.state import ESP32State
+from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
 from cloud.api.nlu import router as nlu_router
 from cloud.api.rules import router as rules_router
@@ -107,6 +108,10 @@ async def lifespan(app):
     _esp32_mqtt_client.on_message = _on_esp32_message
     _esp32_mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)
 
+    # LWT：api 进程意外崩溃时，broker 自动清空 Go2 retained card，防止幽灵设备
+    # paho 要求 will_set 在 connect() 之前调用
+    _esp32_mqtt_client.will_set("ssm/agents/go2/card", "", retain=True, qos=1)
+
     try:
         _esp32_mqtt_client.connect(broker_host, broker_port, keepalive=60)
         _esp32_mqtt_client.loop_start()
@@ -115,6 +120,7 @@ async def lifespan(app):
         print(f"[ESP32Agent MQTT] Connection failed: {e}")
 
     esp32_tools.init(_esp32_mqtt_client)
+    go2_router_module.init_mqtt(_esp32_mqtt_client)
     agent = esp32_agent_mod.init(_esp32_state)
     agent.start()
 
