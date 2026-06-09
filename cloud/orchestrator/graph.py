@@ -153,6 +153,8 @@ def _make_planner_node(llm):
             out = {}
 
         route = out.get("route", "act")
+        if route not in ("act", "chat", "define_rule"):
+            route = "act"
 
         # ── chat：纯问答/闲聊，answer 直接交给 ChatNode 发出 ──
         if route == "chat":

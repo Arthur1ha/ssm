@@ -220,6 +220,19 @@ def test_planner_defaults_to_act_on_unparseable(monkeypatch):
     assert out["planned_tasks"] == []
 
 
+def test_planner_defaults_to_act_on_unknown_route(monkeypatch):
+    """JSON 合法但 route 不在已知值时，降级为 act，不让条件边崩溃。"""
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+
+    llm = _stub_llm('{"route": "UNKNOWN", "tasks": []}')
+    node = graph_mod._make_planner_node(llm)
+    out = node(_planner_state("su", "???"))
+
+    assert out["route"] == "act"
+    assert out["planned_tasks"] == []
+
+
 # ── ChatNode / RuleBuilderNode 测试 ──────────────────────────────
 
 def test_chat_node_publishes_done(monkeypatch):
