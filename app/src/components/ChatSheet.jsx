@@ -39,16 +39,16 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
       });
       const saved = pendingRule;
       setPendingRule(null);
-      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: `规则「${saved.name}」已保存，条件触发时自动执行。`, actions: [] });
+      onAppend({ role: 'assistant', text: `规则「${saved.name}」已保存，条件触发时自动执行。`, actions: [] });
     } catch {
-      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '规则保存失败，请重试。', actions: [] });
+      onAppend({ role: 'assistant', text: '规则保存失败，请重试。', actions: [] });
     }
     setSavingRule(false);
   };
 
   const handleCancelRule = () => {
     setPendingRule(null);
-    onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '已取消，规则未保存。', actions: [] });
+    onAppend({ role: 'assistant', text: '已取消，规则未保存。', actions: [] });
   };
 
   const send = async (text) => {
@@ -58,79 +58,62 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
     onAppend({ role: 'user', text: t });
 
     if (subs.length === 0) {
-      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '附近没有发现可控设备，请确认 ESP32 已上线。', actions: [] });
+      onAppend({ role: 'assistant', text: '附近没有发现可控设备，请确认 ESP32 已上线。', actions: [] });
       return;
     }
 
     setThinking(true);
-    setThinkingText('解析意图...');
+    setThinkingText('正在规划...');
 
-    try {
-      const res = await fetch('/api/intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: t, devices: subs }),
-      });
-      if (!res.ok) throw new Error('nlu_failed');
-      const nluData = await res.json();
-      const { session_id, nlu_feedback, intent_type, requirements, rule } = nluData;
+    const session_id = 'sid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    const feedbackTopic = `ssm/feedback/${session_id}`;
+    mqttBus.subscribe(feedbackTopic);
 
-      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: nlu_feedback, actions: [] });
+    const cleanup = () => {
+      mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+      mqttBus.unsubscribe(feedbackTopic);
+    };
+
+    let timeoutId = setTimeout(() => {
+      cleanup();
       setThinking(false);
       setThinkingText('');
+      onAppend({ role: 'assistant', text: '操作超时，设备可能无响应', actions: [] });
+    }, 60000);
 
-      if (intent_type === 'define_rule' && rule) {
-        setPendingRule(rule);
-        return;
-      }
-
-      setThinking(true);
-      setThinkingText('正在规划...');
-      const feedbackTopic = `ssm/feedback/${session_id}`;
-      mqttBus.subscribe(feedbackTopic);
-
-      let timeoutId = setTimeout(() => {
-        mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
-        setThinking(false);
-        setThinkingText('');
-        onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '操作超时，设备可能无响应', actions: [] });
-      }, 60000);
-
-      function handleFeedback(e) {
-        const { stage, text } = e.detail || {};
-        if (!stage) return;
-        if (stage === 'planning' || stage === 'executing') {
-          clearTimeout(timeoutId);
-          timeoutId = setTimeout(() => {
-            mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
-            setThinking(false);
-            setThinkingText('');
-            onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '操作超时，设备可能无响应', actions: [] });
-          }, 40000);
-          setThinkingText(stage === 'planning' ? '正在规划...' : '正在执行...');
-        } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
-          clearTimeout(timeoutId);
-          mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+    function handleFeedback(e) {
+      const { stage, text, rule } = e.detail || {};
+      if (!stage) return;
+      if (stage === 'planning' || stage === 'executing') {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          cleanup();
           setThinking(false);
           setThinkingText('');
-          onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text, actions: [] });
-        }
+          onAppend({ role: 'assistant', text: '操作超时，设备可能无响应', actions: [] });
+        }, 40000);
+        setThinkingText(stage === 'planning' ? '正在规划...' : '正在执行...');
+      } else if (stage === 'pending_rule' && rule) {
+        clearTimeout(timeoutId);
+        cleanup();
+        setThinking(false);
+        setThinkingText('');
+        setPendingRule(rule);
+      } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
+        clearTimeout(timeoutId);
+        cleanup();
+        setThinking(false);
+        setThinkingText('');
+        onAppend({ role: 'assistant', text, actions: [] });
       }
-      mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
-
-      mqttBus.publish(`ssm/intent/${session_id}`, {
-        session_id,
-        user_msg: t,
-        requirements,
-        priority: 5,
-        ts: Math.floor(Date.now() / 1000),
-      });
-
-    } catch (e) {
-      setThinking(false);
-      setThinkingText('');
-      onAppend({ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '服务暂时无响应，请稍后重试。', actions: [] });
     }
+    mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
+
+    mqttBus.publish(`ssm/intent/${session_id}`, JSON.stringify({
+      session_id,
+      user_msg: t,
+      ts: Date.now(),
+    }));
   };
 
   return (

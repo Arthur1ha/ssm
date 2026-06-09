@@ -75,6 +75,13 @@ class MqttBus extends EventTarget {
         }
     }
 
+    unsubscribe(topicPattern) {
+        this._subscriptions.delete(topicPattern);
+        if (this._connected) {
+            this._client.unsubscribe(topicPattern);
+        }
+    }
+
     publish(topic, payload, opts = {}) {
         if (!this._connected) {
             console.warn('[MqttBus] publish skipped — not connected');

@@ -2,10 +2,7 @@
 
 import threading
 import json
-from pathlib import Path
 from typing import Optional
-
-_DEVICES_FILE = Path(__file__).parent / "devices.json"
 
 
 class SharedState:
@@ -28,7 +25,6 @@ class SharedState:
                     self._capability_registry[tag] = []
                 if unit_id not in self._capability_registry[tag]:
                     self._capability_registry[tag].append(unit_id)
-            self._flush_devices()
 
     def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict):
         with self._lock:
@@ -92,14 +88,6 @@ class SharedState:
         except Exception:
             pass
         return devices
-
-    def _flush_devices(self):
-        try:
-            _DEVICES_FILE.write_text(
-                json.dumps(self._manifests, ensure_ascii=False, indent=2)
-            )
-        except Exception as e:
-            print(f"[SharedState] devices.json 写入失败: {e}")
 
     def _is_actuator(self, unit_id: str) -> bool:
         return unit_id.split("_")[-1] == "led"

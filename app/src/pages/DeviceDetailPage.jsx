@@ -12,30 +12,48 @@ function DeviceDetailPage({ slug, device, unitData, onBack, messages, onAppend }
     mqttBus.publish(cmdTopic, { cmd, ...extra });
   };
 
-  const sendChat = async (text) => {
+  const sendChat = (text) => {
     if (!text || thinking) return;
     onAppend({ role: 'user', text });
     setThinking(true);
-    try {
-      const res = await fetch('/api/intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          devices: device ? [{
-            unit_id:      uid,
-            agent_type:   'actuator',
-            topics:       { command: cmdTopic },
-            capabilities: device.capabilities || [],
-          }] : [],
-        }),
-      });
-      const data = await res.json();
-      onAppend({ role: 'assistant', text: data.nlu_feedback || '已处理' });
-    } catch (e) {
-      onAppend({ role: 'assistant', text: '请求失败：' + e.message });
+
+    const session_id = 'sid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    const feedbackTopic = `ssm/feedback/${session_id}`;
+    mqttBus.subscribe(feedbackTopic);
+
+    const cleanup = () => {
+      mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+      mqttBus.unsubscribe(feedbackTopic);
+    };
+
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      setThinking(false);
+      onAppend({ role: 'assistant', text: '操作超时，设备可能无响应' });
+    }, 60000);
+
+    function handleFeedback(e) {
+      const { stage, text: msg, rule } = e.detail || {};
+      if (!stage) return;
+      if (stage === 'pending_rule' && rule) {
+        clearTimeout(timeoutId);
+        cleanup();
+        setThinking(false);
+        onAppend({ role: 'assistant', text: `收到规则「${rule.name}」，请在主界面确认保存。` });
+      } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
+        clearTimeout(timeoutId);
+        cleanup();
+        setThinking(false);
+        onAppend({ role: 'assistant', text: msg || '已处理' });
+      }
     }
-    setThinking(false);
+    mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
+
+    mqttBus.publish(`ssm/intent/${session_id}`, JSON.stringify({
+      session_id,
+      user_msg: text,
+      ts: Date.now(),
+    }));
   };
 
   const btnBase = {
