@@ -32,16 +32,28 @@ class Go2AgentState(TypedDict):
     early_exit:     bool
 
 
+_SKILL_TO_TOOL = {
+    "go2_navigate": "go2_navigate_to",
+    "go2_chat":     None,   # chat 走 LLM，无对应工具函数
+}
+
+
 async def planner_node(state: Go2AgentState) -> Go2AgentState:
     # 若上游已确定 skill_id，直接跳过 LLM 重规划
     if state.get("skill_id"):
-        logger.info("[Go2/Agent] skill_id=%s 直接路由，跳过规划", state["skill_id"])
-        return {
-            **state,
-            "action":        state["skill_id"],
-            "planned_tools": [{"tool": state["skill_id"], "params": state.get("params") or {}}],
-            "early_exit":    False,
-        }
+        skill_id = state["skill_id"]
+        # 将 card skill_id 映射到 TOOL_FN_MAP 键名；None 表示需要 LLM 处理
+        tool_name = _SKILL_TO_TOOL.get(skill_id, skill_id)
+        if tool_name is None:
+            # go2_chat 等无对应工具的 skill 退回 LLM 规划
+            pass
+        else:
+            logger.info("[Go2/Agent] skill_id=%s → tool=%s 直接路由，跳过规划", skill_id, tool_name)
+            return {
+                **state,
+                "planned_tools": [{"tool": tool_name, "params": state.get("params") or {}}],
+                "early_exit":    False,
+            }
 
     if not go2.is_connected:
         logger.info("[Go2/Agent] Go2 未连接，提前退出")
