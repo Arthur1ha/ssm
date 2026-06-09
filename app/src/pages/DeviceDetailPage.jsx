@@ -17,22 +17,32 @@ function DeviceDetailPage({ slug, device, unitData, onBack, messages, onAppend }
     onAppend({ role: 'user', text });
     setThinking(true);
 
-    const session_id = 'sid_' + Date.now();
+    const session_id = 'sid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     const feedbackTopic = `ssm/feedback/${session_id}`;
     mqttBus.subscribe(feedbackTopic);
 
-    const timeoutId = setTimeout(() => {
+    const cleanup = () => {
       mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+      mqttBus.unsubscribe(feedbackTopic);
+    };
+
+    const timeoutId = setTimeout(() => {
+      cleanup();
       setThinking(false);
       onAppend({ role: 'assistant', text: '操作超时，设备可能无响应' });
     }, 60000);
 
     function handleFeedback(e) {
-      const { stage, text: msg } = e.detail || {};
+      const { stage, text: msg, rule } = e.detail || {};
       if (!stage) return;
-      if (stage === 'done' || stage === 'partial' || stage === 'failed') {
+      if (stage === 'pending_rule' && rule) {
         clearTimeout(timeoutId);
-        mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+        cleanup();
+        setThinking(false);
+        onAppend({ role: 'assistant', text: `收到规则「${rule.name}」，请在主界面确认保存。` });
+      } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
+        clearTimeout(timeoutId);
+        cleanup();
         setThinking(false);
         onAppend({ role: 'assistant', text: msg || '已处理' });
       }

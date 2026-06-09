@@ -65,12 +65,17 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
     setThinking(true);
     setThinkingText('正在规划...');
 
-    const session_id = 'sid_' + Date.now();
+    const session_id = 'sid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     const feedbackTopic = `ssm/feedback/${session_id}`;
     mqttBus.subscribe(feedbackTopic);
 
-    let timeoutId = setTimeout(() => {
+    const cleanup = () => {
       mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+      mqttBus.unsubscribe(feedbackTopic);
+    };
+
+    let timeoutId = setTimeout(() => {
+      cleanup();
       setThinking(false);
       setThinkingText('');
       onAppend({ role: 'assistant', text: '操作超时，设备可能无响应', actions: [] });
@@ -82,7 +87,7 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
       if (stage === 'planning' || stage === 'executing') {
         clearTimeout(timeoutId);
         timeoutId = setTimeout(() => {
-          mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+          cleanup();
           setThinking(false);
           setThinkingText('');
           onAppend({ role: 'assistant', text: '操作超时，设备可能无响应', actions: [] });
@@ -90,13 +95,13 @@ function ChatSheet({ open, onClose, agents, unitData, messages, onAppend }) {
         setThinkingText(stage === 'planning' ? '正在规划...' : '正在执行...');
       } else if (stage === 'pending_rule' && rule) {
         clearTimeout(timeoutId);
-        mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+        cleanup();
         setThinking(false);
         setThinkingText('');
         setPendingRule(rule);
       } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
         clearTimeout(timeoutId);
-        mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+        cleanup();
         setThinking(false);
         setThinkingText('');
         onAppend({ role: 'assistant', text, actions: [] });
