@@ -6,9 +6,9 @@ from collections import deque
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
-logger = logging.getLogger(__name__), TypedDict
+logger = logging.getLogger(__name__)
 
 EPISODES_DB = Path(__file__).parent / "episodes.db"
 _RETENTION_DAYS = 7
