@@ -6,6 +6,7 @@
 - Evaluator：http 结果已在 task_results，跳过 MQTT 轮询；只对 mqtt task 轮询。
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -105,18 +106,26 @@ def _stub_llm(content):
     return llm
 
 
+def _planner_state(session_id, user_msg):
+    """构造 Planner 输入 state（含 Task 4 新增字段）。"""
+    return {"session_id": session_id, "user_msg": user_msg, "requirements": [],
+            "route": "", "planned_tasks": [], "rule": {},
+            "task_results": {}, "response_text": "", "early_exit": False}
+
+
 def test_planner_builds_valid_tasks(monkeypatch):
-    """Planner 输出合法的 {slug, skill_id, task_id, params}。"""
+    """route=act 时输出合法的 {slug, skill_id, task_id, params}。"""
     monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD, GO2_CARD]))
     monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
 
     llm = _stub_llm(
-        '[{"slug": "esp32_desk_led", "skill_id": "set_light_state", "params": {"state": "BRIGHT"}}]'
+        '{"route": "act", "tasks": '
+        '[{"slug": "esp32_desk_led", "skill_id": "set_light_state", "params": {"state": "BRIGHT"}}]}'
     )
     node = graph_mod._make_planner_node(llm)
-    out = node({"session_id": "s1", "user_msg": "开灯", "requirements": [],
-                "planned_tasks": [], "task_results": {}, "response_text": "", "early_exit": False})
+    out = node(_planner_state("s1", "开灯"))
 
+    assert out["route"] == "act"
     assert out["early_exit"] is False
     assert len(out["planned_tasks"]) == 1
     t = out["planned_tasks"][0]
@@ -132,16 +141,16 @@ def test_planner_filters_invalid_slug_and_skill(monkeypatch):
     monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
 
     llm = _stub_llm(
-        '['
+        '{"route": "act", "tasks": ['
         '{"slug": "nonexistent", "skill_id": "set_light_state", "params": {}},'   # bad slug
         '{"slug": "esp32_desk_led", "skill_id": "bogus_skill", "params": {}},'    # bad skill
         '{"slug": "go2", "skill_id": "go2_navigate", "params": {"name": "厨房"}}'  # valid
-        ']'
+        ']}'
     )
     node = graph_mod._make_planner_node(llm)
-    out = node({"session_id": "s2", "user_msg": "去厨房", "requirements": [],
-                "planned_tasks": [], "task_results": {}, "response_text": "", "early_exit": False})
+    out = node(_planner_state("s2", "去厨房"))
 
+    assert out["route"] == "act"
     assert len(out["planned_tasks"]) == 1
     assert out["planned_tasks"][0]["slug"] == "go2"
     assert out["planned_tasks"][0]["skill_id"] == "go2_navigate"
@@ -153,14 +162,100 @@ def test_planner_early_exit_when_no_cards(monkeypatch):
     fb = MagicMock()
     monkeypatch.setattr(_t, "do_publish_feedback", fb)
 
-    llm = _stub_llm("[]")
+    llm = _stub_llm('{"route": "act", "tasks": []}')
     node = graph_mod._make_planner_node(llm)
-    out = node({"session_id": "s3", "user_msg": "开灯", "requirements": [],
-                "planned_tasks": [], "task_results": {}, "response_text": "", "early_exit": False})
+    out = node(_planner_state("s3", "开灯"))
 
     assert out["early_exit"] is True
     assert out["planned_tasks"] == []
     assert any(call.args[1] == "failed" for call in fb.call_args_list)
+
+
+# ── Planner 分类（route）测试 ─────────────────────────────────────
+
+def test_planner_route_chat(monkeypatch):
+    """route=chat 时 response_text 填入 answer，无 tasks。"""
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD, GO2_CARD]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+
+    llm = _stub_llm('{"route": "chat", "answer": "你好！有什么需要我帮忙的？"}')
+    node = graph_mod._make_planner_node(llm)
+    out = node(_planner_state("sc", "你好呀"))
+
+    assert out["route"] == "chat"
+    assert out["response_text"] == "你好！有什么需要我帮忙的？"
+    assert out["planned_tasks"] == []
+    assert out["early_exit"] is False
+
+
+def test_planner_route_define_rule(monkeypatch):
+    """route=define_rule 时 rule 字段被填充。"""
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+
+    rule = {
+        "name": "变暗自动开灯",
+        "trigger": {"agent_tag": "light_level", "event": "dark"},
+        "action": {"resource_tag": "lighting", "cmd": "SET_STATE", "params": {"state": "BRIGHT"}},
+    }
+    llm = _stub_llm(json.dumps({"route": "define_rule", "rule": rule}, ensure_ascii=False))
+    node = graph_mod._make_planner_node(llm)
+    out = node(_planner_state("sr", "以后变暗就开灯"))
+
+    assert out["route"] == "define_rule"
+    assert out["rule"] == rule
+    assert out["planned_tasks"] == []
+
+
+def test_planner_defaults_to_act_on_unparseable(monkeypatch):
+    """LLM 输出无法解析时降级为 act（空 tasks）。"""
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+
+    llm = _stub_llm("抱歉我不知道")
+    node = graph_mod._make_planner_node(llm)
+    out = node(_planner_state("sx", "???"))
+
+    assert out["route"] == "act"
+    assert out["planned_tasks"] == []
+
+
+# ── ChatNode / RuleBuilderNode 测试 ──────────────────────────────
+
+def test_chat_node_publishes_done(monkeypatch):
+    """ChatNode 调用 do_publish_feedback(stage="done") 发出 answer。"""
+    fb = MagicMock()
+    monkeypatch.setattr(_t, "do_publish_feedback", fb)
+
+    node = graph_mod._make_chat_node(MagicMock())
+    state = _planner_state("sc", "你好")
+    state["route"] = "chat"
+    state["response_text"] = "你好！"
+    node(state)
+
+    fb.assert_called_once()
+    args = fb.call_args.args
+    assert args[0] == "sc"       # session_id
+    assert args[1] == "done"     # stage
+    assert args[2] == "你好！"   # text
+
+
+def test_rule_builder_node_publishes_pending_rule(monkeypatch):
+    """RuleBuilderNode 发 pending_rule，payload 含 rule。"""
+    fb = MagicMock()
+    monkeypatch.setattr(_t, "do_publish_feedback", fb)
+
+    rule = {"name": "变暗自动开灯", "trigger": {}, "action": {}}
+    node = graph_mod._make_rule_builder_node()
+    state = _planner_state("sr", "以后变暗就开灯")
+    state["route"] = "define_rule"
+    state["rule"] = rule
+    node(state)
+
+    fb.assert_called_once()
+    assert fb.call_args.args[0] == "sr"
+    assert fb.call_args.args[1] == "pending_rule"
+    assert fb.call_args.kwargs["rule"] == rule
 
 
 # ── Dispatcher 测试 ──────────────────────────────────────────────
@@ -294,3 +389,68 @@ def test_evaluator_skips_polling_for_http_results(monkeypatch):
     assert out["task_results"]["s_t1"]["result"] == "ok"
     # 只对 mqtt task 查询过 state
     state_obj.get_task_result.assert_called_with("s_t1")
+
+
+# ── 整图条件分支测试 ─────────────────────────────────────────────
+
+def _run_graph(monkeypatch, llm_content, cards):
+    """用 stub LLM 编译整图并跑一次，返回各节点 mock 以便断言路由。"""
+    monkeypatch.setattr(graph_mod, "_make_llm", lambda: _stub_llm(llm_content))
+    monkeypatch.setattr(_t, "_registry", FakeRegistry(cards))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+    monkeypatch.setattr(_t, "do_publish_task", MagicMock())
+    monkeypatch.setattr(_t, "do_http_dispatch", MagicMock(return_value={"result": "ok"}))
+
+    # 各分支节点替身：记录是否被走到
+    disp = MagicMock(side_effect=lambda s: s)
+    chat = MagicMock(side_effect=lambda s: s)
+    rule = MagicMock(side_effect=lambda s: s)
+    eval_ = MagicMock(side_effect=lambda s: s)
+    resp = MagicMock(side_effect=lambda s: s)
+    monkeypatch.setattr(graph_mod, "_make_dispatcher_node", lambda: disp)
+    monkeypatch.setattr(graph_mod, "_make_evaluator_node", lambda: eval_)
+    monkeypatch.setattr(graph_mod, "_make_responder_node", lambda llm: resp)
+    monkeypatch.setattr(graph_mod, "_make_chat_node", lambda llm: chat)
+    monkeypatch.setattr(graph_mod, "_make_rule_builder_node", lambda: rule)
+
+    app = graph_mod.build_orchestrator()
+    app.invoke(_planner_state("g1", "测试"))
+    return {"dispatcher": disp, "chat": chat, "rule_builder": rule,
+            "evaluator": eval_, "responder": resp}
+
+
+def test_graph_routes_act_to_dispatcher(monkeypatch):
+    """route=act → 走 Dispatcher（不走 ChatNode / RuleBuilderNode）。"""
+    nodes = _run_graph(
+        monkeypatch,
+        '{"route": "act", "tasks": [{"slug": "esp32_desk_led", '
+        '"skill_id": "set_light_state", "params": {"state": "BRIGHT"}}]}',
+        [LED_CARD],
+    )
+    nodes["dispatcher"].assert_called_once()
+    nodes["chat"].assert_not_called()
+    nodes["rule_builder"].assert_not_called()
+
+
+def test_graph_routes_chat_to_chat_node(monkeypatch):
+    """route=chat → 走 ChatNode（不走 Dispatcher / RuleBuilderNode）。"""
+    nodes = _run_graph(
+        monkeypatch,
+        '{"route": "chat", "answer": "你好！"}',
+        [LED_CARD],
+    )
+    nodes["chat"].assert_called_once()
+    nodes["dispatcher"].assert_not_called()
+    nodes["rule_builder"].assert_not_called()
+
+
+def test_graph_routes_define_rule_to_rule_builder(monkeypatch):
+    """route=define_rule → 走 RuleBuilderNode（不走 Dispatcher / ChatNode）。"""
+    nodes = _run_graph(
+        monkeypatch,
+        '{"route": "define_rule", "rule": {"name": "变暗自动开灯", "trigger": {}, "action": {}}}',
+        [LED_CARD],
+    )
+    nodes["rule_builder"].assert_called_once()
+    nodes["dispatcher"].assert_not_called()
+    nodes["chat"].assert_not_called()

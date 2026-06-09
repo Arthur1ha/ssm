@@ -1,7 +1,10 @@
 """graph.py — 用户意图编排图（card-driven）。
 
-Planner → Dispatcher → Evaluator → Responder 四节点有向图。
-Planner 读 CardRegistry 的 card skills 让 LLM 自由规划（无硬编码路由规则）；
+Planner 是唯一大脑：一次 LLM 调用同时完成分类（act/chat/define_rule）与
+规划/回答/建规则，输出带 route 字段的 JSON。图按 route 条件分支：
+  - act         → Dispatcher → Evaluator → Responder → END
+  - chat        → ChatNode → END
+  - define_rule → RuleBuilderNode → END
 Dispatcher 按 card.transport.kind 分支：mqtt 走 MQTT 发布，http 走线程池非阻塞；
 Evaluator 只对 mqtt task 轮询 result topic，http 结果由 Dispatcher 已填好。
 """
@@ -47,7 +50,9 @@ class OrchestratorState(TypedDict):
     session_id:    str
     user_msg:      str
     requirements:  list   # NLU 结果，可选，默认 []
+    route:         str    # "act" / "chat" / "define_rule"，由 Planner 分类，默认 ""
     planned_tasks: list   # [{slug, skill_id, task_id, params}]
+    rule:          dict   # define_rule 时填充的规则定义，默认 {}
     task_results:  dict   # task_id → result payload
     response_text: str
     early_exit:    bool    # True = feedback 已发出，跳过后续节点
@@ -56,7 +61,10 @@ class OrchestratorState(TypedDict):
 # ── prompt 构建 ──────────────────────────────────────────────────
 
 def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
-    """把所有在线 card 的 skills + params_schema 注入 prompt，无硬编码路由规则。"""
+    """把所有在线 card 的 skills + params_schema 注入 prompt，并要求分类 + 规划合一。
+
+    Planner 一次 LLM 调用输出带 route 字段的 JSON，三选一：act / chat / define_rule。
+    """
     lines = []
     for slug, card in cards.items():
         if not card.get("online", True):
@@ -70,28 +78,36 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
     agents_str = "\n".join(lines) if lines else "无可用智能体"
 
     return (
-        f"你是 SSM 多智能体编排中枢。根据用户意图，从可用智能体中挑选合适的 skill 生成任务列表。\n\n"
+        f"你是 SSM 多智能体编排中枢，兼任智能家居助理。根据用户意图，输出一个 JSON 对象（不含代码块）。\n\n"
         f"用户原话：{user_msg}\n"
         f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
         f"可用智能体：\n{agents_str}\n\n"
-        f"要求：\n"
-        f"1. 仅使用上面列出的 slug 和 skill_id，params 必须符合对应 skill 的 params_schema。\n"
-        f"2. 每个意图选择最贴切的一个 skill，禁止为同一目标生成多个串行任务。\n"
-        f"3. 描述场景（如读书、睡眠）时，自行选择合适的参数值。\n"
-        f"4. 找不到合适的智能体时输出空数组 []。\n\n"
-        f"直接输出 JSON 数组，不含代码块或解释，每项包含 slug、skill_id、params。\n"
-        f'示例：[{{"slug": "esp32_desk_led", "skill_id": "set_light_state", "params": {{"state": "BRIGHT"}}}}]'
+        f"分类规则：\n"
+        f"1. 如果用户要控制设备或使用某个智能体的技能（含 Go2 对话 go2_chat）→ route=\"act\"，输出 tasks 数组。\n"
+        f"   很多“问题”其实是某 agent 的对话/记忆技能，应分类为 act 并选中该 skill，由对应 agent 回答。\n"
+        f"2. 如果用户说“以后…就…”、“每次…就…”、“当…时自动…” → route=\"define_rule\"，输出 rule 对象。\n"
+        f"3. 其他（纯问答、闲聊、不涉及任何设备）→ route=\"chat\"，输出 answer 字符串。\n\n"
+        f"act 校验：slug 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
+        f"params 必须符合对应 skill 的 params_schema。\n"
+        f"找不到合适的 slug/skill_id 时改用 route=\"chat\" 回答“抱歉，没有合适的设备”。\n\n"
+        f"输出格式（三选一，直接输出 JSON，不含代码块或解释）：\n"
+        f'- act:         {{"route": "act", "tasks": [{{"slug": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
+        f'- chat:        {{"route": "chat", "answer": "..."}}\n'
+        f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{...}}, "action": {{...}}}}}}'
     )
 
 
-def _parse_tasks(content: str) -> list:
-    """从 LLM 输出中提取 JSON 数组，剥离代码块包裹。"""
+def _parse_planner_output(content: str) -> dict:
+    """从 LLM 输出中提取 JSON 对象，剥离代码块包裹。
+
+    返回带 route 字段的 dict；解析失败返回 {}（调用方按空规划处理）。
+    """
     content = content.strip()
     content = re.sub(r'```(?:json)?\n?', '', content).strip().rstrip('`').strip()
-    idx_s = content.find('[')
-    idx_e = content.rfind(']')
+    idx_s = content.find('{')
+    idx_e = content.rfind('}')
     if idx_s == -1 or idx_e == -1:
-        return []
+        return {}
     return json.loads(content[idx_s:idx_e + 1])
 
 
@@ -108,25 +124,53 @@ def _http_timeout_for(card: dict, skill_id: str) -> float:
 # ── 节点工厂 ──────────────────────────────────────────────────────
 
 def _make_planner_node(llm):
-    """构建 Planner 节点：读 CardRegistry，LLM 自由规划，校验后产出任务。"""
+    """构建 Planner 节点（唯一大脑）：读 CardRegistry，一次 LLM 完成分类 + 规划。
+
+    输出 route（act/chat/define_rule）：
+      - act：校验后产出 planned_tasks；
+      - chat：把 answer 写入 response_text，交给 ChatNode 发出；
+      - define_rule：把 rule 写入 state，交给 RuleBuilderNode 处理。
+    解析失败或注册表为空时降级为安全 chat / failed。
+    """
 
     def planner_node(state: OrchestratorState) -> OrchestratorState:
         session_id = state["session_id"]
-        _t.do_publish_feedback(session_id, "planning", "正在规划控制方案...")
+        _t.do_publish_feedback(session_id, "planning", "正在理解你的意图...")
 
         cards = _t._registry.get_all_cards() if _t._registry else {}
         if not cards:
             _t.do_publish_feedback(session_id, "failed",
                 "抱歉，我还没有发现可用的智能体，请确认设备已上线。")
-            return {**state, "planned_tasks": [], "early_exit": True}
+            return {**state, "route": "act", "planned_tasks": [], "early_exit": True}
 
         prompt = _build_card_prompt(cards, state["user_msg"], state.get("requirements", []))
 
         try:
             resp = llm.invoke([HumanMessage(content=prompt)])
-            tasks_raw = _parse_tasks(resp.content)
+            out = _parse_planner_output(resp.content)
         except Exception as e:
             print(f"[Planner] parse error: {e}")
+            out = {}
+
+        route = out.get("route", "act")
+
+        # ── chat：纯问答/闲聊，answer 直接交给 ChatNode 发出 ──
+        if route == "chat":
+            answer = out.get("answer", "") or "抱歉，我没太理解你的意思。"
+            print(f"[Planner] session={session_id} route=chat")
+            return {**state, "route": "chat", "response_text": answer,
+                    "planned_tasks": [], "early_exit": False}
+
+        # ── define_rule：把规则交给 RuleBuilderNode ──
+        if route == "define_rule":
+            rule = out.get("rule", {}) or {}
+            print(f"[Planner] session={session_id} route=define_rule rule={rule.get('name', '')}")
+            return {**state, "route": "define_rule", "rule": rule,
+                    "planned_tasks": [], "early_exit": False}
+
+        # ── act（默认）：校验 tasks ──
+        tasks_raw = out.get("tasks", [])
+        if not isinstance(tasks_raw, list):
             tasks_raw = []
 
         tasks = []
@@ -149,10 +193,43 @@ def _make_planner_node(llm):
                 "params":   t.get("params", {}),
             })
 
-        print(f"[Planner] session={session_id} planned {len(tasks)} task(s)")
-        return {**state, "planned_tasks": tasks, "early_exit": False}
+        print(f"[Planner] session={session_id} route=act planned {len(tasks)} task(s)")
+        return {**state, "route": "act", "planned_tasks": tasks, "early_exit": False}
 
     return planner_node
+
+
+def _make_chat_node(llm):
+    """构建 ChatNode：把 Planner 已填好的 answer（response_text）发回 PWA。
+
+    llm 形参为统一节点工厂签名预留，本节点不调用 LLM。
+    """
+
+    def chat_node(state: OrchestratorState) -> OrchestratorState:
+        session_id = state["session_id"]
+        answer = state.get("response_text", "") or "抱歉，我没太理解你的意思。"
+        _t.do_publish_feedback(session_id, "done", answer)
+        print(f"[Chat] session={session_id} → {answer}")
+        return state
+
+    return chat_node
+
+
+def _make_rule_builder_node():
+    """构建 RuleBuilderNode：发 pending_rule 反馈，附带 rule 供 PWA 确认后生效。"""
+
+    def rule_builder_node(state: OrchestratorState) -> OrchestratorState:
+        session_id = state["session_id"]
+        rule = state.get("rule", {}) or {}
+        _t.do_publish_feedback(
+            session_id, "pending_rule",
+            f"我来帮你设置规则「{rule.get('name', '')}」，请确认后生效。",
+            rule=rule,
+        )
+        print(f"[RuleBuilder] session={session_id} pending rule={rule.get('name', '')}")
+        return state
+
+    return rule_builder_node
 
 
 def _make_dispatcher_node():
@@ -333,19 +410,33 @@ def _make_responder_node(llm):
 
 
 def build_orchestrator():
-    """装配 Planner→Dispatcher→Evaluator→Responder 编排图。"""
+    """装配 Planner（唯一大脑）+ 条件分支编排图。
+
+    Planner 按 route 分流：
+      - act         → Dispatcher → Evaluator → Responder → END
+      - chat        → ChatNode → END
+      - define_rule → RuleBuilderNode → END
+    """
     llm = _make_llm()
 
     g = StateGraph(OrchestratorState)
-    g.add_node("planner",    _make_planner_node(llm))
-    g.add_node("dispatcher", _make_dispatcher_node())
-    g.add_node("evaluator",  _make_evaluator_node())
-    g.add_node("responder",  _make_responder_node(llm))
+    g.add_node("planner",      _make_planner_node(llm))
+    g.add_node("dispatcher",   _make_dispatcher_node())
+    g.add_node("evaluator",    _make_evaluator_node())
+    g.add_node("responder",    _make_responder_node(llm))
+    g.add_node("chat",         _make_chat_node(llm))
+    g.add_node("rule_builder", _make_rule_builder_node())
 
     g.set_entry_point("planner")
-    g.add_edge("planner",    "dispatcher")
-    g.add_edge("dispatcher", "evaluator")
-    g.add_edge("evaluator",  "responder")
-    g.add_edge("responder",  END)
+    g.add_conditional_edges(
+        "planner",
+        lambda s: s.get("route", "act"),
+        {"act": "dispatcher", "chat": "chat", "define_rule": "rule_builder"},
+    )
+    g.add_edge("dispatcher",   "evaluator")
+    g.add_edge("evaluator",    "responder")
+    g.add_edge("responder",    END)
+    g.add_edge("chat",         END)
+    g.add_edge("rule_builder", END)
 
     return g.compile()

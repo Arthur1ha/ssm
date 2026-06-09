@@ -31,12 +31,17 @@ def init(shared_state, mqtt_client, registry=None):
     _registry = registry
 
 
-def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "ok"):
-    """向 PWA 发布编排进度反馈（ssm/feedback/{session_id}）。"""
+def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "ok", **extra):
+    """向 PWA 发布编排进度反馈（ssm/feedback/{session_id}）。
+
+    extra 为附加字段（如 RuleBuilderNode 的 rule），会并入 payload 一同发出。
+    """
+    payload = {"session_id": session_id, "stage": stage,
+               "text": text, "status": status, "ts": int(_time.time())}
+    payload.update(extra)
     _mqtt.publish(
         f"ssm/feedback/{session_id}",
-        json.dumps({"session_id": session_id, "stage": stage,
-                    "text": text, "status": status, "ts": int(_time.time())}),
+        json.dumps(payload, ensure_ascii=False),
     )
 
 
