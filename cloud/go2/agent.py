@@ -11,10 +11,9 @@ logger = logging.getLogger(__name__)
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
-from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.soul import get_system_prompt, ensure_yesterday_evolved
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 from cloud.go2.agentcore.memory import daily_summary as summary_mod
-from cloud.go2.agentcore import soul_evolution
 
 from cloud.go2.connection import go2
 from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm
@@ -38,7 +37,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
 
     # 懒触发昨日摘要和性格演化（后台，不阻塞规划）
     asyncio.create_task(summary_mod.ensure_yesterday_summary())
-    asyncio.create_task(soul_evolution.ensure_yesterday_evolved())
+    asyncio.create_task(ensure_yesterday_evolved())
 
     # 构建记忆上下文：今天原始记录 + 最近 6 天摘要
     recent_summaries = summary_mod.get_recent_summaries(6)
