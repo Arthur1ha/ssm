@@ -26,7 +26,6 @@ from cloud.esp32.router import router as esp32_router
 from cloud.esp32.state import ESP32State
 from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
-from cloud.api.nlu import router as nlu_router
 from cloud.api.rules import router as rules_router
 from cloud.api.devices import router as devices_router
 from cloud.cards.registry import get_registry
@@ -134,7 +133,6 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 app.include_router(go2_router)
 app.include_router(esp32_router)
-app.include_router(nlu_router)
 app.include_router(rules_router)
 app.include_router(devices_router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])

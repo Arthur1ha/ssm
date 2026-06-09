@@ -12,30 +12,38 @@ function DeviceDetailPage({ slug, device, unitData, onBack, messages, onAppend }
     mqttBus.publish(cmdTopic, { cmd, ...extra });
   };
 
-  const sendChat = async (text) => {
+  const sendChat = (text) => {
     if (!text || thinking) return;
     onAppend({ role: 'user', text });
     setThinking(true);
-    try {
-      const res = await fetch('/api/intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          devices: device ? [{
-            unit_id:      uid,
-            agent_type:   'actuator',
-            topics:       { command: cmdTopic },
-            capabilities: device.capabilities || [],
-          }] : [],
-        }),
-      });
-      const data = await res.json();
-      onAppend({ role: 'assistant', text: data.nlu_feedback || '已处理' });
-    } catch (e) {
-      onAppend({ role: 'assistant', text: '请求失败：' + e.message });
+
+    const session_id = 'sid_' + Date.now();
+    const feedbackTopic = `ssm/feedback/${session_id}`;
+    mqttBus.subscribe(feedbackTopic);
+
+    const timeoutId = setTimeout(() => {
+      mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+      setThinking(false);
+      onAppend({ role: 'assistant', text: '操作超时，设备可能无响应' });
+    }, 60000);
+
+    function handleFeedback(e) {
+      const { stage, text: msg } = e.detail || {};
+      if (!stage) return;
+      if (stage === 'done' || stage === 'partial' || stage === 'failed') {
+        clearTimeout(timeoutId);
+        mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
+        setThinking(false);
+        onAppend({ role: 'assistant', text: msg || '已处理' });
+      }
     }
-    setThinking(false);
+    mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
+
+    mqttBus.publish(`ssm/intent/${session_id}`, JSON.stringify({
+      session_id,
+      user_msg: text,
+      ts: Date.now(),
+    }));
   };
 
   const btnBase = {
