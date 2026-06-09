@@ -10,6 +10,7 @@ import os
 import re
 import json
 import time as _time
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TypedDict
 
@@ -55,9 +56,11 @@ class OrchestratorState(TypedDict):
 # ── prompt 构建 ──────────────────────────────────────────────────
 
 def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
-    """把所有 card 的 skills + params_schema 注入 prompt，无硬编码路由规则。"""
+    """把所有在线 card 的 skills + params_schema 注入 prompt，无硬编码路由规则。"""
     lines = []
     for slug, card in cards.items():
+        if not card.get("online", True):
+            continue
         lines.append(f"- {slug}（{card.get('name', slug)}）：")
         for skill in card.get("skills", []):
             schema = skill.get("params_schema", {})
@@ -223,9 +226,12 @@ def _make_dispatcher_node():
             for task_id, fut, _ in http_jobs:
                 try:
                     results[task_id] = fut.result(timeout=0)
-                except Exception as e:
-                    print(f"[Dispatcher] http task {task_id} timeout/error: {e}")
+                except concurrent.futures.TimeoutError:
+                    print(f"[Dispatcher] http task {task_id} timed out")
                     results[task_id] = {"result": "timeout", "task_id": task_id}
+                except Exception as e:
+                    print(f"[Dispatcher] http task {task_id} error: {e}")
+                    results[task_id] = {"result": "error", "task_id": task_id}
             executor.shutdown(wait=False)
 
         return {**state, "task_results": results}
