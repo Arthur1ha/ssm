@@ -48,6 +48,7 @@ class ESP32Agent:
         self._cooldown: dict[str, float] = {}
         self._last_sound_ts: float = 0.0
         self._work_start_ts: float = 0.0
+        self._last_act_ts: float = 0.0
         self._last_light_level: str = ""
         self._last_proactive_ts: float = 0.0
         self._belief_summary: str = ""
