@@ -1,5 +1,12 @@
-function DeviceDetailPage({ slug, device, unitData, onBack, messages, onAppend }) {
-  const [thinking, setThinking] = React.useState(false);
+function DeviceDetailPage({ slug, device, unitData, onBack }) {
+  const initialMsg = {
+    role: 'assistant', agent: slug,
+    agentName: device?.name || slug,
+    text: `你好，我是 ${device?.name || slug}，有什么可以帮你？`,
+  };
+  const [messages, setMessages] = React.useState([initialMsg]);
+  const onAppend = (msg) => setMessages(prev => [...prev, msg]);
+  const { thinking, thinkingText, send } = useSendIntent();
 
   const meta     = device ? getAgentMeta(device) : { icon: 'bulb', color: '#FF9A5A' };
   const uid      = device?.unit_id || '';
@@ -15,45 +22,12 @@ function DeviceDetailPage({ slug, device, unitData, onBack, messages, onAppend }
   const sendChat = (text) => {
     if (!text || thinking) return;
     onAppend({ role: 'user', text });
-    setThinking(true);
-
-    const session_id = 'sid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-    const feedbackTopic = `ssm/feedback/${session_id}`;
-    mqttBus.subscribe(feedbackTopic);
-
-    const cleanup = () => {
-      mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
-      mqttBus.unsubscribe(feedbackTopic);
-    };
-
-    const timeoutId = setTimeout(() => {
-      cleanup();
-      setThinking(false);
-      onAppend({ role: 'assistant', text: '操作超时，设备可能无响应' });
-    }, 60000);
-
-    function handleFeedback(e) {
-      const { stage, text: msg, rule } = e.detail || {};
-      if (!stage) return;
-      if (stage === 'pending_rule' && rule) {
-        clearTimeout(timeoutId);
-        cleanup();
-        setThinking(false);
-        onAppend({ role: 'assistant', text: `收到规则「${rule.name}」，请在主界面确认保存。` });
-      } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
-        clearTimeout(timeoutId);
-        cleanup();
-        setThinking(false);
-        onAppend({ role: 'assistant', text: msg || '已处理' });
-      }
-    }
-    mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
-
-    mqttBus.publish(`ssm/intent/${session_id}`, JSON.stringify({
-      session_id,
-      user_msg: text,
-      ts: Date.now(),
-    }));
+    send(text, {
+      deviceHint: slug,
+      onMessage:     (msg)  => onAppend({ role: 'assistant', text: msg }),
+      onPendingRule: (rule) => onAppend({ role: 'assistant',
+        text: `收到规则「${rule.name}」，请在主界面确认保存。` }),
+    });
   };
 
   const btnBase = {
@@ -127,6 +101,7 @@ function DeviceDetailPage({ slug, device, unitData, onBack, messages, onAppend }
       <ChatPanel
         messages={messages}
         thinking={thinking}
+        thinkingText={thinkingText}
         onSend={sendChat}
         placeholder="告诉设备要做什么…"
         variant="inline"
