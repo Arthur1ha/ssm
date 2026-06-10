@@ -83,6 +83,21 @@ class TestSense:
         assert result["sound_detected"] is False
         assert result["sound_recent"] is False
 
+    def test_no_context_combo_in_result(self):
+        snap = {"esp32_desk_light": {"state": {"level": "DARK", "lux": 10, "ts": 1000}}}
+        agent = make_agent_with_snapshot(snap)
+        result = agent._sense()
+        assert "context_combo" not in result
+
+    def test_includes_led_device_id(self):
+        snap = {"esp32_desk_light": {"state": {"level": "NORMAL", "lux": 300, "ts": 1000}}}
+        mock_state = MagicMock(spec=ESP32State)
+        mock_state.sensor_snapshot.return_value = snap
+        mock_state.actuator_snapshot.return_value = {"esp32_desk_led": {"state": {"ism": "BRIGHT"}}}
+        agent = ESP32Agent(mock_state, llm=MagicMock())
+        result = agent._sense()
+        assert result["led_device_id"] == "esp32_desk_led"
+
 
 class TestReason:
     SENSE_DATA = {

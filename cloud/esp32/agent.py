@@ -165,35 +165,28 @@ class ESP32Agent:
         sound_detected = server_sound_recent or snap_sound_recent
 
         led_state = "UNKNOWN"
+        led_device_id = "esp32_desk_led"
         for uid, data in self._state.actuator_snapshot().items():
             if uid.endswith("_led"):
                 led_state = (data.get("state") or {}).get("ism", "UNKNOWN")
+                led_device_id = uid
                 break
 
-        now_dt      = datetime.datetime.now()
-        time_str    = now_dt.strftime("%H:%M")
-        hour        = now_dt.hour
-        if hour < 6:   time_period = "深夜"
-        elif hour < 9: time_period = "清晨"
+        now_dt = datetime.datetime.now()
+        time_str = now_dt.strftime("%H:%M")
+        hour = now_dt.hour
+        if hour < 6:    time_period = "深夜"
+        elif hour < 9:  time_period = "清晨"
         elif hour < 12: time_period = "上午"
         elif hour < 18: time_period = "下午"
         elif hour < 21: time_period = "傍晚"
         else:           time_period = "夜间"
 
-        if level in ("DARK", "DIM") and sound_detected:
-            combo = "dark_active"
-        elif level in ("DARK", "DIM") and not sound_detected:
-            combo = "dark_silent"
-        elif level in ("NORMAL", "BRIGHT") and sound_detected:
-            combo = "normal_active"
-        else:
-            combo = "normal_silent"
-
         return {
             "light_level": level, "light_value": value, "light_lux": lux,
             "sound_detected": sound_detected, "sound_recent": sound_detected,
-            "led_state": led_state, "time_str": time_str, "time_period": time_period,
-            "context_combo": combo,
+            "led_state": led_state, "led_device_id": led_device_id,
+            "time_str": time_str, "time_period": time_period,
         }
 
     def _reason(self, sense_data: dict, proactive_triggers: list | None = None, combo_changed: bool = False) -> dict | None:
