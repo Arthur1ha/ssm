@@ -49,12 +49,10 @@ class ESP32Agent:
         self._last_sound_ts: float = 0.0
         self._work_start_ts: float = 0.0
         self._last_act_ts: float = 0.0
-        self._last_act_combo: str = ""
         self._last_light_level: str = ""
         self._last_proactive_ts: float = 0.0
         self._belief_summary: str = ""
         self._beliefs_since_summary: int = 0
-        self._last_combo: str = ""
 
     def _make_llm(self):
         model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
@@ -245,6 +243,58 @@ class ESP32Agent:
             logger.warning("reason parse error: %s", e)
             return None
 
+    def _find_led_device(self) -> str:
+        """从 actuator 快照中查找 LED 设备 ID，找不到返回默认值。"""
+        for uid in self._state.actuator_snapshot():
+            if uid.endswith("_led"):
+                return uid
+        return "esp32_desk_led"
+
+    def _get_current_ism(self, led_device: str) -> str:
+        """读取 LED 当前 ISM 状态。"""
+        snap = self._state.actuator_snapshot()
+        return (snap.get(led_device, {}).get("state") or {}).get("ism", "").upper()
+
+    def _execute(self, tool_calls: list, led_device: str):
+        """执行 planner 输出的工具调用列表。"""
+        from cloud.esp32 import tools as _tools_mod
+        now = time.time()
+        for call in tool_calls:
+            tool_name = call.get("tool", "")
+            params = dict(call.get("params", {}))
+
+            if tool_name in ("set_led_state", "set_led_color"):
+                params["device_id"] = led_device
+                key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
+                if now - self._cooldown.get(key, 0) < 300:
+                    if tool_name == "set_led_state":
+                        target = params.get("state", "").upper()
+                        current = self._get_current_ism(led_device)
+                        if current and current == target:
+                            logger.debug("cooldown skip: already %s", target)
+                            continue
+                        else:
+                            logger.debug("cooldown skip: %s", key)
+                            continue
+                    else:
+                        logger.debug("cooldown skip: %s", key)
+                        continue
+                self._cooldown[key] = now
+                self._last_act_ts = now
+
+            if tool_name not in _tools_mod.TOOL_FN_MAP:
+                logger.warning("unknown tool: %s", tool_name)
+                continue
+            fn = getattr(_tools_mod, tool_name, None)
+            if fn is None:
+                logger.warning("unknown tool: %s", tool_name)
+                continue
+            try:
+                fn(**params)
+                logger.info("execute %s %s", tool_name, params)
+            except Exception as e:
+                logger.warning("tool %s failed: %s", tool_name, e)
+
     def _act(self, belief: dict, combo: str = ""):
         device = "esp32_desk_led"
         now    = time.time()
@@ -312,9 +362,9 @@ class ESP32Agent:
         if now - self._last_proactive_ts < 600:
             return []
         triggers = []
-        combo = sense.get("context_combo", "")
 
-        if combo.endswith("_active"):
+        is_active = sense.get("sound_detected", False)
+        if is_active:
             if self._work_start_ts == 0:
                 self._work_start_ts = now
         else:
@@ -328,9 +378,7 @@ class ESP32Agent:
             triggers.append("env_changed")
         self._last_light_level = current_level
 
-        if (self._last_act_ts > 0
-                and (now - self._last_act_ts) >= 300
-                and combo == self._last_act_combo):
+        if self._last_act_ts > 0 and (now - self._last_act_ts) >= 300:
             triggers.append("unimproved")
 
         return triggers
@@ -340,8 +388,9 @@ class ESP32Agent:
         entries = []
         for b in recent:
             ts_str = time.strftime("%H:%M", time.localtime(b.get("ts", 0)))
-            entries.append(f"{ts_str}: {b.get('context', '')}（动作：{b.get('reason', '')}）")
-        prompt = "以下是最近的桌面空间状态变化记录，用一句话总结规律（20字以内）：\n" + "\n".join(entries)
+            actions = "、".join(b.get("actions", [])) or "无动作"
+            entries.append(f"{ts_str}: {b.get('context', '')} → {actions}")
+        prompt = "以下是最近桌面空间状态记录，用一句话总结规律（20字以内）：\n" + "\n".join(entries)
         try:
             resp = self._llm.invoke([HumanMessage(content=prompt)])
             return resp.content.strip()[:100]
@@ -381,17 +430,21 @@ class ESP32Agent:
                     continue
                 logger.debug("sense: %s", sense)
 
-                proactive_triggers = self._check_proactive(sense)
-                combo_changed = sense.get("context_combo", "") != self._last_combo
+                sense["proactive_hints"] = self._check_proactive(sense)
 
                 self._set_led_mood("thinking")
-                belief = self._reason(sense, proactive_triggers or None, combo_changed=combo_changed)
-                if belief is None:
+                tool_calls = self._reason(sense)
+                if tool_calls is None:
                     self._set_led_mood("idle")
                     continue
-                logger.info("belief: should_act=%s, reason=%s", belief.get("should_act"), belief.get("reason"))
 
-                self._belief_history.append(belief)
+                logger.info("tool_calls (%d): %s", len(tool_calls), json.dumps(tool_calls, ensure_ascii=False))
+
+                self._belief_history.append({
+                    "ts": time.time(),
+                    "context": f"light={sense['light_level']} sound={sense['sound_detected']} led={sense['led_state']}",
+                    "actions": [c["tool"] for c in tool_calls],
+                })
                 if len(self._belief_history) > 10:
                     self._belief_history.pop(0)
 
@@ -400,19 +453,12 @@ class ESP32Agent:
                     self._belief_summary = self._summarize_beliefs()
                     self._beliefs_since_summary = 0
 
-                if belief.get("should_verbalize_thought") and belief.get("thought_text"):
-                    self._publish_thought(belief["thought_text"])
-
-                speech_text = belief.get("speech_text", "")
-                if speech_text and (combo_changed or proactive_triggers):
-                    self._set_led_mood("speaking")
-                    self._speak(speech_text)
-
-                if belief.get("proactive_report") and speech_text:
-                    self._last_proactive_ts = time.time()
-
-                self._act(belief, combo=sense.get("context_combo", ""))
-                self._last_combo = sense.get("context_combo", "")
+                if tool_calls:
+                    has_speech = any(c["tool"] == "speak" for c in tool_calls)
+                    if has_speech:
+                        self._set_led_mood("speaking")
+                    led_device = self._find_led_device()
+                    self._execute(tool_calls, led_device)
 
                 self._set_led_mood("done")
                 time.sleep(2)

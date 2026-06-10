@@ -178,66 +178,80 @@ class TestReason:
         assert "决策规则（按优先级）" not in prompt
 
 
-class TestAct:
+class TestExecute:
     def _make_agent(self):
         mock_state = MagicMock(spec=ESP32State)
         mock_state.actuator_snapshot.return_value = {
-            "esp32_desk_led": {"state": {"ism": "BRIGHT"}}
+            "esp32_desk_led": {"state": {"ism": "OFF"}}
         }
         return ESP32Agent(mock_state, llm=MagicMock())
 
-    def _belief_state(self, state="BRIGHT", color=None):
-        return {
-            "state_action": {"state": state},
-            "color_action": color,
-        }
-
-    def _belief_color(self, r=255, g=200, b=100, brightness=180):
-        return {
-            "state_action": None,
-            "color_action": {"r": r, "g": g, "b": b, "brightness": brightness},
-        }
-
-    def test_publishes_set_state_bright(self):
+    def test_set_led_state_calls_tool(self):
         agent = self._make_agent()
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            agent._act(self._belief_state("BRIGHT"))
-            mock_pub.assert_called_once()
-            assert mock_pub.call_args[0][2] == "SET_STATE"
+        with patch("cloud.esp32.tools.set_led_state") as mock_fn:
+            agent._execute([{"tool": "set_led_state", "params": {"state": "BRIGHT"}}], "esp32_desk_led")
+            mock_fn.assert_called_once_with(device_id="esp32_desk_led", state="BRIGHT")
 
-    def test_bright_with_color_uses_set_color(self):
+    def test_set_led_color_calls_tool(self):
         agent = self._make_agent()
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            agent._act({"state_action": {"state": "BRIGHT"}, "color_action": {"r": 255, "g": 100, "b": 50, "brightness": 180}})
-            assert mock_pub.call_args[0][2] == "SET_COLOR"
+        with patch("cloud.esp32.tools.set_led_color") as mock_fn:
+            agent._execute(
+                [{"tool": "set_led_color", "params": {"r": 255, "g": 100, "b": 50, "brightness": 180}}],
+                "esp32_desk_led"
+            )
+            mock_fn.assert_called_once_with(device_id="esp32_desk_led", r=255, g=100, b=50, brightness=180)
 
-    def test_off_ignores_color(self):
+    def test_speak_calls_tool(self):
         agent = self._make_agent()
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            agent._act({"state_action": {"state": "OFF"}, "color_action": {"r": 255, "g": 0, "b": 0, "brightness": 255}})
-            assert mock_pub.call_args[0][2] == "SET_STATE"
-            assert mock_pub.call_args[0][3] == {"state": "OFF"}
+        with patch("cloud.esp32.tools.speak") as mock_fn:
+            agent._execute([{"tool": "speak", "params": {"text": "灯已开启"}}], "esp32_desk_led")
+            mock_fn.assert_called_once_with(text="灯已开启")
 
-    def test_null_actions_publish_nothing(self):
+    def test_speak_does_not_inject_device_id(self):
         agent = self._make_agent()
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            agent._act({"state_action": None, "color_action": None})
-            mock_pub.assert_not_called()
+        with patch("cloud.esp32.tools.speak") as mock_fn:
+            agent._execute([{"tool": "speak", "params": {"text": "你好"}}], "esp32_desk_led")
+            call_kwargs = mock_fn.call_args[1]
+            assert "device_id" not in call_kwargs
 
-    def test_cooldown_blocks_duplicate(self):
+    def test_cooldown_blocks_duplicate_led_command(self):
         agent = self._make_agent()
-        belief = self._belief_state("BRIGHT")
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            agent._act(belief)
-            agent._act(belief)
-            assert mock_pub.call_count == 1
+        calls = [{"tool": "set_led_state", "params": {"state": "BRIGHT"}}]
+        with patch("cloud.esp32.tools.set_led_state") as mock_fn:
+            agent._execute(calls, "esp32_desk_led")
+            agent._execute(calls, "esp32_desk_led")
+            assert mock_fn.call_count == 1
 
     def test_cooldown_allows_different_state(self):
         agent = self._make_agent()
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            agent._act(self._belief_state("BRIGHT"))
-            agent._act(self._belief_state("OFF"))
-            assert mock_pub.call_count == 2
+        with patch("cloud.esp32.tools.set_led_state") as mock_fn:
+            agent._execute([{"tool": "set_led_state", "params": {"state": "BRIGHT"}}], "esp32_desk_led")
+            agent._execute([{"tool": "set_led_state", "params": {"state": "OFF"}}], "esp32_desk_led")
+            assert mock_fn.call_count == 2
+
+    def test_unknown_tool_skipped_without_exception(self):
+        agent = self._make_agent()
+        agent._execute([{"tool": "fly_to_moon", "params": {}}], "esp32_desk_led")
+
+    def test_empty_list_does_nothing(self):
+        agent = self._make_agent()
+        with patch("cloud.esp32.tools.set_led_state") as mock_fn:
+            agent._execute([], "esp32_desk_led")
+            mock_fn.assert_not_called()
+
+
+class TestFindLedDevice:
+    def test_finds_led_from_actuator_snapshot(self):
+        mock_state = MagicMock(spec=ESP32State)
+        mock_state.actuator_snapshot.return_value = {"esp32_desk_led": {}}
+        agent = ESP32Agent(mock_state, llm=MagicMock())
+        assert agent._find_led_device() == "esp32_desk_led"
+
+    def test_fallback_when_no_led(self):
+        mock_state = MagicMock(spec=ESP32State)
+        mock_state.actuator_snapshot.return_value = {}
+        agent = ESP32Agent(mock_state, llm=MagicMock())
+        assert agent._find_led_device() == "esp32_desk_led"
 
 
 class TestBeliefHistory:
