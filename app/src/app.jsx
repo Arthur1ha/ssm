@@ -35,7 +35,7 @@ function App() {
 
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHash();
-  const agentsRef   = useRef([]);
+  const agentsRef   = useRef([GO2_STATIC_DEVICE]);
   const prevStatesRef = useRef({});
 
   useEffect(() => { agentsRef.current = agents; }, [agents]);
@@ -48,15 +48,16 @@ function App() {
     const registry   = new AgentRegistry(mqttBus);
     const ismTracker = new ISMTracker(mqttBus);
 
-    registry.addEventListener('change', () => {
+    const handleRegistryChange = () => {
       const mqttAgents = registry.getAll().filter(a =>
         a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) && a._online === true
       );
       setAgents([GO2_STATIC_DEVICE, ...mqttAgents]);
-    });
+    };
+    registry.addEventListener('change', handleRegistryChange);
 
     let pendingSnap = false;
-    ismTracker.addEventListener('update', () => {
+    const handleIsmUpdate = () => {
       if (pendingSnap) return;
       pendingSnap = true;
       requestAnimationFrame(() => {
@@ -81,9 +82,10 @@ function App() {
         });
         setUnitData({ ...snap });
       });
-    });
+    };
+    ismTracker.addEventListener('update', handleIsmUpdate);
 
-    mqttBus.onConnect(() => {
+    const handleConnect = () => {
       setConnected(true);
       mqttBus.publish('ssm/agents/phone_ui/manifest', {
         unit_id: 'phone_ui', agent_type: 'supervisor',
@@ -91,9 +93,12 @@ function App() {
         ts: Math.floor(Date.now() / 1000),
       }, { retain: true });
       mqttBus.subscribe('ssm/agents/desk/speech');
-    });
-    mqttBus.addEventListener('disconnect', () => setConnected(false));
-    mqttBus.addEventListener('reconnect',  () => setConnected(false));
+    };
+    const handleDisconnect = () => setConnected(false);
+    const handleReconnect  = () => setConnected(false);
+    mqttBus.addEventListener('connect',    handleConnect);
+    mqttBus.addEventListener('disconnect', handleDisconnect);
+    mqttBus.addEventListener('reconnect',  handleReconnect);
     mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
 
     /* desk TTS */
@@ -102,7 +107,15 @@ function App() {
       if (audio) playAudioB64(audio);
     };
     mqttBus.addEventListener('topic:ssm/agents/desk/speech', handleSpeech);
-    return () => mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
+
+    return () => {
+      registry.removeEventListener('change', handleRegistryChange);
+      ismTracker.removeEventListener('update', handleIsmUpdate);
+      mqttBus.removeEventListener('connect',    handleConnect);
+      mqttBus.removeEventListener('disconnect', handleDisconnect);
+      mqttBus.removeEventListener('reconnect',  handleReconnect);
+      mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
+    };
   }, []);
 
   /* ── 规则保存 ── */
