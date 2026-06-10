@@ -48,7 +48,6 @@ class ESP32Agent:
         self._cooldown: dict[str, float] = {}
         self._last_sound_ts: float = 0.0
         self._work_start_ts: float = 0.0
-        self._last_act_ts: float = 0.0
         self._last_light_level: str = ""
         self._last_proactive_ts: float = 0.0
         self._belief_summary: str = ""
@@ -295,67 +294,8 @@ class ESP32Agent:
             except Exception as e:
                 logger.warning("tool %s failed: %s", tool_name, e)
 
-    def _act(self, belief: dict, combo: str = ""):
-        device = "esp32_desk_led"
-        now    = time.time()
-
-        state_action = belief.get("state_action")
-        color_action = belief.get("color_action")
-
-        current_ism = ""
-        for uid, data in self._state.actuator_snapshot().items():
-            if uid.endswith("_led"):
-                current_ism = (data.get("state") or {}).get("ism", "").upper()
-                break
-
-        cmd, params = None, {}
-        if state_action and state_action.get("state") == "OFF":
-            cmd, params = "SET_STATE", {"state": "OFF"}
-        elif state_action and state_action.get("state") == "BRIGHT" and color_action:
-            cmd, params = "SET_COLOR", color_action
-        elif state_action and state_action.get("state") == "BRIGHT":
-            cmd, params = "SET_STATE", {"state": "BRIGHT"}
-        elif color_action and current_ism not in ("OFF", "UNKNOWN", ""):
-            cmd, params = "SET_COLOR", color_action
-
-        if not cmd:
-            return
-
-        key = f"{cmd}_{json.dumps(params, sort_keys=True)}"
-        if now - self._cooldown.get(key, 0) < 300:
-            if cmd == "SET_STATE":
-                target_state = params.get("state", "").upper()
-                if current_ism and current_ism != target_state:
-                    logger.debug("cooldown bypass: target=%s current=%s, resend", target_state, current_ism)
-                    self._cooldown[key] = now
-                else:
-                    logger.debug("cooldown, skip (%s)", key)
-                    return
-            else:
-                logger.debug("cooldown, skip (%s)", key)
-                return
-
-        self._cooldown[key] = now
-        self._last_act_ts    = now
-        self._last_act_combo = combo
-
-        task_id = f"agent_auto_{int(now)}"
-        _tools.publish_task(device, task_id, cmd, params, "agent_auto")
-        logger.info("act → %s %s %s", device, cmd, params)
-
-    def _speak(self, text: str, priority: str = "normal"):
-        if not text:
-            return
-        _tools.publish_speech(text, priority)
-        logger.info("speech → %s", text)
-
     def _set_led_mood(self, mood: str):
         _tools.publish_led_mood(mood)
-
-    def _publish_thought(self, text: str):
-        if not text:
-            return
-        _tools.publish_thought(text)
 
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
