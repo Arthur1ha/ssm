@@ -103,8 +103,8 @@ class TestReason:
     SENSE_DATA = {
         "light_level": "DARK", "light_value": 100, "light_lux": 30,
         "sound_detected": False, "sound_recent": False,
-        "led_state": "OFF", "time_str": "20:00", "time_period": "夜间",
-        "context_combo": "dark_silent",
+        "led_state": "OFF", "led_device_id": "esp32_desk_led",
+        "time_str": "20:00", "time_period": "夜间",
     }
 
     def _make_with_llm_response(self, content: str):
@@ -112,48 +112,70 @@ class TestReason:
         mock_llm.invoke.return_value = AIMessage(content=content)
         return ESP32Agent(MagicMock(spec=ESP32State), llm=mock_llm)
 
-    def test_returns_belief_dict(self):
+    def test_returns_list_of_tool_calls(self):
         agent = self._make_with_llm_response(
-            '{"context": "光线昏暗", "space_mood": "昏暗", "should_act": true, '
-            '"state_action": {"state": "BRIGHT"}, "color_action": null, '
-            '"reason": "光线不足", "speech_text": "", "thought_text": "", '
-            '"should_verbalize_thought": false, "proactive_report": false}'
+            '[{"tool": "set_led_color", "params": {"r": 255, "g": 160, "b": 60, "brightness": 160}}]'
         )
-        belief = agent._reason(self.SENSE_DATA)
-        assert belief is not None
-        assert belief["should_act"] is True
-        assert "ts" in belief
+        result = agent._reason(self.SENSE_DATA)
+        assert isinstance(result, list)
+        assert result[0]["tool"] == "set_led_color"
+
+    def test_returns_empty_list_for_no_action(self):
+        agent = self._make_with_llm_response("[]")
+        result = agent._reason(self.SENSE_DATA)
+        assert result == []
 
     def test_returns_none_on_invalid_json(self):
-        agent = self._make_with_llm_response("not valid json at all")
+        agent = self._make_with_llm_response("不是 JSON")
         assert agent._reason(self.SENSE_DATA) is None
 
     def test_handles_json_with_preamble(self):
         agent = self._make_with_llm_response(
-            '好的，结果如下：\n{"context": "正常", "space_mood": "空闲", "should_act": false, '
-            '"state_action": null, "color_action": null, "reason": "ok", '
-            '"speech_text": "", "thought_text": "", "should_verbalize_thought": false, "proactive_report": false}'
+            '好的，结果如下：\n[{"tool": "speak", "params": {"text": "光线不足"}}]'
         )
-        belief = agent._reason(self.SENSE_DATA)
-        assert belief is not None
-        assert belief["should_act"] is False
+        result = agent._reason(self.SENSE_DATA)
+        assert result is not None
+        assert result[0]["tool"] == "speak"
+
+    def test_prompt_includes_raw_sense_values(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content="[]")
+        agent = ESP32Agent(MagicMock(spec=ESP32State), llm=mock_llm)
+        agent._reason(self.SENSE_DATA)
+        prompt = mock_llm.invoke.call_args[0][0][0].content
+        assert "DARK" in prompt
+        assert "20:00" in prompt
+
+    def test_prompt_includes_tool_descriptions(self):
+        from cloud.esp32.tools import TOOL_DESCRIPTIONS
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content="[]")
+        agent = ESP32Agent(MagicMock(spec=ESP32State), llm=mock_llm)
+        agent._reason(self.SENSE_DATA)
+        prompt = mock_llm.invoke.call_args[0][0][0].content
+        assert "set_led_state" in prompt or "set_led_color" in prompt
 
     def test_prompt_includes_history(self):
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = AIMessage(
-            content='{"context": "test", "space_mood": "空闲", "should_act": false, '
-            '"state_action": null, "color_action": null, "reason": "ok", '
-            '"speech_text": "", "thought_text": "", "should_verbalize_thought": false, "proactive_report": false}'
-        )
+        mock_llm.invoke.return_value = AIMessage(content="[]")
         agent = ESP32Agent(MagicMock(spec=ESP32State), llm=mock_llm)
         agent._belief_history = [
-            {"context": "空间安静", "ts": time.time() - 120},
-            {"context": "有人进入", "ts": time.time() - 60},
+            {"context": "光线昏暗有人活动", "actions": ["set_led_color"], "ts": time.time() - 120},
         ]
         agent._reason(self.SENSE_DATA)
         prompt = mock_llm.invoke.call_args[0][0][0].content
-        assert "空间安静" in prompt
-        assert "有人进入" in prompt
+        assert "光线昏暗有人活动" in prompt
+
+    def test_prompt_does_not_contain_explicit_rules(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = AIMessage(content="[]")
+        agent = ESP32Agent(MagicMock(spec=ESP32State), llm=mock_llm)
+        agent._reason(self.SENSE_DATA)
+        prompt = mock_llm.invoke.call_args[0][0][0].content
+        # 不应出现硬编码规则关键字
+        assert "dark_active" not in prompt
+        assert "→ state_action" not in prompt
+        assert "决策规则（按优先级）" not in prompt
 
 
 class TestAct:
@@ -219,27 +241,18 @@ class TestAct:
 
 
 class TestBeliefHistory:
-    def test_history_capped_at_10(self):
+    def test_reason_returns_list(self):
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = AIMessage(
-            content='{"context": "x", "space_mood": "空闲", "should_act": false, '
-            '"state_action": null, "color_action": null, "reason": "ok", '
-            '"speech_text": "", "thought_text": "", "should_verbalize_thought": false, "proactive_report": false}'
-        )
+        mock_llm.invoke.return_value = AIMessage(content="[]")
         agent = ESP32Agent(MagicMock(spec=ESP32State), llm=mock_llm)
         sense = {
             "light_level": "NORMAL", "light_value": 300, "light_lux": 300,
             "sound_detected": False, "sound_recent": False,
-            "led_state": "OFF", "time_str": "10:00", "time_period": "上午",
-            "context_combo": "normal_silent",
+            "led_state": "OFF", "led_device_id": "esp32_desk_led",
+            "time_str": "10:00", "time_period": "上午",
         }
-        for _ in range(15):
-            b = agent._reason(sense)
-            if b:
-                agent._belief_history.append(b)
-                if len(agent._belief_history) > 10:
-                    agent._belief_history.pop(0)
-        assert len(agent._belief_history) == 10
+        result = agent._reason(sense)
+        assert isinstance(result, list)
 
 
 class TestRunIntent:

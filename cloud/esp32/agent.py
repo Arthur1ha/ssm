@@ -189,86 +189,58 @@ class ESP32Agent:
             "time_str": time_str, "time_period": time_period,
         }
 
-    def _reason(self, sense_data: dict, proactive_triggers: list | None = None, combo_changed: bool = False) -> dict | None:
-        last_context = self._belief_history[-1]["context"] if self._belief_history else ""
+    def _reason(self, sense_data: dict) -> list[dict] | None:
+        from cloud.esp32 import tools as _tools_mod
 
         if self._belief_summary:
-            history_lines = f"\n历史规律摘要：{self._belief_summary}"
+            history_lines = f"历史规律摘要：{self._belief_summary}"
         elif self._belief_history:
             recent = self._belief_history[-3:]
             lines = []
             for b in recent:
                 ts_str = time.strftime("%H:%M", time.localtime(b.get("ts", 0)))
-                lines.append(f"- {ts_str}: {b.get('context', '')}")
-            history_lines = "\n近期状态变化：\n" + "\n".join(lines)
+                actions = "、".join(b.get("actions", [])) or "无动作"
+                lines.append(f"- {ts_str}: {b.get('context', '')}（执行了：{actions}）")
+            history_lines = "近期历史：\n" + "\n".join(lines)
         else:
             history_lines = ""
 
-        proactive_ctx = ""
-        if proactive_triggers:
-            labels = {
-                "long_work":   "用户已连续工作超过 60 分钟",
-                "unimproved":  "上次执行动作超过 5 分钟但环境未改善",
-                "env_changed": "环境光线档位发生跳变",
-            }
-            trigger_strs = "、".join(labels.get(t, t) for t in proactive_triggers)
-            proactive_ctx = (
-                f"\n【主动报告触发】当前满足触发条件：{trigger_strs}。"
-                "若你认为有必要，可将 proactive_report 设为 true 并在 speech_text 中说出来，不一定要有 action。"
-            )
-
-        combo_changed_str = "true（环境情境已改变）" if combo_changed else "false（情境与上次相同）"
+        proactive_hints = sense_data.get("proactive_hints", [])
+        hint_labels = {
+            "long_work":   "用户已连续活动超过 60 分钟",
+            "unimproved":  "距上次执行动作超过 5 分钟",
+            "env_changed": "环境光线档位发生变化",
+        }
+        hints_str = ""
+        if proactive_hints:
+            hint_strs = "、".join(hint_labels.get(h, h) for h in proactive_hints)
+            hints_str = f"\n提示信息（供参考，不强制触发动作）：{hint_strs}"
 
         prompt = (
             f"{AGENT_PERSONA}\n"
-            "你负责自动控制桌面 LED 灯，并用符合性格的语言表达决策。\n"
-            "light_value 是光线传感器 ADC 原始值（0=最暗，4095=最亮），light_level 是档位，"
-            "light_lux 是换算后照度（如有）。\n"
-            "led_state 是 LED 当前状态（OFF=关, BRIGHT=亮, DIM=暗）。\n"
-            f"当前时段：{sense_data.get('time_period', '')}（{sense_data.get('time_str', '')}），请结合时段判断合理行为。\n"
-            f"combo_changed={combo_changed_str}\n\n"
-            f"传感器数据：{json.dumps(sense_data, ensure_ascii=False)}\n"
-            f"context_combo 含义：dark_active=黑暗中有人，dark_silent=黑暗无人，"
-            f"normal_active=正常有人，normal_silent=正常无人。当前：{sense_data.get('context_combo', '')}\n"
-            f"上一次判断：{last_context}（若无则忽略）"
+            "你负责控制桌面 LED 灯，根据当前传感器观测自主决定是否采取行动。\n\n"
+            f"当前观测：{json.dumps(sense_data, ensure_ascii=False)}\n"
+            "字段说明：light_level（DARK/DIM/NORMAL/BRIGHT）、light_lux（照度，越小越暗）、"
+            "sound_detected（近 5 秒内是否有声音）、led_state（当前灯状态）、time_period（时段）\n\n"
+            f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
             f"{history_lines}"
-            f"{proactive_ctx}\n\n"
-            "决策规则（按优先级）：\n"
-            "1. dark_active → state_action=BRIGHT；若 combo_changed=true 同时输出 color_action\n"
-            "2. dark_silent 且灯亮 → state_action=OFF，color_action=null\n"
-            "3. dark_silent 且灯关 → 两者均 null\n"
-            "4. normal_* 且灯亮 → state_action=OFF，color_action=null\n"
-            "5. combo_changed=true 且灯亮 → 可仅输出 color_action 换色，state_action=null\n"
-            "6. 其他 → 两者均 null\n\n"
-            "颜色参考（结合时段和 combo 自由决定 r/g/b，0-255）：\n"
-            "深夜暖橙(255,100,30 亮120)、傍晚暖黄(255,160,60 亮160)、"
-            "清晨淡蓝白(200,220,255 亮200)、上午专注冷白(220,220,255 亮220)、"
-            "嘈杂活跃偏青(180,220,200 亮200)，不限于此。\n\n"
-            "输出 JSON（不含代码块）：\n"
-            "{\n"
-            '  "context": "一句话描述当前情境（内部日志）",\n'
-            '  "space_mood": "专注/空闲/嘈杂/昏暗 中的一个",\n'
-            '  "should_act": true/false,\n'
-            '  "state_action": {"state": "BRIGHT"} 或 {"state": "OFF"} 或 null,\n'
-            '  "color_action": {"r": 0-255, "g": 0-255, "b": 0-255, "brightness": 0-255} 或 null,\n'
-            '  "reason": "为什么这样决定（内部日志）",\n'
-            '  "speech_text": "智能体说出来的话，简洁不超过两句，不执行动作时可为空字符串",\n'
-            '  "thought_text": "有趣的推理，简洁一句话，不值得说就为空字符串",\n'
-            '  "should_verbalize_thought": true/false,\n'
-            '  "proactive_report": true/false\n'
-            "}\n"
+            f"{hints_str}\n\n"
+            "根据观测自主判断，输出 JSON 数组，无需任何动作时输出 []，不含代码块或解释。\n"
+            "示例：[{\"tool\": \"set_led_color\", \"params\": {\"r\": 255, \"g\": 160, \"b\": 60, \"brightness\": 160}}, "
+            "{\"tool\": \"speak\", \"params\": {\"text\": \"傍晚了，给你调个暖黄\"}}]"
         )
 
         try:
             resp = self._llm.invoke([HumanMessage(content=prompt)])
             content = resp.content.strip()
-            start = content.find("{")
-            end   = content.rfind("}") + 1
-            if start == -1:
-                raise ValueError("no JSON found")
-            belief = json.loads(content[start:end])
-            belief["ts"] = time.time()
-            return belief
+            content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
+            idx_s, idx_e = content.find("["), content.rfind("]")
+            if idx_s == -1:
+                raise ValueError("no JSON array found")
+            tool_calls = json.loads(content[idx_s:idx_e + 1])
+            if not isinstance(tool_calls, list):
+                raise ValueError("expected list")
+            return [c for c in tool_calls if isinstance(c, dict) and "tool" in c]
         except Exception as e:
             logger.warning("reason parse error: %s", e)
             return None
