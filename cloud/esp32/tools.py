@@ -33,3 +33,38 @@ def publish_led_mood(mood: str):
 
 def publish_thought(text: str):
     _mqtt.publish("ssm/agents/desk/thought", json.dumps({"text": text}, ensure_ascii=False))
+
+
+TOOL_DESCRIPTIONS = """可用工具（系统自动注入目标设备 ID）：
+- set_led_state(state): 设置 LED 状态，state 必须为 BRIGHT/DIM/OFF 之一
+- set_led_color(r, g, b, brightness): 设置 LED 颜色，r/g/b/brightness 均为 0-255 整数
+- speak(text): 播报中文语音，text 简洁不超过两句
+无需任何动作时输出 []"""
+
+
+def set_led_state(device_id: str, state: str) -> str:
+    """设置 LED 开关/亮度状态。"""
+    task_id = f"auto_{int(time.time())}"
+    publish_task(device_id, task_id, "SET_STATE", {"state": state}, "agent_auto")
+    return f"SET_STATE={state}"
+
+
+def set_led_color(device_id: str, r: int, g: int, b: int, brightness: int) -> str:
+    """设置 LED 颜色。"""
+    task_id = f"auto_{int(time.time())}"
+    params = {"r": r, "g": g, "b": b, "brightness": brightness}
+    publish_task(device_id, task_id, "SET_COLOR", params, "agent_auto")
+    return f"SET_COLOR r={r} g={g} b={b} brightness={brightness}"
+
+
+def speak(text: str) -> str:
+    """播报语音。"""
+    publish_speech(text)
+    return f"speech: {text}"
+
+
+TOOL_FN_MAP: dict = {
+    "set_led_state": set_led_state,
+    "set_led_color": set_led_color,
+    "speak": speak,
+}

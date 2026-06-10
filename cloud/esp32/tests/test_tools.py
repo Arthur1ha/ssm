@@ -82,3 +82,68 @@ class TestPublishSpeech:
             tools.publish_speech("你好")
         payload = json.loads(mqtt.publish.call_args[0][1])
         assert "audio" not in payload
+
+
+class TestSetLedState:
+    def test_publishes_set_state_action(self):
+        mqtt = make_mock_mqtt()
+        tools.set_led_state("esp32_desk_led", "BRIGHT")
+        payload = json.loads(mqtt.publish.call_args[0][1])
+        assert payload["action"] == "SET_STATE"
+        assert payload["params"]["state"] == "BRIGHT"
+
+    def test_correct_topic(self):
+        mqtt = make_mock_mqtt()
+        tools.set_led_state("esp32_desk_led", "OFF")
+        topic = mqtt.publish.call_args[0][0]
+        assert topic.startswith("ssm/task/esp32_desk_led/")
+
+    def test_returns_string(self):
+        make_mock_mqtt()
+        result = tools.set_led_state("esp32_desk_led", "DIM")
+        assert isinstance(result, str)
+
+
+class TestSetLedColor:
+    def test_publishes_set_color_action(self):
+        mqtt = make_mock_mqtt()
+        tools.set_led_color("esp32_desk_led", 255, 160, 60, 160)
+        payload = json.loads(mqtt.publish.call_args[0][1])
+        assert payload["action"] == "SET_COLOR"
+        assert payload["params"] == {"r": 255, "g": 160, "b": 60, "brightness": 160}
+
+    def test_correct_topic(self):
+        mqtt = make_mock_mqtt()
+        tools.set_led_color("esp32_desk_led", 0, 0, 0, 0)
+        topic = mqtt.publish.call_args[0][0]
+        assert topic.startswith("ssm/task/esp32_desk_led/")
+
+    def test_returns_string(self):
+        make_mock_mqtt()
+        result = tools.set_led_color("esp32_desk_led", 255, 200, 100, 180)
+        assert isinstance(result, str)
+
+
+class TestSpeakTool:
+    def test_calls_publish_speech_internally(self):
+        make_mock_mqtt()
+        with patch("cloud.esp32.tts.synthesize", return_value=None):
+            result = tools.speak("灯已打开")
+        assert isinstance(result, str)
+
+
+class TestToolFnMap:
+    def test_all_tools_present(self):
+        assert "set_led_state" in tools.TOOL_FN_MAP
+        assert "set_led_color" in tools.TOOL_FN_MAP
+        assert "speak" in tools.TOOL_FN_MAP
+
+    def test_all_callables(self):
+        for name, fn in tools.TOOL_FN_MAP.items():
+            assert callable(fn), f"{name} 应为可调用对象"
+
+    def test_tool_descriptions_is_string(self):
+        assert isinstance(tools.TOOL_DESCRIPTIONS, str)
+        assert "set_led_state" in tools.TOOL_DESCRIPTIONS
+        assert "set_led_color" in tools.TOOL_DESCRIPTIONS
+        assert "speak" in tools.TOOL_DESCRIPTIONS
