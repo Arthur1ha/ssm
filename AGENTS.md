@@ -9,9 +9,10 @@
 **核心业务逻辑**：
 1. ESP32 启动时探测引脚 → 向 broker 发布已接设备的 manifest（retained）
 2. 手机 PWA 订阅 `ssm/agents/#`，自动发现所有在线设备，按 GPS 距离排序
-3. 用户语音/文字 → `/api/nlu` 解析意图 → 编排器 Planner→Dispatcher→Evaluator→Responder 执行并反馈
-4. 传感器事件也触发编排器自动决策（如变暗自动开灯）
+3. 用户语音/文字 → `/api/intent` 解析意图 → 编排器 Planner→Dispatcher→Evaluator→Responder 执行并反馈
+4. 传感器事件也触发云端 ESP32 智能体自动决策（如变暗自动开灯）
 5. 云端离线时 ESP32 本地规则接管（兜底层）
+6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{slug}/agent`）暴露能力，供编排器与 PWA 动态发现
 
 ---
 
@@ -23,7 +24,9 @@
 | 边缘库 | `umqtt.robust`、`neopixel`、`machine`、`ujson` | 内置于 MicroPython |
 | 消息代理 | Mosquitto | 运行于云服务器 `47.116.137.202`，TCP 1883 / WS 9001 |
 | 云端 AI | LangGraph + LangChain + ChatOpenAI（兼容接口） | langgraph≥0.2、langchain≥0.3 |
-| LLM | NVIDIA OpenAI-compatible API，`deepseek-ai/deepseek-v4-pro` | 见 `cloud/.env: MODEL_LIST` |
+| LLM（编排/Go2/ESP32 智能体） | 火山方舟 Ark `deepseek-v4-flash` / `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
+| LLM（意图解析 `/api/intent`） | 腾讯混元 MaaS `hy3-preview`（独立通道） | 见 `cloud/.env: CHAT_MODEL` |
+| Go2 机器狗 | `unitree-webrtc-connect`（WebRTC）+ YOLO（ultralytics）视觉 | HTTP REST，非 MQTT |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
 | 手机 PWA | React 18（无构建，Babel standalone） + MQTT.js | React 18.3.1、mqtt.js 5.3.4 |
 | Python 环境 | uv 管理，Python 3.13 | `pyproject.toml` + `uv.lock` |
@@ -46,27 +49,41 @@ ssm/
 │   ├── boot.py          ← WiFi 连接（先于 main.py 执行）
 │   └── main.py          ← 主循环入口
 ├── cloud/               ← 云端服务（跑在服务器上）
-│   ├── .env             ← LLM API Key、MQTT 地址、MODEL_LIST
-│   ├── api/
-│   │   └── main.py      ← FastAPI：/api/nlu、/api/rules、/api/devices
-│   └── orchestrator/
-│       ├── main.py      ← MQTT 事件循环，路由 RuleEngine / DeskAgent
-│       ├── desk_agent.py← 桌面空间智能体：sense→reason→act
-│       ├── graph.py     ← LangGraph 图：Planner→Dispatcher→Evaluator→Responder
-│       ├── tools.py     ← MQTT 发布辅助函数（供图节点使用）
-│       ├── shared_state.py ← 线程安全传感器/执行器快照
-│       ├── rule_engine.py  ← 规则匹配引擎
-│       └── tts.py       ← TTS 合成封装
+│   ├── .env             ← LLM API Key、MQTT 地址、MODEL_LIST / CHAT_MODEL（见 .env.example）
+│   ├── api/             ← FastAPI 聚合入口（端口 8082），装配下面所有 router
+│   │   ├── main.py      ← app 装配 + ESP32 MQTT 桥（订阅 manifest/state/event/result）
+│   │   ├── nlu.py       ← `POST /api/intent` 意图解析（腾讯混元 MaaS）
+│   │   ├── rules.py     ← `/api/rules` 自动化规则 CRUD
+│   │   └── devices.py   ← `/api/devices` + `/api/devices/{slug}/agent`（★ A2A Agent Card）
+│   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + LangGraph）
+│   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 编排图
+│   │   ├── graph.py     ← LangGraph：Planner→Dispatcher→Evaluator→Responder（支持 ESP32/MQTT 与 Go2/HTTP）
+│   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助（供图节点使用）
+│   │   ├── shared_state.py ← 线程安全设备/任务快照（合并 MQTT manifest + devices.json）
+│   │   ├── devices.json ← 文件型设备注册表（go2 等非 MQTT 设备）
+│   │   ├── rules.json   ← 自动化规则存储
+│   │   └── rule_engine.py ← ⚠️ 当前无任何引用（遗留代码，勿依赖）
+│   ├── esp32/           ← ESP32 桌面空间智能体（云端侧，原 orchestrator/desk_agent）
+│   │   ├── agent.py     ← 带 persona 的 sense→reason→act 智能体
+│   │   ├── router.py    ← `/api/esp32/intents`
+│   │   ├── state.py     ← ESP32 设备/任务状态
+│   │   ├── tools.py     ← MQTT 发布辅助
+│   │   └── tts.py       ← TTS 合成封装
+│   └── go2/             ← Go2 机器狗智能体（HTTP，非 MQTT）
+│       ├── agent.py     ← Planner→Executor LangGraph（独立于编排器）
+│       ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
+│       ├── agentcore/   ← 智能体内核（当前 go2 专属）：soul（性格+演化）、memory（episode/spatial/daily_summary）、tools、skills（vision/reactive）
+│       ├── navigation/  ← astar / frontier / occupancy_grid / navigator / drive
+│       └── connection/  ← webrtc / video / sensors / fsm
 ├── app/                 ← 用户端 PWA（跑在手机/浏览器）
-│   ├── index.html
-│   ├── manifest.json
-│   ├── sw.js
-│   ├── styles/app.css
+│   ├── index.html / manifest.json / sw.js / styles/app.css
 │   └── src/
-│       ├── app.jsx      ← ★ 主 React 应用（雷达、设备、规则、对话）
-│       ├── MqttBus.js   ← MQTT 连接与发布/订阅封装
-│       ├── AgentRegistry.js ← 设备注册表
-│       └── ISMTracker.js    ← 设备状态跟踪
+│       ├── app.jsx      ← ★ 主 React 应用（路由、MQTT 引导、聊天状态）
+│       ├── config.js    ← Broker 地址、阈值等前端配置
+│       ├── MqttBus.js / AgentRegistry.js / ISMTracker.js ← MQTT 总线 / 设备注册表 / 状态跟踪
+│       ├── pages/       ← DiscoverPage、DevicesPage、DeviceDetailPage、Go2Page、RulesPage
+│       ├── components/  ← RadarScan、DeviceCard、ChatPanel/ChatSheet、TabBar 等
+│       └── utils/       ← geo（haversine）、agentMeta、audio
 ├── protocol/            ← MQTT 协议契约（单一真实来源）
 │   └── topics.md        ← 所有 topic 格式定义
 ├── infra/               ← 运维与部署配置
@@ -75,9 +92,10 @@ ssm/
 │       └── passwd       ← MQTT 认证文件
 ├── Makefile             ← 统一服务管理
 ├── pyproject.toml       ← Python 依赖（uv 管理）
-└── docs/
-    └── ARCHITECTURE.md  ← 通信架构单一真实来源
+└── docs/                ← superpowers/（plans + specs）、research/、*.html 状态机图（无 ARCHITECTURE.md）
 ```
+
+**云端有三个 LLM 智能体**：编排器（`orchestrator/`，统筹全局）、ESP32 桌面智能体（`esp32/agent.py`，自主感知决策）、Go2 机器狗（`go2/agent.py`）。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。
 
 **当前接线**（以 `config.py` 为准）：
 
@@ -122,13 +140,13 @@ ssm/
 
 ## 架构决策
 
-### 1. 分布式多智能体 + MQTT 总线（核心）
+### 1. 分布式多智能体总线：控制面 MQTT / 数据面按设备本性（核心）
 
-**决策**：所有智能体（ESP32、编排器、PWA）只通过 MQTT topic 通信，无直接 RPC 调用。
+**决策**：分两个面——**控制面**（发现、在线状态、能力声明 card）所有智能体统一走 MQTT（retained + LWT，单一真相）；**数据面**（实际调用）按设备本性选传输：ESP32 走 MQTT `task`/`result`，Go2 走 HTTP/SSE（视频流、地图、流式对话天然需要 HTTP）。
 
-**原因**：天然解耦——新加一个 ESP32 只需发布 manifest，其余节点自动感知；编排器宕机不影响 ESP32 本地规则；各层可独立替换。
+**原因**：天然解耦——新加一个智能体只需发布 manifest/card，其余节点自动感知；编排器宕机不影响 ESP32 本地规则。控制面统一保证"谁在线"只有一套真相；数据面分离让重设备（Go2）保留流式能力。
 
-**避免**：ESP32 直接调用 HTTP API、编排器直接操作 GPIO、PWA 轮询 REST 状态。
+**避免**：ESP32 直接调用 HTTP API、编排器直接操作 GPIO、PWA 轮询 REST 状态；把控制面（card/在线状态）做成文件或 HTTP（必须在 MQTT retained）；让 Go2 这类 HTTP 调用**同步阻塞**编排器事件循环（须线程池+超时）。
 
 ### 2. ESP32 三层解耦（BSM / ISM / TriggerMap）
 
@@ -178,7 +196,7 @@ make logs
 # [Manifest] Published N manifests for esp32_desk
 
 # PWA 验证：打开 DevTools Console 观察 MQTT 消息收发
-make ngrok-url
+make tunnel-url
 ```
 
 **改动验证节奏**：每次只改一处，5 分钟内能在 PWA 或串口看到结果。不能快速验证的改动说明粒度过大。

@@ -167,11 +167,38 @@ class Drive:
                 for h in history
             ) or "  （尚未执行任何步骤）"
 
-            # 射线投射：告诉 LLM 各方向实际可行距离，让方向选择有依据
+            # 射线投射：告诉 LLM 各方向实际可行距离，并按开阔度分级
             grid_obj = go2.occupancy_grid
             if grid_obj and odom:
                 dir_free = frontier_mod.raycast_directions(grid_obj, odom)
-                dir_str  = "  ".join(f"{d}:{v:.1f}m" for d, v in dir_free.items())
+                _adj = {
+                    "forward":        ("forward_left",  "forward_right"),
+                    "forward_right":  ("forward",       "right"),
+                    "right":          ("forward_right", "backward_right"),
+                    "backward_right": ("right",         "backward"),
+                    "backward":       ("backward_right","backward_left"),
+                    "backward_left":  ("backward",      "left"),
+                    "left":           ("backward_left", "forward_left"),
+                    "forward_left":   ("left",          "forward"),
+                }
+                open_dirs, pass_dirs, block_dirs = [], [], []
+                for d, v in dir_free.items():
+                    a1, a2   = _adj[d]
+                    adj_min  = min(dir_free[a1], dir_free[a2])
+                    if v >= 1.5 and adj_min >= 0.6:
+                        open_dirs.append(f"{d}({v:.1f}m)")
+                    elif v >= 0.8:
+                        pass_dirs.append(f"{d}({v:.1f}m)")
+                    else:
+                        block_dirs.append(f"{d}({v:.1f}m)")
+                dir_lines = []
+                if open_dirs:
+                    dir_lines.append(f"  ★开阔（优先）：{', '.join(open_dirs)}")
+                if pass_dirs:
+                    dir_lines.append(f"  ○可通行：{', '.join(pass_dirs)}")
+                if block_dirs:
+                    dir_lines.append(f"  ✗受阻：{', '.join(block_dirs)}")
+                dir_str = "\n".join(dir_lines) if dir_lines else "所有方向均受阻"
             else:
                 dir_str = "地图未就绪"
 
@@ -183,12 +210,15 @@ class Drive:
                 f"你正在自主探索环境，当前第 {step + 1} 步（最多 {_MAX_STEPS} 步）。\n"
                 f"当前位置：{odom_str}\n"
                 f"已知地点：{loc_str}\n"
-                f"各方向可行空间：{dir_str}\n"
+                f"各方向可行空间（★开阔 = 自身及相邻方向均宽敞，优先选择；"
+                f"数值仅代表射线通畅距离，不保证目的地完全可达）：\n{dir_str}\n"
                 f"当前观察：{last_obs}\n\n"
                 f"本次探索历史：\n{history_str}\n\n"
                 f"可用工具：\n"
                 f"  explore_direction → direction: {'/'.join(frontier_mod.DIRECTIONS)}\n"
-                f"                      选择想去的方向，系统根据地图自动算出安全目标并导航过去\n"
+                f"                      优先选★开阔方向；避免朝向家具底部、墙角或狭窄通道\n"
+                f"                      若返回「路径不通」请立即改选其他★开阔或○可通行方向\n"
+                f"                      系统根据地图自动算出安全目标并导航过去\n"
                 f"  go2_sport         → cmd: {', '.join(sorted(_VALID_SPORT_CMDS))}\n"
                 f"  go2_observe       → question: 想观察什么\n"
                 f"  navigator_go      → name: 导航到已知地点\n"
@@ -308,6 +338,17 @@ class Drive:
             return f"{nav_summary} | 到达后观察：{observation}"
 
         target_x, target_y = target
+
+        # A* 可达性预检查：射线通畅不等于路径可规划，提前排除障碍包围的目的地
+        from cloud.go2.navigation.astar import astar
+        from cloud.go2.navigation.navigator import _nearest_free_cell
+        start_cell = grid_obj.odom_to_grid(odom["x"], odom["y"])
+        goal_raw   = grid_obj.odom_to_grid(target_x, target_y)
+        goal_cell  = _nearest_free_cell(grid_obj, goal_raw, max_r=20)
+        if goal_cell is None or not astar(grid_obj.grid, start_cell, goal_cell):
+            logger.info("[Drive] explore_direction=%s A*预检查不通，跳过导航", direction)
+            return f"方向「{direction}」路径不通（目的地被障碍包围），请选其他方向"
+
         tmp_name = f"_explore_{int(time.time())}"
         spatial_memory.tag_location(tmp_name, {"x": target_x, "y": target_y, "heading": 0.0})
 
