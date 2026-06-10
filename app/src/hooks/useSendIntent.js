@@ -20,14 +20,20 @@ function useSendIntent() {
       mqttBus.unsubscribe(feedbackTopic);
     };
 
+    let finished = false;
+    let timeoutId;
+
     const done = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutId);
       cleanup();
       thinkingRef.current = false;
       setThinking(false);
       setThinkingText('');
     };
 
-    let timeoutId = setTimeout(() => {
+    timeoutId = setTimeout(() => {
       done();
       onMessage?.('操作超时，设备可能无响应');
     }, 60000);
