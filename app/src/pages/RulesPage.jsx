@@ -1,6 +1,6 @@
 const { useState: useStateR, useEffect: useEffectR } = React;
 
-function RulesScreen() {
+function RulesScreen({ embedded = false }) {
   const [rules, setRules] = useStateR([]);
 
   const load = async () => {
@@ -27,7 +27,7 @@ function RulesScreen() {
   };
 
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ position: embedded ? 'relative' : 'absolute', inset: embedded ? 'unset' : 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
         background: 'radial-gradient(50% 30% at 50% 5%, rgba(200,255,62,0.1), transparent 70%)' }}/>
       <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
@@ -37,7 +37,7 @@ function RulesScreen() {
         </span>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
-        paddingBottom: 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
+        paddingBottom: embedded ? '16px' : 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
         {rules.length === 0 ? (
           <div style={{ padding: '60px 20px', textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: 13, lineHeight: 2 }}>
             还没有规则<br/>
