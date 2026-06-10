@@ -1,10 +1,21 @@
-/* SSM PWA — App 根组件：路由、MQTT 引导、聊天历史状态 */
+/* SSM PWA — App 根组件：单主屏 + Hash 路由全屏设备页 */
 const { useState, useEffect, useRef } = React;
 
-/* ── Hash 路由 ──────────────────────────────────────────────────── */
+// LIME 来自 config.js 全局，此处不重复声明
+const EXCL_TYPES = new Set(['decision', 'supervisor']);
+const EXCL_PLAT  = new Set(['pc', 'pwa']);
+const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
+
+const GO2_STATIC_DEVICE = {
+  unit_id: 'go2', agent_id: 'go2', slug: 'go2',
+  name: 'Go2 Air', agent_type: 'robot',
+  capabilities: ['MOVE', 'STAND_UP', 'SIT_DOWN', 'HELLO', 'STRETCH', 'DANCE'],
+};
+
+/* ── Hash 路由 ── */
 function useHash() {
-  const [hash, setHash] = React.useState(window.location.hash);
-  React.useEffect(() => {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
     const handler = () => setHash(window.location.hash);
     window.addEventListener('hashchange', handler);
     return () => window.removeEventListener('hashchange', handler);
@@ -12,91 +23,27 @@ function useHash() {
   return hash;
 }
 
-/* ── App ─────────────────────────────────────────────────────────── */
-const EXCL_TYPES = new Set(['decision', 'supervisor']);
-const EXCL_PLAT  = new Set(['pc', 'pwa']);
-
-const GO2_STATIC_DEVICE = {
-  unit_id:      "go2",
-  agent_id:     "go2",
-  slug:         "go2",
-  name:         "Go2 Air",
-  agent_type:   "robot",
-  capabilities: ["MOVE", "STAND_UP", "SIT_DOWN", "HELLO", "STRETCH", "DANCE"],
-};
-
+/* ── App ── */
 function App() {
-  const [tab, setTab]                         = useState('discover');
-  const [sheetOpen, setSheetOpen]             = useState(false);
-  const [connected, setConnected]             = useState(false);
-  const [agents, setAgents]                   = useState([GO2_STATIC_DEVICE]);
-  const [unitData, setUnitData]               = useState({});
-  const [phoneLoc, setPhoneLoc]               = useState(null);
-  const [locError, setLocError]               = useState(null);
-  const [discoveryDevice, setDiscoveryDevice] = useState(null);
-  const [chatHistories, setChatHistories]     = useState({
-    main: [{ role: 'assistant', agent: 'orchestrator', agentName: 'SSM助手', text: '你好，需要我做什么？', actions: [] }],
-    go2:  [{ role: 'assistant', agent: 'go2', agentName: 'Go2', text: '需要 Go2 做什么？', actions: [] }],
-  });
+  const [connected, setConnected]   = useState(false);
+  const [agents, setAgents]         = useState([GO2_STATIC_DEVICE]);
+  const [unitData, setUnitData]     = useState({});
+  const [activityLog, setActivityLog] = useState([]);
+  const [rulesOpen, setRulesOpen]   = useState(false);
+  const [pendingRule, setPendingRule] = useState(null);
+  const [savingRule, setSavingRule]  = useState(false);
 
-  const appendMessage = (context, msg) => {
-    setChatHistories(h => ({ ...h, [context]: [...(h[context] ?? []), msg] }));
-  };
+  const { thinking, thinkingText, send } = useSendIntent();
+  const currentHash = useHash();
+  const agentsRef   = useRef([]);
+  const prevStatesRef = useRef({});
 
-  const currentHash      = useHash();
-  const seenPopupDevices = useRef(new Set());
-  const agentsRef        = useRef([]);
-  const phoneLocRef      = useRef(null);
-  const onlineIdsRef     = useRef(new Set());
+  useEffect(() => { agentsRef.current = agents; }, [agents]);
 
-  useEffect(() => { agentsRef.current  = agents;   }, [agents]);
-  useEffect(() => { phoneLocRef.current = phoneLoc; }, [phoneLoc]);
+  const appendActivity = (entry) =>
+    setActivityLog(prev => [...prev.slice(-19), { ...entry, ts: Date.now() }]);
 
-  useEffect(() => {
-    const loc = phoneLocRef.current;
-    const currentIds = new Set(agents.map(a => a.unit_id || a.agent_id));
-    currentIds.forEach(uid => {
-      if (!onlineIdsRef.current.has(uid)) seenPopupDevices.current.delete(uid);
-    });
-    onlineIdsRef.current = currentIds;
-    if (!loc) return;
-    agents.forEach(agent => {
-      if (agent._lat == null || agent._lng == null) return;
-      const uid = agent.unit_id || agent.agent_id;
-      if (seenPopupDevices.current.has(uid)) return;
-      const dist = haversine(loc.lat, loc.lng, agent._lat, agent._lng);
-      if (dist < POPUP_RADIUS_M) {
-        seenPopupDevices.current.add(uid);
-        setDiscoveryDevice(prev => prev || agent);
-      }
-    });
-  }, [agents]);
-
-  useEffect(() => {
-    if (!navigator.geolocation) { setLocError('浏览器不支持定位'); return; }
-    const watchId = navigator.geolocation.watchPosition(
-      pos => {
-        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        setPhoneLoc(loc);
-        console.log('[GPS] phone loc:', loc, 'agents:', agentsRef.current.length);
-        agentsRef.current.forEach(agent => {
-          const uid = agent.unit_id || agent.agent_id;
-          if (agent._lat == null || agent._lng == null) { console.log('[GPS] skip (no loc):', uid); return; }
-          const dist = Math.round(haversine(loc.lat, loc.lng, agent._lat, agent._lng));
-          console.log('[GPS]', uid, 'dist:', dist, 'm / threshold:', POPUP_RADIUS_M, 'm | seen:', seenPopupDevices.current.has(uid));
-          if (seenPopupDevices.current.has(uid)) return;
-          if (dist < POPUP_RADIUS_M) {
-            seenPopupDevices.current.add(uid);
-            setDiscoveryDevice(prev => prev || agent);
-          }
-        });
-      },
-      err => { console.warn('[GPS] error:', err.code, err.message); setLocError(err.code === 1 ? '位置权限被拒绝' : '定位失败'); },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
-
+  /* ── MQTT 初期化 ── */
   useEffect(() => {
     const registry   = new AgentRegistry(mqttBus);
     const ismTracker = new ISMTracker(mqttBus);
@@ -108,22 +55,12 @@ function App() {
       setAgents([GO2_STATIC_DEVICE, ...mqttAgents]);
     });
 
-    registry.addEventListener('reconnect', ({ detail }) => {
-      agentsRef.current.forEach(agent => {
-        if (agent.parent_id === detail.parentId) {
-          const uid = agent.unit_id || agent.agent_id;
-          seenPopupDevices.current.delete(uid);
-          onlineIdsRef.current.delete(uid);
-        }
-      });
-    });
-
-    let pendingUnitData = false;
+    let pendingSnap = false;
     ismTracker.addEventListener('update', () => {
-      if (pendingUnitData) return;
-      pendingUnitData = true;
+      if (pendingSnap) return;
+      pendingSnap = true;
       requestAnimationFrame(() => {
-        pendingUnitData = false;
+        pendingSnap = false;
         const snap = {};
         ismTracker.unitIds().forEach(uid => {
           snap[uid] = {
@@ -131,6 +68,16 @@ function App() {
             event:  ismTracker.get(uid, 'event'),
             report: ismTracker.get(uid, 'report'),
           };
+          /* ISM 状态变化 → 追加活动事件 */
+          const ism = snap[uid].state?.ism;
+          if (ism && ism !== prevStatesRef.current[uid]) {
+            if (prevStatesRef.current[uid] !== undefined) {
+              const agent = agentsRef.current.find(a => (a.unit_id || a.agent_id) === uid);
+              const name  = agent?.name || uid;
+              appendActivity({ type: 'event', text: `${name} → ${ism}` });
+            }
+            prevStatesRef.current[uid] = ism;
+          }
         });
         setUnitData({ ...snap });
       });
@@ -147,24 +94,9 @@ function App() {
     });
     mqttBus.addEventListener('disconnect', () => setConnected(false));
     mqttBus.addEventListener('reconnect',  () => setConnected(false));
-
     mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
 
-    mqttBus.subscribe('ssm/agents/go2/thought');
-    const go2ThoughtListener = (e) => {
-      const ev = e.detail;
-      if (!ev || !ev.type) return;
-      if (ev.type === 'think') {
-        appendMessage('main', { role: 'assistant', agent: 'go2', agentName: 'Go2', text: ev.text });
-      } else if (ev.type === 'act') {
-        appendMessage('main', { role: 'step', agent: 'go2', text: ev.text });
-      }
-    };
-    mqttBus.addEventListener('topic:ssm/agents/go2/thought', go2ThoughtListener);
-    return () => mqttBus.removeEventListener('topic:ssm/agents/go2/thought', go2ThoughtListener);
-  }, []);
-
-  useEffect(() => {
+    /* desk TTS */
     const handleSpeech = (e) => {
       const { audio } = e.detail || {};
       if (audio) playAudioB64(audio);
@@ -173,71 +105,300 @@ function App() {
     return () => mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
   }, []);
 
+  /* ── 规则保存 ── */
+  const handleConfirmRule = async () => {
+    if (!pendingRule) return;
+    setSavingRule(true);
+    try {
+      await fetch('/api/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pendingRule),
+      });
+      const saved = pendingRule;
+      setPendingRule(null);
+      appendActivity({ type: 'ai', text: `规则「${saved.name}」已保存，条件触发时自动执行。` });
+    } catch {
+      appendActivity({ type: 'ai', text: '规则保存失败，请重试。' });
+    }
+    setSavingRule(false);
+  };
+
+  const handleCancelRule = () => {
+    setPendingRule(null);
+    appendActivity({ type: 'ai', text: '已取消，规则未保存。' });
+  };
+
+  /* ── 主屏发送 ── */
+  const handleSend = (text) => {
+    const t = text.trim();
+    if (!t) return;
+    appendActivity({ type: 'user', text: t });
+
+    const actuators = agentsRef.current.filter(a => a.agent_type === 'actuator');
+    if (actuators.length === 0) {
+      appendActivity({ type: 'ai', text: '附近没有发现可控设备，请确认 ESP32 已上线。' });
+      return;
+    }
+
+    send(t, {
+      onMessage:     (msg)  => appendActivity({ type: 'ai', text: msg }),
+      onPendingRule: (rule) => setPendingRule(rule),
+    });
+  };
+
+  /* ── Hash 路由：全屏设备页 ── */
   const hashMatch = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (hashMatch) {
     const slug = hashMatch[1];
-    if (slug === "go2") {
-      return <Go2DevicePage
-        onBack={() => navigate('#')}
-        messages={chatHistories.go2}
-        onAppend={msg => appendMessage('go2', msg)}
-      />;
+    if (slug === 'go2') {
+      return <Go2DevicePage onBack={() => navigate('#')}/>;
     }
     const device = agents.find(a => a.slug === slug || (a.unit_id || a.agent_id) === slug);
     if (!device) { navigate('#'); return null; }
-    const devCtx = device.unit_id || slug;
     return (
       <DeviceDetailPage
         slug={slug}
         device={device}
         unitData={unitData}
         onBack={() => navigate('#')}
-        messages={chatHistories[devCtx] ?? [{ role: 'assistant', agent: devCtx, agentName: device.name, text: `你好，我是 ${device.name}，有什么可以帮你？` }]}
-        onAppend={msg => appendMessage(devCtx, msg)}
       />
     );
   }
 
+  /* ── 主屏布局 ── */
+  const robots    = agents.filter(a => a.agent_type === 'robot');
+  const actuators = agents.filter(a => a.agent_type === 'actuator');
+  const sensors   = agents.filter(a => a.agent_type !== 'actuator' && a.agent_type !== 'robot');
+
+  const sectionLabel = (text) => (
+    <div style={{ padding: '12px 20px 6px' }}>
+      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+        color: 'rgba(255,255,255,0.28)', fontWeight: 600 }}>{text}</span>
+    </div>
+  );
+
   return (
     <div style={{
-      position: 'fixed', inset: 0, overflow: 'hidden',
-      background: '#0B0B0E', color: '#fff',
+      position: 'fixed', inset: 0, background: '#0B0B0E', color: '#fff',
       fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif',
       paddingTop: 'env(safe-area-inset-top, 0px)',
+      display: 'flex', flexDirection: 'column',
     }}>
-      <div style={{ position: 'relative', height: '100%' }}>
-        {tab === 'discover' && (
-          <DiscoverScreen agents={agents} connected={connected} phoneLoc={phoneLoc} locError={locError}/>
+
+      {/* 头部 */}
+      <div style={{
+        padding: '14px 20px 10px', display: 'flex',
+        alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>SSM</span>
+          <div style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: connected ? LIME : '#FF5252',
+            boxShadow: connected ? `0 0 6px ${LIME}` : 'none',
+          }}/>
+        </div>
+        <button onClick={() => setRulesOpen(true)} style={{
+          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
+          color: 'rgba(255,255,255,0.55)', borderRadius: 10, padding: '6px 10px',
+          cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
+          display: 'flex', alignItems: 'center', gap: 5,
+        }}>
+          <Icon name="zap" size={13}/>
+          规则
+        </button>
+      </div>
+
+      {/* 可滚动主体 */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+
+        {/* 设备分组 */}
+        {agents.length === 0 ? (
+          <div style={{ padding: '40px 20px', textAlign: 'center',
+            color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>
+            等待设备上线…
+          </div>
+        ) : (
+          <div style={{ padding: '0 14px' }}>
+            {robots.length > 0 && (
+              <>
+                {sectionLabel('机器人')}
+                {robots.map(a => {
+                  const meta = getAgentMeta(a);
+                  const slug = a.slug || a.unit_id || a.agent_id;
+                  return (
+                    <div key={slug} onClick={() => navigate('#/devices/' + slug)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 12,
+                        padding: '12px 14px', marginBottom: 8, borderRadius: 18, cursor: 'pointer',
+                        background: `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`,
+                        border: `1px solid ${meta.color}40`,
+                      }}>
+                      <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
+                        background: meta.color, color: '#0B0B0E',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <Icon name={meta.icon} size={19}/>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500 }}>{a.name || slug}</div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', marginTop: 2 }}>
+                          {meta.label} · 点击控制
+                        </div>
+                      </div>
+                      <Icon name="arrow" size={16} color="rgba(255,255,255,0.3)"/>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+            {actuators.length > 0 && (
+              <>
+                {sectionLabel('执行器')}
+                {actuators.map(a => (
+                  <ActuatorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>
+                ))}
+              </>
+            )}
+            {sensors.length > 0 && (
+              <>
+                {sectionLabel('传感器')}
+                {sensors.map(a => (
+                  <SensorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>
+                ))}
+              </>
+            )}
+          </div>
         )}
-        {tab === 'devices' && (
-          <DevicesScreen agents={agents} unitData={unitData}/>
-        )}
-        {tab === 'rules' && <RulesScreen />}
-        <PersistentInputBar onOpen={() => setSheetOpen(true)}/>
-        <TabBar tab={tab} setTab={setTab} deviceBadge={agents.length}/>
-        {discoveryDevice && (
-          <div style={{ position: 'absolute', inset: 0, zIndex: 40,
-            background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(3px)' }}
-            onClick={() => setDiscoveryDevice(null)}>
-            <div onClick={e => e.stopPropagation()}>
-              <DeviceDiscoveryCard
-                agent={discoveryDevice}
-                unitData={unitData}
-                onDismiss={() => setDiscoveryDevice(null)}
-                onGo={() => { setTab('devices'); setDiscoveryDevice(null); }}
-              />
+
+        {/* 活动分隔线 */}
+        <div style={{ padding: '8px 20px 4px', marginTop: 4 }}>
+          <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+            color: 'rgba(255,255,255,0.2)', fontWeight: 600 }}>活动</span>
+        </div>
+
+        {/* 活动流 */}
+        <ActivityFeed
+          entries={activityLog}
+          thinking={thinking}
+          thinkingText={thinkingText}
+        />
+
+        {/* 规则确认卡 */}
+        {pendingRule && (
+          <div style={{ padding: '0 16px 10px' }}>
+            <div style={{
+              background: 'rgba(200,255,62,0.07)', border: '1px solid rgba(200,255,62,0.22)',
+              borderRadius: 18, padding: '14px 16px',
+            }}>
+              <div style={{ fontSize: 12, color: LIME, fontWeight: 600, marginBottom: 8 }}>
+                规则预览 · 确认保存？
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{pendingRule.name}</div>
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 12 }}>
+                当 {pendingRule.trigger?.agent_tag}.{pendingRule.trigger?.event}
+                {' → '}
+                {pendingRule.action?.resource_tag} / {pendingRule.action?.cmd}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={handleCancelRule} style={{
+                  flex: 1, padding: '9px 0', borderRadius: 999, fontSize: 13,
+                  background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
+                  color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontFamily: 'inherit',
+                }}>取消</button>
+                <button onClick={handleConfirmRule} disabled={savingRule} style={{
+                  flex: 2, padding: '9px 0', borderRadius: 999, fontSize: 13, fontWeight: 600,
+                  background: LIME, border: 'none', color: '#0B0B0E',
+                  cursor: 'pointer', fontFamily: 'inherit',
+                  boxShadow: '0 0 16px rgba(200,255,62,0.3)',
+                }}>{savingRule ? '保存中...' : '确认保存'}</button>
+              </div>
             </div>
           </div>
         )}
+
+        {/* 空态快捷建议 */}
+        {activityLog.length === 0 && !thinking && (
+          <div style={{ padding: '8px 12px', display: 'flex', gap: 6,
+            overflowX: 'auto', scrollbarWidth: 'none' }}>
+            {SUGGESTIONS.map(s => (
+              <button key={s} onClick={() => handleSend(s)} style={{
+                padding: '6px 12px', borderRadius: 999, whiteSpace: 'nowrap',
+                background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
+                color: 'rgba(255,255,255,0.6)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
+              }}>{s}</button>
+            ))}
+          </div>
+        )}
+
+        {/* 底部留白（防止内容被输入栏遮住） */}
+        <div style={{ height: 16 }}/>
       </div>
-      <ChatSheet
-        open={sheetOpen}
-        onClose={() => setSheetOpen(false)}
-        agents={agents}
-        unitData={unitData}
-        messages={chatHistories.main}
-        onAppend={msg => appendMessage('main', msg)}
-      />
+
+      {/* 常驻输入栏 */}
+      <MainInputBar onSend={handleSend} thinking={thinking}/>
+
+      {/* 规则抽屉 */}
+      <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>
+    </div>
+  );
+}
+
+/* ── 底部输入栏 ── */
+function MainInputBar({ onSend, thinking }) {
+  const [input, setInput] = useState('');
+
+  const handleSend = () => {
+    const t = input.trim();
+    if (!t || thinking) return;
+    setInput('');
+    onSend(t);
+  };
+
+  return (
+    <div style={{
+      flexShrink: 0, padding: '8px 12px',
+      paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
+      borderTop: '1px solid rgba(255,255,255,0.06)',
+      background: '#0B0B0E',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        background: 'rgba(30,29,38,0.95)',
+        border: '1px solid rgba(255,255,255,0.09)',
+        borderRadius: 999,
+      }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && !e.isComposing && handleSend()}
+          placeholder={thinking ? '处理中…' : '告诉我想要什么…'}
+          disabled={thinking}
+          style={{
+            flex: 1, background: 'transparent', border: 'none',
+            color: thinking ? 'rgba(255,255,255,0.35)' : '#fff',
+            fontSize: 14, fontFamily: 'inherit', outline: 'none',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+        />
+        <button
+          onClick={handleSend}
+          disabled={!input.trim() || thinking}
+          style={{
+            width: 38, height: 38, borderRadius: 999, flexShrink: 0,
+            background: input.trim() && !thinking ? LIME : 'rgba(255,255,255,0.08)',
+            color:      input.trim() && !thinking ? '#0B0B0E' : 'rgba(255,255,255,0.25)',
+            border: 'none',
+            cursor: input.trim() && !thinking ? 'pointer' : 'default',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: input.trim() && !thinking ? '0 0 18px rgba(200,255,62,0.35)' : 'none',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+        >
+          <Icon name="arrow" size={16} sw={2.2}/>
+        </button>
+      </div>
     </div>
   );
 }
