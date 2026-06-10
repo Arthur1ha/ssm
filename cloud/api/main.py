@@ -6,6 +6,8 @@ from pathlib import Path
 
 logging.getLogger("cloud").setLevel(logging.INFO)
 
+logger = logging.getLogger(__name__)
+
 _LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 
 
@@ -49,7 +51,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
-        print("[ESP32Agent MQTT] Connected and subscribed")
+        logger.info("[ESP32Agent MQTT] Connected and subscribed")
 
 
 def _on_esp32_message(client, userdata, msg):
@@ -88,16 +90,22 @@ def _on_esp32_message(client, userdata, msg):
 async def lifespan(app):
     logging.getLogger("uvicorn.access").addFilter(_DropSnapshotLogs())
 
-    # Go2 日志独立写 go2.log，不再冒泡到 uvicorn/api.log
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s", datefmt="%H:%M:%S")
+
+    # Go2 日志独立写 go2.log，不再冒泡到 uvicorn/api.log
     _go2_handler = logging.FileHandler(_LOG_DIR / "go2.log")
-    _go2_handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(name)s %(message)s",
-        datefmt="%H:%M:%S",
-    ))
+    _go2_handler.setFormatter(_fmt)
     _go2_logger = logging.getLogger("cloud.go2")
     _go2_logger.addHandler(_go2_handler)
     _go2_logger.propagate = False
+
+    # ESP32 日志独立写 esp32.log，不再冒泡到 uvicorn/api.log
+    _esp32_handler = logging.FileHandler(_LOG_DIR / "esp32.log")
+    _esp32_handler.setFormatter(_fmt)
+    _esp32_logger = logging.getLogger("cloud.esp32")
+    _esp32_logger.addHandler(_esp32_handler)
+    _esp32_logger.propagate = False
 
     global _esp32_mqtt_client
     broker_host = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
@@ -119,9 +127,9 @@ async def lifespan(app):
     try:
         _esp32_mqtt_client.connect(broker_host, broker_port, keepalive=60)
         _esp32_mqtt_client.loop_start()
-        print(f"[ESP32Agent MQTT] Connecting to {broker_host}:{broker_port}...")
+        logger.info("[ESP32Agent MQTT] Connecting to %s:%s...", broker_host, broker_port)
     except Exception as e:
-        print(f"[ESP32Agent MQTT] Connection failed: {e}")
+        logger.error("[ESP32Agent MQTT] Connection failed: %s", e)
 
     esp32_tools.init(_esp32_mqtt_client)
     go2_router_module.init_mqtt(_esp32_mqtt_client)
@@ -132,7 +140,7 @@ async def lifespan(app):
 
     _esp32_mqtt_client.loop_stop()
     _esp32_mqtt_client.disconnect()
-    print("[ESP32Agent MQTT] Disconnected")
+    logger.info("[ESP32Agent MQTT] Disconnected")
 
 
 app = FastAPI(lifespan=lifespan)

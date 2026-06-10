@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from cloud.esp32.agent import get_agent
 
-router = APIRouter()
+router = APIRouter(prefix="/api/esp32", tags=["esp32"])
 
 
 class RunRequest(BaseModel):
@@ -12,7 +12,7 @@ class RunRequest(BaseModel):
     device_ids: list = []
 
 
-@router.post("/api/esp32/intents")
+@router.post("/intents")
 async def esp32_run(req: RunRequest):
     agent = get_agent()
     if agent is None:

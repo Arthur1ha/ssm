@@ -8,7 +8,6 @@ from typing import Optional
 
 from cloud.go2.agentcore.memory.episode import EPISODES_DB
 from cloud.go2.agentcore.tools.tools import get_text_llm
-from cloud.go2.agentcore.soul import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +68,7 @@ async def generate_and_save(
         return None
 
     from langchain_core.messages import HumanMessage, SystemMessage
+    from cloud.go2.agentcore.soul import get_system_prompt
 
     episodes_text = "\n".join(episodes)
     prompt = (

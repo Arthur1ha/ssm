@@ -4,11 +4,14 @@ import json
 import queue
 import time
 import datetime
+import logging
 import threading
 from typing import Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger(__name__)
 
 from cloud.esp32.state import ESP32State
 from cloud.esp32 import tools as _tools
@@ -114,7 +117,7 @@ class ESP32Agent:
             idx_s, idx_e = content.find("["), content.rfind("]")
             cmds = json.loads(content[idx_s:idx_e + 1]) if idx_s != -1 else []
         except Exception as e:
-            print(f"[ESP32Agent] run_intent parse error: {e}")
+            logger.warning("run_intent parse error: %s", e)
             cmds = []
 
         task_ids = []
@@ -124,7 +127,7 @@ class ESP32Agent:
             task_id = f"{session_id}_t{i}"
             _tools.publish_task(cmd["device_id"], task_id, cmd["action"], cmd.get("params", {}), session_id)
             task_ids.append(task_id)
-            print(f"[ESP32Agent] intent → {cmd['device_id']} {cmd['action']} task_id={task_id}")
+            logger.info("intent → %s %s task_id=%s", cmd["device_id"], cmd["action"], task_id)
 
         return {"task_ids": task_ids, "status": "dispatched"}
 
@@ -274,7 +277,7 @@ class ESP32Agent:
             belief["ts"] = time.time()
             return belief
         except Exception as e:
-            print(f"[ESP32Agent] reason parse error: {e}")
+            logger.warning("reason parse error: %s", e)
             return None
 
     def _act(self, belief: dict, combo: str = ""):
@@ -308,13 +311,13 @@ class ESP32Agent:
             if cmd == "SET_STATE":
                 target_state = params.get("state", "").upper()
                 if current_ism and current_ism != target_state:
-                    print(f"[ESP32Agent] cooldown bypass: target={target_state} current={current_ism}, resend")
+                    logger.debug("cooldown bypass: target=%s current=%s, resend", target_state, current_ism)
                     self._cooldown[key] = now
                 else:
-                    print(f"[ESP32Agent] cooldown, skip ({key})")
+                    logger.debug("cooldown, skip (%s)", key)
                     return
             else:
-                print(f"[ESP32Agent] cooldown, skip ({key})")
+                logger.debug("cooldown, skip (%s)", key)
                 return
 
         self._cooldown[key] = now
@@ -323,13 +326,13 @@ class ESP32Agent:
 
         task_id = f"agent_auto_{int(now)}"
         _tools.publish_task(device, task_id, cmd, params, "agent_auto")
-        print(f"[ESP32Agent] act → {device} {cmd} {params}")
+        logger.info("act → %s %s %s", device, cmd, params)
 
     def _speak(self, text: str, priority: str = "normal"):
         if not text:
             return
         _tools.publish_speech(text, priority)
-        print(f"[ESP32Agent] speech → {text}")
+        logger.info("speech → %s", text)
 
     def _set_led_mood(self, mood: str):
         _tools.publish_led_mood(mood)
@@ -378,11 +381,11 @@ class ESP32Agent:
             resp = self._llm.invoke([HumanMessage(content=prompt)])
             return resp.content.strip()[:100]
         except Exception as e:
-            print(f"[ESP32Agent] summarize error: {e}")
+            logger.warning("summarize error: %s", e)
             return ""
 
     def _loop(self):
-        print("[ESP32Agent] sensor automation running")
+        logger.info("sensor automation running")
         _last_event_ts: dict[str, float] = {}
         DEBOUNCE_SECS     = 5
         OFFLINE_THRESHOLD = 120
@@ -400,18 +403,18 @@ class ESP32Agent:
                         continue
                     _last_event_ts[unit_id] = enqueue_ts
                     triggered_by_event = True
-                    print(f"[ESP32Agent] triggered by {unit_id}")
+                    logger.info("triggered by %s", unit_id)
                 except queue.Empty:
                     if time.time() - _last_any_event_ts > OFFLINE_THRESHOLD:
-                        print("[ESP32Agent] periodic tick: device offline, skip")
+                        logger.debug("periodic tick: device offline, skip")
                         continue
-                    print("[ESP32Agent] periodic tick")
+                    logger.debug("periodic tick")
 
                 sense = self._sense()
                 if sense is None:
-                    print("[ESP32Agent] sense: no light data, skip")
+                    logger.debug("sense: no light data, skip")
                     continue
-                print(f"[ESP32Agent] sense: {sense}")
+                logger.debug("sense: %s", sense)
 
                 proactive_triggers = self._check_proactive(sense)
                 combo_changed = sense.get("context_combo", "") != self._last_combo
@@ -421,7 +424,7 @@ class ESP32Agent:
                 if belief is None:
                     self._set_led_mood("idle")
                     continue
-                print(f"[ESP32Agent] belief: should_act={belief.get('should_act')}, reason={belief.get('reason')}")
+                logger.info("belief: should_act=%s, reason=%s", belief.get("should_act"), belief.get("reason"))
 
                 self._belief_history.append(belief)
                 if len(self._belief_history) > 10:
@@ -451,4 +454,4 @@ class ESP32Agent:
                 self._set_led_mood("idle")
 
             except Exception as e:
-                print(f"[ESP32Agent] loop error: {e}")
+                logger.error("loop error: %s", e, exc_info=True)

@@ -8,12 +8,12 @@ from fastapi import APIRouter, HTTPException
 
 from cloud.cards.registry import get_registry
 
-router = APIRouter()
+router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 
 # ── 路由 ─────────────────────────────────────────────────────────
 
-@router.get("/api/devices")
+@router.get("")
 def list_devices():
     """返回所有已注册设备的精简列表（slug/name/agent_type/online）。
 
@@ -33,7 +33,7 @@ def list_devices():
     ]
 
 
-@router.get("/api/devices/{slug}/agent")
+@router.get("/{slug}/agent")
 def device_agent_card(slug: str):
     """返回指定设备的完整 Agent Card（机器可读能力描述）。
 

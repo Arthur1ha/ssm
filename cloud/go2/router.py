@@ -122,7 +122,7 @@ def _clear_go2_card() -> None:
         logging.error("[Go2] 清除 card 失败: %s", exc)
 
 
-router = APIRouter()
+router = APIRouter(prefix="/api/go2", tags=["go2"])
 
 # 当前注册的视觉回调句柄，重连时先移除再重注册，防止重复触发
 _active_rule_cb  = None
@@ -130,7 +130,7 @@ _active_drive_cb = None
 _autonomy_mode   = "remote"  # "remote" | "free_explore"
 
 
-@router.post("/api/go2/connection")
+@router.post("/connection")
 async def go2_connect():
     email    = os.getenv("GO2_EMAIL", "")
     password = os.getenv("GO2_PASSWORD", "")
@@ -167,7 +167,7 @@ async def go2_connect():
     return {"status": "connecting"}
 
 
-@router.delete("/api/go2/connection")
+@router.delete("/connection")
 async def go2_disconnect():
     global _active_rule_cb, _active_drive_cb, _autonomy_mode
     vision_loop.stop()
@@ -180,7 +180,7 @@ async def go2_disconnect():
     return {"status": "disconnected"}
 
 
-@router.get("/api/go2/connection")
+@router.get("/connection")
 def go2_status():
     return {
         "connected":        go2.is_connected,
@@ -191,7 +191,7 @@ def go2_status():
     }
 
 
-@router.get("/api/go2/video")
+@router.get("/video")
 async def go2_video():
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 not connected")
@@ -201,7 +201,7 @@ async def go2_video():
     )
 
 
-@router.get("/api/go2/video/snapshot")
+@router.get("/video/snapshot")
 async def go2_video_snapshot():
     """单帧 JPEG，供不支持 MJPEG 的浏览器（iOS Safari）轮询使用。"""
     if not go2.is_connected:
@@ -216,7 +216,7 @@ async def go2_video_snapshot():
     )
 
 
-@router.get("/api/go2/connection/stream")
+@router.get("/connection/stream")
 async def go2_state():
     async def sse_gen():
         q = go2.new_state_queue()
@@ -248,7 +248,7 @@ class VelocityRequest(BaseModel):
     vyaw: float = 0.0
 
 
-@router.post("/api/go2/commands")
+@router.post("/commands")
 async def go2_command(req: CommandRequest):
     try:
         await go2.send_command(req.cmd, req.params or None)
@@ -259,7 +259,7 @@ async def go2_command(req: CommandRequest):
     return {"ok": True}
 
 
-@router.post("/api/go2/velocity")
+@router.post("/velocity")
 async def go2_velocity(req: VelocityRequest):
     """WIRELESS_CONTROLLER 速度控制，无 ack，适合摇杆实时输入。"""
     if not go2.is_connected:
@@ -272,7 +272,7 @@ async def go2_velocity(req: VelocityRequest):
     return {"ok": True}
 
 
-@router.put("/api/go2/mode")
+@router.put("/mode")
 async def go2_mode(req: ModeRequest):
     if req.mode not in ("normal", "ai", "mcf"):
         raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
@@ -290,7 +290,7 @@ class ChatRequest(BaseModel):
     params: dict | None = None
 
 
-@router.post("/api/go2/chat")
+@router.post("/chat")
 async def go2_chat(req: ChatRequest):
     from cloud.go2.agent import run_agent
     drive.user_interrupt = True
@@ -300,7 +300,7 @@ async def go2_chat(req: ChatRequest):
         drive.user_interrupt = False
 
 
-@router.post("/api/go2/chat/stream")
+@router.post("/chat/stream")
 async def go2_chat_stream(req: ChatRequest):
     """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
     from cloud.go2.agent import run_agent_stream
@@ -320,7 +320,7 @@ async def go2_chat_stream(req: ChatRequest):
     )
 
 
-@router.get("/api/go2/mind/last_decision")
+@router.get("/mind/last_decision")
 def go2_mind_last_decision():
     """返回 ReactiveMind 上次 LLM 推理的决策结果。"""
     d = reactive_mind.last_decision
@@ -329,7 +329,7 @@ def go2_mind_last_decision():
     return {"decision": d}
 
 
-@router.get("/api/go2/vision")
+@router.get("/vision")
 def go2_vision_latest():
     """返回最近一次 OpenCV 检测的结构化结果。"""
     if vision_loop.latest is None:
@@ -337,7 +337,7 @@ def go2_vision_latest():
     return vision_loop.latest
 
 
-@router.get("/api/go2/vision/stream")
+@router.get("/vision/stream")
 async def go2_vision_stream():
     """SSE 流：每次检测完成后推送一条 VisionFrame JSON。"""
     q: asyncio.Queue = asyncio.Queue(maxsize=10)
@@ -395,7 +395,7 @@ class PersonalityRequest(BaseModel):
     prompt: str
 
 
-@router.post("/api/go2/navigation/locations")
+@router.post("/navigation/locations")
 async def nav_tag_location(req: TagLocationRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -407,13 +407,13 @@ async def nav_tag_location(req: TagLocationRequest):
     return {"ok": True, "message": result}
 
 
-@router.get("/api/go2/navigation/locations")
+@router.get("/navigation/locations")
 def nav_list_locations():
     from cloud.go2.agentcore.memory import spatial as spatial_memory
     return spatial_memory.list_locations()
 
 
-@router.delete("/api/go2/navigation/locations/{name}")
+@router.delete("/navigation/locations/{name}")
 def nav_delete_location(name: str):
     from cloud.go2.agentcore.memory import spatial as spatial_memory
     deleted = spatial_memory.delete_location(name)
@@ -422,7 +422,7 @@ def nav_delete_location(name: str):
     return {"ok": True}
 
 
-@router.post("/api/go2/navigation/go")
+@router.post("/navigation/go")
 async def nav_go(req: NavigateRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -431,7 +431,7 @@ async def nav_go(req: NavigateRequest):
     return {"ok": True, "message": f"开始导航到「{req.name}」"}
 
 
-@router.post("/api/go2/navigation/patrol")
+@router.post("/navigation/patrol")
 async def nav_start_patrol(req: PatrolRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -442,14 +442,14 @@ async def nav_start_patrol(req: PatrolRequest):
     return {"ok": True, "stops": req.stops}
 
 
-@router.delete("/api/go2/navigation/patrol")
+@router.delete("/navigation/patrol")
 def nav_stop():
     from cloud.go2.navigation.navigator import navigator
     navigator.stop()
     return {"ok": True}
 
 
-@router.post("/api/go2/stop")
+@router.post("/stop")
 async def emergency_stop():
     global _active_rule_cb, _active_drive_cb, _autonomy_mode
     from cloud.go2.navigation.navigator import navigator
@@ -468,14 +468,14 @@ async def emergency_stop():
     return {"ok": True, "mode": "manual"}
 
 
-@router.get("/api/go2/navigation/state")
+@router.get("/navigation/state")
 def nav_state():
     from cloud.go2.navigation.navigator import navigator
     s = navigator.state
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
 
 
-@router.put("/api/go2/obstacle-avoidance")
+@router.put("/obstacle-avoidance")
 async def set_obstacle_avoidance(req: ObstacleAvoidanceRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -483,7 +483,7 @@ async def set_obstacle_avoidance(req: ObstacleAvoidanceRequest):
     return {"ok": True, "enabled": req.enabled}
 
 
-@router.put("/api/go2/led")
+@router.put("/led")
 async def set_led(req: LedRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -494,23 +494,23 @@ async def set_led(req: LedRequest):
     return {"ok": True, "color": req.color, "duration": req.duration}
 
 
-@router.get("/api/go2/drive/state")
+@router.get("/drive/state")
 def go2_drive_state():
     return drive.state_snapshot
 
 
-@router.get("/api/go2/memory")
+@router.get("/memory")
 def go2_memory():
     from cloud.go2.agentcore.memory.episode import episode_memory
     return {"entries": episode_memory.entries()}
 
 
-@router.get("/api/go2/autonomy")
+@router.get("/autonomy")
 def go2_autonomy_get():
     return {"mode": _autonomy_mode}
 
 
-@router.put("/api/go2/autonomy")
+@router.put("/autonomy")
 async def go2_autonomy_set(req: AutonomyRequest):
     global _active_rule_cb, _active_drive_cb, _autonomy_mode
     if req.mode not in ("manual", "reactive", "free_explore"):
@@ -548,20 +548,20 @@ async def go2_autonomy_set(req: AutonomyRequest):
     return {"ok": True, "mode": _autonomy_mode}
 
 
-@router.get("/api/go2/personality")
+@router.get("/personality")
 def go2_personality_get():
     from cloud.go2.agentcore.soul import get_system_prompt
     return {"prompt": get_system_prompt()}
 
 
-@router.post("/api/go2/personality")
+@router.post("/personality")
 def go2_personality_set(req: PersonalityRequest):
     from cloud.go2.agentcore.soul import set_personality
     set_personality(req.prompt)
     return {"ok": True, "prompt": req.prompt}
 
 
-@router.get("/api/go2/agent-card")
+@router.get("/agent-card")
 def go2_agent_card():
     """返回 Go2 智能体能力描述，供编排器动态发现技能。"""
     import inspect
@@ -586,7 +586,7 @@ def go2_agent_card():
     }
 
 
-@router.get("/api/go2/debug/voxel_map")
+@router.get("/debug/voxel_map")
 def go2_debug_voxel_map():
     """返回最近一帧体素地图原始消息，用于格式调研。"""
     import json
@@ -617,7 +617,7 @@ def go2_debug_voxel_map():
     return _safe(raw)
 
 
-@router.put("/api/go2/navigation/home")
+@router.put("/navigation/home")
 async def nav_set_home():
     """把当前位置重新标记为 home。"""
     if not go2.is_connected:
@@ -630,7 +630,7 @@ async def nav_set_home():
     return {"ok": True, "message": result}
 
 
-@router.post("/api/go2/navigation/home/go")
+@router.post("/navigation/home/go")
 async def nav_go_home():
     """归位：导航回 home 点。"""
     if not go2.is_connected:
@@ -640,7 +640,7 @@ async def nav_go_home():
     return {"ok": True, "message": "开始归位"}
 
 
-@router.get("/api/go2/map/debug")
+@router.get("/map/debug")
 def go2_map_debug():
     """返回原始体素消息的结构，用于诊断数据格式。"""
     raw = go2.voxel_raw
@@ -663,7 +663,7 @@ def go2_map_debug():
     return _summarize(raw)
 
 
-@router.get("/api/go2/map.png")
+@router.get("/map.png")
 def go2_map_image():
     import io, math as _math
     import numpy as np

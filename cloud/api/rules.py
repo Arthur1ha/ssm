@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time as _time
 import uuid
@@ -8,7 +9,9 @@ import paho.mqtt.publish as _mqtt_pub
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/rules", tags=["rules"])
 
 _RULES_FILE  = Path(__file__).parent.parent / "orchestrator" / "rules.json"
 _MQTT_HOST   = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
@@ -51,9 +54,9 @@ def _push_rules_to_esp32() -> None:
                 auth={"username": _MQTT_USER, "password": _MQTT_PASS},
                 retain=True, qos=1,
             )
-        print(f"[API] Pushed {len(esp32_rules)} rules to ESP32")
+        logger.info("已推送 %d 条规则到 ESP32", len(esp32_rules))
     except Exception as e:
-        print(f"[API] Rule push failed: {e}")
+        logger.warning("规则推送失败: %s", e)
 
 
 class RuleCreateRequest(BaseModel):
@@ -67,12 +70,12 @@ class RuleUpdateRequest(BaseModel):
     enabled: bool
 
 
-@router.get("/api/rules")
+@router.get("")
 def list_rules():
     return _load_rules()
 
 
-@router.post("/api/rules")
+@router.post("")
 def create_rule(req: RuleCreateRequest):
     rules = _load_rules()
     rule = {
@@ -89,7 +92,7 @@ def create_rule(req: RuleCreateRequest):
     return rule
 
 
-@router.delete("/api/rules/{rule_id}")
+@router.delete("/{rule_id}")
 def delete_rule(rule_id: str):
     rules = _load_rules()
     new = [r for r in rules if r["rule_id"] != rule_id]
@@ -100,7 +103,7 @@ def delete_rule(rule_id: str):
     return {"deleted": rule_id}
 
 
-@router.patch("/api/rules/{rule_id}")
+@router.patch("/{rule_id}")
 def update_rule(rule_id: str, req: RuleUpdateRequest):
     rules = _load_rules()
     for r in rules:

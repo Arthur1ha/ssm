@@ -1,5 +1,8 @@
 import asyncio
 import base64
+import logging
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 
@@ -25,5 +28,5 @@ def synthesize(text: str, voice: str = _DEFAULT_VOICE) -> str | None:
             loop.close()
         return base64.b64encode(audio_bytes).decode()
     except Exception as e:
-        print(f"[TTS] 合成失败: {e}")
+        logger.warning("合成失败: %s", e)
         return None
