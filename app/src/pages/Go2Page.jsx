@@ -234,7 +234,11 @@ function WaypointMap({ locations, LIME, BORDER }) {
 
 /* ─────────────────────────────────────────────────────────── */
 
-function Go2DevicePage({ onBack, messages, onAppend }) {
+function Go2DevicePage({ onBack }) {
+  const [messages, setMessages] = React.useState([
+    { role: 'assistant', agent: 'go2', agentName: 'Go2', text: '需要 Go2 做什么？' }
+  ]);
+  const onAppend = (msg) => setMessages(prev => [...prev, msg]);
   const { useState, useEffect, useRef, useCallback } = React;
 
   const LIME   = "#C8FF3E";
