@@ -4,14 +4,15 @@
 # make stop          停止所有后台服务
 # make ps / logs     查看进程 / 日志
 
-.PHONY: broker api orchestrator orchestrator-bg pwa pwa-bg ngrok ngrok-bg \
-        stop ps logs ngrok-url trace go2-logs go2-state go2-logs-window
+.PHONY: broker api orchestrator orchestrator-bg pwa pwa-bg tunnel tunnel-bg \
+        stop ps logs tunnel-url trace go2-logs go2-state go2-logs-window
 
 SSM_DIR     := $(CURDIR)
 LOG_DIR     := $(SSM_DIR)/logs
 BROKER_CONF := $(LOG_DIR)/mosquitto.conf
-NGROK_CMD   := env HTTP_PROXY="" HTTPS_PROXY="" http_proxy="" https_proxy="" \
-                   ngrok http 8080 --log=stdout --request-header-add "ngrok-skip-browser-warning:1"
+PUBLIC_URL  := https://ssm.eliottxu.top
+TUNNEL_CMD  := env HTTP_PROXY="" HTTPS_PROXY="" http_proxy="" https_proxy="" \
+                   cloudflared tunnel run ssm
 
 # 后台启动宏：$(1)=pkill 模式  $(2)=启动命令  $(3)=日志名
 define bg
@@ -56,15 +57,14 @@ pwa:
 pwa-bg:
 	$(call bg,[h]ttp.server 8081,uv run python -m http.server 8081 --directory app,pwa)
 
-# ── ngrok ────────────────────────────────────────────────────
-ngrok:
-	$(NGROK_CMD)
+# ── Cloudflare Tunnel ────────────────────────────────────────
+tunnel:
+	$(TUNNEL_CMD)
 
-ngrok-bg:
-	$(call bg,[n]grok,$(NGROK_CMD),ngrok)
-	@sleep 2
-	@curl -s http://localhost:4040/api/tunnels 2>/dev/null | \
-		python3 -c "import sys,json;[print('  Public URL:',t['public_url']) for t in json.load(sys.stdin)['tunnels']]" || true
+tunnel-bg:
+	$(call bg,[c]loudflared,$(TUNNEL_CMD),tunnel)
+	@sleep 3
+	@echo "  Public URL: $(PUBLIC_URL)"
 
 # ── 停止 ─────────────────────────────────────────────────────
 stop:
@@ -72,22 +72,21 @@ stop:
 	@pkill -9 -f "[u]vicorn cloud.api.main"   || true
 	@pkill -9 -f "cloud/orchestrator/main.py" || true
 	@pkill -9 -f "[h]ttp.server 8081"         || true
-	@pkill -9 -f "[n]grok"                    || true
+	@pkill -9 -f "[c]loudflared"              || true
 	@echo "All SSM services stopped."
 
 # ── 工具 ─────────────────────────────────────────────────────
 ps:
-	@pgrep -a -f "mosquitto|uvicorn|http\.server|ngrok|orchestrator/main\.py" || echo "(none)"
+	@pgrep -a -f "mosquitto|uvicorn|http\.server|cloudflared|orchestrator/main\.py" || echo "(none)"
 
 logs:
 	@echo "=== API ===" && tail -20 logs/api.log 2>/dev/null || echo "(no log)"
 	@echo "=== Orchestrator ===" && tail -20 logs/orchestrator.log 2>/dev/null || echo "(no log)"
 	@echo "=== PWA ===" && tail -5 logs/pwa.log 2>/dev/null || echo "(no log)"
-	@echo "=== ngrok ===" && tail -5 logs/ngrok.log 2>/dev/null || echo "(no log)"
+	@echo "=== tunnel ===" && tail -5 logs/tunnel.log 2>/dev/null || echo "(no log)"
 
-ngrok-url:
-	@curl -s http://localhost:4040/api/tunnels | \
-		python3 -c "import sys,json;[print(t['public_url']) for t in json.load(sys.stdin)['tunnels']]"
+tunnel-url:
+	@echo "$(PUBLIC_URL)"
 
 trace:
 	@while true; do \

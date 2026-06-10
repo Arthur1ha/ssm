@@ -18,3 +18,5 @@ __pycache__/
 docs/
 paper/
 test_script/
+# cloudflared 二进制副本，正式版在 /usr/local/bin
+cloudflared
