@@ -4,7 +4,12 @@ const { useState, useEffect, useRef } = React;
 // LIME 来自 config.js 全局，此处不重复声明
 const EXCL_TYPES = new Set(['decision', 'supervisor']);
 const EXCL_PLAT  = new Set(['pc', 'pwa']);
-const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
+const SUGGESTIONS = [
+  { text: '我要工作了',     color: '#C8FF3E' },
+  { text: '帮我营造睡眠氛围', color: '#7B8CFF' },
+  { text: '有人来了',      color: '#FF9F43' },
+  { text: '我要离开了',    color: '#FF6B9D' },
+];
 
 const GO2_STATIC_DEVICE = {
   unit_id: 'go2', agent_id: 'go2', slug: 'go2',
@@ -271,16 +276,16 @@ function App() {
       {/* 快捷建议 + 输入栏 */}
       <div style={{ flexShrink: 0, background: 'var(--color-bg)' }}>
         {activityLog.length === 0 && !thinking && (
-          <div style={{ padding: '8px 12px 0', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {SUGGESTIONS.map(s => (
-              <button key={s} onClick={() => handleSend(s)} style={{
-                flex: '1 1 calc(50% - 4px)',
-                padding: '10px 12px', borderRadius: 'var(--radius-btn)',
-                background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
-                color: 'var(--color-text-muted)', fontSize: 13, cursor: 'pointer',
-                fontFamily: 'inherit', textAlign: 'left', lineHeight: 1.3,
+          <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8,
+            overflowX: 'auto', scrollbarWidth: 'none' }}>
+            {SUGGESTIONS.map(({ text, color }) => (
+              <button key={text} onClick={() => handleSend(text)} style={{
+                flexShrink: 0, padding: '7px 14px', borderRadius: 'var(--radius-pill)',
+                background: `${color}18`, border: `1px solid ${color}40`,
+                color, fontSize: 13, cursor: 'pointer',
+                fontFamily: 'inherit', whiteSpace: 'nowrap',
                 WebkitTapHighlightColor: 'transparent',
-              }}>{s}</button>
+              }}>{text}</button>
             ))}
           </div>
         )}
