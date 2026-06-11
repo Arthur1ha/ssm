@@ -264,26 +264,28 @@ function App() {
           </div>
         )}
 
-        {/* 空态快捷建议 */}
-        {activityLog.length === 0 && !thinking && (
-          <div style={{ padding: '8px 12px', display: 'flex', gap: 6,
-            overflowX: 'auto', scrollbarWidth: 'none' }}>
-            {SUGGESTIONS.map(s => (
-              <button key={s} onClick={() => handleSend(s)} style={{
-                padding: '6px 12px', borderRadius: 999, whiteSpace: 'nowrap',
-                background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
-                color: 'var(--color-text-muted)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
-              }}>{s}</button>
-            ))}
-          </div>
-        )}
-
         {/* 底部留白（防止内容被输入栏遮住） */}
         <div style={{ height: 16 }}/>
       </div>
 
-      {/* 常驻输入栏 */}
-      <MainInputBar onSend={handleSend} thinking={thinking}/>
+      {/* 快捷建议 + 输入栏 */}
+      <div style={{ flexShrink: 0, background: 'var(--color-bg)' }}>
+        {activityLog.length === 0 && !thinking && (
+          <div style={{ padding: '8px 12px 0', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {SUGGESTIONS.map(s => (
+              <button key={s} onClick={() => handleSend(s)} style={{
+                flex: '1 1 calc(50% - 4px)',
+                padding: '10px 12px', borderRadius: 'var(--radius-btn)',
+                background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+                color: 'var(--color-text-muted)', fontSize: 13, cursor: 'pointer',
+                fontFamily: 'inherit', textAlign: 'left', lineHeight: 1.3,
+                WebkitTapHighlightColor: 'transparent',
+              }}>{s}</button>
+            ))}
+          </div>
+        )}
+        <MainInputBar onSend={handleSend} thinking={thinking}/>
+      </div>
 
       {/* 规则抽屉 */}
       <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>
