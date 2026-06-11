@@ -33,64 +33,9 @@ function SensorCard({ agent, unitData }) {
 }
 
 function ActuatorCard({ agent, unitData }) {
-  const uid      = agent.unit_id || agent.agent_id;
-  const meta     = getAgentMeta(agent);
-  const active   = isAgentActive(agent, unitData);
-  const n        = (agent.name || '').toLowerCase();
-  const cmdTopic = agent.topics?.command;
-
-  const sendCmd = (cmd, extra = {}) => {
-    if (!cmdTopic) return;
-    mqttBus.publish(cmdTopic, { cmd, ...extra });
-  };
-
-  const stateData = (unitData[uid] || {}).state || {};
-  const ism = stateData.ism || 'OFF';
-
-  const btnBase = {
-    flex: 1, padding: '7px 4px', borderRadius: 999, fontSize: 12,
-    cursor: 'pointer', fontFamily: 'inherit', border: 'none',
-    transition: 'background 0.15s, color 0.15s',
-  };
-  const btnActive = (color) => ({
-    ...btnBase,
-    background: color, color: '#0B0B0E', fontWeight: 600,
-    boxShadow: `0 0 10px ${color}60`,
-  });
-  const btnIdle = {
-    ...btnBase,
-    background: 'rgba(255,255,255,0.07)',
-    border: '1px solid rgba(255,255,255,0.09)',
-    color: 'rgba(255,255,255,0.55)',
-  };
-
-  let controls = null;
-  if (n.includes('led') || n.includes('rgb') || n.includes('ws2812')) {
-    const isOff = (ism === 'OFF');
-    controls = (
-      <div style={{ display: 'flex', gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
-        <button onClick={() => sendCmd('SET_STATE', { state: isOff ? 'BRIGHT' : 'OFF' })}
-          style={isOff ? btnIdle : btnActive(meta.color)}>
-          {isOff ? '开灯' : '关灯'}
-        </button>
-        <button onClick={() => sendCmd('SET_STATE', { state: 'DIM' })}
-          style={ism === 'DIM' ? btnActive(meta.color) : btnIdle}>微光</button>
-        <button onClick={() => sendCmd('BLINK', { r: 255, g: 180, b: 30, count: 3 })}
-          style={ism === 'BLINK' ? btnActive(meta.color) : btnIdle}>闪烁</button>
-      </div>
-    );
-  } else if (n.includes('buz')) {
-    controls = (
-      <div style={{ display: 'flex', gap: 6, marginTop: 10 }} onClick={e => e.stopPropagation()}>
-        <button onClick={() => sendCmd('PLAY', { pattern: 'NOTIFY' })}
-          style={ism === 'NOTIFY' ? btnActive(meta.color) : btnIdle}>通知音</button>
-        <button onClick={() => sendCmd('PLAY', { pattern: 'ALERT' })}
-          style={ism === 'ALERT' ? btnActive('#FF5252') : btnIdle}>警报</button>
-        <button onClick={() => sendCmd('STOP')}
-          style={ism === 'SILENT' ? btnActive(LIME) : btnIdle}>停止</button>
-      </div>
-    );
-  }
+  const uid    = agent.unit_id || agent.agent_id;
+  const meta   = getAgentMeta(agent);
+  const active = isAgentActive(agent, unitData);
 
   return (
     <div
@@ -125,7 +70,6 @@ function ActuatorCard({ agent, unitData }) {
           background: agent._online ? LIME : 'rgba(255,255,255,0.2)',
           boxShadow: agent._online ? `0 0 6px ${LIME}` : 'none' }}/>
       </div>
-      {controls}
     </div>
   );
 }

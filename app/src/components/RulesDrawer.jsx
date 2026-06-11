@@ -1,5 +1,6 @@
 /* RulesDrawer — 规则管理底部抽屉 */
 function RulesDrawer({ open, onClose }) {
+  const [rules, setRules] = React.useState([]);
   return (
     <>
       {/* 背景遮罩 */}
@@ -35,7 +36,14 @@ function RulesDrawer({ open, onClose }) {
           justifyContent: 'space-between', flexShrink: 0,
           borderBottom: '1px solid rgba(255,255,255,0.05)',
         }}>
-          <span style={{ fontSize: 16, fontWeight: 400 }}>自动化规则</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 16, fontWeight: 400 }}>自动化规则</span>
+            {rules.length > 0 && (
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
+                {rules.filter(r => r.enabled).length} 启用 · {rules.length} 总计
+              </span>
+            )}
+          </div>
           <button onClick={onClose} style={{
             width: 30, height: 30, borderRadius: '50%',
             border: '1px solid rgba(255,255,255,0.09)',
@@ -48,7 +56,7 @@ function RulesDrawer({ open, onClose }) {
 
         {/* RulesScreen 内容 */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          <RulesScreen embedded={true}/>
+          <RulesScreen embedded={true} onRulesChange={setRules}/>
         </div>
       </div>
     </>

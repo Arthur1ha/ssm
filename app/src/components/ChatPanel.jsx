@@ -1,9 +1,5 @@
-/* ChatPanel — 统一聊天面板组件
-   variant="sheet"  : 底部弹出 sheet 内嵌，由 ChatSheet 提供外层容器
-   variant="inline" : 内嵌页面，撑满父容器剩余高度
-*/
+/* ChatPanel — 统一聊天面板组件（variant="inline"：内嵌页面，撑满父容器剩余高度） */
 const { useState, useEffect, useRef } = React;
-const _LIME = '#C8FF3E';
 
 function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
                      variant, disabled, open, children }) {
@@ -58,7 +54,7 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
             <div style={{
               padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
               borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
-              background: m.role === 'user' ? _LIME : 'rgba(255,255,255,0.06)',
+              background: m.role === 'user' ? LIME : 'rgba(255,255,255,0.06)',
               color: m.role === 'user' ? '#0B0B0E' : '#fff',
               border: m.role === 'user' ? 'none' : '1px solid rgba(255,255,255,0.07)',
             }}>{m.text}</div>
@@ -68,12 +64,12 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
                 padding: '7px 11px',
                 background: 'rgba(200,255,62,0.06)',
                 border: '1px solid rgba(200,255,62,0.2)', borderRadius: 12 }}>
-                <div style={{ width: 22, height: 22, borderRadius: 7, background: _LIME,
+                <div style={{ width: 22, height: 22, borderRadius: 7, background: LIME,
                   color: '#0B0B0E', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                   <Icon name="check" size={11} sw={2.5}/>
                 </div>
                 <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>{ac.name}</span>
-                <span style={{ fontSize: 12, color: _LIME, fontFamily: 'monospace',
+                <span style={{ fontSize: 12, color: LIME, fontFamily: 'monospace',
                   marginLeft: 'auto' }}>{ac.action}</span>
               </div>
             ))}
@@ -136,7 +132,7 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
             disabled={!input.trim() || disabled}
             style={{
               width: 38, height: 38, borderRadius: 999, flexShrink: 0,
-              background: input.trim() && !disabled ? _LIME : 'rgba(255,255,255,0.08)',
+              background: input.trim() && !disabled ? LIME : 'rgba(255,255,255,0.08)',
               color:      input.trim() && !disabled ? '#0B0B0E' : 'rgba(255,255,255,0.25)',
               border: 'none',
               cursor: input.trim() && !disabled ? 'pointer' : 'default',

@@ -1,7 +1,6 @@
 /* ActivityFeed — 主屏活动流组件 */
 function ActivityFeed({ entries, thinking, thinkingText }) {
   const { useRef, useEffect } = React;
-  const LIME = '#C8FF3E';
   const bottomRef = useRef(null);
 
   useEffect(() => {

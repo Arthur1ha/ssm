@@ -75,7 +75,6 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
 
   const R  = 62;  // pad radius px
   const KR = 22;  // knob radius px
-  const LIME = "#C8FF3E";
 
   const padRef    = useRef(null);
   const activeRef = useRef(false);
@@ -241,7 +240,6 @@ function Go2DevicePage({ onBack }) {
   const onAppend = (msg) => setMessages(prev => [...prev, msg]);
   const { useState, useEffect, useRef, useCallback } = React;
 
-  const LIME   = "#C8FF3E";
   const DIM    = "rgba(200,255,62,0.13)";
   const BG     = "#06080F";
   const PANEL  = "#0C0F1A";

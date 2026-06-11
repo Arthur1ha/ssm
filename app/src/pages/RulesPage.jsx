@@ -1,12 +1,14 @@
 const { useState: useStateR, useEffect: useEffectR } = React;
 
-function RulesScreen({ embedded = false }) {
+function RulesScreen({ embedded = false, onRulesChange }) {
   const [rules, setRules] = useStateR([]);
 
   const load = async () => {
     try {
       const r = await fetch('/api/rules');
-      setRules(await r.json());
+      const data = await r.json();
+      setRules(data);
+      onRulesChange?.(data);
     } catch {}
   };
 
@@ -30,12 +32,14 @@ function RulesScreen({ embedded = false }) {
     <div style={{ position: embedded ? 'relative' : 'absolute', inset: embedded ? 'unset' : 0, display: 'flex', flexDirection: 'column' }}>
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
         background: 'radial-gradient(50% 30% at 50% 5%, rgba(200,255,62,0.1), transparent 70%)' }}/>
-      <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
-        <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>规则</span>
-        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-          {rules.filter(r => r.enabled).length} 启用 · {rules.length} 总计
-        </span>
-      </div>
+      {!embedded && (
+        <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
+          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>规则</span>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
+            {rules.filter(r => r.enabled).length} 启用 · {rules.length} 总计
+          </span>
+        </div>
+      )}
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
         paddingBottom: embedded ? '16px' : 'calc(158px + env(safe-area-inset-bottom, 0px))', position: 'relative' }}>
         {rules.length === 0 ? (

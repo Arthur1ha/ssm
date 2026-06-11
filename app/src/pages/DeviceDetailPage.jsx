@@ -11,13 +11,7 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
   const meta     = device ? getAgentMeta(device) : { icon: 'bulb', color: '#FF9A5A' };
   const uid      = device?.unit_id || '';
   const ism      = (unitData[uid] || {}).state?.ism || 'OFF';
-  const cmdTopic = device?.topics?.command;
   const agentCardUrl = '/api/devices/' + slug + '/agent';
-
-  const sendCmd = (cmd, extra = {}) => {
-    if (!cmdTopic) return;
-    mqttBus.publish(cmdTopic, { cmd, ...extra });
-  };
 
   const sendChat = (text) => {
     if (!text || thinking) return;
@@ -29,16 +23,6 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
         text: `收到规则「${rule.name}」，请在主界面确认保存。` }),
     });
   };
-
-  const btnBase = {
-    flex: 1, padding: '7px 4px', borderRadius: 999, fontSize: 12,
-    cursor: 'pointer', fontFamily: 'inherit', border: 'none',
-    transition: 'background 0.15s',
-  };
-  const btnOn  = { ...btnBase, background: meta.color, color: '#0B0B0E', fontWeight: 600,
-    boxShadow: `0 0 10px ${meta.color}60` };
-  const btnOff = { ...btnBase, background: 'rgba(255,255,255,0.07)',
-    border: '1px solid rgba(255,255,255,0.09)', color: 'rgba(255,255,255,0.55)' };
 
   return (
     <div style={{
@@ -82,22 +66,6 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
           Agent 接入
         </a>
       </div>
-      {device && (
-        <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button onClick={() => sendCmd('SET_STATE', { state: ism === 'OFF' ? 'BRIGHT' : 'OFF' })}
-              style={ism !== 'OFF' ? btnOn : btnOff}>
-              {ism === 'OFF' ? '开灯' : '关灯'}
-            </button>
-            <button onClick={() => sendCmd('SET_STATE', { state: 'DIM' })}
-              style={ism === 'DIM' ? btnOn : btnOff}>微光</button>
-            <button onClick={() => sendCmd('SET_COLOR', { r: 255, g: 160, b: 60, brightness: 180 })}
-              style={ism === 'COLOR' ? btnOn : btnOff}>暖黄</button>
-            <button onClick={() => sendCmd('BLINK', { r: 255, g: 180, b: 30, count: 3 })}
-              style={ism === 'BLINK' ? btnOn : btnOff}>闪烁</button>
-          </div>
-        </div>
-      )}
       <ChatPanel
         messages={messages}
         thinking={thinking}
