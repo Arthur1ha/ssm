@@ -24,13 +24,14 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
           );
         }
         if (e.type === 'ai') {
-          const oc = getAgentBubbleColor('orchestrator');
+          const agent = e.agent || 'orchestrator';
+          const oc = getAgentBubbleColor(agent);
           return (
             <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
               <div style={{ maxWidth: '78%', display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
                   fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                  {getAgentDisplayName('orchestrator')}
+                  {getAgentDisplayName(agent)}
                 </div>
                 <div style={{
                   padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
