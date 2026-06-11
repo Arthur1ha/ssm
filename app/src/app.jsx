@@ -8,7 +8,7 @@ const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来�
 
 const GO2_STATIC_DEVICE = {
   unit_id: 'go2', agent_id: 'go2', slug: 'go2',
-  name: 'Go2 Air', agent_type: 'robot',
+  name: 'Go2 Air', agent_type: 'robot', _online: false,
   capabilities: ['MOVE', 'STAND_UP', 'SIT_DOWN', 'HELLO', 'STRETCH', 'DANCE'],
 };
 
@@ -50,10 +50,17 @@ function App() {
     const ismTracker = new ISMTracker(mqttBus);
 
     const handleRegistryChange = () => {
-      const mqttAgents = registry.getAll().filter(a =>
-        a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) && a._online === true
+      const all = registry.getAll();
+      // Go2 单独处理：优先用 MQTT registry 里的在线状态，无则用静态默认（离线）
+      const go2FromMqtt = all.find(a => (a.unit_id || a.agent_id) === 'go2');
+      const go2Entry = go2FromMqtt
+        ? { ...GO2_STATIC_DEVICE, _online: go2FromMqtt._online === true }
+        : GO2_STATIC_DEVICE;
+      const mqttAgents = all.filter(a =>
+        a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) &&
+        (a.unit_id || a.agent_id) !== 'go2'
       );
-      setAgents([GO2_STATIC_DEVICE, ...mqttAgents]);
+      setAgents([go2Entry, ...mqttAgents]);
     };
     registry.addEventListener('change', handleRegistryChange);
 
@@ -88,17 +95,11 @@ function App() {
 
     const handleConnect = () => {
       setConnected(true);
-      mqttBus.publish('ssm/agents/phone_ui/manifest', {
-        unit_id: 'phone_ui', agent_type: 'supervisor',
-        name: 'human_supervisor', hw_platform: 'pwa',
-        ts: Math.floor(Date.now() / 1000),
-      }, { retain: true });
+      mqttBus.publish('ssm/agents/phone_ui/manifest', '', { retain: true });
       mqttBus.subscribe('ssm/agents/desk/speech');
       if (!greetedRef.current) {
         greetedRef.current = true;
-        send('打个招呼吧', {
-          onMessage: (msg) => appendActivity({ type: 'ai', text: msg }),
-        });
+        appendActivity({ type: 'ai', text: '你好呀，我是智慧空间管家，有什么可以帮你的嘛？' });
       }
     };
     const handleDisconnect = () => {
@@ -186,7 +187,7 @@ function App() {
   /* ── 主屏布局 ── */
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: 'var(--color-bg)', color: '#fff',
+      position: 'fixed', inset: 0, background: 'var(--bg-gradient)', color: '#fff',
       fontFamily: 'var(--font-sans)',
       paddingTop: 'env(safe-area-inset-top, 0px)',
       display: 'flex', flexDirection: 'column',
@@ -194,28 +195,24 @@ function App() {
 
       {/* 头部 */}
       <div style={{
-        padding: '14px 20px 10px', display: 'flex',
+        padding: '12px 16px', display: 'flex',
         alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+        borderBottom: '1px solid var(--color-border)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>SSM</span>
+          <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '0.08em', fontFamily: 'var(--font-sans)' }}>SSM</span>
           <div
             onClick={!connected ? () => mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS }) : undefined}
             style={{
-              width: 6, height: 6, borderRadius: '50%',
+              width: 7, height: 7, borderRadius: '50%',
               background: connected ? 'var(--color-accent)' : 'var(--color-danger)',
-              boxShadow: connected ? '0 0 6px var(--color-online-glow)' : 'none',
+              boxShadow: connected ? '0 0 8px var(--color-online-glow)' : 'none',
               cursor: connected ? 'default' : 'pointer',
             }}
           />
         </div>
-        <button onClick={() => setRulesOpen(true)} style={{
-          background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
-          color: 'var(--color-text-muted)', borderRadius: 10, padding: '6px 10px',
-          cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
-          display: 'flex', alignItems: 'center', gap: 5,
-        }}>
-          <Icon name="zap" size={13}/>
+        <button onClick={() => setRulesOpen(true)} className="btn">
+          <Icon name="list" size={13}/>
           规则
         </button>
       </div>
@@ -278,8 +275,8 @@ function App() {
       </div>
 
       {/* 快捷建议 + 输入栏 */}
-      <div style={{ flexShrink: 0, background: 'var(--color-bg)' }}>
-        {activityLog.length === 0 && !thinking && (
+      <div style={{ flexShrink: 0, background: 'var(--color-bar)', backdropFilter: 'var(--glass-blur)', WebkitBackdropFilter: 'var(--glass-blur)', borderTop: '1px solid var(--color-border)' }}>
+        {activityLog.every(e => e.type !== 'user') && !thinking && (
           <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8,
             overflowX: 'auto', scrollbarWidth: 'none' }}>
             {SUGGESTIONS.map(s => (
@@ -317,8 +314,7 @@ function MainInputBar({ onSend, thinking }) {
     <div style={{
       flexShrink: 0, padding: '8px 12px',
       paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
-      borderTop: '1px solid var(--color-border)',
-      background: 'var(--color-bg)',
+      background: 'transparent',
     }}>
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,

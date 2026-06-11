@@ -1,0 +1,129 @@
+{
+  "phone_ui": {
+    "unit_id": "phone_ui",
+    "agent_type": "supervisor",
+    "name": "human_supervisor",
+    "hw_platform": "pwa",
+    "ts": 1781170106
+  },
+  "pc_llm_agent": {
+    "unit_id": "pc_llm_agent",
+    "agent_type": "decision",
+    "name": "llm_orchestrator",
+    "hw_platform": "pc",
+    "topics": {
+      "manifest": "ssm/agents/pc_llm_agent/manifest",
+      "state": "ssm/agents/pc_llm_agent/state"
+    }
+  },
+  "esp32_desk_light": {
+    "agent_tag": "light_level",
+    "firmware_ver": "0.2.0",
+    "agent_type": "sensor",
+    "unit_id": "esp32_desk_light",
+    "levels": [
+      "DARK",
+      "DIM",
+      "NORMAL",
+      "BRIGHT"
+    ],
+    "name": "ambient_light",
+    "topics": {
+      "report": "ssm/agents/esp32_desk_light/report",
+      "event": "ssm/agents/esp32_desk_light/event",
+      "manifest": "ssm/agents/esp32_desk_light/manifest",
+      "state": "ssm/agents/esp32_desk_light/state"
+    },
+    "hw_platform": "esp32",
+    "ism_states": [
+      "SAMPLING",
+      "ERROR"
+    ],
+    "ts": 13,
+    "parent_id": "esp32_desk"
+  },
+  "esp32_desk_sound": {
+    "agent_type": "sensor",
+    "topics": {
+      "report": "ssm/agents/esp32_desk_sound/report",
+      "event": "ssm/agents/esp32_desk_sound/event",
+      "manifest": "ssm/agents/esp32_desk_sound/manifest",
+      "state": "ssm/agents/esp32_desk_sound/state"
+    },
+    "values": [
+      "detected"
+    ],
+    "agent_tag": "sound",
+    "name": "sound",
+    "hw_platform": "esp32",
+    "firmware_ver": "0.2.0",
+    "parent_id": "esp32_desk",
+    "ts": 13,
+    "unit_id": "esp32_desk_sound"
+  },
+  "esp32_desk_led": {
+    "commands": [
+      "SET_COLOR",
+      "SET_STATE",
+      "BLINK"
+    ],
+    "ism_states": [
+      "OFF",
+      "DIM",
+      "BRIGHT",
+      "COLOR",
+      "BLINK"
+    ],
+    "firmware_ver": "0.2.0",
+    "topics": {
+      "state": "ssm/agents/esp32_desk_led/state",
+      "command": "ssm/agents/esp32_desk_led/command",
+      "report": "ssm/agents/esp32_desk_led/report",
+      "event": "ssm/agents/esp32_desk_led/event",
+      "manifest": "ssm/agents/esp32_desk_led/manifest"
+    },
+    "ts": 13,
+    "resource_tags": [
+      "lighting",
+      "ambiance"
+    ],
+    "num_pixels": 16,
+    "unit_id": "esp32_desk_led",
+    "name": "ws2812_ring",
+    "hw_platform": "esp32",
+    "agent_type": "actuator",
+    "slug": "desk-lamp",
+    "capabilities": [
+      {
+        "params": [
+          "r",
+          "g",
+          "b",
+          "brightness"
+        ],
+        "action": "SET_COLOR"
+      },
+      {
+        "params": [
+          "state"
+        ],
+        "values": [
+          "OFF",
+          "BRIGHT",
+          "DIM"
+        ],
+        "action": "SET_STATE"
+      },
+      {
+        "params": [
+          "r",
+          "g",
+          "b",
+          "count"
+        ],
+        "action": "BLINK"
+      }
+    ],
+    "parent_id": "esp32_desk"
+  }
+}

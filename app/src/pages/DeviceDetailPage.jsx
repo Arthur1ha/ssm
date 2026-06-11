@@ -1,79 +1,134 @@
 function DeviceDetailPage({ slug, device, unitData, onBack }) {
   const initialMsg = {
     role: 'assistant', agent: slug,
-    agentName: device?.name || slug,
     text: `你好，我是 ${device?.name || slug}，有什么可以帮你？`,
   };
   const [messages, setMessages] = React.useState([initialMsg]);
   const onAppend = (msg) => setMessages(prev => [...prev, msg]);
   const { thinking, thinkingText, send } = useSendIntent();
 
-  const meta     = device ? getAgentMeta(device) : { icon: 'bulb', color: '#FF9A5A' };
-  const uid      = device?.unit_id || '';
-  const ism      = (unitData[uid] || {}).state?.ism || 'OFF';
-  const agentCardUrl = '/api/devices/' + slug + '/agent';
+  const meta  = device ? getAgentMeta(device) : { icon: 'bulb', color: '#FF9A5A', label: '设备' };
+  const uid   = device?.unit_id || '';
+  const ism   = (unitData[uid] || {}).state?.ism || '';
+  const isOn  = ism && ism !== 'OFF' && ism !== 'IDLE';
+  const n     = (device?.name || '').toLowerCase();
+
+  const isLed = n.includes('led') || n.includes('rgb') || n.includes('ws2812') || n.includes('ring') || n.includes('灯');
+  const LED_CMDS = ['开灯', '关灯', '调亮', '调暗', '彩虹', '呼吸灯', '白色'];
+
+  const hasUserMsg = messages.some(m => m.role === 'user');
 
   const sendChat = (text) => {
     if (!text || thinking) return;
     onAppend({ role: 'user', text });
     send(text, {
-      deviceHint: slug,
-      onMessage:     (msg)  => onAppend({ role: 'assistant', text: msg }),
-      onPendingRule: (rule) => onAppend({ role: 'assistant',
+      deviceHint:    slug,
+      onMessage:     (msg)  => onAppend({ role: 'assistant', agent: slug, text: msg }),
+      onPendingRule: (rule) => onAppend({ role: 'assistant', agent: slug,
         text: `收到规则「${rule.name}」，请在主界面确认保存。` }),
     });
   };
 
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: 'var(--color-bg)', color: 'var(--color-text)',
+      position: 'fixed', inset: 0,
+      background: 'var(--color-bg)', color: 'var(--color-text)',
       fontFamily: 'var(--font-sans)',
       paddingTop: 'env(safe-area-inset-top, 0px)',
       display: 'flex', flexDirection: 'column',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px',
-        borderBottom: '1px solid var(--color-border)', flexShrink: 0 }}>
+
+      {/* ── Header（与 Go2 布局一致） ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '11px 16px',
+        borderBottom: '1px solid var(--color-border)',
+        background: 'var(--color-surface-1)',
+        flexShrink: 0,
+      }}>
+        {/* 返回按钮 */}
         <button onClick={onBack} style={{
-          background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
-          color: 'var(--color-text-muted)', borderRadius: 'var(--radius-btn)', padding: '6px 12px',
-          cursor: 'pointer', fontFamily: 'inherit', fontSize: 13,
-          display: 'flex', alignItems: 'center', gap: 5,
-        }}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M19 12H5M12 5l-7 7 7 7"/>
-          </svg>
-          返回
-        </button>
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-            background: `${meta.color}18`, color: meta.color,
-            display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon name={meta.icon} size={17}/>
-          </div>
-          <div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>{device?.name || slug}</div>
-            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', fontFamily: 'var(--font-mono)' }}>{ism}</div>
-          </div>
+          background: 'none', border: 'none',
+          color: 'var(--color-text-dim)', cursor: 'pointer',
+          fontSize: 18, padding: '0 4px', lineHeight: 1,
+          fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
+        }}>←</button>
+
+        {/* 设备名 + 副标题 */}
+        <div>
+          <div style={{
+            fontSize: 13, fontWeight: 700, letterSpacing: '0.12em',
+            color: meta.color, textShadow: isOn ? `0 0 12px ${meta.color}80` : 'none',
+            transition: 'text-shadow 0.4s',
+          }}>{(device?.name || slug).toUpperCase()}</div>
+          <div style={{
+            fontSize: 9, color: 'var(--color-text-dim)',
+            letterSpacing: '0.18em', marginTop: 1,
+          }}>{meta.label.toUpperCase()}</div>
         </div>
-        <a href={agentCardUrl} target="_blank" rel="noopener" style={{
-          padding: '6px 12px', borderRadius: 'var(--radius-btn)', fontSize: 12,
-          background: `${meta.color}15`, border: `1px solid ${meta.color}35`,
-          color: meta.color, textDecoration: 'none',
-          display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0,
-        }}>
-          <Icon name="zap" size={12} color={meta.color}/>
-          Agent 接入
-        </a>
+
+        {/* 右侧：状态点 + ISM 文字 + Agent 按钮 */}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: device?._online ? meta.color : 'var(--color-offline)',
+            boxShadow: isOn ? `0 0 8px ${meta.color}` : 'none',
+            transition: 'box-shadow 0.4s',
+          }}/>
+          <span style={{
+            fontSize: 10, letterSpacing: '0.1em',
+            color: device?._online ? meta.color : 'var(--color-text-dim)',
+          }}>
+            {ism || (device?._online ? 'ONLINE' : 'OFFLINE')}
+          </span>
+          <a href={'/api/devices/' + slug + '/agent'} target="_blank" rel="noopener"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              background: `${meta.color}12`,
+              color: meta.color,
+              border: `1px solid ${meta.color}30`,
+              borderRadius: 'var(--radius-sm)', padding: '5px 10px',
+              fontSize: 10, letterSpacing: '0.1em',
+              cursor: 'pointer', textDecoration: 'none',
+              fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
+            }}>
+            <Icon name="zap" size={10} color={meta.color}/>
+            AGENT
+          </a>
+        </div>
       </div>
+
+      {/* ── 聊天区（快捷指令通过 children 插在输入栏上方） ── */}
       <ChatPanel
         messages={messages}
         thinking={thinking}
         thinkingText={thinkingText}
+        thinkingAgent={slug}
         onSend={sendChat}
         placeholder="告诉设备要做什么…"
         variant="inline"
-      />
+      >
+        {/* 快捷指令：无用户消息时显示，位置与主屏建议一致 */}
+        {isLed && !hasUserMsg && !thinking && (
+          <div style={{
+            padding: '6px 12px 0',
+            display: 'flex', gap: 6,
+            overflowX: 'auto', scrollbarWidth: 'none',
+          }}>
+            {LED_CMDS.map(cmd => (
+              <button key={cmd} onClick={() => sendChat(cmd)} style={{
+                flexShrink: 0, padding: '7px 14px',
+                borderRadius: 'var(--radius-card)',
+                background: 'var(--color-surface-2)',
+                border: '1px solid var(--color-border-strong)',
+                color: 'var(--color-text-muted)', fontSize: 13,
+                cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+                WebkitTapHighlightColor: 'transparent',
+              }}>{cmd}</button>
+            ))}
+          </div>
+        )}
+      </ChatPanel>
     </div>
   );
 }

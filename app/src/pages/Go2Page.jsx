@@ -161,7 +161,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
           pointerEvents: "none",
         }} />
       </div>
-      <div style={{ fontSize: 9, color: "#2e2e2e", letterSpacing: "0.22em",
+      <div style={{ fontSize: 9, color: "var(--color-text-dim)", letterSpacing: "0.22em",
         fontFamily: 'var(--font-mono)' }}>{label}</div>
     </div>
   );
@@ -177,7 +177,7 @@ function WaypointMap({ locations, BORDER }) {
       <svg width="100%" viewBox={`0 0 ${W} ${H}`}
         style={{ border: `1px solid ${BORDER}`, borderRadius: 4, display: "block" }}>
         <text x={W / 2} y={H / 2} textAnchor="middle" dominantBaseline="middle"
-          fill="#1e1e1e" fontSize="10" fontFamily="var(--font-mono)"
+          fill="rgba(200,255,62,0.25)" fontSize="10" fontFamily="var(--font-mono)"
           letterSpacing="2">NO DATA</text>
       </svg>
     );
@@ -235,7 +235,7 @@ function WaypointMap({ locations, BORDER }) {
 
 function Go2DevicePage({ onBack }) {
   const [messages, setMessages] = React.useState([
-    { role: 'assistant', agent: 'go2', agentName: 'Go2', text: '需要 Go2 做什么？' }
+    { role: 'assistant', agent: 'go2', text: '嗷！系统就绪，走、跑、跳、探索，说吧。' }
   ]);
   const onAppend = (msg) => setMessages(prev => [...prev, msg]);
   const { useState, useEffect, useRef, useCallback } = React;
@@ -485,7 +485,7 @@ function Go2DevicePage({ onBack }) {
             } else if (ev.type === "tool_done") {
               onAppend({ role: 'step', agent: 'go2', text: `↳ ${ev.tool}: ${ev.result}` });
             } else if (ev.type === "response") {
-              onAppend({ role: 'assistant', agent: 'go2', agentName: 'Go2', text: ev.text });
+              onAppend({ role: 'assistant', agent: 'go2', text: ev.text });
             } else if (ev.type === "done") {
               setChatThink(false);
               setThinkText("");
@@ -494,7 +494,7 @@ function Go2DevicePage({ onBack }) {
         }
       }
     } catch (_) {
-      onAppend({ role: 'assistant', agent: 'go2', agentName: 'Go2', text: "请求失败，请检查连接" });
+      onAppend({ role: 'assistant', agent: 'go2', text: "请求失败，请检查连接。" });
     } finally {
       setChatThink(false);
       setThinkText("");
@@ -556,13 +556,13 @@ function Go2DevicePage({ onBack }) {
         padding: "11px 16px", borderBottom: `1px solid ${BORDER}`,
         background: PANEL, flexShrink: 0 }}>
         <button onClick={onBack} style={{ background: "none", border: "none",
-          color: "#444", cursor: "pointer", fontSize: 18, padding: "0 4px",
+          color: "var(--color-text-dim)", cursor: "pointer", fontSize: 18, padding: "0 4px",
           fontFamily: "inherit", lineHeight: 1,
           WebkitTapHighlightColor: "transparent" }}>←</button>
 
         <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.15em",
           color: 'var(--color-accent)', textShadow: `0 0 14px var(--color-accent)` }}>GO2 AIR</div>
-        <div style={{ fontSize: 9, color: "#222", letterSpacing: "0.2em", marginLeft: -4 }}>UNITREE</div>
+        <div style={{ fontSize: 9, color: "var(--color-text-dim)", letterSpacing: "0.2em", marginLeft: -4 }}>UNITREE</div>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ width: 7, height: 7, borderRadius: "50%",
@@ -616,9 +616,9 @@ function Go2DevicePage({ onBack }) {
             : <div style={{ width: "100%", height: "100%", display: "flex",
                 alignItems: "center", justifyContent: "center",
                 flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 11, color: "#172017", letterSpacing: "0.2em" }}>NO SIGNAL</div>
-                <div style={{ width: 28, height: 1, background: "#121812" }} />
-                <div style={{ fontSize: 9, color: "#0f170f", letterSpacing: "0.15em" }}>CONNECT TO ENABLE</div>
+                <div style={{ fontSize: 11, color: "rgba(200,255,62,0.25)", letterSpacing: "0.2em" }}>NO SIGNAL</div>
+                <div style={{ width: 28, height: 1, background: "rgba(200,255,62,0.08)" }} />
+                <div style={{ fontSize: 9, color: "var(--color-text-dim)", letterSpacing: "0.15em" }}>CONNECT TO ENABLE</div>
               </div>
           }
 
@@ -769,7 +769,7 @@ function Go2DevicePage({ onBack }) {
 
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
                 {locations.length === 0 && (
-                  <div style={{ fontSize: 10, color: "#1e1e1e", textAlign: "center",
+                  <div style={{ fontSize: 10, color: "var(--color-text-dim)", textAlign: "center",
                     padding: "10px 0", letterSpacing: "0.15em" }}>— NO WAYPOINTS —</div>
                 )}
                 {locations.map(loc => (
@@ -783,7 +783,7 @@ function Go2DevicePage({ onBack }) {
                       <div style={{ fontSize: 11, color: "rgba(200,255,62,0.7)",
                         letterSpacing: "0.05em", overflow: "hidden",
                         textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{loc.name}</div>
-                      <div style={{ fontSize: 9, color: "#2e2e2e", letterSpacing: "0.07em", marginTop: 2 }}>
+                      <div style={{ fontSize: 9, color: "var(--color-text-dim)", letterSpacing: "0.07em", marginTop: 2 }}>
                         ({loc.x.toFixed(2)}, {loc.y.toFixed(2)})&nbsp;
                         {(loc.heading * 180 / Math.PI).toFixed(0)}°
                       </div>
@@ -858,17 +858,15 @@ function Go2DevicePage({ onBack }) {
           )}
         </div>
 
-        {/* ── AI 对话区 ── */}
-        <div style={{ borderTop: '2px solid var(--color-border-strong)', marginTop: 10,
+        {/* ── 对话区 ── */}
+        <div style={{ borderTop: `1px solid ${BORDER}`, marginTop: 8,
           display: 'flex', flexDirection: 'column', minHeight: 200, flex: 1 }}>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)',
-            fontFamily: 'var(--font-sans)', padding: '12px 14px 0', fontWeight: 500 }}>
-            AI 对话
-          </div>
           <ChatPanel
             messages={messages}
             thinking={chatThinking}
             thinkingText={thinkingText}
+            thinkingAgent="go2"
+            thinkingAgentName="Go2"
             onSend={sendChat}
             placeholder={connected ? "对话控制，如：站起来跳个舞" : "未连接"}
             variant="inline"

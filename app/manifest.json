@@ -1,7 +1,7 @@
 {
-    "name": "SSM 智能桌面",
+    "name": "SSM智慧空间",
     "short_name": "SSM",
-    "description": "智能桌面多智能体控制台",
+    "description": "空间多智能体",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#0f0f1a",

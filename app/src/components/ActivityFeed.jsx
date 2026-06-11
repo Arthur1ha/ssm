@@ -24,14 +24,22 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
           );
         }
         if (e.type === 'ai') {
+          const oc = getAgentBubbleColor('orchestrator');
           return (
             <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-              <div style={{
-                maxWidth: '78%', padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
-                borderRadius: 'var(--radius-card)',
-                background: 'var(--color-surface-2)',
-                border: '1px solid var(--color-border)', color: 'var(--color-text)',
-              }}>{e.text}</div>
+              <div style={{ maxWidth: '78%', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
+                  fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+                  {getAgentDisplayName('orchestrator')}
+                </div>
+                <div style={{
+                  padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
+                  borderRadius: 'var(--radius-card)',
+                  background: `${oc}10`,
+                  border: `1px solid ${oc}25`,
+                  color: 'var(--color-text)',
+                }}>{e.text}</div>
+              </div>
             </div>
           );
         }
@@ -63,28 +71,36 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
         return null;
       })}
 
-      {thinking && (
+      {thinking && (() => {
+        const oc = getAgentBubbleColor('orchestrator');
+        return (
         <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-          <div style={{
-            padding: '10px 14px', borderRadius: 'var(--radius-card)',
-            background: 'var(--color-surface-2)',
-            border: '1px solid var(--color-border)',
-            display: 'flex', flexDirection: 'column', gap: 6,
-          }}>
-            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-              <span className="typing-dot"/>
-              <span className="typing-dot" style={{ animationDelay: '.14s' }}/>
-              <span className="typing-dot" style={{ animationDelay: '.28s' }}/>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
+              fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+              {getAgentDisplayName('orchestrator')}
             </div>
-            {thinkingText && (
-              <span style={{ fontSize: 11, color: 'var(--color-text-dim)',
-                fontFamily: 'var(--font-mono)' }}>
+            <div style={{
+              padding: '10px 14px', borderRadius: 'var(--radius-card)',
+              background: `${oc}10`, border: `1px solid ${oc}25`,
+              display: 'flex', flexDirection: 'column', gap: 6,
+            }}>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <span className="typing-dot" style={{ background: oc, opacity: 0.6 }}/>
+                <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.14s' }}/>
+                <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.28s' }}/>
+              </div>
+              {thinkingText && (
+                <span style={{ fontSize: 11, color: oc, opacity: 0.7,
+                  fontFamily: 'var(--font-mono)' }}>
                 {thinkingText}
               </span>
-            )}
+              )}
+            </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       <div ref={bottomRef}/>
     </div>

@@ -80,6 +80,11 @@ class CardRegistry:
                 return
             try:
                 data = json.loads(raw)
+                # 系统/监控节点不参与编排
+                if data.get("agent_type") in ("supervisor", "decision"):
+                    return
+                if data.get("hw_platform") in ("pwa", "pc"):
+                    return
                 card = build_card_from_manifest(data)
                 with self._lock:
                     self._cards[card["slug"]] = card

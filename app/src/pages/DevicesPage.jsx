@@ -46,36 +46,9 @@ function DevicesScreen({ agents, unitData }) {
       {agentDevices.length > 0 && (
         <>
           {sectionLabel('智能体')}
-          {agentDevices.map(a => {
-            if (a.agent_type === 'robot') {
-              const meta = getAgentMeta(a);
-              const slug = a.slug || a.unit_id || a.agent_id;
-              return (
-                <div key={slug} onClick={() => navigate('#/devices/' + slug)}
-                  className="interactive"
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 12,
-                    padding: '12px 14px', marginBottom: 8, borderRadius: 'var(--radius-card)', cursor: 'pointer',
-                    background: `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`,
-                    border: `1px solid ${meta.color}40`,
-                  }}>
-                  <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
-                    background: meta.color, color: '#0B0B0E',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <Icon name={meta.icon} size={19}/>
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--color-text)' }}>{a.name || slug}</div>
-                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 2 }}>
-                      {meta.label} · 点击控制
-                    </div>
-                  </div>
-                  <Icon name="arrow" size={16} color="var(--color-text-dim)"/>
-                </div>
-              );
-            }
-            return <ActuatorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>;
-          })}
+          {agentDevices.map(a => (
+            <ActuatorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>
+          ))}
         </>
       )}
       {sensors.length > 0 && (

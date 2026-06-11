@@ -1,8 +1,8 @@
 /* ChatPanel — 统一聊天面板组件（variant="inline"：内嵌页面，撑满父容器剩余高度） */
 const { useState, useEffect, useRef } = React;
 
-function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
-                     variant, disabled, open, children }) {
+function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAgentName,
+                     onSend, placeholder, variant, disabled, open, children }) {
   const [input,  setInput]  = useState('');
   const msgsRef  = useRef(null);
   const inputRef = useRef(null);
@@ -33,30 +33,37 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
       {/* 消息气泡区 */}
       <div ref={msgsRef} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px',
         display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {messages.map((m, i) => (
+        {messages.map((m, i) => {
+          const agentColor = getAgentBubbleColor(m.agent);
+          return (
           <div key={i} style={{ maxWidth: '82%',
             alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-            display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {m.role !== 'user' && m.role !== 'step' && m.agentName && (
-              <div style={{ fontSize: 10, color: 'var(--color-text-dim)',
-                paddingLeft: 4, marginBottom: -2 }}>{m.agentName}</div>
+            display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {m.role !== 'user' && m.role !== 'step' && (
+              <div style={{
+                fontSize: 10, paddingLeft: 4,
+                color: agentColor, opacity: 0.75,
+                fontFamily: 'var(--font-mono)', letterSpacing: '0.04em',
+              }}>
+                {m.agentName || getAgentDisplayName(m.agent)}
+              </div>
             )}
             {m.role === 'step' ? (
               <div style={{
-                padding: '7px 12px', fontSize: 13, lineHeight: 1.5,
-                borderRadius: 12,
-                background: 'var(--color-surface-1)',
-                color: 'var(--color-text-muted)',
-                border: '1px solid var(--color-border)',
-                fontStyle: 'italic',
+                padding: '6px 12px', fontSize: 12, lineHeight: 1.5,
+                borderRadius: 8,
+                background: `${agentColor}08`,
+                color: agentColor,
+                border: `1px solid ${agentColor}20`,
+                fontFamily: 'var(--font-mono)', opacity: 0.7,
               }}>{m.text}</div>
             ) : (
             <div style={{
-              padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
-              borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
-              background: m.role === 'user' ? 'var(--color-accent)' : 'var(--color-surface-2)',
+              padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
+              borderRadius: m.role === 'user' ? '16px 16px 4px 16px' : '4px 16px 16px 16px',
+              background: m.role === 'user' ? 'var(--color-accent)' : `${agentColor}10`,
               color: m.role === 'user' ? 'var(--color-bg)' : 'var(--color-text)',
-              border: m.role === 'user' ? 'none' : '1px solid var(--color-border)',
+              border: m.role === 'user' ? 'none' : `1px solid ${agentColor}25`,
             }}>{m.text}</div>
             )}
             {m.actions?.map((ac, ai) => (
@@ -74,25 +81,34 @@ function ChatPanel({ messages, thinking, thinkingText, onSend, placeholder,
               </div>
             ))}
           </div>
-        ))}
+          );
+        })}
 
-        {thinking && (
-          <div style={{ alignSelf: 'flex-start', padding: '10px 14px',
-            borderRadius: '4px 18px 18px 18px',
-            background: 'var(--color-surface-2)',
-            border: '1px solid var(--color-border)',
-            display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-              <span className="typing-dot"/>
-              <span className="typing-dot" style={{ animationDelay: '.14s' }}/>
-              <span className="typing-dot" style={{ animationDelay: '.28s' }}/>
+        {thinking && (() => {
+          const tc = getAgentBubbleColor(thinkingAgent);
+          return (
+            <div style={{ alignSelf: 'flex-start', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ fontSize: 10, paddingLeft: 4, color: tc, opacity: 0.75,
+                fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+                {thinkingAgentName || getAgentDisplayName(thinkingAgent)}
+              </div>
+              <div style={{ padding: '10px 14px',
+                borderRadius: '4px 16px 16px 16px',
+                background: `${tc}10`, border: `1px solid ${tc}25`,
+                display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <span className="typing-dot" style={{ background: tc, opacity: 0.6 }}/>
+                  <span className="typing-dot" style={{ background: tc, opacity: 0.6, animationDelay: '.14s' }}/>
+                  <span className="typing-dot" style={{ background: tc, opacity: 0.6, animationDelay: '.28s' }}/>
+                </div>
+                {thinkingText && (
+                  <span style={{ fontSize: 11, color: tc, opacity: 0.7,
+                    fontFamily: 'var(--font-mono)' }}>{thinkingText}</span>
+                )}
+              </div>
             </div>
-            {thinkingText && (
-              <span style={{ fontSize: 11, color: 'var(--color-text-dim)',
-                fontFamily: 'var(--font-mono)' }}>{thinkingText}</span>
-            )}
-          </div>
-        )}
+          );
+        })()}
         <div/>
       </div>
 

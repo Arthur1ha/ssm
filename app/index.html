@@ -8,6 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>SSM</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="styles/app.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -35,10 +39,10 @@
 </head>
 <body>
   <!-- Plain JS globals (load before React) -->
-  <script src="src/config.js"></script>
-  <script src="src/utils/geo.js"></script>
-  <script src="src/utils/agentMeta.js"></script>
-  <script src="src/utils/audio.js"></script>
+  <script src="src/config.js?v=2"></script>
+  <script src="src/utils/geo.js?v=2"></script>
+  <script src="src/utils/agentMeta.js?v=2"></script>
+  <script src="src/utils/audio.js?v=2"></script>
   <script src="src/MqttBus.js"></script>
   <script src="src/AgentRegistry.js"></script>
   <script src="src/ISMTracker.js"></script>
@@ -46,17 +50,17 @@
   <div id="root"></div>
 
   <!-- JSX components (dependency order) -->
-  <script type="text/babel" src="src/components/Icon.jsx"></script>
-  <script type="text/babel" src="src/hooks/useSendIntent.js"></script>
-  <script type="text/babel" src="src/components/ChatPanel.jsx"></script>
-  <script type="text/babel" src="src/components/DeviceCard.jsx"></script>
-  <script type="text/babel" src="src/components/ActivityFeed.jsx"></script>
-  <script type="text/babel" src="src/pages/RulesPage.jsx"></script>
-  <script type="text/babel" src="src/components/RulesDrawer.jsx"></script>
-  <script type="text/babel" src="src/pages/DeviceDetailPage.jsx"></script>
-  <script type="text/babel" src="src/pages/Go2Page.jsx"></script>
-  <script type="text/babel" src="src/pages/DevicesPage.jsx"></script>
-  <script type="text/babel" src="src/app.jsx"></script>
+  <script type="text/babel" src="src/components/Icon.jsx?v=2"></script>
+  <script type="text/babel" src="src/hooks/useSendIntent.js?v=2"></script>
+  <script type="text/babel" src="src/components/ChatPanel.jsx?v=2"></script>
+  <script type="text/babel" src="src/components/DeviceCard.jsx?v=2"></script>
+  <script type="text/babel" src="src/components/ActivityFeed.jsx?v=2"></script>
+  <script type="text/babel" src="src/pages/RulesPage.jsx?v=2"></script>
+  <script type="text/babel" src="src/components/RulesDrawer.jsx?v=2"></script>
+  <script type="text/babel" src="src/pages/DeviceDetailPage.jsx?v=2"></script>
+  <script type="text/babel" src="src/pages/Go2Page.jsx?v=2"></script>
+  <script type="text/babel" src="src/pages/DevicesPage.jsx?v=2"></script>
+  <script type="text/babel" src="src/app.jsx?v=2"></script>
 
 </body>
 </html>

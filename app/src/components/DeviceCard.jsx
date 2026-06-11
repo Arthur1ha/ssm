@@ -4,7 +4,7 @@ function SensorCard({ agent, unitData }) {
   const reading = getSensorReading(agent, unitData);
   const offline = !agent._online;
   return (
-    <div style={{
+    <div className="glass" style={{
       display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
       marginBottom: 8, borderRadius: 'var(--radius-card)',
       background: 'var(--color-surface-1)',
@@ -26,9 +26,10 @@ function SensorCard({ agent, unitData }) {
           {offline ? '离线' : `${meta.label} · 只读`}
         </div>
       </div>
-      <span style={{ fontSize: 14, fontWeight: 600, color: reading.color,
+      <span style={{ fontSize: 14, fontWeight: 600,
+        color: offline ? 'var(--color-text-dim)' : reading.color,
         fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-        {reading.value}
+        {offline ? '—' : reading.value}
       </span>
       <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
         background: offline ? 'var(--color-offline)' : 'var(--color-online)',
@@ -38,15 +39,16 @@ function SensorCard({ agent, unitData }) {
 }
 
 function ActuatorCard({ agent, unitData }) {
-  const uid    = agent.unit_id || agent.agent_id;
-  const meta   = getAgentMeta(agent);
-  const active = isAgentActive(agent, unitData);
-  const offline = !agent._online;
+  const uid      = agent.unit_id || agent.agent_id;
+  const meta     = getAgentMeta(agent);
+  const active   = isAgentActive(agent, unitData);
+  const offline  = !agent._online;
+  const canClick = true;
 
   return (
     <div
-      onClick={offline ? undefined : () => navigate('#/devices/' + (agent.slug || uid))}
-      className={offline ? '' : 'interactive'}
+      onClick={canClick ? () => navigate('#/devices/' + (agent.slug || uid)) : undefined}
+      className={`glass${canClick ? ' interactive' : ''}`}
       style={{
         padding: '12px 14px', marginBottom: 10,
         borderRadius: 'var(--radius-card)',
@@ -55,7 +57,7 @@ function ActuatorCard({ agent, unitData }) {
           : 'var(--color-surface-1)',
         border: `1px solid ${active && !offline ? meta.color + '40' : 'var(--color-border)'}`,
         opacity: offline ? 0.4 : 1,
-        cursor: offline ? 'default' : 'pointer',
+        cursor: canClick ? 'pointer' : 'default',
       }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
@@ -74,11 +76,9 @@ function ActuatorCard({ agent, unitData }) {
             {offline ? '离线' : getStateLabel(agent, unitData)}
           </div>
         </div>
-        {!offline && (
-          <div style={{ flexShrink: 0, color: 'var(--color-text-dim)' }}>
-            <Icon name="arrow" size={13} sw={2}/>
-          </div>
-        )}
+        <div style={{ flexShrink: 0, color: offline ? 'var(--color-text-dim)' : 'var(--color-text-muted)', opacity: offline ? 0.4 : 1 }}>
+          <Icon name="arrow" size={13} sw={2}/>
+        </div>
         <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
           background: offline ? 'var(--color-offline)' : 'var(--color-online)',
           boxShadow: offline ? 'none' : '0 0 6px var(--color-online-glow)' }}/>

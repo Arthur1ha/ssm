@@ -1,18 +1,14 @@
-// Service Worker — cache PWA shell for offline use
-const CACHE = 'ssm-v5';
-const ASSETS = [
-    '/',
-    '/index.html',
-    '/styles/app.css',
-    '/src/MqttBus.js',
-    '/src/AgentRegistry.js',
-    '/src/ISMTracker.js',
-    '/src/app.jsx',
+// Service Worker — network-first for app files, cache for offline fallback
+const CACHE = 'ssm-v10';
+
+// 只预缓存真正稳定的外壳资源
+const PRECACHE = [
+    '/manifest.json',
 ];
 
 self.addEventListener('install', e => {
     e.waitUntil(
-        caches.open(CACHE).then(c => c.addAll(ASSETS)).catch(() => {})
+        caches.open(CACHE).then(c => c.addAll(PRECACHE)).catch(() => {})
     );
     self.skipWaiting();
 });
@@ -27,9 +23,20 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-    // Only cache same-origin requests; pass CDN (mqtt.js) through
+    // CDN 资源（外部域名）直接透传，不干预
     if (!e.request.url.startsWith(self.location.origin)) return;
+
+    // 所有同源请求：先网络，失败再用缓存
     e.respondWith(
-        caches.match(e.request).then(r => r || fetch(e.request))
+        fetch(e.request)
+            .then(res => {
+                // 成功拿到网络响应，顺手更新缓存
+                if (res && res.status === 200 && res.type === 'basic') {
+                    const clone = res.clone();
+                    caches.open(CACHE).then(c => c.put(e.request, clone));
+                }
+                return res;
+            })
+            .catch(() => caches.match(e.request))
     );
 });

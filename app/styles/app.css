@@ -1,25 +1,37 @@
 /* SSM Phone PWA Styles */
 :root {
-  /* ── 背景层级 ── */
-  --color-bg:           #0B0B0E;
-  --color-surface-1:    rgba(255,255,255,0.03);
-  --color-surface-2:    rgba(255,255,255,0.06);
-  --color-surface-3:    rgba(255,255,255,0.10);
+  /* ── 背景（单一深色底，用表面层级建立纵深，而非渐变） ── */
+  --color-bg:           #0C0C15;
+  --bg-gradient:        #0C0C15;
+  --color-bar:          #0C0C15;
+  --glass-blur:         blur(20px);
+  --glass-shadow:       0 1px 0 rgba(255,255,255,0.06) inset;
 
-  /* ── 文字 ── */
-  --color-text:         #ffffff;
-  --color-text-muted:   rgba(255,255,255,0.40);
-  --color-text-dim:     rgba(255,255,255,0.25);
+  /* ── 表面层级（Linear 风：实色，差值明确） ── */
+  --color-surface-0:    #0C0C15;   /* 页面底色 */
+  --color-surface-1:    #14141F;   /* 卡片、面板 */
+  --color-surface-2:    #1C1C2A;   /* 输入框、次要按钮、hover */
+  --color-surface-3:    #252535;   /* 选中态、强调区域 */
 
-  /* ── 边框 ── */
-  --color-border:       rgba(255,255,255,0.08);
-  --color-border-strong: rgba(255,255,255,0.14);
+  /* ── 按钮专用 ── */
+  --color-btn:          #1C1C2A;
+  --color-btn-border:   rgba(255,255,255,0.10);
+  --color-btn-hover:    #252535;
 
-  /* ── 强调色（LIME） ── */
+  /* ── 文字（对比度全面提升） ── */
+  --color-text:         #E8E8F0;
+  --color-text-muted:   rgba(232,232,240,0.65);
+  --color-text-dim:     rgba(232,232,240,0.42);
+
+  /* ── 边框（极细，Linear 风） ── */
+  --color-border:       rgba(255,255,255,0.07);
+  --color-border-strong: rgba(255,255,255,0.13);
+
+  /* ── 强调色（LIME，保留） ── */
   --color-accent:       #C8FF3E;
-  --color-accent-dim:   rgba(200,255,62,0.15);
-  --color-accent-glow:  rgba(200,255,62,0.35);
-  --color-accent-border:rgba(200,255,62,0.10);
+  --color-accent-dim:   rgba(200,255,62,0.12);
+  --color-accent-glow:  rgba(200,255,62,0.30);
+  --color-accent-border:rgba(200,255,62,0.22);
 
   /* ── 语义色 ── */
   --color-online:       #C8FF3E;
@@ -27,18 +39,18 @@
   --color-offline:      rgba(255,255,255,0.20);
   --color-danger:       #FF5252;
   --color-danger-dim:   rgba(255,82,82,0.10);
-  --color-danger-border:rgba(255,82,82,0.20);
+  --color-danger-border:rgba(255,82,82,0.25);
   --color-warn:         #F0A500;
 
-  /* ── 圆角 ── */
-  --radius-card: 18px;
-  --radius-btn:  10px;
+  /* ── 圆角（收紧，更干练） ── */
+  --radius-card: 12px;
+  --radius-btn:  8px;
   --radius-sm:   6px;
   --radius-pill: 999px;
 
   /* ── 字体 ── */
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  --font-sans: 'Syne', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   /* ── 间距 ── */
   --space-xs:  4px;
@@ -50,35 +62,36 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 
-/* typing indicator */
 .typing-dot {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 6px; height: 6px;
   border-radius: 50%;
   background: var(--color-text-muted);
   animation: typing-bounce 1.2s infinite ease-in-out;
 }
-
 @keyframes typing-bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
   40%           { transform: translateY(-4px); opacity: 1; }
 }
 
 body {
-  background: var(--color-bg);
+  background: var(--bg-gradient);
   color: var(--color-text);
   font-family: var(--font-sans);
   font-size: 14px;
   min-height: 100vh;
 }
 
-/* 统一点击反馈 */
+/* 实色卡片层（替代毛玻璃：背景已是实色，靠边框建立纵深） */
+.glass {
+  box-shadow: var(--glass-shadow);
+}
+
+/* 点击反馈 */
 .interactive {
   -webkit-tap-highlight-color: transparent;
   cursor: pointer;
@@ -86,5 +99,24 @@ body {
 }
 .interactive:active {
   transform: scale(0.97);
-  filter: brightness(1.08);
+  filter: brightness(1.12);
 }
+
+/* 通用按钮基础样式 */
+.btn {
+  background: var(--color-btn);
+  border: 1px solid var(--color-btn-border);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-btn);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s, filter 0.08s;
+}
+.btn:active { filter: brightness(1.2); }
+.btn:hover  { background: var(--color-btn-hover); }

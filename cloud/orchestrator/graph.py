@@ -69,6 +69,8 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
     for slug, card in cards.items():
         if not card.get("online", True):
             continue
+        if not card.get("skills"):
+            continue  # 无技能的设备（传感器、系统节点）不进入规划上下文
         lines.append(f"- {slug}（{card.get('name', slug)}）：")
         for skill in card.get("skills", []):
             schema = skill.get("params_schema", {})
