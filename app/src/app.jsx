@@ -271,7 +271,7 @@ function App() {
                 }}>取消</button>
                 <button onClick={handleConfirmRule} disabled={savingRule} style={{
                   flex: 2, padding: '9px 0', borderRadius: 999, fontSize: 13, fontWeight: 600,
-                  background: 'var(--color-accent)', border: 'none', color: '#0B0B0E',
+                  background: 'var(--color-accent)', border: 'none', color: 'var(--color-bg)',
                   cursor: 'pointer', fontFamily: 'inherit',
                   boxShadow: '0 0 16px rgba(200,255,62,0.3)',
                 }}>{savingRule ? '保存中...' : '确认保存'}</button>
