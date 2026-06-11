@@ -10,16 +10,16 @@ function DevicesScreen({ agents, unitData }) {
     <div onClick={collapsible ? onToggle : undefined}
       style={{ padding: '16px 6px 8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         cursor: collapsible ? 'pointer' : 'default', userSelect: 'none' }}>
-      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.45)', fontWeight: 500 }}>{text}</span>
+      <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>{text}</span>
       {collapsible && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {!open && count > 0 && (
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', fontFamily: 'monospace' }}>
+            <span style={{ fontSize: 10, color: 'var(--color-text-dim)', fontFamily: 'monospace' }}>
               {count} 个
             </span>
           )}
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-            stroke="rgba(255,255,255,0.3)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+            stroke="var(--color-text-dim)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
             style={{ transition: 'transform 0.2s', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
             <path d="M6 9l6 6 6-6"/>
           </svg>
@@ -30,9 +30,13 @@ function DevicesScreen({ agents, unitData }) {
 
   if (agents.length === 0) {
     return (
-      <div style={{ padding: '40px 20px', textAlign: 'center',
-        color: 'rgba(255,255,255,0.25)', fontSize: 13 }}>
-        等待设备上线…
+      <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+        <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 8 }}>
+          等待设备上线…
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', opacity: 0.6, lineHeight: 1.6 }}>
+          请确认 ESP32 已开机并连接到同一网络
+        </div>
       </div>
     );
   }
@@ -48,9 +52,10 @@ function DevicesScreen({ agents, unitData }) {
               const slug = a.slug || a.unit_id || a.agent_id;
               return (
                 <div key={slug} onClick={() => navigate('#/devices/' + slug)}
+                  className="interactive"
                   style={{
                     display: 'flex', alignItems: 'center', gap: 12,
-                    padding: '12px 14px', marginBottom: 8, borderRadius: 18, cursor: 'pointer',
+                    padding: '12px 14px', marginBottom: 8, borderRadius: 'var(--radius-card)', cursor: 'pointer',
                     background: `linear-gradient(135deg, ${meta.color}15, rgba(255,255,255,0.03))`,
                     border: `1px solid ${meta.color}40`,
                   }}>
@@ -60,12 +65,12 @@ function DevicesScreen({ agents, unitData }) {
                     <Icon name={meta.icon} size={19}/>
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 500 }}>{a.name || slug}</div>
-                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', marginTop: 2 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--color-text)' }}>{a.name || slug}</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 2 }}>
                       {meta.label} · 点击控制
                     </div>
                   </div>
-                  <Icon name="arrow" size={16} color="rgba(255,255,255,0.3)"/>
+                  <Icon name="arrow" size={16} color="var(--color-text-dim)"/>
                 </div>
               );
             }
