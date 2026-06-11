@@ -131,6 +131,23 @@ class TestSpeakTool:
             result = tools.speak("灯已打开")
         assert isinstance(result, str)
 
+    def test_speak_also_publishes_thought(self):
+        mqtt = make_mock_mqtt()
+        with patch("cloud.esp32.tts.synthesize", return_value=None):
+            tools.speak("灯已调暖色")
+        topics = [call[0][0] for call in mqtt.publish.call_args_list]
+        assert "ssm/agents/desk/thought" in topics
+
+    def test_speak_thought_payload_contains_text(self):
+        mqtt = make_mock_mqtt()
+        with patch("cloud.esp32.tts.synthesize", return_value=None):
+            tools.speak("行吧，给你暖了")
+        thought_calls = [c for c in mqtt.publish.call_args_list
+                         if c[0][0] == "ssm/agents/desk/thought"]
+        assert len(thought_calls) == 1
+        payload = json.loads(thought_calls[0][0][1])
+        assert payload["text"] == "行吧，给你暖了"
+
 
 class TestToolFnMap:
     def test_all_tools_present(self):

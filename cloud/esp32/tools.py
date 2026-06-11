@@ -60,6 +60,7 @@ def set_led_color(device_id: str, r: int, g: int, b: int, brightness: int) -> st
 def speak(text: str) -> str:
     """播报语音。"""
     publish_speech(text)
+    publish_thought(text)
     return f"speech: {text}"
 
 
