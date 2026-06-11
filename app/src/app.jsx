@@ -94,7 +94,10 @@ function App() {
       }, { retain: true });
       mqttBus.subscribe('ssm/agents/desk/speech');
     };
-    const handleDisconnect = () => setConnected(false);
+    const handleDisconnect = () => {
+      setConnected(false);
+      appendActivity({ type: 'system', text: 'MQTT 连接断开，正在重连…' });
+    };
     const handleReconnect  = () => setConnected(false);
     mqttBus.addEventListener('connect',    handleConnect);
     mqttBus.addEventListener('disconnect', handleDisconnect);
@@ -182,8 +185,8 @@ function App() {
   /* ── 主屏布局 ── */
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: '#0B0B0E', color: '#fff',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif',
+      position: 'fixed', inset: 0, background: 'var(--color-bg)', color: '#fff',
+      fontFamily: 'var(--font-sans)',
       paddingTop: 'env(safe-area-inset-top, 0px)',
       display: 'flex', flexDirection: 'column',
     }}>
@@ -195,15 +198,29 @@ function App() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em' }}>SSM</span>
-          <div style={{
-            width: 6, height: 6, borderRadius: '50%',
-            background: connected ? LIME : '#FF5252',
-            boxShadow: connected ? `0 0 6px ${LIME}` : 'none',
-          }}/>
+          <div
+            onClick={!connected ? () => mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS }) : undefined}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '3px 8px', borderRadius: 'var(--radius-pill)',
+              background: connected ? 'rgba(200,255,62,0.10)' : 'rgba(255,82,82,0.10)',
+              border: `1px solid ${connected ? 'rgba(200,255,62,0.25)' : 'rgba(255,82,82,0.25)'}`,
+              cursor: connected ? 'default' : 'pointer',
+            }}
+          >
+            <div style={{
+              width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+              background: connected ? 'var(--color-accent)' : 'var(--color-danger)',
+              boxShadow: connected ? '0 0 6px var(--color-online-glow)' : 'none',
+            }}/>
+            <span style={{ fontSize: 11, color: connected ? 'var(--color-accent)' : 'var(--color-danger)' }}>
+              {connected ? '已连接' : '点击重连'}
+            </span>
+          </div>
         </div>
         <button onClick={() => setRulesOpen(true)} style={{
-          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
-          color: 'rgba(255,255,255,0.55)', borderRadius: 10, padding: '6px 10px',
+          background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+          color: 'var(--color-text-muted)', borderRadius: 10, padding: '6px 10px',
           cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
           display: 'flex', alignItems: 'center', gap: 5,
         }}>
@@ -220,7 +237,7 @@ function App() {
 
         {/* 活动分隔线 */}
         <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
-          <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', fontWeight: 500 }}>活动</span>
+          <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>活动</span>
         </div>
 
         {/* 活动流 */}
@@ -234,7 +251,7 @@ function App() {
         {pendingRule && (
           <div style={{ padding: '0 16px 10px' }}>
             <div style={{
-              background: 'rgba(200,255,62,0.07)', border: '1px solid rgba(200,255,62,0.22)',
+              background: 'var(--color-accent-dim)', border: '1px solid rgba(200,255,62,0.22)',
               borderRadius: 18, padding: '14px 16px',
             }}>
               <div style={{ fontSize: 12, color: LIME, fontWeight: 600, marginBottom: 8 }}>
@@ -249,12 +266,12 @@ function App() {
               <div style={{ display: 'flex', gap: 8 }}>
                 <button onClick={handleCancelRule} style={{
                   flex: 1, padding: '9px 0', borderRadius: 999, fontSize: 13,
-                  background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
-                  color: 'rgba(255,255,255,0.5)', cursor: 'pointer', fontFamily: 'inherit',
+                  background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+                  color: 'var(--color-text-muted)', cursor: 'pointer', fontFamily: 'inherit',
                 }}>取消</button>
                 <button onClick={handleConfirmRule} disabled={savingRule} style={{
                   flex: 2, padding: '9px 0', borderRadius: 999, fontSize: 13, fontWeight: 600,
-                  background: LIME, border: 'none', color: '#0B0B0E',
+                  background: 'var(--color-accent)', border: 'none', color: '#0B0B0E',
                   cursor: 'pointer', fontFamily: 'inherit',
                   boxShadow: '0 0 16px rgba(200,255,62,0.3)',
                 }}>{savingRule ? '保存中...' : '确认保存'}</button>
@@ -270,8 +287,8 @@ function App() {
             {SUGGESTIONS.map(s => (
               <button key={s} onClick={() => handleSend(s)} style={{
                 padding: '6px 12px', borderRadius: 999, whiteSpace: 'nowrap',
-                background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)',
-                color: 'rgba(255,255,255,0.6)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
+                background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+                color: 'var(--color-text-muted)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
               }}>{s}</button>
             ))}
           </div>
@@ -305,14 +322,14 @@ function MainInputBar({ onSend, thinking }) {
     <div style={{
       flexShrink: 0, padding: '8px 12px',
       paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
-      borderTop: '1px solid rgba(255,255,255,0.06)',
-      background: '#0B0B0E',
+      borderTop: '1px solid var(--color-border)',
+      background: 'var(--color-bg)',
     }}>
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '6px 6px 6px 16px',
         background: 'rgba(30,29,38,0.95)',
-        border: '1px solid rgba(255,255,255,0.09)',
+        border: '1px solid var(--color-border)',
         borderRadius: 999,
       }}>
         <input
@@ -333,12 +350,12 @@ function MainInputBar({ onSend, thinking }) {
           disabled={!input.trim() || thinking}
           style={{
             width: 38, height: 38, borderRadius: 999, flexShrink: 0,
-            background: input.trim() && !thinking ? LIME : 'rgba(255,255,255,0.08)',
-            color:      input.trim() && !thinking ? '#0B0B0E' : 'rgba(255,255,255,0.25)',
+            background: input.trim() && !thinking ? 'var(--color-accent)' : 'var(--color-surface-2)',
+            color:      input.trim() && !thinking ? 'var(--color-bg)' : 'var(--color-text-dim)',
             border: 'none',
             cursor: input.trim() && !thinking ? 'pointer' : 'default',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: input.trim() && !thinking ? '0 0 18px rgba(200,255,62,0.35)' : 'none',
+            boxShadow: input.trim() && !thinking ? '0 0 18px var(--color-accent-glow)' : 'none',
             WebkitTapHighlightColor: 'transparent',
           }}
         >
