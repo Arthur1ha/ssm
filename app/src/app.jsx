@@ -219,10 +219,24 @@ function App() {
         {/* 设备分组 */}
         <DevicesScreen agents={agents} unitData={unitData}/>
 
+        {/* 招呼语 */}
+        {activityLog.length === 0 && !thinking && (
+          <div style={{ padding: '24px 20px 8px' }}>
+            <div style={{ fontSize: 26, fontWeight: 300, letterSpacing: '-0.02em', color: 'var(--color-text)' }}>
+              {(() => { const h = new Date().getHours(); return h < 12 ? '早上好' : h < 18 ? '下午好' : '晚上好'; })()}
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginTop: 4 }}>
+              有什么我可以帮你的？
+            </div>
+          </div>
+        )}
+
         {/* 活动分隔线 */}
-        <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
-          <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>活动</span>
-        </div>
+        {activityLog.length > 0 && (
+          <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
+            <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>活动</span>
+          </div>
+        )}
 
         {/* 活动流 */}
         <ActivityFeed
