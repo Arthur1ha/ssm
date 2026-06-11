@@ -8,6 +8,22 @@ from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
+_GO2_THOUGHT_TOPIC = "ssm/agents/go2/thought"
+
+
+def _get_mqtt_client():
+    """获取 API 层共享 MQTT 客户端。"""
+    from cloud.api.main import get_mqtt_client
+    return get_mqtt_client()
+
+
+def _publish_thought(payload: dict) -> None:
+    """发布 Go2 人格化回复到 thought topic。"""
+    client = _get_mqtt_client()
+    if client:
+        client.publish(_GO2_THOUGHT_TOPIC, json.dumps(payload, ensure_ascii=False))
+
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
@@ -203,6 +219,8 @@ async def run_agent(
         "response_text":  "",
         "early_exit":     False,
     })
+    if state["response_text"] and not state.get("early_exit"):
+        _publish_thought({"type": "think", "text": state["response_text"]})
     return {
         "response":      state["response_text"],
         "actions_taken": [r["tool"] for r in state["tool_results"]],

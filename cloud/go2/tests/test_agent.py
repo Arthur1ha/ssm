@@ -567,3 +567,33 @@ def test_executor_uses_system_message_for_response(monkeypatch):
 
     assert any(isinstance(m, SystemMessage) for m in captured)
     conn_mod.go2.is_connected = False
+
+
+def test_run_agent_publishes_thought(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.connection as conn_mod
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    conn_mod.go2.is_connected = True
+
+    async def fake_planner(state):
+        return {**state, "planned_tools": [], "early_exit": False}
+
+    mock_text_llm = MagicMock()
+    mock_text_llm.ainvoke = AsyncMock(return_value=MagicMock(content="汪！我这就去迎接你！"))
+    monkeypatch.setattr(agent_mod, "get_text_llm", lambda: mock_text_llm)
+
+    published = []
+    mock_client = MagicMock()
+    mock_client.publish = lambda topic, payload: published.append((topic, payload))
+    monkeypatch.setattr(agent_mod, "_get_mqtt_client", lambda: mock_client)
+
+    with patch.object(agent_mod, "planner_node", side_effect=fake_planner):
+        result = asyncio.run(agent_mod.run_agent("s1", "来迎接我"))
+
+    thought_publishes = [p for p in published if p[0] == "ssm/agents/go2/thought"]
+    assert len(thought_publishes) == 1
+    payload = json.loads(thought_publishes[0][1])
+    assert payload["type"] == "think"
+    assert payload["text"] == "汪！我这就去迎接你！"
+    conn_mod.go2.is_connected = False
