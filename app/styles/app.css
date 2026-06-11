@@ -13,7 +13,7 @@
 
   /* ── 边框 ── */
   --color-border:       rgba(255,255,255,0.08);
-  --color-border-strong:rgba(255,255,255,0.14);
+  --color-border-strong: rgba(255,255,255,0.14);
 
   /* ── 强调色（LIME） ── */
   --color-accent:       #C8FF3E;
@@ -64,8 +64,6 @@
   background: var(--color-text-muted);
   animation: typing-bounce 1.2s infinite ease-in-out;
 }
-.typing-dot:nth-child(2) { animation-delay: 0.2s; }
-.typing-dot:nth-child(3) { animation-delay: 0.4s; }
 
 @keyframes typing-bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
