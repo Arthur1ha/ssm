@@ -154,7 +154,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
           left: R - KR + knob.x, top: R - KR + knob.y,
           background: disabled
             ? "#1c1c1c"
-            : `radial-gradient(circle at 35% 35%, ${LIME}, rgba(140,210,20,0.85))`,
+            : `radial-gradient(circle at 35% 35%, var(--color-accent), rgba(140,210,20,0.85))`,
           border: `1px solid ${disabled ? "#242424" : "rgba(200,255,62,0.55)"}`,
           boxShadow: disabled ? "none" : "0 0 18px rgba(200,255,62,0.45), 0 2px 6px rgba(0,0,0,0.6)",
           transition: drag ? "none" : "left 0.12s cubic-bezier(.2,.8,.4,1), top 0.12s cubic-bezier(.2,.8,.4,1)",
@@ -162,14 +162,14 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
         }} />
       </div>
       <div style={{ fontSize: 9, color: "#2e2e2e", letterSpacing: "0.22em",
-        fontFamily: "'Share Tech Mono','Courier New',monospace" }}>{label}</div>
+        fontFamily: 'var(--font-mono)' }}>{label}</div>
     </div>
   );
 }
 
 /* ─────────────────────────────────────────────────────────── */
 
-function WaypointMap({ locations, LIME, BORDER }) {
+function WaypointMap({ locations, BORDER }) {
   const W = 280, H = 130, PAD = 22;
 
   if (locations.length === 0) {
@@ -177,7 +177,7 @@ function WaypointMap({ locations, LIME, BORDER }) {
       <svg width="100%" viewBox={`0 0 ${W} ${H}`}
         style={{ border: `1px solid ${BORDER}`, borderRadius: 4, display: "block" }}>
         <text x={W / 2} y={H / 2} textAnchor="middle" dominantBaseline="middle"
-          fill="#1e1e1e" fontSize="10" fontFamily="'Share Tech Mono',monospace"
+          fill="#1e1e1e" fontSize="10" fontFamily="var(--font-mono)"
           letterSpacing="2">NO DATA</text>
       </svg>
     );
@@ -219,10 +219,10 @@ function WaypointMap({ locations, LIME, BORDER }) {
         const { sx, sy } = toSvg(loc.x, loc.y);
         return (
           <g key={loc.name}>
-            <circle cx={sx} cy={sy} r={3.5} fill={LIME} fillOpacity="0.85"
+            <circle cx={sx} cy={sy} r={3.5} style={{ fill: 'var(--color-accent)' }} fillOpacity="0.85"
               filter="url(#wp-glow)" />
             <text x={sx + 6} y={sy} fontSize="7.5" dominantBaseline="middle"
-              fontFamily="'Share Tech Mono',monospace"
+              fontFamily="var(--font-mono)"
               fill="rgba(200,255,62,0.5)" letterSpacing="0.3">{loc.name}</text>
           </g>
         );
@@ -240,10 +240,10 @@ function Go2DevicePage({ onBack }) {
   const onAppend = (msg) => setMessages(prev => [...prev, msg]);
   const { useState, useEffect, useRef, useCallback } = React;
 
-  const DIM    = "rgba(200,255,62,0.13)";
-  const BG     = "#06080F";
-  const PANEL  = "#0C0F1A";
-  const BORDER = "rgba(200,255,62,0.1)";
+  const DIM    = "var(--color-accent-dim)";
+  const BG     = "var(--color-bg)";
+  const PANEL  = "var(--color-surface-1)";
+  const BORDER = "var(--color-accent-border)";
 
   const [status,        setStatus]     = useState("idle");
   const [robotState,    setRobot]      = useState(null);
@@ -501,7 +501,12 @@ function Go2DevicePage({ onBack }) {
     }
   }, [connected, chatThinking, onAppend]);
 
-  const statusColor = { idle: "#444", connecting: "#f0a500", connected: LIME, error: "#ff4455" }[status];
+  const statusColor = {
+    idle:       'var(--color-text-dim)',
+    connecting: 'var(--color-warn)',
+    connected:  'var(--color-accent)',
+    error:      'var(--color-danger)',
+  }[status];
   const statusLabel = { idle: "OFFLINE", connecting: "CONNECTING", connected: "ONLINE", error: "ERROR" }[status];
 
   const ACTIONS = [
@@ -521,26 +526,25 @@ function Go2DevicePage({ onBack }) {
 
   /* ── 动作按钮样式 ── */
   const actStyle = {
-    background: connected ? "rgba(200,255,62,0.055)" : "rgba(255,255,255,0.015)",
-    color: connected ? "rgba(200,255,62,0.72)" : "#222",
-    border: `1px solid ${connected ? "rgba(200,255,62,0.16)" : "#151515"}`,
-    borderRadius: 5, fontSize: 11, fontWeight: 700,
-    cursor: connected ? "pointer" : "not-allowed",
-    padding: "9px 0", fontFamily: "inherit",
-    letterSpacing: "0.05em",
-    WebkitTapHighlightColor: "transparent",
-    transition: "all 0.1s",
+    background: connected ? 'var(--color-accent-dim)' : 'var(--color-surface-1)',
+    color: connected ? 'var(--color-accent)' : 'var(--color-text-dim)',
+    border: `1px solid ${connected ? 'rgba(200,255,62,0.16)' : 'var(--color-border)'}`,
+    borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
+    cursor: connected ? 'pointer' : 'not-allowed',
+    padding: '9px 0', fontFamily: 'var(--font-mono)',
+    letterSpacing: '0.05em',
+    WebkitTapHighlightColor: 'transparent',
+    transition: 'all 0.1s',
   };
 
   return (
     <div style={{ background: BG, color: "#ccc",
       position: "fixed", inset: 0,
       paddingTop: "env(safe-area-inset-top, 0px)",
-      fontFamily: "'Share Tech Mono','Courier New',monospace",
+      fontFamily: 'var(--font-sans)',
       display: "flex", flexDirection: "column" }}>
 
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
         @keyframes blink  { 0%,49%{opacity:1} 50%,100%{opacity:0} }
         @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
         .g2-act:active { filter:brightness(1.6); transform:scale(0.91) !important; }
@@ -557,35 +561,35 @@ function Go2DevicePage({ onBack }) {
           WebkitTapHighlightColor: "transparent" }}>←</button>
 
         <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.15em",
-          color: LIME, textShadow: `0 0 14px ${LIME}45` }}>GO2 AIR</div>
+          color: 'var(--color-accent)', textShadow: `0 0 14px var(--color-accent)` }}>GO2 AIR</div>
         <div style={{ fontSize: 9, color: "#222", letterSpacing: "0.2em", marginLeft: -4 }}>UNITREE</div>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ width: 7, height: 7, borderRadius: "50%",
             background: statusColor,
-            boxShadow: connected ? `0 0 8px ${LIME}` : "none",
+            boxShadow: connected ? `0 0 8px var(--color-accent)` : "none",
             animation: busy ? "blink 1s infinite" : "none" }} />
           <span style={{ fontSize: 10, color: statusColor, letterSpacing: "0.1em" }}>
             {statusLabel}
           </span>
           {!connected
             ? <button onClick={connect} disabled={busy} style={{
-                background: busy ? "transparent" : DIM,
-                color: busy ? "#3a3a3a" : LIME,
-                border: `1px solid ${busy ? "#222" : "rgba(200,255,62,0.38)"}`,
-                borderRadius: 4, padding: "5px 12px", fontSize: 10,
+                background: busy ? 'transparent' : 'var(--color-accent-dim)',
+                color: busy ? 'var(--color-text-dim)' : 'var(--color-accent)',
+                border: `1px solid ${busy ? 'var(--color-border)' : 'rgba(200,255,62,0.38)'}`,
+                borderRadius: 'var(--radius-sm)', padding: "5px 12px", fontSize: 10,
                 cursor: busy ? "not-allowed" : "pointer",
                 letterSpacing: "0.1em", fontFamily: "inherit",
                 WebkitTapHighlightColor: "transparent" }}>
                 {busy ? "..." : "CONNECT"}
               </button>
             : <button onClick={disconnect} style={{
-                background: "rgba(255,68,85,0.09)", color: "#ff4455",
-                border: "1px solid rgba(255,68,85,0.22)",
-                borderRadius: 4, padding: "5px 10px", fontSize: 10,
+                background: 'var(--color-danger-dim)', color: 'var(--color-danger)',
+                border: '1px solid var(--color-danger-border)',
+                borderRadius: 'var(--radius-sm)', padding: "5px 10px", fontSize: 10,
                 cursor: "pointer", letterSpacing: "0.1em", fontFamily: "inherit",
                 WebkitTapHighlightColor: "transparent" }}>
-                DISC
+                断开
               </button>
           }
         </div>
@@ -638,7 +642,7 @@ function Go2DevicePage({ onBack }) {
           {connected && robotState && (
             <div style={{ position: "absolute", bottom: 8, left: 10, right: 10,
               display: "flex", justifyContent: "space-between",
-              fontSize: 9, color: `${LIME}75`, letterSpacing: "0.1em",
+              fontSize: 9, color: 'var(--color-accent)', letterSpacing: "0.1em", opacity: 0.75,
               pointerEvents: "none" }}>
               <span>H {typeof robotState.body_height === "number"
                 ? robotState.body_height.toFixed(3) : "--"}m</span>
@@ -660,14 +664,14 @@ function Go2DevicePage({ onBack }) {
             const active = autonomyMode === key;
             const accent = key === "free_explore" ? "#f0a500"
                          : key === "reactive"     ? "#00d4ff"
-                         : LIME;
+                         : 'var(--color-accent)';
             return (
               <button key={key} onClick={() => connected && switchAutonomy(key)} style={{
                 flex: 1, padding: "8px 4px",
-                background: active ? `${accent}18` : "transparent",
-                color: active ? accent : "#2a2a2a",
-                border: `1px solid ${active ? `${accent}40` : "#181818"}`,
-                borderRadius: 4, fontSize: 11, fontWeight: 700,
+                background: active ? `${accent}18` : 'var(--color-surface-1)',
+                color: active ? accent : 'var(--color-text-dim)',
+                border: `1px solid ${active ? `${accent}40` : 'var(--color-border)'}`,
+                borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
                 cursor: connected ? "pointer" : "not-allowed",
                 letterSpacing: "0.07em", fontFamily: "inherit",
                 WebkitTapHighlightColor: "transparent",
@@ -708,10 +712,10 @@ function Go2DevicePage({ onBack }) {
             className="g2-stop"
             style={{
               width: "100%", padding: "11px 0",
-              background: connected ? "rgba(255,68,85,0.1)" : "rgba(255,255,255,0.02)",
-              color: connected ? "#ff4455" : "#1e1e1e",
-              border: `1px solid ${connected ? "rgba(255,68,85,0.26)" : "#141414"}`,
-              borderRadius: 5, fontSize: 12, fontWeight: 700,
+              background: connected ? 'var(--color-danger-dim)' : 'var(--color-surface-1)',
+              color: connected ? 'var(--color-danger)' : 'var(--color-text-dim)',
+              border: `1px solid ${connected ? 'var(--color-danger-border)' : 'var(--color-border)'}`,
+              borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 700,
               cursor: connected ? "pointer" : "not-allowed",
               fontFamily: "inherit", letterSpacing: "0.12em",
               WebkitTapHighlightColor: "transparent",
@@ -727,9 +731,9 @@ function Go2DevicePage({ onBack }) {
             className="g2-act"
             style={{
               width: "100%", padding: "11px 0",
-              background: connected ? "rgba(200,255,62,0.07)" : "rgba(255,255,255,0.02)",
-              color: connected ? LIME : "#1e1e1e",
-              border: `1px solid ${connected ? "rgba(200,255,62,0.28)" : "#141414"}`,
+              background: connected ? 'var(--color-accent-dim)' : 'var(--color-surface-1)',
+              color: connected ? 'var(--color-accent)' : 'var(--color-text-dim)',
+              border: `1px solid ${connected ? "rgba(200,255,62,0.28)" : 'var(--color-border)'}`,
               borderRadius: 5, fontSize: 12, fontWeight: 700,
               cursor: connected ? "pointer" : "not-allowed",
               fontFamily: "inherit", letterSpacing: "0.12em",
@@ -747,13 +751,13 @@ function Go2DevicePage({ onBack }) {
             padding: "10px 14px", cursor: "pointer",
             fontFamily: "inherit", WebkitTapHighlightColor: "transparent",
           }}>
-            <span style={{ fontSize: 9, color: "#252525", letterSpacing: "0.2em" }}>WAYPOINTS</span>
+            <span style={{ fontSize: 9, color: 'var(--color-text-dim)', letterSpacing: "0.2em" }}>WAYPOINTS</span>
             <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {locations.length > 0 && (
-                <span style={{ fontSize: 9, color: "rgba(200,255,62,0.35)",
+                <span style={{ fontSize: 9, color: 'var(--color-accent)',
                   letterSpacing: "0.1em" }}>{locations.length} PTS</span>
               )}
-              <span style={{ fontSize: 10, color: "#2a2a2a", display: "inline-block",
+              <span style={{ fontSize: 10, color: 'var(--color-text-dim)', display: "inline-block",
                 transform: wpOpen ? "rotate(180deg)" : "rotate(0deg)",
                 transition: "transform 0.2s" }}>▾</span>
             </span>
@@ -761,7 +765,7 @@ function Go2DevicePage({ onBack }) {
 
           {wpOpen && (
             <div style={{ padding: "0 14px 14px", animation: "fadeIn 0.15s ease" }}>
-              <WaypointMap locations={locations} LIME={LIME} BORDER={BORDER} />
+              <WaypointMap locations={locations} BORDER={BORDER} />
 
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
                 {locations.length === 0 && (
@@ -771,9 +775,9 @@ function Go2DevicePage({ onBack }) {
                 {locations.map(loc => (
                   <div key={loc.name} style={{
                     display: "flex", alignItems: "center", gap: 6,
-                    background: "rgba(200,255,62,0.025)",
+                    background: 'var(--color-accent-dim)',
                     border: `1px solid ${BORDER}`,
-                    borderRadius: 4, padding: "7px 10px",
+                    borderRadius: 'var(--radius-sm)', padding: "7px 10px",
                   }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 11, color: "rgba(200,255,62,0.7)",
@@ -787,9 +791,9 @@ function Go2DevicePage({ onBack }) {
                     <button onClick={() => navigateTo(loc.name)}
                       disabled={!connected || navigating === loc.name}
                       style={{
-                        background: connected ? "rgba(200,255,62,0.07)" : "transparent",
-                        color: connected ? "rgba(200,255,62,0.6)" : "#1e1e1e",
-                        border: `1px solid ${connected ? "rgba(200,255,62,0.2)" : "#181818"}`,
+                        background: connected ? 'var(--color-accent-dim)' : 'transparent',
+                        color: connected ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                        border: `1px solid ${connected ? "rgba(200,255,62,0.2)" : 'var(--color-border)'}`,
                         borderRadius: 3, fontSize: 9, padding: "4px 8px",
                         cursor: connected ? "pointer" : "not-allowed",
                         fontFamily: "inherit", letterSpacing: "0.1em",
@@ -798,8 +802,8 @@ function Go2DevicePage({ onBack }) {
                       {navigating === loc.name ? "···" : "GO"}
                     </button>
                     <button onClick={() => deleteLocation(loc.name)} style={{
-                      background: "rgba(255,68,85,0.06)", color: "#ff4455",
-                      border: "1px solid rgba(255,68,85,0.15)",
+                      background: 'var(--color-danger-dim)', color: 'var(--color-danger)',
+                      border: '1px solid var(--color-danger-border)',
                       borderRadius: 3, fontSize: 11, padding: "3px 7px",
                       cursor: "pointer", fontFamily: "inherit", lineHeight: 1,
                       WebkitTapHighlightColor: "transparent",
@@ -814,17 +818,17 @@ function Go2DevicePage({ onBack }) {
                   placeholder="标记当前位置名称..."
                   disabled={!connected}
                   style={{
-                    flex: 1, background: "rgba(200,255,62,0.03)",
+                    flex: 1, background: 'var(--color-accent-dim)',
                     border: `1px solid ${BORDER}`, borderRadius: 4,
                     padding: "7px 10px", fontSize: 11,
-                    color: connected ? "#aaa" : "#2a2a2a",
-                    fontFamily: "inherit", outline: "none", letterSpacing: "0.05em",
+                    color: connected ? 'var(--color-text-muted)' : 'var(--color-text-dim)',
+                    fontFamily: 'var(--font-mono)', outline: "none", letterSpacing: "0.05em",
                   }} />
                 <button onClick={tagLocation}
                   disabled={!connected || !tagName.trim() || wpLoading}
                   style={{
-                    background: connected && tagName.trim() ? DIM : "transparent",
-                    color: connected && tagName.trim() ? LIME : "#252525",
+                    background: connected && tagName.trim() ? DIM : 'transparent',
+                    color: connected && tagName.trim() ? 'var(--color-accent)' : 'var(--color-text-dim)',
                     border: `1px solid ${connected && tagName.trim() ? "rgba(200,255,62,0.3)" : "#1a1a1a"}`,
                     borderRadius: 4, fontSize: 10, padding: "7px 12px",
                     cursor: connected && tagName.trim() ? "pointer" : "not-allowed",
@@ -839,9 +843,9 @@ function Go2DevicePage({ onBack }) {
                 <button disabled={!connected || settingHome} onClick={setHome}
                   style={{
                     width: "100%", padding: "7px 0",
-                    background: connected ? "rgba(200,255,62,0.03)" : "transparent",
-                    color: connected ? "rgba(200,255,62,0.45)" : "#1e1e1e",
-                    border: `1px solid ${connected ? "rgba(200,255,62,0.14)" : "#141414"}`,
+                    background: connected ? 'var(--color-accent-dim)' : 'transparent',
+                    color: connected ? 'var(--color-accent)' : 'var(--color-text-dim)',
+                    border: `1px solid ${connected ? "rgba(200,255,62,0.14)" : 'var(--color-border)'}`,
                     borderRadius: 4, fontSize: 10, fontWeight: 700,
                     cursor: connected ? "pointer" : "not-allowed",
                     fontFamily: "inherit", letterSpacing: "0.1em",
@@ -855,10 +859,12 @@ function Go2DevicePage({ onBack }) {
         </div>
 
         {/* ── AI 对话区 ── */}
-        <div style={{ borderTop: `1px solid ${BORDER}`, marginTop: 10,
-          display: "flex", flexDirection: "column", minHeight: 200, flex: 1 }}>
-          <div style={{ fontSize: 9, color: "#252525", letterSpacing: "0.2em",
-            padding: "10px 14px 0" }}>AI AGENT</div>
+        <div style={{ borderTop: '2px solid var(--color-border-strong)', marginTop: 10,
+          display: 'flex', flexDirection: 'column', minHeight: 200, flex: 1 }}>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)',
+            fontFamily: 'var(--font-sans)', padding: '12px 14px 0', fontWeight: 500 }}>
+            AI 对话
+          </div>
           <ChatPanel
             messages={messages}
             thinking={chatThinking}
