@@ -83,10 +83,9 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
         f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
         f"可用智能体：\n{agents_str}\n\n"
         f"分类规则：\n"
-        f"1. 如果用户要控制设备或使用某个智能体的技能（含 Go2 对话 go2_chat）→ route=\"act\"，输出 tasks 数组。\n"
-        f"   很多“问题”其实是某 agent 的对话/记忆技能，应分类为 act 并选中该 skill，由对应 agent 回答。\n"
-        f"2. 如果用户说“以后…就…”、“每次…就…”、“当…时自动…” → route=\"define_rule\"，输出 rule 对象。\n"
-        f"3. 其他（纯问答、闲聊、不涉及任何设备）→ route=\"chat\"，输出 answer 字符串。\n\n"
+        f”1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\”act\”，输出 tasks 数组。\n”
+        f”2. 如果用户说”以后…就…”、”每次…就…”、”当…时自动…” → route=\”define_rule\”，输出 rule 对象。\n”
+        f”3. 其他（问候、闲聊、纯问答、不明确指向某设备）→ route=\”chat\”，输出 answer 字符串。\n\n”
         f"act 校验：slug 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
         f"找不到合适的 slug/skill_id 时改用 route=\"chat\" 回答“抱歉，没有合适的设备”。\n\n"
@@ -194,6 +193,20 @@ def _make_planner_node(llm):
                 "task_id":  f"{session_id}_t{i}",
                 "params":   t.get("params", {}),
             })
+
+        # tasks 校验后为空 → 退化为闲聊，避免 Dispatcher 返回冷冰冰的错误
+        if not tasks:
+            try:
+                chat_prompt = (f"用户说：'{state['user_msg']}'。"
+                               f"没有合适的设备可以执行，请用一句简短友好的中文回应用户，"
+                               f"不要提技术细节。")
+                chat_resp = llm.invoke([HumanMessage(content=chat_prompt)])
+                answer = chat_resp.content.strip()
+            except Exception:
+                answer = "抱歉，暂时没有合适的设备来完成这个请求。"
+            print(f"[Planner] session={session_id} tasks empty → fallback chat")
+            return {**state, "route": "chat", "response_text": answer,
+                    "planned_tasks": [], "early_exit": False}
 
         print(f"[Planner] session={session_id} route=act planned {len(tasks)} task(s)")
         return {**state, "route": "act", "planned_tasks": tasks, "early_exit": False}
