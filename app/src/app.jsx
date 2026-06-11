@@ -151,12 +151,6 @@ function App() {
     if (!t) return;
     appendActivity({ type: 'user', text: t });
 
-    const actuators = agentsRef.current.filter(a => a.agent_type === 'actuator');
-    if (actuators.length === 0) {
-      appendActivity({ type: 'ai', text: '附近没有发现可控设备，请确认 ESP32 已上线。' });
-      return;
-    }
-
     send(t, {
       onMessage:     (msg)  => appendActivity({ type: 'ai', text: msg }),
       onPendingRule: (rule) => setPendingRule(rule),
