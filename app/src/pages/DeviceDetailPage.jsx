@@ -26,16 +26,16 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
 
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: '#0B0B0E', color: '#fff',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif',
+      position: 'fixed', inset: 0, background: 'var(--color-bg)', color: 'var(--color-text)',
+      fontFamily: 'var(--font-sans)',
       paddingTop: 'env(safe-area-inset-top, 0px)',
       display: 'flex', flexDirection: 'column',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px',
-        borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
+        borderBottom: '1px solid var(--color-border)', flexShrink: 0 }}>
         <button onClick={onBack} style={{
-          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
-          color: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '6px 12px',
+          background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+          color: 'var(--color-text-muted)', borderRadius: 'var(--radius-btn)', padding: '6px 12px',
           cursor: 'pointer', fontFamily: 'inherit', fontSize: 13,
           display: 'flex', alignItems: 'center', gap: 5,
         }}>
@@ -52,12 +52,12 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
             <Icon name={meta.icon} size={17}/>
           </div>
           <div>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{device?.name || slug}</div>
-            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{ism}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)' }}>{device?.name || slug}</div>
+            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', fontFamily: 'var(--font-mono)' }}>{ism}</div>
           </div>
         </div>
         <a href={agentCardUrl} target="_blank" rel="noopener" style={{
-          padding: '6px 12px', borderRadius: 10, fontSize: 12,
+          padding: '6px 12px', borderRadius: 'var(--radius-btn)', fontSize: 12,
           background: `${meta.color}15`, border: `1px solid ${meta.color}35`,
           color: meta.color, textDecoration: 'none',
           display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0,
