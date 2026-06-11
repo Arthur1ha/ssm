@@ -17,8 +17,8 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
             <div key={i} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
               <div style={{
                 maxWidth: '78%', padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
-                borderRadius: '18px 18px 4px 18px',
-                background: LIME, color: '#0B0B0E',
+                borderRadius: 'var(--radius-card)',
+                background: 'var(--color-accent)', color: 'var(--color-bg)',
               }}>{e.text}</div>
             </div>
           );
@@ -28,9 +28,9 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
             <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
               <div style={{
                 maxWidth: '78%', padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
-                borderRadius: '4px 18px 18px 18px',
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.07)', color: '#fff',
+                borderRadius: 'var(--radius-card)',
+                background: 'var(--color-surface-2)',
+                border: '1px solid var(--color-border)', color: 'var(--color-text)',
               }}>{e.text}</div>
             </div>
           );
@@ -39,12 +39,24 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
           return (
             <div key={i} style={{ marginBottom: 6, padding: '0 4px' }}>
               <span style={{
-                fontSize: 11, color: 'rgba(255,255,255,0.3)',
-                fontFamily: 'monospace',
+                fontSize: 11, color: 'var(--color-text-dim)',
+                fontFamily: 'var(--font-mono)',
               }}>
                 {new Date(e.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
                 {'  '}{e.text}
               </span>
+            </div>
+          );
+        }
+        if (e.type === 'system') {
+          return (
+            <div key={i} style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, height: 1, background: 'var(--color-border)' }}/>
+              <span style={{
+                fontSize: 11, color: 'var(--color-text-dim)',
+                fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
+              }}>{e.text}</span>
+              <div style={{ flex: 1, height: 1, background: 'var(--color-border)' }}/>
             </div>
           );
         }
@@ -54,9 +66,9 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
       {thinking && (
         <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
           <div style={{
-            padding: '10px 14px', borderRadius: '4px 18px 18px 18px',
-            background: 'rgba(255,255,255,0.06)',
-            border: '1px solid rgba(255,255,255,0.07)',
+            padding: '10px 14px', borderRadius: 'var(--radius-card)',
+            background: 'var(--color-surface-2)',
+            border: '1px solid var(--color-border)',
             display: 'flex', flexDirection: 'column', gap: 6,
           }}>
             <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
@@ -65,7 +77,8 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
               <span className="typing-dot" style={{ animationDelay: '.28s' }}/>
             </div>
             {thinkingText && (
-              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.32)', fontFamily: 'monospace' }}>
+              <span style={{ fontSize: 11, color: 'var(--color-text-dim)',
+                fontFamily: 'var(--font-mono)' }}>
                 {thinkingText}
               </span>
             )}
