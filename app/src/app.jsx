@@ -97,6 +97,7 @@ function App() {
       setConnected(true);
       mqttBus.publish('ssm/agents/phone_ui/manifest', '', { retain: true });
       mqttBus.subscribe('ssm/agents/desk/speech');
+      mqttBus.subscribe('ssm/agents/+/thought');
       if (!greetedRef.current) {
         greetedRef.current = true;
         appendActivity({ type: 'ai', text: '你好呀，我是智慧空间管家，有什么可以帮你的嘛？' });
@@ -119,6 +120,19 @@ function App() {
     };
     mqttBus.addEventListener('topic:ssm/agents/desk/speech', handleSpeech);
 
+    /* 多智能体 thought 气泡 */
+    const handleThought = (e) => {
+      const { topic, msg } = e.detail || {};
+      if (!topic || !msg) return;
+      const parts = topic.split('/');
+      // 匹配 ssm/agents/{agentId}/thought
+      if (parts.length !== 4 || parts[0] !== 'ssm' || parts[1] !== 'agents' || parts[3] !== 'thought') return;
+      const { text, type } = msg;
+      if (!text || type === 'act') return;   // act 类型是执行日志，不展示
+      appendActivity({ type: 'ai', agent: parts[2], text });
+    };
+    mqttBus.addEventListener('message', handleThought);
+
     return () => {
       registry.removeEventListener('change', handleRegistryChange);
       ismTracker.removeEventListener('update', handleIsmUpdate);
@@ -126,6 +140,7 @@ function App() {
       mqttBus.removeEventListener('disconnect', handleDisconnect);
       mqttBus.removeEventListener('reconnect',  handleReconnect);
       mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
+      mqttBus.removeEventListener('message', handleThought);
     };
   }, []);
 
