@@ -195,22 +195,12 @@ function App() {
           <div
             onClick={!connected ? () => mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS }) : undefined}
             style={{
-              display: 'flex', alignItems: 'center', gap: 5,
-              padding: '3px 8px', borderRadius: 'var(--radius-pill)',
-              background: connected ? 'rgba(200,255,62,0.10)' : 'rgba(255,82,82,0.10)',
-              border: `1px solid ${connected ? 'rgba(200,255,62,0.25)' : 'rgba(255,82,82,0.25)'}`,
-              cursor: connected ? 'default' : 'pointer',
-            }}
-          >
-            <div style={{
-              width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+              width: 6, height: 6, borderRadius: '50%',
               background: connected ? 'var(--color-accent)' : 'var(--color-danger)',
               boxShadow: connected ? '0 0 6px var(--color-online-glow)' : 'none',
-            }}/>
-            <span style={{ fontSize: 11, color: connected ? 'var(--color-accent)' : 'var(--color-danger)' }}>
-              {connected ? '已连接' : '点击重连'}
-            </span>
-          </div>
+              cursor: connected ? 'default' : 'pointer',
+            }}
+          />
         </div>
         <button onClick={() => setRulesOpen(true)} style={{
           background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
