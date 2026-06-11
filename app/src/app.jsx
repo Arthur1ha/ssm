@@ -4,12 +4,7 @@ const { useState, useEffect, useRef } = React;
 // LIME 来自 config.js 全局，此处不重复声明
 const EXCL_TYPES = new Set(['decision', 'supervisor']);
 const EXCL_PLAT  = new Set(['pc', 'pwa']);
-const SUGGESTIONS = [
-  { text: '我要工作了',     color: '#C8FF3E' },
-  { text: '帮我营造睡眠氛围', color: '#7B8CFF' },
-  { text: '有人来了',      color: '#FF9F43' },
-  { text: '我要离开了',    color: '#FF6B9D' },
-];
+const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
 
 const GO2_STATIC_DEVICE = {
   unit_id: 'go2', agent_id: 'go2', slug: 'go2',
@@ -278,14 +273,14 @@ function App() {
         {activityLog.length === 0 && !thinking && (
           <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8,
             overflowX: 'auto', scrollbarWidth: 'none' }}>
-            {SUGGESTIONS.map(({ text, color }) => (
-              <button key={text} onClick={() => handleSend(text)} style={{
-                flexShrink: 0, padding: '7px 14px', borderRadius: 'var(--radius-pill)',
-                background: `${color}18`, border: `1px solid ${color}40`,
-                color, fontSize: 13, cursor: 'pointer',
+            {SUGGESTIONS.map(s => (
+              <button key={s} onClick={() => handleSend(s)} style={{
+                flexShrink: 0, padding: '8px 16px', borderRadius: 'var(--radius-card)',
+                background: 'var(--color-surface-2)', border: '1px solid var(--color-border-strong)',
+                color: 'var(--color-text-muted)', fontSize: 13, cursor: 'pointer',
                 fontFamily: 'inherit', whiteSpace: 'nowrap',
                 WebkitTapHighlightColor: 'transparent',
-              }}>{text}</button>
+              }}>{s}</button>
             ))}
           </div>
         )}
