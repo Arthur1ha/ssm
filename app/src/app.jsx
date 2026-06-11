@@ -35,8 +35,9 @@ function App() {
 
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHash();
-  const agentsRef   = useRef([GO2_STATIC_DEVICE]);
+  const agentsRef     = useRef([GO2_STATIC_DEVICE]);
   const prevStatesRef = useRef({});
+  const greetedRef    = useRef(false);
 
   useEffect(() => { agentsRef.current = agents; }, [agents]);
 
@@ -93,6 +94,12 @@ function App() {
         ts: Math.floor(Date.now() / 1000),
       }, { retain: true });
       mqttBus.subscribe('ssm/agents/desk/speech');
+      if (!greetedRef.current) {
+        greetedRef.current = true;
+        send('打个招呼吧', {
+          onMessage: (msg) => appendActivity({ type: 'ai', text: msg }),
+        });
+      }
     };
     const handleDisconnect = () => {
       setConnected(false);
@@ -218,18 +225,6 @@ function App() {
 
         {/* 设备分组 */}
         <DevicesScreen agents={agents} unitData={unitData}/>
-
-        {/* 招呼语 */}
-        {activityLog.length === 0 && !thinking && (
-          <div style={{ padding: '24px 20px 8px' }}>
-            <div style={{ fontSize: 26, fontWeight: 300, letterSpacing: '-0.02em', color: 'var(--color-text)' }}>
-              {(() => { const h = new Date().getHours(); return h < 12 ? '早上好' : h < 18 ? '下午好' : '晚上好'; })()}
-            </div>
-            <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginTop: 4 }}>
-              有什么我可以帮你的？
-            </div>
-          </div>
-        )}
 
         {/* 活动分隔线 */}
         {activityLog.length > 0 && (
