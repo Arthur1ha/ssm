@@ -42,13 +42,13 @@ api:
 # ── Orchestrator ─────────────────────────────────────────────
 orchestrator:
 	@while true; do \
-		uv run python -u cloud/orchestrator/main.py; \
+		PYTHONPATH=$(SSM_DIR) uv run python -u cloud/orchestrator/main.py; \
 		echo "[`date '+%H:%M:%S'`] Orchestrator 退出，3 秒后自动重启... (Ctrl+C 停止)"; \
 		sleep 3; \
 	done
 
 orchestrator-bg:
-	$(call bg,cloud/orchestrator/main.py,uv run python -u cloud/orchestrator/main.py,orchestrator)
+	$(call bg,cloud/orchestrator/main.py,PYTHONPATH=$(SSM_DIR) uv run python -u cloud/orchestrator/main.py,orchestrator)
 
 # ── PWA ──────────────────────────────────────────────────────
 pwa:

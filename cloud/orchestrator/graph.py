@@ -83,12 +83,12 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
         f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
         f"可用智能体：\n{agents_str}\n\n"
         f"分类规则：\n"
-        f”1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\”act\”，输出 tasks 数组。\n”
-        f”2. 如果用户说”以后…就…”、”每次…就…”、”当…时自动…” → route=\”define_rule\”，输出 rule 对象。\n”
-        f”3. 其他（问候、闲聊、纯问答、不明确指向某设备）→ route=\”chat\”，输出 answer 字符串。\n\n”
+        f"1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
+        f"2. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
+        f"3. 其他（问候、闲聊、纯问答、不明确指向某设备）→ route=\"chat\"，输出 answer 字符串。\n\n"
         f"act 校验：slug 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
-        f"找不到合适的 slug/skill_id 时改用 route=\"chat\" 回答“抱歉，没有合适的设备”。\n\n"
+        f"找不到合适的 slug/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
         f"输出格式（三选一，直接输出 JSON，不含代码块或解释）：\n"
         f'- act:         {{"route": "act", "tasks": [{{"slug": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
         f'- chat:        {{"route": "chat", "answer": "..."}}\n'
