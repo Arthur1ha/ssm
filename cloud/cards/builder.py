@@ -90,7 +90,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
 
     transport: Transport = {
         "kind": "mqtt",
-        "task_topic": f"ssm/task/{slug}/{{task_id}}",
+        "task_topic": f"ssm/task/{unit_id}/{{task_id}}",  # 用 unit_id，保证 ESP32 能收到
     }
 
     capabilities: list[dict] = manifest.get("capabilities", [])
@@ -103,6 +103,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
 
     return AgentCard(
         slug=slug,
+        unit_id=unit_id,
         name=name,
         description=description,
         agent_type=agent_type,

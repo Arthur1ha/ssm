@@ -66,7 +66,7 @@ UNIT_CONFIGS = {
         'name': 'ambient_light',
         'probe': {'type': 'adc', 'pin': LIGHT_SENSOR_PIN, 'min_val': 30},
         'manifest': {
-            'agent_tag': 'light_level',
+            'tags': ['light_level'],
             'levels': ['DARK', 'DIM', 'NORMAL', 'BRIGHT'],
             'ism_states': ['SAMPLING', 'ERROR'],
         },
@@ -76,7 +76,7 @@ UNIT_CONFIGS = {
         'name': 'ir_presence',
         'probe': {'type': 'digital', 'pin': IR_SENSOR_PIN, 'pull': 'down', 'active': 1},
         'manifest': {
-            'agent_tag': 'presence',
+            'tags': ['presence'],
             'values': [True, False],
             'ism_states': ['MONITORING', 'ERROR'],
         },
@@ -87,7 +87,7 @@ UNIT_CONFIGS = {
         # DO 引脚为开漏输出，安静时浮空无法数字探测，改为手动标志位
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
-            'agent_tag': 'sound',
+            'tags': ['sound'],
             'values': ['detected'],
         },
     },
@@ -105,7 +105,7 @@ UNIT_CONFIGS = {
                 {'action': 'SET_STATE', 'params': ['state'], 'values': ['OFF', 'BRIGHT', 'DIM']},
                 {'action': 'BLINK',     'params': ['r', 'g', 'b', 'count']},
             ],
-            'resource_tags': ['lighting', 'ambiance'],
+            'tags': ['lighting', 'ambiance'],
         },
     },
 }

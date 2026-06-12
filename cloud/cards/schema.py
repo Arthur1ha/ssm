@@ -35,18 +35,21 @@ class Transport(TypedDict):
     """
 
     kind: Literal["mqtt", "http"]
-    task_topic: NotRequired[str]   # mqtt only: ssm/task/{slug}/{task_id}
+    task_topic: NotRequired[str]   # mqtt only: ssm/task/{unit_id}/{task_id}
     endpoint: NotRequired[str]     # http only: /api/go2/chat 等
 
 
 class AgentCard(TypedDict):
     """智能体能力描述卡片，供编排器和 PWA 动态发现与调用。
 
+    slug：LLM / 展示层别名（如 desk-lamp），唯一索引，缺省同 unit_id。
+    unit_id：MQTT 传输层真实标识符（如 esp32_desk_led），用于 topic 构造。
     online 字段为动态状态，由 registry 根据 LWT 或 card 消息维护。
     state 字段为动态状态，由对应 state topic 更新，builder 不填充。
     """
 
     slug: str
+    unit_id: NotRequired[str]   # MQTT 传输层标识符，缺省同 slug
     name: str
     description: str
     agent_type: str   # "actuator" | "sensor" | "robot" | "decision"

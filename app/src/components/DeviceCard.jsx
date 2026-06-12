@@ -1,5 +1,5 @@
 function SensorCard({ agent, unitData }) {
-  const uid     = agent.unit_id || agent.agent_id;
+  const uid     = agent.unit_id;
   const meta    = getAgentMeta(agent);
   const reading = getSensorReading(agent, unitData);
   const offline = !agent._online;
@@ -39,7 +39,7 @@ function SensorCard({ agent, unitData }) {
 }
 
 function ActuatorCard({ agent, unitData }) {
-  const uid      = agent.unit_id || agent.agent_id;
+  const uid      = agent.unit_id;
   const meta     = getAgentMeta(agent);
   const active   = isAgentActive(agent, unitData);
   const offline  = !agent._online;

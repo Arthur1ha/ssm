@@ -42,7 +42,7 @@ def _push_rules_to_esp32() -> None:
         esp32_rules.append({
             "id":   r["rule_id"],
             "en":   r.get("enabled", True),
-            "trig": {"tag": trig.get("agent_tag", ""), "ev": trig.get("event", "")},
+            "trig": {"tag": trig.get("tag", ""), "ev": trig.get("event", "")},
             "act":  {"cmd": action.get("cmd", "SET_STATE"), **params},
         })
     payload = json.dumps(esp32_rules, ensure_ascii=False)

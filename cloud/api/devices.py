@@ -23,9 +23,9 @@ def list_devices():
     cards = get_registry().get_all_cards()
     return [
         {
-            "unit_id":    card.get("slug"),   # registry 以 slug 索引，unit_id 对外沿用 slug
-            "name":       card.get("name"),
+            "unit_id":    card.get("unit_id") or card.get("slug"),
             "slug":       card.get("slug"),
+            "name":       card.get("name"),
             "agent_type": card.get("agent_type"),
             "online":     card.get("online", False),
         }

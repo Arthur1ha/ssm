@@ -99,7 +99,7 @@ function RulesScreen({ embedded = false, onRulesChange }) {
               </div>
               <div style={{ fontSize: 11, color: 'var(--color-text-dim)',
                 fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-                {rule.trigger?.agent_tag}.{rule.trigger?.event} → {rule.action?.resource_tag}
+                {rule.trigger?.tag}.{rule.trigger?.event} → {rule.action?.tag}
               </div>
             </div>
             {/* 删除按钮（扩大触摸目标 B6 + 二次确认 B3） */}

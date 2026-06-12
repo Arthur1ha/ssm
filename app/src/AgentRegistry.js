@@ -39,7 +39,7 @@ class AgentRegistry extends EventTarget {
                 const id = mStatus[1];
                 const online = (msg === 'online');
                 const now = Date.now();
-                const existing = this._agents.get(id) || { agent_id: id };
+                const existing = this._agents.get(id) || { unit_id: id };
                 this._agents.set(id, { ...existing, _online: online, _lastSeen: now });
                 // propagate to child agents that share this parent_id
                 for (const [aid, agent] of this._agents) {
@@ -56,7 +56,7 @@ class AgentRegistry extends EventTarget {
 
             if (mLocation) {
                 const id = mLocation[1];
-                const existing = this._agents.get(id) || { agent_id: id };
+                const existing = this._agents.get(id) || { unit_id: id };
                 this._agents.set(id, { ...existing, _lat: msg.lat, _lng: msg.lng });
                 // propagate to child agents that share this parent_id
                 for (const [aid, agent] of this._agents) {

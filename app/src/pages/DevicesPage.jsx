@@ -47,7 +47,7 @@ function DevicesScreen({ agents, unitData }) {
         <>
           {sectionLabel('智能体')}
           {agentDevices.map(a => (
-            <ActuatorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>
+            <ActuatorCard key={a.unit_id} agent={a} unitData={unitData}/>
           ))}
         </>
       )}
@@ -55,7 +55,7 @@ function DevicesScreen({ agents, unitData }) {
         <>
           {sectionLabel('传感器', sensors.length, true, sensorsOpen, () => setSensorsOpen(v => !v))}
           {sensorsOpen && sensors.map(a => (
-            <SensorCard key={a.unit_id || a.agent_id} agent={a} unitData={unitData}/>
+            <SensorCard key={a.unit_id} agent={a} unitData={unitData}/>
           ))}
         </>
       )}

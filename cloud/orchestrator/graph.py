@@ -24,6 +24,30 @@ from langgraph.graph import StateGraph, END
 import tools as _t
 
 
+# ── 对话历史 ─────────────────────────────────────────────────────
+_conversation_history: list = []
+_MAX_HISTORY = 10
+
+
+def _format_env_state(sensors: dict, actuators: dict) -> str:
+    """把传感器和执行器快照格式化为可读字符串，注入 Planner prompt。"""
+    lines = []
+    for uid, data in sensors.items():
+        s = data.get("state") or data.get("event") or {}
+        lines.append(f"- {uid}：ISM={s.get('ism', '?')}")
+    for uid, data in actuators.items():
+        s = data.get("state", {})
+        lines.append(f"- {uid}：ISM={s.get('ism', '?')}")
+    return "\n".join(lines) if lines else "暂无环境数据"
+
+
+def _append_history(user_msg: str, response: str):
+    """追加一轮对话记录，超出 _MAX_HISTORY 时移除最旧一条。"""
+    _conversation_history.append({"user": user_msg, "assistant": response})
+    while len(_conversation_history) > _MAX_HISTORY:
+        _conversation_history.pop(0)
+
+
 def _make_llm():
     """构建带 fallback 链的 ChatOpenAI（按 MODEL_LIST 顺序重试）。"""
     model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
@@ -60,17 +84,18 @@ class OrchestratorState(TypedDict):
 
 # ── prompt 构建 ──────────────────────────────────────────────────
 
-def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
-    """把所有在线 card 的 skills + params_schema 注入 prompt，并要求分类 + 规划合一。
+def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
+                        env_state: str = "", history: list = None) -> str:
+    """把在线 card skills、环境状态、对话历史注入 prompt，一次 LLM 完成分类 + 规划。
 
-    Planner 一次 LLM 调用输出带 route 字段的 JSON，三选一：act / chat / define_rule。
+    Planner 输出带 route 字段的 JSON，四选一：act / chat / define_rule。
     """
     lines = []
     for slug, card in cards.items():
         if not card.get("online", True):
             continue
         if not card.get("skills"):
-            continue  # 无技能的设备（传感器、系统节点）不进入规划上下文
+            continue
         lines.append(f"- {slug}（{card.get('name', slug)}）：")
         for skill in card.get("skills", []):
             schema = skill.get("params_schema", {})
@@ -79,22 +104,32 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list) -> str:
             lines.append(f"  skill: {skill['id']}（{skill.get('name', '')}）params: {params_desc}")
     agents_str = "\n".join(lines) if lines else "无可用智能体"
 
+    history_str = ""
+    if history:
+        turns = [f"  用户：{h['user']}\n  助理：{h['assistant']}" for h in history]
+        history_str = "最近对话记录：\n" + "\n".join(turns) + "\n\n"
+
+    env_str = f"当前环境状态：\n{env_state}\n\n" if env_state else ""
+
     return (
         f"你是 SSM 多智能体编排中枢，兼任智能家居助理。根据用户意图，输出一个 JSON 对象（不含代码块）。\n\n"
+        f"{history_str}"
+        f"{env_str}"
         f"用户原话：{user_msg}\n"
         f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
         f"可用智能体：\n{agents_str}\n\n"
         f"分类规则：\n"
         f"1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
-        f"2. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
-        f"3. 其他（问候、闲聊、纯问答、不明确指向某设备）→ route=\"chat\"，输出 answer 字符串。\n\n"
+        f"2. 如果用户宣布开始某项活动（如'我要工作了'、'开始学习'、'准备睡觉'）且当前环境状态需要调整（如灯光过暗/过亮）→ route=\"act\"，主动规划合适的任务。\n"
+        f"3. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
+        f"4. 其他（问候、闲聊、纯问答、不明确指向某设备且环境无需调整）→ route=\"chat\"，输出 answer 字符串。\n\n"
         f"act 校验：slug 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
         f"找不到合适的 slug/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
-        f"输出格式（三选一，直接输出 JSON，不含代码块或解释）：\n"
+        f"输出格式（四选一，直接输出 JSON，不含代码块或解释）：\n"
         f'- act:         {{"route": "act", "tasks": [{{"slug": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
         f'- chat:        {{"route": "chat", "answer": "..."}}\n'
-        f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{...}}, "action": {{...}}}}}}'
+        f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{"tag": "light_level|presence|sound", "event": "..."}}, "action": {{"tag": "lighting", "cmd": "SET_STATE", "params": {{...}}}}}}}}'
     )
 
 
@@ -144,7 +179,13 @@ def _make_planner_node(llm):
                 "抱歉，我还没有发现可用的智能体，请确认设备已上线。")
             return {**state, "route": "act", "planned_tasks": [], "early_exit": True}
 
-        prompt = _build_card_prompt(cards, state["user_msg"], state.get("requirements", []))
+        sensors   = _t._state.sensor_snapshot()   if _t._state else {}
+        actuators = _t._state.actuator_snapshot() if _t._state else {}
+        env_state = _format_env_state(sensors, actuators)
+        prompt = _build_card_prompt(
+            cards, state["user_msg"], state.get("requirements", []),
+            env_state=env_state, history=list(_conversation_history),
+        )
 
         try:
             resp = llm.invoke([HumanMessage(content=prompt)])
@@ -227,6 +268,7 @@ def _make_chat_node(llm):
         answer = state.get("response_text", "") or "抱歉，我没太理解你的意思。"
         _t.do_publish_feedback(session_id, "done", answer)
         print(f"[Chat] session={session_id} → {answer}")
+        _append_history(state["user_msg"], answer)
         return state
 
     return chat_node
@@ -421,6 +463,7 @@ def _make_responder_node(llm):
 
         _t.do_publish_feedback(session_id, stage, text)
         print(f"[Responder] session={session_id} stage={stage} → {text}")
+        _append_history(state["user_msg"], text)
         return {**state, "response_text": text}
 
     return responder_node

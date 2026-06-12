@@ -12,7 +12,7 @@ class SharedState:
         self._actuators          = {}   # unit_id → { state, report }
         self._manifests          = {}   # unit_id → manifest payload
         self._decision_active    = False
-        self._capability_registry = {}  # resource_tag → [unit_id]
+        self._capability_registry = {}  # tag → [unit_id]
         self._task_results        = {}  # task_id → result payload
 
     # ── MQTT message ingestion ────────────────────────────────
@@ -20,7 +20,7 @@ class SharedState:
     def on_manifest(self, unit_id: str, payload: dict):
         with self._lock:
             self._manifests[unit_id] = payload
-            for tag in payload.get("resource_tags", []):
+            for tag in payload.get("tags", []):
                 if tag not in self._capability_registry:
                     self._capability_registry[tag] = []
                 if unit_id not in self._capability_registry[tag]:

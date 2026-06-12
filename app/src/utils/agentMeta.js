@@ -13,7 +13,7 @@ function getAgentMeta(agent) {
 }
 
 function getStateLabel(agent, unitData) {
-  const uid = agent.unit_id || agent.agent_id;
+  const uid = agent.unit_id;
   const s   = (unitData[uid] || {}).state || {};
   const n   = (agent.name || '').toLowerCase();
   if (agent.agent_type === 'robot') return '点击控制';
@@ -26,7 +26,7 @@ function getStateLabel(agent, unitData) {
 }
 
 function getSensorReading(agent, unitData) {
-  const uid = agent.unit_id || agent.agent_id;
+  const uid = agent.unit_id;
   const d   = unitData[uid] || {};
   const s   = d.state || d.event || {};
   const n   = (agent.name || '').toLowerCase();
@@ -50,7 +50,7 @@ function getSensorReading(agent, unitData) {
 }
 
 function isAgentActive(agent, unitData) {
-  const uid = agent.unit_id || agent.agent_id;
+  const uid = agent.unit_id;
   const s   = (unitData[uid] || {}).state || {};
   const n   = (agent.name || '').toLowerCase();
   if (n.includes('led') || n.includes('rgb')) return s.ism && s.ism !== 'OFF' && s.ism !== 'IDLE';

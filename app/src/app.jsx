@@ -7,7 +7,7 @@ const EXCL_PLAT  = new Set(['pc', 'pwa']);
 const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
 
 const GO2_STATIC_DEVICE = {
-  unit_id: 'go2', agent_id: 'go2', slug: 'go2',
+  unit_id: 'go2', slug: 'go2',
   name: 'Go2 Air', agent_type: 'robot', _online: false,
   capabilities: ['MOVE', 'STAND_UP', 'SIT_DOWN', 'HELLO', 'STRETCH', 'DANCE'],
 };
@@ -26,7 +26,7 @@ function useHash() {
 /* ── App ── */
 function App() {
   const [connected, setConnected]   = useState(false);
-  const [agents, setAgents]         = useState([GO2_STATIC_DEVICE]);
+  const [agents, setAgents]         = useState([]);
   const [unitData, setUnitData]     = useState({});
   const [activityLog, setActivityLog] = useState([]);
   const [rulesOpen, setRulesOpen]   = useState(false);
@@ -35,7 +35,7 @@ function App() {
 
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHash();
-  const agentsRef     = useRef([GO2_STATIC_DEVICE]);
+  const agentsRef     = useRef([]);
   const prevStatesRef = useRef({});
   const greetedRef    = useRef(false);
 
@@ -44,6 +44,20 @@ function App() {
   const appendActivity = (entry) =>
     setActivityLog(prev => [...prev.slice(-19), { ...entry, ts: Date.now() }]);
 
+  /* ── REST 预载：立即获取已知设备，不等 MQTT ── */
+  useEffect(() => {
+    fetch('/api/devices')
+      .then(r => r.json())
+      .then(devices => {
+        const restAgents = devices
+          .filter(d => d.agent_type && !EXCL_TYPES.has(d.agent_type) && !EXCL_PLAT.has(d.hw_platform))
+          .map(d => ({ ...d, _online: d.online ?? false }));
+        const hasGo2 = restAgents.some(d => (d.unit_id || d.slug) === 'go2');
+        setAgents(hasGo2 ? restAgents : [GO2_STATIC_DEVICE, ...restAgents]);
+      })
+      .catch(() => setAgents([GO2_STATIC_DEVICE]));
+  }, []);
+
   /* ── MQTT 初期化 ── */
   useEffect(() => {
     const registry   = new AgentRegistry(mqttBus);
@@ -51,16 +65,27 @@ function App() {
 
     const handleRegistryChange = () => {
       const all = registry.getAll();
-      // Go2 单独处理：优先用 MQTT registry 里的在线状态，无则用静态默认（离线）
-      const go2FromMqtt = all.find(a => (a.unit_id || a.agent_id) === 'go2');
-      const go2Entry = go2FromMqtt
-        ? { ...GO2_STATIC_DEVICE, _online: go2FromMqtt._online === true }
-        : GO2_STATIC_DEVICE;
-      const mqttAgents = all.filter(a =>
-        a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform) &&
-        (a.unit_id || a.agent_id) !== 'go2'
-      );
-      setAgents([go2Entry, ...mqttAgents]);
+      // unit_id 为统一索引（REST 和 MQTT manifest 现在都用真实 unit_id）
+      const mqttByUnitId = new Map();
+      for (const a of all) {
+        const id = a.unit_id;
+        if (a.agent_type && !EXCL_TYPES.has(a.agent_type) && !EXCL_PLAT.has(a.hw_platform)) {
+          mqttByUnitId.set(id, a);
+        }
+      }
+      setAgents(prev => {
+        const merged = prev.map(d => {
+          const id = d.unit_id;
+          const mqtt = mqttByUnitId.get(id);
+          if (!mqtt) return d;
+          mqttByUnitId.delete(id);
+          if (id === 'go2') return { ...GO2_STATIC_DEVICE, _online: mqtt._online === true };
+          return { ...d, ...mqtt };
+        });
+        // 追加 MQTT 报告但 REST 列表里没有的新设备
+        for (const a of mqttByUnitId.values()) merged.push(a);
+        return merged;
+      });
     };
     registry.addEventListener('change', handleRegistryChange);
 
@@ -81,7 +106,7 @@ function App() {
           const ism = snap[uid].state?.ism;
           if (ism && ism !== prevStatesRef.current[uid]) {
             if (prevStatesRef.current[uid] !== undefined) {
-              const agent = agentsRef.current.find(a => (a.unit_id || a.agent_id) === uid);
+              const agent = agentsRef.current.find(a => (a.unit_id) === uid);
               const name  = agent?.name || uid;
               appendActivity({ type: 'event', text: `${name} → ${ism}` });
             }
@@ -187,7 +212,7 @@ function App() {
     if (slug === 'go2') {
       return <Go2DevicePage onBack={() => navigate('#')}/>;
     }
-    const device = agents.find(a => a.slug === slug || (a.unit_id || a.agent_id) === slug);
+    const device = agents.find(a => a.slug === slug || (a.unit_id) === slug);
     if (!device) { navigate('#'); return null; }
     return (
       <DeviceDetailPage
@@ -264,9 +289,9 @@ function App() {
               </div>
               <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{pendingRule.name}</div>
               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 12 }}>
-                当 {pendingRule.trigger?.agent_tag}.{pendingRule.trigger?.event}
+                当 {pendingRule.trigger?.tag}.{pendingRule.trigger?.event}
                 {' → '}
-                {pendingRule.action?.resource_tag} / {pendingRule.action?.cmd}
+                {pendingRule.action?.tag} / {pendingRule.action?.cmd}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button onClick={handleCancelRule} style={{
