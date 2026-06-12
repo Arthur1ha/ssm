@@ -59,10 +59,9 @@ ssm/
 │   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 编排图
 │   │   ├── graph.py     ← LangGraph：Planner→Dispatcher→Evaluator→Responder（支持 ESP32/MQTT 与 Go2/HTTP）
 │   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助（供图节点使用）
-│   │   ├── shared_state.py ← 线程安全设备/任务快照（合并 MQTT manifest + devices.json）
-│   │   ├── devices.json ← 文件型设备注册表（go2 等非 MQTT 设备）
-│   │   ├── rules.json   ← 自动化规则存储
-│   │   └── rule_engine.py ← ⚠️ 当前无任何引用（遗留代码，勿依赖）
+│   │   ├── shared_state.py ← 线程安全传感器/执行器/任务快照（按 manifest agent_type 分桶）
+│   │   ├── devices.json ← 预留：文件型非 MQTT 设备注册表（当前为空，go2 已走 MQTT card）
+│   │   └── rules.json   ← 自动化规则存储
 │   ├── esp32/           ← ESP32 桌面空间智能体（云端侧，原 orchestrator/desk_agent）
 │   │   ├── agent.py     ← 带 persona 的 sense→reason→act 智能体
 │   │   ├── router.py    ← `/api/esp32/intents`
