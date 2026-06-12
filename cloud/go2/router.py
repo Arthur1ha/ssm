@@ -22,6 +22,7 @@ from cloud.go2.agentcore.skills.vision import vision_loop
 _mqtt_client = None
 
 GO2_CARD_TOPIC = "ssm/agents/go2/card"
+GO2_STATUS_TOPIC = "ssm/agents/go2/status"
 
 
 def init_mqtt(client) -> None:
@@ -31,9 +32,10 @@ def init_mqtt(client) -> None:
 
 
 def _build_go2_card() -> dict:
-    """构建 Go2 完整 Agent Card dict，符合 AgentCard schema。
+    """构建 Go2 Agent Card dict（静态能力描述，符合 AgentCard schema）。
 
-    state 字段从 go2 连接对象实时读取，保证 card 发布时状态准确。
+    card 只含能力，不含 volatile state；在线状态由 status topic 维护，
+    FSM/动作等动态状态经 HTTP /api/go2/* 实时获取。
     """
     return {
         "unit_id": "go2",
@@ -84,10 +86,8 @@ def _build_go2_card() -> dict:
                 "invoke": {"action": "NAVIGATE"},
             },
         ],
-        "state": {
-            "fsm": go2.fsm_state,
-            "available_actions": go2.available_actions,
-        },
+        # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
+        "state": {},
     }
 
 
@@ -105,6 +105,17 @@ def _publish_go2_card() -> None:
         logging.info("[Go2] 已发布 retained card 到 %s", GO2_CARD_TOPIC)
     except Exception as exc:
         logging.error("[Go2] 发布 card 失败: %s", exc)
+
+
+def _publish_go2_status(online: bool) -> None:
+    """发布 Go2 在线状态（retained，含 LWT 语义），由 CardRegistry 维护 card.online。"""
+    if _mqtt_client is None:
+        return
+    try:
+        _mqtt_client.publish(GO2_STATUS_TOPIC, "online" if online else "offline", retain=True, qos=1)
+        logging.info("[Go2] status → %s", "online" if online else "offline")
+    except Exception as exc:
+        logging.error("[Go2] 发布 status 失败: %s", exc)
 
 
 def _clear_go2_card() -> None:
@@ -147,6 +158,7 @@ async def go2_connect():
             return
 
         _publish_go2_card()
+        _publish_go2_status(True)
 
         if _active_rule_cb is not None:
             vision_loop.remove_callback(_active_rule_cb)
@@ -177,6 +189,7 @@ async def go2_disconnect():
     _autonomy_mode   = "manual"
     await go2.disconnect()
     _clear_go2_card()
+    _publish_go2_status(False)
     return {"status": "disconnected"}
 
 

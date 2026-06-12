@@ -82,13 +82,12 @@ class TestBuildGo2Card:
         enum_values = sport["params_schema"]["properties"]["cmd"]["enum"]
         assert set(enum_values) == {"StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"}
 
-    def test_state_reflects_go2_connection(self):
-        """state.fsm 和 state.available_actions 必须来自 go2 连接对象。"""
+    def test_state_is_empty(self):
+        """card 不含 volatile state（FSM/动作经 HTTP 实时获取，不进 retained card）。"""
         self.go2_stub.fsm_state = "standing"
         self.go2_stub.available_actions = ["Hello"]
         card = self.router_mod._build_go2_card()
-        assert card["state"]["fsm"] == "standing"
-        assert card["state"]["available_actions"] == ["Hello"]
+        assert card["state"] == {}
 
     def test_online_is_true(self):
         """连接后发布的 card online 字段必须为 True。"""
