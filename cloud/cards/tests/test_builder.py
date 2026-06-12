@@ -87,9 +87,10 @@ class TestBuildCardFromManifestActuator:
         """ESP32 设备传输层应为 mqtt。"""
         assert self.card["transport"]["kind"] == "mqtt"
 
-    def test_transport_task_topic_含_slug(self):
-        """task_topic 应包含 slug。"""
-        assert "desk-lamp" in self.card["transport"]["task_topic"]
+    def test_transport_task_topic_含_unit_id(self):
+        """task_topic 必须用 unit_id（传输地址），不能用 slug。"""
+        assert self.card["transport"]["task_topic"] == "ssm/task/esp32_desk_led/{task_id}"
+        assert "desk-lamp" not in self.card["transport"]["task_topic"]
 
     def test_skills_数量_为_三个(self):
         """LED manifest 有三条 capabilities，应产出三个 skill。"""

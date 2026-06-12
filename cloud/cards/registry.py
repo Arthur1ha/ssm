@@ -37,17 +37,21 @@ class CardRegistry:
         client.subscribe([
             ("ssm/agents/+/card",     0),
             ("ssm/agents/+/manifest", 0),
+            ("ssm/agents/+/status",   0),
         ])
-        logger.info("[CardRegistry] Subscribed to ssm/agents/+/card and ssm/agents/+/manifest")
+        logger.info("[CardRegistry] Subscribed to card / manifest / status")
 
     def handle_message(self, topic: str, payload: bytes | str) -> None:
         """处理 MQTT 消息，更新注册表。
 
+        topic 匹配 ssm/agents/+/status：
+            - online/offline → 按 unit_id 或 parent_id 匹配，维护 card.online（含 LWT）
         topic 匹配 ssm/agents/+/card：
-            - 空 payload → 移除该 slug（设备离线）
+            - 空 payload → 移除该 card（设备离线）
             - 非空 payload → parse_card 后存入
         topic 匹配 ssm/agents/+/manifest：
-            - json parse → build_card_from_manifest → 以 card.slug 存入
+            - 空 payload → 移除该单元 card（单元缺席）
+            - 非空 payload → build_card_from_manifest → 以 card.slug 存入（保留已知 online）
         其他 topic：静默忽略。
         """
         parts = topic.split("/")
@@ -56,6 +60,17 @@ class CardRegistry:
 
         msg_type = parts[3]
         raw = payload if isinstance(payload, bytes) else payload.encode()
+
+        # status：父设备/设备级在线状态（含 LWT），按 unit_id 或 parent_id 匹配
+        if msg_type == "status":
+            device_id = parts[2]
+            online = (raw.strip() == b"online")
+            with self._lock:
+                for c in self._cards.values():
+                    if c.get("unit_id") == device_id or c.get("parent_id") == device_id:
+                        c["online"] = online
+            logger.info("[CardRegistry] %s → online=%s", device_id, online)
+            return
 
         if msg_type == "card":
             if not raw.strip():
@@ -76,7 +91,14 @@ class CardRegistry:
                     logger.warning("[CardRegistry] Failed to parse card payload: %s", exc)
 
         elif msg_type == "manifest":
+            unit_id = parts[2]
+            # 空 manifest = 该单元缺席，移除对应 card
             if not raw.strip():
+                with self._lock:
+                    gone = [s for s, c in list(self._cards.items()) if c.get("unit_id") == unit_id]
+                    for slug in gone:
+                        del self._cards[slug]
+                        logger.info("[CardRegistry] Removed card (manifest cleared): %s", slug)
                 return
             try:
                 data = json.loads(raw)
@@ -87,6 +109,10 @@ class CardRegistry:
                     return
                 card = build_card_from_manifest(data)
                 with self._lock:
+                    # 保留已知 online（status 可能先于 manifest 到达，且是在线真相）
+                    prev = self._cards.get(card["slug"])
+                    if prev is not None and "online" in prev:
+                        card["online"] = prev["online"]
                     self._cards[card["slug"]] = card
                 logger.info("[CardRegistry] Stored card (from manifest): %s", card["slug"])
             except Exception as exc:

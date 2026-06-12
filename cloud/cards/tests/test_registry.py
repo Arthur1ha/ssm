@@ -189,6 +189,50 @@ class TestIgnoreIrrelevantTopics:
         assert len(registry.get_all_cards()) == 0
 
 
+# ── status / 在线状态测试 ───────────────────────────────────────
+
+class TestStatusOnline:
+    """测试按 /status topic（含 LWT）维护 card.online。"""
+
+    def test_父设备_status_offline_使子单元离线(self, registry):
+        """父设备 LWT 触发 status=offline → 子单元 card.online 转 False，再 online 恢复。"""
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        assert registry.get_card("desk-lamp")["online"] is True
+
+        registry.handle_message("ssm/agents/esp32_desk/status", b"offline")
+        assert registry.get_card("desk-lamp")["online"] is False
+
+        registry.handle_message("ssm/agents/esp32_desk/status", b"online")
+        assert registry.get_card("desk-lamp")["online"] is True
+
+    def test_manifest_重发不覆盖_offline(self, registry):
+        """status=offline 后即便 manifest 重发，online 仍保持 False（status 是真相）。"""
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        registry.handle_message("ssm/agents/esp32_desk/status", b"offline")
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        assert registry.get_card("desk-lamp")["online"] is False
+
+
+class TestEmptyManifestRemoves:
+    """测试空 manifest（缺席单元）移除对应 card。"""
+
+    IR_MANIFEST = {
+        "unit_id": "esp32_desk_ir", "parent_id": "esp32_desk",
+        "agent_type": "sensor", "name": "ir_presence",
+        "hw_platform": "esp32", "capabilities": [], "tags": ["presence"],
+    }
+
+    def test_空_manifest_移除_card(self, registry):
+        registry.handle_message(
+            "ssm/agents/esp32_desk_ir/manifest", json.dumps(self.IR_MANIFEST).encode())
+        assert registry.get_card("esp32_desk_ir") is not None
+        registry.handle_message("ssm/agents/esp32_desk_ir/manifest", b"")
+        assert registry.get_card("esp32_desk_ir") is None
+
+
 # ── 多设备并存测试 ──────────────────────────────────────────────
 
 def test_多设备并存(registry):

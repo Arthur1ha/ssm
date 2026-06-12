@@ -101,7 +101,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         if skill:
             skills.append(skill)
 
-    return AgentCard(
+    card = AgentCard(
         slug=slug,
         unit_id=unit_id,
         name=name,
@@ -112,6 +112,8 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         skills=skills,
         state={},
     )
+    card["parent_id"] = manifest.get("parent_id", "")
+    return card
 
 
 def parse_card(payload: dict) -> AgentCard:
