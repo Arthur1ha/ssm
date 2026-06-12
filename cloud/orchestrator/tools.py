@@ -45,10 +45,13 @@ def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "o
     )
 
 
-def do_publish_task(slug: str, task_id: str, action: str, params: dict, session_id: str):
-    """向 MQTT 设备（ESP32）发布任务消息（ssm/task/{slug}/{task_id}）。"""
+def do_publish_task(unit_id: str, task_id: str, action: str, params: dict, session_id: str):
+    """向 MQTT 设备（ESP32）发布任务消息（ssm/task/{unit_id}/{task_id}）。
+
+    topic 一律用 unit_id（传输层唯一标识），不用 slug。见 protocol/identifiers.md。
+    """
     _mqtt.publish(
-        f"ssm/task/{slug}/{task_id}",
+        f"ssm/task/{unit_id}/{task_id}",
         json.dumps({"task_id": task_id, "session_id": session_id,
                     "action": action, "params": params, "ts": int(_time.time())}),
         qos=1,

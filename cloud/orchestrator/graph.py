@@ -332,9 +332,15 @@ def _make_dispatcher_node():
             kind = card.get("transport", {}).get("kind")
 
             if kind == "mqtt":
-                action = skill.get("invoke", {}).get("action", "")
-                _t.do_publish_task(slug, task["task_id"], action, task["params"], session_id)
-                print(f"[Dispatcher] mqtt → {slug} {action} task_id={task['task_id']}")
+                action  = skill.get("invoke", {}).get("action", "")
+                unit_id = card.get("unit_id")
+                if not unit_id:
+                    # 硬边界：topic 只能用 unit_id，绝不退回 slug（见 protocol/identifiers.md）
+                    results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
+                                                "error": "missing_unit_id"}
+                    continue
+                _t.do_publish_task(unit_id, task["task_id"], action, task["params"], session_id)
+                print(f"[Dispatcher] mqtt → {unit_id} {action} task_id={task['task_id']}")
 
             elif kind == "http":
                 endpoint = card.get("transport", {}).get("endpoint", "")

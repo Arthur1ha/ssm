@@ -23,6 +23,7 @@ import tools as _t          # noqa: E402
 
 LED_CARD = {
     "slug": "esp32_desk_led",
+    "unit_id": "esp32_desk_led",
     "name": "桌面灯",
     "description": "WS2812 灯环",
     "agent_type": "actuator",
@@ -49,6 +50,7 @@ LED_CARD = {
 
 GO2_CARD = {
     "slug": "go2",
+    "unit_id": "go2",
     "name": "Go2 机器狗",
     "description": "四足机器人",
     "agent_type": "robot",
@@ -293,7 +295,7 @@ def test_dispatcher_mqtt_uses_publish_task(monkeypatch):
 
     pub.assert_called_once()
     args = pub.call_args.args
-    assert args[0] == "esp32_desk_led"   # slug
+    assert args[0] == "esp32_desk_led"   # unit_id
     assert args[1] == "s1_t0"            # task_id
     assert args[2] == "SET_STATE"        # action from invoke
     assert args[3] == {"state": "BRIGHT"}
