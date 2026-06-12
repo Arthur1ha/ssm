@@ -46,15 +46,15 @@ class TestBuildGo2Card:
         self.router_mod, self.go2_stub = _load_router_with_stub()
 
     def test_top_level_fields_present(self):
-        """card 必须包含 slug / name / description / agent_type / online / transport / skills / state。"""
+        """card 必须包含 unit_id / name / description / agent_type / online / transport / skills / state。"""
         card = self.router_mod._build_go2_card()
-        for field in ("slug", "name", "description", "agent_type", "online", "transport", "skills", "state"):
+        for field in ("unit_id", "name", "description", "agent_type", "online", "transport", "skills", "state"):
             assert field in card, f"缺少字段: {field}"
 
-    def test_slug_is_go2(self):
-        """slug 必须为 'go2'。"""
+    def test_unit_id_is_go2(self):
+        """unit_id 必须为 'go2'。"""
         card = self.router_mod._build_go2_card()
-        assert card["slug"] == "go2"
+        assert card["unit_id"] == "go2"
 
     def test_transport_kind_and_endpoint(self):
         """transport.kind 必须为 'http'，endpoint 必须为 '/api/go2/chat'。"""
@@ -100,7 +100,7 @@ class TestBuildGo2Card:
         card = self.router_mod._build_go2_card()
         serialized = json.dumps(card, ensure_ascii=False)
         restored = json.loads(serialized)
-        assert restored["slug"] == "go2"
+        assert restored["unit_id"] == "go2"
 
 
 class TestPublishClearGo2Card:

@@ -7,7 +7,7 @@ const EXCL_PLAT  = new Set(['pc', 'pwa']);
 const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
 
 const GO2_STATIC_DEVICE = {
-  unit_id: 'go2', slug: 'go2',
+  unit_id: 'go2',
   name: 'Go2 Air', agent_type: 'robot', _online: false,
   capabilities: ['MOVE', 'STAND_UP', 'SIT_DOWN', 'HELLO', 'STRETCH', 'DANCE'],
 };
@@ -52,7 +52,7 @@ function App() {
         const restAgents = devices
           .filter(d => d.agent_type && !EXCL_TYPES.has(d.agent_type) && !EXCL_PLAT.has(d.hw_platform))
           .map(d => ({ ...d, _online: d.online ?? false }));
-        const hasGo2 = restAgents.some(d => (d.unit_id || d.slug) === 'go2');
+        const hasGo2 = restAgents.some(d => d.unit_id === 'go2');
         setAgents(hasGo2 ? restAgents : [GO2_STATIC_DEVICE, ...restAgents]);
       })
       .catch(() => setAgents([GO2_STATIC_DEVICE]));
@@ -208,15 +208,15 @@ function App() {
   /* ── Hash 路由：全屏设备页 ── */
   const hashMatch = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (hashMatch) {
-    const slug = hashMatch[1];
-    if (slug === 'go2') {
+    const routeId = hashMatch[1];
+    if (routeId === 'go2') {
       return <Go2DevicePage onBack={() => navigate('#')}/>;
     }
-    const device = agents.find(a => a.slug === slug || (a.unit_id) === slug);
+    const device = agents.find(a => a.unit_id === routeId);
     if (!device) { navigate('#'); return null; }
     return (
       <DeviceDetailPage
-        slug={slug}
+        unitId={routeId}
         device={device}
         unitData={unitData}
         onBack={() => navigate('#')}

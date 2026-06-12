@@ -36,7 +36,7 @@ def _build_go2_card() -> dict:
     state 字段从 go2 连接对象实时读取，保证 card 发布时状态准确。
     """
     return {
-        "slug": "go2",
+        "unit_id": "go2",
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",

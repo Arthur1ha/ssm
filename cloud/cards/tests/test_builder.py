@@ -67,9 +67,9 @@ class TestBuildCardFromManifestActuator:
         """每个测试前构建 LED card。"""
         self.card = build_card_from_manifest(LED_MANIFEST)
 
-    def test_slug_来自_manifest(self):
-        """slug 应使用 manifest['slug'] 字段。"""
-        assert self.card["slug"] == "desk-lamp"
+    def test_unit_id_来自_manifest(self):
+        """card 以 manifest['unit_id'] 为唯一标识。"""
+        assert self.card["unit_id"] == "esp32_desk_led"
 
     def test_name_正确(self):
         """name 应对应 manifest['name']。"""
@@ -140,9 +140,9 @@ class TestBuildCardFromManifestSensor:
         """每个测试前构建光线传感器 card。"""
         self.card = build_card_from_manifest(LIGHT_SENSOR_MANIFEST)
 
-    def test_slug_回退到_unit_id(self):
-        """无 slug 字段时应回退到 unit_id。"""
-        assert self.card["slug"] == "esp32_desk_light"
+    def test_unit_id_正确(self):
+        """传感器 card 的 unit_id 为 manifest['unit_id']。"""
+        assert self.card["unit_id"] == "esp32_desk_light"
 
     def test_agent_type_为_sensor(self):
         """agent_type 应为 sensor。"""
@@ -183,9 +183,9 @@ class TestParseCard:
         """每个测试前解析 Go2 card。"""
         self.card = parse_card(GO2_CARD)
 
-    def test_slug_正确(self):
-        """slug 应保持原值。"""
-        assert self.card["slug"] == "go2"
+    def test_unit_id_回退到_slug(self):
+        """自描述 card 无 unit_id 时回退用 slug（兼容旧 go2 card）。"""
+        assert self.card["unit_id"] == "go2"
 
     def test_name_正确(self):
         """name 应保持原值。"""
@@ -258,6 +258,6 @@ def test_第二次_manifest_覆盖第一次():
     registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(manifest_v1))
     registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(manifest_v2))
 
-    card = registry.get_card("desk-lamp")
+    card = registry.get_card("esp32_desk_led")
     assert card["name"] == "ws2812_ring_v2"
     assert len(card["skills"]) == 2

@@ -77,13 +77,12 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
 def build_card_from_manifest(manifest: dict) -> AgentCard:
     """从 ESP32 MQTT manifest 字典组装完整 AgentCard。
 
-    slug 优先取 manifest['slug']，缺省用 unit_id。
+    unit_id 为唯一标识（注册表 key、topic、URL 都用它）。
     skills 只映射 CAPABILITY_SKILLS 中已知的 action，未知 action 静默跳过。
     online 固定为 True（收到 manifest 即表示设备在线）。
     state 固定为空 {}（动态状态由 state topic 单独维护）。
     """
     unit_id = manifest.get("unit_id", "")
-    slug = manifest.get("slug") or unit_id
     name = manifest.get("name", unit_id)
     agent_type = manifest.get("agent_type", "sensor")
     description = manifest.get("description", "")
@@ -102,7 +101,6 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
             skills.append(skill)
 
     card = AgentCard(
-        slug=slug,
         unit_id=unit_id,
         name=name,
         description=description,
@@ -119,10 +117,10 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
 def parse_card(payload: dict) -> AgentCard:
     """验证并返回自描述 Agent Card（Go2 等 HTTP 设备使用）。
 
-    当前为 pass-through 实现，Task 2 接入 Go2 后在此添加校验逻辑。
+    unit_id 缺省回退 payload['slug']，兼容烧录/重启前的旧 retained card。
     """
     return AgentCard(
-        slug=payload.get("slug", ""),
+        unit_id=payload.get("unit_id") or payload.get("slug", ""),
         name=payload.get("name", ""),
         description=payload.get("description", ""),
         agent_type=payload.get("agent_type", ""),

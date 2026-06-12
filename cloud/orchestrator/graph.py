@@ -68,14 +68,14 @@ class OrchestratorState(TypedDict):
     """编排图共享状态。
 
     requirements 为 NLU 结果，可选（Task 5 退役 NLU 后将为空）。
-    planned_tasks 每项形如 {slug, skill_id, task_id, params}。
+    planned_tasks 每项形如 {unit_id, skill_id, task_id, params}。
     """
 
     session_id:    str
     user_msg:      str
     requirements:  list   # NLU 结果，可选，默认 []
     route:         str    # "act" / "chat" / "define_rule"，由 Planner 分类，默认 ""
-    planned_tasks: list   # [{slug, skill_id, task_id, params}]
+    planned_tasks: list   # [{unit_id, skill_id, task_id, params}]
     rule:          dict   # define_rule 时填充的规则定义，默认 {}
     task_results:  dict   # task_id → result payload
     response_text: str
@@ -91,12 +91,12 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
     Planner 输出带 route 字段的 JSON，四选一：act / chat / define_rule。
     """
     lines = []
-    for slug, card in cards.items():
+    for unit_id, card in cards.items():
         if not card.get("online", True):
             continue
         if not card.get("skills"):
             continue
-        lines.append(f"- {slug}（{card.get('name', slug)}）：")
+        lines.append(f"- {unit_id}（{card.get('name', unit_id)}）：")
         for skill in card.get("skills", []):
             schema = skill.get("params_schema", {})
             props = schema.get("properties", {})
@@ -123,11 +123,11 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"2. 如果用户宣布开始某项活动（如'我要工作了'、'开始学习'、'准备睡觉'）且当前环境状态需要调整（如灯光过暗/过亮）→ route=\"act\"，主动规划合适的任务。\n"
         f"3. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
         f"4. 其他（问候、闲聊、纯问答、不明确指向某设备且环境无需调整）→ route=\"chat\"，输出 answer 字符串。\n\n"
-        f"act 校验：slug 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
+        f"act 校验：unit_id 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
-        f"找不到合适的 slug/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
+        f"找不到合适的 unit_id/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
         f"输出格式（四选一，直接输出 JSON，不含代码块或解释）：\n"
-        f'- act:         {{"route": "act", "tasks": [{{"slug": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
+        f'- act:         {{"route": "act", "tasks": [{{"unit_id": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
         f'- chat:        {{"route": "chat", "answer": "..."}}\n'
         f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{"tag": "light_level|presence|sound", "event": "..."}}, "action": {{"tag": "lighting", "cmd": "SET_STATE", "params": {{...}}}}}}}}'
     )
@@ -221,17 +221,17 @@ def _make_planner_node(llm):
         for i, t in enumerate(tasks_raw):
             if not isinstance(t, dict):
                 continue
-            slug = t.get("slug")
+            unit_id = t.get("unit_id")
             skill_id = t.get("skill_id")
-            card = cards.get(slug)
+            card = cards.get(unit_id)
             if not card:
-                print(f"[Planner] 丢弃未知 slug: {slug}")
+                print(f"[Planner] 丢弃未知 unit_id: {unit_id}")
                 continue
             if not any(s.get("id") == skill_id for s in card.get("skills", [])):
-                print(f"[Planner] 丢弃 {slug} 未知 skill_id: {skill_id}")
+                print(f"[Planner] 丢弃 {unit_id} 未知 skill_id: {skill_id}")
                 continue
             tasks.append({
-                "slug":     slug,
+                "unit_id":  unit_id,
                 "skill_id": skill_id,
                 "task_id":  f"{session_id}_t{i}",
                 "params":   t.get("params", {}),
@@ -316,8 +316,8 @@ def _make_dispatcher_node():
         executor = None
 
         for task in tasks:
-            slug = task["slug"]
-            card = _t._registry.get_card(slug) if _t._registry else None
+            unit_id = task["unit_id"]
+            card = _t._registry.get_card(unit_id) if _t._registry else None
             if not card:
                 results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
                                             "error": "card_not_found"}
@@ -332,13 +332,7 @@ def _make_dispatcher_node():
             kind = card.get("transport", {}).get("kind")
 
             if kind == "mqtt":
-                action  = skill.get("invoke", {}).get("action", "")
-                unit_id = card.get("unit_id")
-                if not unit_id:
-                    # 硬边界：topic 只能用 unit_id，绝不退回 slug（见 protocol/identifiers.md）
-                    results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
-                                                "error": "missing_unit_id"}
-                    continue
+                action = skill.get("invoke", {}).get("action", "")
                 _t.do_publish_task(unit_id, task["task_id"], action, task["params"], session_id)
                 print(f"[Dispatcher] mqtt → {unit_id} {action} task_id={task['task_id']}")
 
@@ -355,7 +349,7 @@ def _make_dispatcher_node():
                     executor = ThreadPoolExecutor(max_workers=8)
                 fut = executor.submit(_t.do_http_dispatch, endpoint, body, timeout)
                 http_jobs.append((task["task_id"], fut, timeout))
-                print(f"[Dispatcher] http → {slug} {endpoint} task_id={task['task_id']} timeout={timeout}s")
+                print(f"[Dispatcher] http → {unit_id} {endpoint} task_id={task['task_id']} timeout={timeout}s")
 
             else:
                 results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
@@ -402,8 +396,8 @@ def _make_evaluator_node():
             tid = task["task_id"]
             if tid in results:
                 continue
-            slug = task["slug"]
-            card = _t._registry.get_card(slug) if _t._registry else None
+            unit_id = task["unit_id"]
+            card = _t._registry.get_card(unit_id) if _t._registry else None
             kind = card.get("transport", {}).get("kind") if card else "mqtt"
             if kind == "mqtt":
                 pending.append(tid)
@@ -457,7 +451,7 @@ def _make_responder_node(llm):
                 prompt = (f"用户说：'{state['user_msg']}'。部分任务成功（{statuses}）。"
                           f"用1句简短中文说明并给出建议。")
             else:
-                tried = [f"{t['slug']}.{t['skill_id']}({t['params']})" for t in state.get("planned_tasks", [])]
+                tried = [f"{t['unit_id']}.{t['skill_id']}({t['params']})" for t in state.get("planned_tasks", [])]
                 reasons = {k: v.get("result") for k, v in results.items()}
                 prompt = (f"用户说：'{state['user_msg']}'。"
                           f"系统尝试执行{tried}但失败（{reasons}）。"

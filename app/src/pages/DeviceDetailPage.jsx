@@ -1,7 +1,7 @@
-function DeviceDetailPage({ slug, device, unitData, onBack }) {
+function DeviceDetailPage({ unitId, device, unitData, onBack }) {
   const initialMsg = {
-    role: 'assistant', agent: slug,
-    text: `你好，我是 ${device?.name || slug}，有什么可以帮你？`,
+    role: 'assistant', agent: unitId,
+    text: `你好，我是 ${device?.name || unitId}，有什么可以帮你？`,
   };
   const [messages, setMessages] = React.useState([initialMsg]);
   const onAppend = (msg) => setMessages(prev => [...prev, msg]);
@@ -22,9 +22,9 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
     if (!text || thinking) return;
     onAppend({ role: 'user', text });
     send(text, {
-      deviceHint:    slug,
-      onMessage:     (msg)  => onAppend({ role: 'assistant', agent: slug, text: msg }),
-      onPendingRule: (rule) => onAppend({ role: 'assistant', agent: slug,
+      deviceHint:    unitId,
+      onMessage:     (msg)  => onAppend({ role: 'assistant', agent: unitId, text: msg }),
+      onPendingRule: (rule) => onAppend({ role: 'assistant', agent: unitId,
         text: `收到规则「${rule.name}」，请在主界面确认保存。` }),
     });
   };
@@ -60,7 +60,7 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
             fontSize: 13, fontWeight: 700, letterSpacing: '0.12em',
             color: meta.color, textShadow: isOn ? `0 0 12px ${meta.color}80` : 'none',
             transition: 'text-shadow 0.4s',
-          }}>{(device?.name || slug).toUpperCase()}</div>
+          }}>{(device?.name || unitId).toUpperCase()}</div>
           <div style={{
             fontSize: 9, color: 'var(--color-text-dim)',
             letterSpacing: '0.18em', marginTop: 1,
@@ -81,7 +81,7 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
           }}>
             {ism || (device?._online ? 'ONLINE' : 'OFFLINE')}
           </span>
-          <a href={'/api/devices/' + slug + '/agent'} target="_blank" rel="noopener"
+          <a href={'/api/devices/' + unitId + '/agent'} target="_blank" rel="noopener"
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               background: `${meta.color}12`,
@@ -103,7 +103,7 @@ function DeviceDetailPage({ slug, device, unitData, onBack }) {
         messages={messages}
         thinking={thinking}
         thinkingText={thinkingText}
-        thinkingAgent={slug}
+        thinkingAgent={unitId}
         onSend={sendChat}
         placeholder="告诉设备要做什么…"
         variant="inline"
