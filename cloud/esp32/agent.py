@@ -231,45 +231,44 @@ class ESP32Agent:
         snap = self._state.actuator_snapshot()
         return (snap.get(led_device, {}).get("state") or {}).get("ism", "").upper()
 
-    def _execute(self, tool_calls: list, led_device: str):
-        """执行 planner 输出的工具调用列表。"""
+    def _dispatch_tool(self, tool_name: str, params: dict, led_device: str) -> bool:
+        """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
+
+        set_led_state / set_led_color 共享 self._cooldown（同参 5 分钟内只发一次）；
+        speak 等不受冷却约束。色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
+        """
         from cloud.esp32 import tools as _tools_mod
         now = time.time()
+        params = dict(params)
+
+        if tool_name in ("set_led_state", "set_led_color"):
+            params["device_id"] = led_device
+            key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
+            if now - self._cooldown.get(key, 0) < 300:
+                logger.debug("cooldown skip: %s", key)
+                return False
+            self._cooldown[key] = now
+            self._last_act_ts = now
+
+        if tool_name not in _tools_mod.TOOL_FN_MAP:
+            logger.warning("unknown tool: %s", tool_name)
+            return False
+        fn = getattr(_tools_mod, tool_name, None)
+        if fn is None:
+            logger.warning("unknown tool: %s", tool_name)
+            return False
+        try:
+            fn(**params)
+            logger.info("execute %s %s", tool_name, params)
+            return True
+        except Exception as e:
+            logger.warning("tool %s failed: %s", tool_name, e)
+            return False
+
+    def _execute(self, tool_calls: list, led_device: str):
+        """执行 planner 输出的工具调用列表（逐个走单一执行口）。"""
         for call in tool_calls:
-            tool_name = call.get("tool", "")
-            params = dict(call.get("params", {}))
-
-            if tool_name in ("set_led_state", "set_led_color"):
-                params["device_id"] = led_device
-                key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
-                if now - self._cooldown.get(key, 0) < 300:
-                    if tool_name == "set_led_state":
-                        target = params.get("state", "").upper()
-                        current = self._get_current_ism(led_device)
-                        if current and current == target:
-                            logger.debug("cooldown skip: already %s", target)
-                            continue
-                        else:
-                            logger.debug("cooldown skip: %s", key)
-                            continue
-                    else:
-                        logger.debug("cooldown skip: %s", key)
-                        continue
-                self._cooldown[key] = now
-                self._last_act_ts = now
-
-            if tool_name not in _tools_mod.TOOL_FN_MAP:
-                logger.warning("unknown tool: %s", tool_name)
-                continue
-            fn = getattr(_tools_mod, tool_name, None)
-            if fn is None:
-                logger.warning("unknown tool: %s", tool_name)
-                continue
-            try:
-                fn(**params)
-                logger.info("execute %s %s", tool_name, params)
-            except Exception as e:
-                logger.warning("tool %s failed: %s", tool_name, e)
+            self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
 
     def _set_led_mood(self, mood: str):
         _tools.publish_led_mood(mood)

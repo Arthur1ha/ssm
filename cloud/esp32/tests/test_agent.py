@@ -350,3 +350,30 @@ class TestAutonomyRouter:
         app = FastAPI(); app.include_router(esp32_router)
         assert TestClient(app).get("/api/esp32/autonomy").status_code == 503
 
+
+class TestDispatchTool:
+    def test_executes_known_tool(self):
+        a = make_agent()
+        with patch("cloud.esp32.tools.set_led_state", return_value="ok") as m:
+            ok = a._dispatch_tool("set_led_state", {"state": "BRIGHT"}, "esp32_desk_led")
+        assert ok is True
+        m.assert_called_once()
+
+    def test_skips_within_cooldown(self):
+        a = make_agent()
+        with patch("cloud.esp32.tools.set_led_state", return_value="ok") as m:
+            a._dispatch_tool("set_led_state", {"state": "BRIGHT"}, "esp32_desk_led")
+            ok2 = a._dispatch_tool("set_led_state", {"state": "BRIGHT"}, "esp32_desk_led")
+        assert ok2 is False
+        assert m.call_count == 1
+
+    def test_unknown_tool_returns_false(self):
+        assert make_agent()._dispatch_tool("bogus", {}, "esp32_desk_led") is False
+
+    def test_speak_not_cooldown_gated(self):
+        a = make_agent()
+        with patch("cloud.esp32.tools.speak", return_value="ok") as m:
+            a._dispatch_tool("speak", {"text": "hi"}, "esp32_desk_led")
+            a._dispatch_tool("speak", {"text": "hi"}, "esp32_desk_led")
+        assert m.call_count == 2
+
