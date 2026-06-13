@@ -313,3 +313,40 @@ class TestUserHold:
         assert a._in_user_hold() is False
         assert a._should_act() is True
 
+
+class TestAutonomyRouter:
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import cloud.esp32.agent as agent_mod
+        from cloud.esp32.router import router as esp32_router
+        agent_mod._agent = make_agent()
+        app = FastAPI()
+        app.include_router(esp32_router)
+        return TestClient(app)
+
+    def test_get_default_mode(self):
+        resp = self._client().get("/api/esp32/autonomy")
+        assert resp.status_code == 200
+        assert resp.json()["mode"] == "reactive"
+
+    def test_put_switches_mode(self):
+        c = self._client()
+        resp = c.put("/api/esp32/autonomy", json={"mode": "manual"})
+        assert resp.status_code == 200
+        assert resp.json()["mode"] == "manual"
+        assert c.get("/api/esp32/autonomy").json()["mode"] == "manual"
+
+    def test_put_invalid_mode_400(self):
+        resp = self._client().put("/api/esp32/autonomy", json={"mode": "bogus"})
+        assert resp.status_code == 400
+
+    def test_503_when_no_agent(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import cloud.esp32.agent as agent_mod
+        from cloud.esp32.router import router as esp32_router
+        agent_mod._agent = None
+        app = FastAPI(); app.include_router(esp32_router)
+        assert TestClient(app).get("/api/esp32/autonomy").status_code == 503
+
