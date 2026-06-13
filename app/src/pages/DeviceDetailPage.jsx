@@ -18,6 +18,25 @@ function DeviceDetailPage({ unitId, device, unitData, onBack }) {
 
   const hasUserMsg = messages.some(m => m.role === 'user');
 
+  const [autonomy, setAutonomy] = React.useState('reactive');
+
+  React.useEffect(() => {
+    if (!isLed) return;
+    fetch('/api/esp32/autonomy')
+      .then(r => r.json())
+      .then(d => d.mode && setAutonomy(d.mode))
+      .catch(() => {});
+  }, [isLed]);
+
+  const switchAutonomy = (mode) => {
+    setAutonomy(mode);
+    fetch('/api/esp32/autonomy', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    }).catch(() => {});
+  };
+
   const sendChat = (text) => {
     if (!text || thinking) return;
     onAppend({ role: 'user', text });
@@ -108,6 +127,29 @@ function DeviceDetailPage({ unitId, device, unitData, onBack }) {
         placeholder="告诉设备要做什么…"
         variant="inline"
       >
+        {/* 自主模式切换（仿 Go2，灯专属） */}
+        {isLed && (
+          <div style={{ display: 'flex', gap: 6, padding: '8px 12px 0' }}>
+            {[
+              { key: 'reactive', label: '自动调光', icon: '◉' },
+              { key: 'manual',   label: '仅听指令', icon: '◎' },
+            ].map(({ key, label, icon }) => {
+              const active = autonomy === key;
+              const accent = key === 'reactive' ? '#00d4ff' : 'var(--color-accent)';
+              return (
+                <button key={key} onClick={() => switchAutonomy(key)} style={{
+                  flex: 1, padding: '7px 4px',
+                  background: active ? `${accent}18` : 'var(--color-surface-1)',
+                  color: active ? accent : 'var(--color-text-dim)',
+                  border: `1px solid ${active ? `${accent}40` : 'var(--color-border)'}`,
+                  borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
+                  cursor: 'pointer', letterSpacing: '0.07em', fontFamily: 'inherit',
+                  WebkitTapHighlightColor: 'transparent', transition: 'all 0.15s',
+                }}>{icon} {label}</button>
+              );
+            })}
+          </div>
+        )}
         {/* 快捷指令：无用户消息时显示，位置与主屏建议一致 */}
         {isLed && !hasUserMsg && !thinking && (
           <div style={{
