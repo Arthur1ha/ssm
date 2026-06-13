@@ -574,31 +574,6 @@ def go2_personality_set(req: PersonalityRequest):
     return {"ok": True, "prompt": req.prompt}
 
 
-@router.get("/agent-card")
-def go2_agent_card():
-    """返回 Go2 智能体能力描述，供编排器动态发现技能。"""
-    import inspect
-    from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP
-    skills = []
-    for name, fn in TOOL_FN_MAP.items():
-        sig = inspect.signature(fn)
-        skills.append({
-            "name": name,
-            "params": {
-                k: str(v.annotation) if v.annotation is not inspect.Parameter.empty else "any"
-                for k, v in sig.parameters.items()
-            },
-            "async": asyncio.iscoroutinefunction(fn),
-        })
-    return {
-        "agent_id":   "go2",
-        "name":       "Go2 机器狗",
-        "transport":  "http",
-        "base_url":   "/api/go2",
-        "skills":     skills,
-    }
-
-
 @router.get("/debug/voxel_map")
 def go2_debug_voxel_map():
     """返回最近一帧体素地图原始消息，用于格式调研。"""
