@@ -70,18 +70,17 @@
 
 ### 云端服务（`cloud/`）
 
-环境变量统一存放在 `cloud/.env`（见 `cloud/.env.example`）。LLM 分两条通道：编排器 / Go2 / ESP32 智能体用火山方舟 Ark `deepseek-v4-*`（`MODEL_LIST`）；意图解析 `/api/intent` 用腾讯混元 MaaS（`CHAT_MODEL`）。
+环境变量统一存放在 `cloud/.env`（见 `cloud/.env.example`）。编排器 / Go2 / ESP32 智能体均用火山方舟 Ark `deepseek-v4-*`（`MODEL_LIST`）。
 
 #### API（`cloud/api/`，FastAPI，端口 8082）
 
 | 接口 | 说明 |
 |------|------|
-| `POST /api/intent` | 意图解析：返回结构化需求 + session_id（`nlu.py`） |
 | `GET  /api/devices` | 列出所有在线设备（`devices.py`） |
 | `GET  /api/devices/{slug}/agent` | **A2A Agent Card**：机器可读的能力描述 |
 | `GET/POST/DELETE /api/rules` | 自动化规则 CRUD（`rules.py`） |
 | `/api/go2/*` | Go2 连接 / 运动 / 导航 / 视觉 / 对话（`cloud/go2/router.py`） |
-| `POST /api/esp32/intents` | ESP32 桌面智能体入口（`cloud/esp32/router.py`） |
+| `GET/PUT /api/esp32/autonomy` | ESP32 灯智能体自主模式（manual/reactive，`cloud/esp32/router.py`） |
 
 `api/main.py` 同时承载一个 ESP32 MQTT 桥，订阅 `manifest/state/event/result` 并喂给 ESP32 桌面智能体。
 
@@ -120,7 +119,7 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 
 **控制 topic**：
 - `ssm/agents/{id}/command` —— 执行器直接指令
-- `ssm/intent/{session_id}` —— 手机意图（`/api/intent` 解析后发布）
+- `ssm/intent/{session_id}` —— 手机意图（PWA 直接发布，编排器订阅）
 - `ssm/task/{device_id}/{task_id}` —— 编排任务
 - `ssm/feedback/{session_id}` —— 渐进式执行反馈
 
@@ -203,7 +202,6 @@ PWA 内 MQTT 地址自动切换：HTTPS 访问时用 `wss://{tunnel域名}/mqtt`
 **手机自然语言控制：**
 ```
 用户说"把灯调暗一点"
-  → /api/intent 解析意图 → 返回 session_id + requirements
   → 手机发布 ssm/intent/{session_id}
   → 编排器 Planner 生成任务 → Dispatcher 下发（ESP32 走 MQTT / Go2 走 HTTP）
   → 设备执行 → Evaluator 确认 → 手机收到 ssm/feedback/{session_id}
