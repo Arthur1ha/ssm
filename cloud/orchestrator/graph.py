@@ -13,6 +13,7 @@ import os
 import re
 import json
 import time as _time
+import logging
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TypedDict
@@ -22,6 +23,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 
 import tools as _t
+
+logger = logging.getLogger("orchestrator")
 
 
 # ── 对话历史 ─────────────────────────────────────────────────────
@@ -60,7 +63,7 @@ def _make_llm():
         timeout=30,
     )
     llms = [ChatOpenAI(model=m, **base_kwargs) for m in models]
-    print(f"[Graph] LLM fallback chain: {' → '.join(models)}")
+    logger.info("[Graph] LLM fallback chain: %s", " → ".join(models))
     return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
 
 
@@ -174,6 +177,8 @@ def _make_planner_node(llm):
         _t.do_publish_feedback(session_id, "planning", "正在理解你的意图...")
 
         cards = _t._registry.get_all_cards() if _t._registry else {}
+        online_ids = [uid for uid, c in cards.items() if c.get("online", True)]
+        logger.info("[Planner] 在线 card：%s", online_ids or "（无）")
         if not cards:
             _t.do_publish_feedback(session_id, "failed",
                 "抱歉，我还没有发现可用的智能体，请确认设备已上线。")
@@ -191,7 +196,7 @@ def _make_planner_node(llm):
             resp = llm.invoke([HumanMessage(content=prompt)])
             out = _parse_planner_output(resp.content)
         except Exception as e:
-            print(f"[Planner] parse error: {e}")
+            logger.error("[Planner] parse error: %s", e)
             out = {}
 
         route = out.get("route", "act")
@@ -201,14 +206,14 @@ def _make_planner_node(llm):
         # ── chat：纯问答/闲聊，answer 直接交给 ChatNode 发出 ──
         if route == "chat":
             answer = out.get("answer", "") or "抱歉，我没太理解你的意思。"
-            print(f"[Planner] session={session_id} route=chat")
+            logger.info("[Planner] route=chat | 回复: %s", answer)
             return {**state, "route": "chat", "response_text": answer,
                     "planned_tasks": [], "early_exit": False}
 
         # ── define_rule：把规则交给 RuleBuilderNode ──
         if route == "define_rule":
             rule = out.get("rule", {}) or {}
-            print(f"[Planner] session={session_id} route=define_rule rule={rule.get('name', '')}")
+            logger.info("[Planner] route=define_rule | 规则名: %s", rule.get("name", ""))
             return {**state, "route": "define_rule", "rule": rule,
                     "planned_tasks": [], "early_exit": False}
 
@@ -225,10 +230,10 @@ def _make_planner_node(llm):
             skill_id = t.get("skill_id")
             card = cards.get(unit_id)
             if not card:
-                print(f"[Planner] 丢弃未知 unit_id: {unit_id}")
+                logger.warning("[Planner] 丢弃未知 unit_id: %s", unit_id)
                 continue
             if not any(s.get("id") == skill_id for s in card.get("skills", [])):
-                print(f"[Planner] 丢弃 {unit_id} 未知 skill_id: {skill_id}")
+                logger.warning("[Planner] 丢弃 %s 未知 skill_id: %s", unit_id, skill_id)
                 continue
             tasks.append({
                 "unit_id":  unit_id,
@@ -247,11 +252,14 @@ def _make_planner_node(llm):
                 answer = chat_resp.content.strip()
             except Exception:
                 answer = "抱歉，暂时没有合适的设备来完成这个请求。"
-            print(f"[Planner] session={session_id} tasks empty → fallback chat")
+            logger.info("[Planner] route=act→chat（无合适设备）| 回复: %s", answer)
             return {**state, "route": "chat", "response_text": answer,
                     "planned_tasks": [], "early_exit": False}
 
-        print(f"[Planner] session={session_id} route=act planned {len(tasks)} task(s)")
+        logger.info("[Planner] route=act → %d 个任务:", len(tasks))
+        for i, t in enumerate(tasks):
+            logger.info("[Planner]   [%d] %s → %s  params=%s",
+                        i, t["unit_id"], t["skill_id"], json.dumps(t["params"], ensure_ascii=False))
         return {**state, "route": "act", "planned_tasks": tasks, "early_exit": False}
 
     return planner_node
@@ -267,7 +275,7 @@ def _make_chat_node(llm):
         session_id = state["session_id"]
         answer = state.get("response_text", "") or "抱歉，我没太理解你的意思。"
         _t.do_publish_feedback(session_id, "done", answer)
-        print(f"[Chat] session={session_id} → {answer}")
+        logger.info("[Chat] → %s", answer)
         _append_history(state["user_msg"], answer)
         return state
 
@@ -285,7 +293,7 @@ def _make_rule_builder_node():
             f"我来帮你设置规则「{rule.get('name', '')}」，请确认后生效。",
             rule=rule,
         )
-        print(f"[RuleBuilder] session={session_id} pending rule={rule.get('name', '')}")
+        logger.info("[RuleBuilder] pending rule=%s", rule.get("name", ""))
         return state
 
     return rule_builder_node
@@ -334,7 +342,9 @@ def _make_dispatcher_node():
             if kind == "mqtt":
                 action = skill.get("invoke", {}).get("action", "")
                 _t.do_publish_task(unit_id, task["task_id"], action, task["params"], session_id)
-                print(f"[Dispatcher] mqtt → {unit_id} {action} task_id={task['task_id']}")
+                logger.info("[Dispatcher] ➤ mqtt  %s  %s  params=%s  task_id=%s",
+                            unit_id, action,
+                            json.dumps(task["params"], ensure_ascii=False), task["task_id"])
 
             elif kind == "http":
                 endpoint = card.get("transport", {}).get("endpoint", "")
@@ -349,7 +359,9 @@ def _make_dispatcher_node():
                     executor = ThreadPoolExecutor(max_workers=8)
                 fut = executor.submit(_t.do_http_dispatch, endpoint, body, timeout)
                 http_jobs.append((task["task_id"], fut, timeout))
-                print(f"[Dispatcher] http → {unit_id} {endpoint} task_id={task['task_id']} timeout={timeout}s")
+                logger.info("[Dispatcher] ➤ http   %s  %s  params=%s  timeout=%ss  task_id=%s",
+                            unit_id, endpoint,
+                            json.dumps(task["params"], ensure_ascii=False), timeout, task["task_id"])
 
             else:
                 results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
@@ -363,10 +375,10 @@ def _make_dispatcher_node():
                 try:
                     results[task_id] = fut.result(timeout=0)
                 except concurrent.futures.TimeoutError:
-                    print(f"[Dispatcher] http task {task_id} timed out")
+                    logger.warning("[Dispatcher] http task %s timed out", task_id)
                     results[task_id] = {"result": "timeout", "task_id": task_id}
                 except Exception as e:
-                    print(f"[Dispatcher] http task {task_id} error: {e}")
+                    logger.warning("[Dispatcher] http task %s error: %s", task_id, e)
                     results[task_id] = {"result": "error", "task_id": task_id}
             executor.shutdown(wait=False)
 
@@ -420,7 +432,13 @@ def _make_evaluator_node():
             if tid not in results:
                 results[tid] = {"result": "timeout", "task_id": tid}
 
-        print(f"[Evaluator] results: {results}")
+        for task in tasks:
+            tid = task["task_id"]
+            r = results.get(tid, {})
+            status = r.get("result", "?")
+            extra = f" error={r['error']}" if r.get("error") else ""
+            logger.info("[Evaluator] %s → %s%s  (%s → %s)",
+                        tid, status, extra, task["unit_id"], task["skill_id"])
         return {**state, "task_results": results}
 
     return evaluator_node
@@ -462,7 +480,7 @@ def _make_responder_node(llm):
             text = fallbacks[stage]
 
         _t.do_publish_feedback(session_id, stage, text)
-        print(f"[Responder] session={session_id} stage={stage} → {text}")
+        logger.info("[Responder] stage=%s | %s", stage, text)
         _append_history(state["user_msg"], text)
         return {**state, "response_text": text}
 

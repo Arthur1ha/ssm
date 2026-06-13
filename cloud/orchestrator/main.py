@@ -5,6 +5,15 @@ import os
 import json
 import queue
 import time
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(message)s",
+    datefmt="%H:%M:%S",
+    force=True,
+)
+logger = logging.getLogger("orchestrator.main")
 
 from pathlib import Path
 from dotenv import load_dotenv
@@ -32,7 +41,7 @@ _announced  = False
 
 def on_connect(client, userdata, flags, rc):
     global _connected
-    print(f"[MQTT] Connected (rc={rc})")
+    logger.info("[MQTT] Connected (rc=%s)", rc)
     if rc == 0:
         _connected = True
 
@@ -65,7 +74,7 @@ def _subscribe_and_announce(client):
     )
     client.publish(f"ssm/agents/{PC_AGENT_ID}/state",
                    json.dumps({"ism": "ACTIVE", "ts": time.time()}), retain=False)
-    print(f"[MQTT] Subscribed and announced as {PC_AGENT_ID}")
+    logger.info("[MQTT] Subscribed and announced as %s", PC_AGENT_ID)
 
 
 def on_message(client, userdata, msg):
@@ -103,7 +112,7 @@ def on_message(client, userdata, msg):
     if len(parts) == 3 and parts[1] == "intent":
         session_id = parts[2]
         if isinstance(payload, dict):
-            print(f"[Intent] session={session_id} user_msg={payload.get('user_msg', '')[:40]}")
+            logger.info("[Intent] session=%s | 用户: %s", session_id, payload.get("user_msg", ""))
             client.publish(
                 f"ssm/feedback/{session_id}",
                 json.dumps({"stage": "planning", "text": "已收到请求，正在处理...", "session_id": session_id}),
@@ -117,14 +126,15 @@ def on_message(client, userdata, msg):
         task_id = parts[3]
         if isinstance(payload, dict):
             state.store_task_result(task_id, payload)
-            print(f"[Result] task={task_id} result={payload.get('result')}")
+            extra = f" error={payload['error']}" if payload.get("error") else ""
+            logger.info("[Result] task=%s → %s%s", task_id, payload.get("result"), extra)
 
 
 def on_disconnect(client, userdata, rc):
     global _connected, _announced
     _connected = False
     _announced = False
-    print(f"[MQTT] Disconnected (rc={rc}), reconnecting...")
+    logger.info("[MQTT] Disconnected (rc=%s), reconnecting...", rc)
 
 
 mqtt_client = mqtt_lib.Client(client_id=PC_AGENT_ID, clean_session=True)
@@ -140,8 +150,8 @@ orchestrator = build_orchestrator()
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
 mqtt_client.loop_start()
-print(f"[Main] Connecting to broker {BROKER_HOST}:{BROKER_PORT}...")
-print("[Main] 编排器就绪，等待 MQTT 事件...")
+logger.info("[Main] Connecting to broker %s:%s...", BROKER_HOST, BROKER_PORT)
+logger.info("[Main] 编排器就绪，等待 MQTT 事件...")
 
 while True:
     if _connected and not _announced:
@@ -158,7 +168,7 @@ while True:
 
         if trigger == "intent":
             session_id = event.get("session_id", "")
-            print(f"[Main] 编排图处理 session={session_id}")
+            logger.info("[Main] ── 编排图启动 session=%s ──", session_id)
             try:
                 orchestrator.invoke({
                     "session_id":   session_id,
@@ -171,12 +181,12 @@ while True:
                     "response_text": "",
                     "early_exit":    False,
                 })
-                print("[Main] 编排图完成。")
+                logger.info("[Main] ── 编排图完成 session=%s ──", session_id)
             except Exception as e:
-                print(f"[Main] 编排图异常: {e}")
+                logger.error("[Main] 编排图异常: %s", e)
             continue
 
     except Exception as e:
         import traceback
-        print(f"[Main] 事件处理异常（已跳过）: {e}")
+        logger.error("[Main] 事件处理异常（已跳过）: %s", e)
         traceback.print_exc()
