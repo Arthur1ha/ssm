@@ -4,9 +4,9 @@
 import time
 import json
 from umqtt.robust import MQTTClient as _MQTTClient
-from config import MQTT_BROKER_IP, MQTT_PORT, AGENT_ID, MQTT_USER, MQTT_PASSWORD
+from config import MQTT_BROKER_IP, MQTT_PORT, DEVICE_ID, MQTT_USER, MQTT_PASSWORD
 
-_STATUS_TOPIC = "ssm/agents/{}/status".format(AGENT_ID)
+_STATUS_TOPIC = "ssm/agents/{}/status".format(DEVICE_ID)
 
 PING_INTERVAL_MS = 30000   # send PING every 30s (keepalive=60, broker timeout=90s)
 
@@ -21,7 +21,7 @@ class MqttClient:
 
     def begin(self):
         self._client = _MQTTClient(
-            client_id = AGENT_ID,
+            client_id = DEVICE_ID,
             server    = MQTT_BROKER_IP,
             port      = MQTT_PORT,
             keepalive = 60,

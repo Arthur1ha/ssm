@@ -46,15 +46,15 @@ class TestBuildGo2Card:
         self.router_mod, self.go2_stub = _load_router_with_stub()
 
     def test_top_level_fields_present(self):
-        """card 必须包含 slug / name / description / agent_type / online / transport / skills / state。"""
+        """card 必须包含 unit_id / name / description / agent_type / online / transport / skills / state。"""
         card = self.router_mod._build_go2_card()
-        for field in ("slug", "name", "description", "agent_type", "online", "transport", "skills", "state"):
+        for field in ("unit_id", "name", "description", "agent_type", "online", "transport", "skills", "state"):
             assert field in card, f"缺少字段: {field}"
 
-    def test_slug_is_go2(self):
-        """slug 必须为 'go2'。"""
+    def test_unit_id_is_go2(self):
+        """unit_id 必须为 'go2'。"""
         card = self.router_mod._build_go2_card()
-        assert card["slug"] == "go2"
+        assert card["unit_id"] == "go2"
 
     def test_transport_kind_and_endpoint(self):
         """transport.kind 必须为 'http'，endpoint 必须为 '/api/go2/chat'。"""
@@ -82,13 +82,12 @@ class TestBuildGo2Card:
         enum_values = sport["params_schema"]["properties"]["cmd"]["enum"]
         assert set(enum_values) == {"StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"}
 
-    def test_state_reflects_go2_connection(self):
-        """state.fsm 和 state.available_actions 必须来自 go2 连接对象。"""
+    def test_state_is_empty(self):
+        """card 不含 volatile state（FSM/动作经 HTTP 实时获取，不进 retained card）。"""
         self.go2_stub.fsm_state = "standing"
         self.go2_stub.available_actions = ["Hello"]
         card = self.router_mod._build_go2_card()
-        assert card["state"]["fsm"] == "standing"
-        assert card["state"]["available_actions"] == ["Hello"]
+        assert card["state"] == {}
 
     def test_online_is_true(self):
         """连接后发布的 card online 字段必须为 True。"""
@@ -100,7 +99,7 @@ class TestBuildGo2Card:
         card = self.router_mod._build_go2_card()
         serialized = json.dumps(card, ensure_ascii=False)
         restored = json.loads(serialized)
-        assert restored["slug"] == "go2"
+        assert restored["unit_id"] == "go2"
 
 
 class TestPublishClearGo2Card:

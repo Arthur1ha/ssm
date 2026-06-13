@@ -1,7 +1,7 @@
 # agent_manifest.py — Publish retained manifests for all present units.
 # Fully driven by UNIT_CONFIGS + PRESENCE; no unit-specific logic here.
 import time
-from config import AGENT_ID, FIRMWARE_VER, UNIT_CONFIGS
+from config import DEVICE_ID, FIRMWARE_VER, UNIT_CONFIGS
 from probe import PRESENCE
 
 
@@ -19,7 +19,7 @@ def publish(mqtt):
 
         manifest = {
             'unit_id':      unit_id,
-            'parent_id':    AGENT_ID,
+            'parent_id':    DEVICE_ID,
             'agent_type':   cfg['agent_type'],
             'name':         cfg['name'],
             'hw_platform':  'esp32',
@@ -38,4 +38,4 @@ def publish(mqtt):
         mqtt.publish(topic, manifest, retain=True)
         count += 1
 
-    print("[Manifest] Published {} manifests for {}".format(count, AGENT_ID))
+    print("[Manifest] Published {} manifests for {}".format(count, DEVICE_ID))

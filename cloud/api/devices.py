@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 @router.get("")
 def list_devices():
-    """返回所有已注册设备的精简列表（slug/name/agent_type/online）。
+    """返回所有已注册设备的精简列表（unit_id/name/agent_type/online）。
 
     数据来源为 CardRegistry，仅包含已收到 manifest 或自描述 card 的设备。
     Go2 在 Task 2 接入前不会出现在此列表。
@@ -23,8 +23,7 @@ def list_devices():
     cards = get_registry().get_all_cards()
     return [
         {
-            "unit_id":    card.get("unit_id") or card.get("slug"),
-            "slug":       card.get("slug"),
+            "unit_id":    card.get("unit_id"),
             "name":       card.get("name"),
             "agent_type": card.get("agent_type"),
             "online":     card.get("online", False),
@@ -33,14 +32,14 @@ def list_devices():
     ]
 
 
-@router.get("/{slug}/agent")
-def device_agent_card(slug: str):
+@router.get("/{unit_id}/agent")
+def device_agent_card(unit_id: str):
     """返回指定设备的完整 Agent Card（机器可读能力描述）。
 
     供其他 AI Agent 或 PWA 自动发现和调用设备能力。
     Go2 在 Task 2 接入前会返回 404。
     """
-    card = get_registry().get_card(slug)
+    card = get_registry().get_card(unit_id)
     if card is None:
-        raise HTTPException(status_code=404, detail=f"设备 '{slug}' 不存在或未上线")
+        raise HTTPException(status_code=404, detail=f"设备 '{unit_id}' 不存在或未上线")
     return card

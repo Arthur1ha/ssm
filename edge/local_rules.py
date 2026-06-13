@@ -1,11 +1,11 @@
 # local_rules.py — Autonomous rules active when decision agent is offline.
-# Rules are synced from cloud via ssm/rules/{AGENT_ID} (retain).
+# Rules are synced from cloud via ssm/rules/{DEVICE_ID} (retain).
 # Suppressed by ssm/decision/active = "true".
 
 import ujson
-from config import AGENT_LED
+from config import UNIT_LED
 
-_LED_CMD        = "ssm/agents/{}/command".format(AGENT_LED)
+_LED_CMD        = "ssm/agents/{}/command".format(UNIT_LED)
 _RULES_CACHE    = "rules_cache.json"
 _MAX_RULES      = 10
 

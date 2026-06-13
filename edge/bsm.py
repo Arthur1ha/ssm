@@ -6,7 +6,7 @@ import time
 import neopixel
 from machine import ADC, Pin
 from probe import PRESENCE
-from config import AGENT_IR, AGENT_SOUND
+from config import UNIT_IR, UNIT_SOUND
 from config import (
     LIGHT_SENSOR_PIN, IR_SENSOR_PIN, SOUND_SENSOR_PIN,
     WS2812_PIN, WS2812_NUM, WS2812_MAX_VAL,
@@ -41,7 +41,7 @@ class BSM:
         self._last_light    = 0
 
         # ── IR sensor (only initialized when physically present) ──
-        if PRESENCE.get(AGENT_IR):
+        if PRESENCE.get(UNIT_IR):
             self._ir_pin = Pin(IR_SENSOR_PIN, Pin.IN, Pin.PULL_UP)
         else:
             self._ir_pin = None
@@ -82,9 +82,9 @@ class BSM:
     def tick(self):
         now = time.ticks_ms()
         self._tick_light(now)
-        if PRESENCE.get(AGENT_IR):
+        if PRESENCE.get(UNIT_IR):
             self._tick_ir(now)
-        if PRESENCE.get(AGENT_SOUND):
+        if PRESENCE.get(UNIT_SOUND):
             self._tick_sound(now)
         self._tick_blink(now)
         self._tick_mood(now)

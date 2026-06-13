@@ -269,105 +269,111 @@ class TestBeliefHistory:
         assert isinstance(result, list)
 
 
-class TestRunIntent:
-    def _make_agent_with_llm(self, content: str):
-        from unittest.mock import AsyncMock
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content=content))
-        state = MagicMock(spec=ESP32State)
-        state.get_manifest.return_value = {
-            "capabilities": ["SET_STATE", "SET_COLOR"],
-            "resource_tags": ["lighting"],
-        }
-        return ESP32Agent(state, llm=mock_llm)
+class TestAutonomyMode:
+    def test_default_mode_is_reactive(self):
+        assert make_agent().get_autonomy_mode() == "reactive"
 
-    @pytest.mark.asyncio
-    async def test_returns_task_ids(self):
-        agent = self._make_agent_with_llm(
-            '[{"device_id": "esp32_desk_led", "action": "SET_COLOR", "params": {"r": 255, "g": 200, "b": 100, "brightness": 180}}]'
-        )
-        with patch("cloud.esp32.tools.publish_task"):
-            result = await agent.run_intent("s1", "暖色调", ["esp32_desk_led"])
-        assert result["status"] == "dispatched"
-        assert len(result["task_ids"]) == 1
-        assert result["task_ids"][0] == "s1_t0"
+    def test_set_mode_manual(self):
+        a = make_agent()
+        a.set_autonomy_mode("manual")
+        assert a.get_autonomy_mode() == "manual"
 
-    @pytest.mark.asyncio
-    async def test_publishes_correct_mqtt_command(self):
-        agent = self._make_agent_with_llm(
-            '[{"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {"state": "OFF"}}]'
-        )
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            await agent.run_intent("s1", "关灯", ["esp32_desk_led"])
-        mock_pub.assert_called_once()
-        args = mock_pub.call_args[0]
-        assert args[0] == "esp32_desk_led"
-        assert args[2] == "SET_STATE"
-        assert args[3] == {"state": "OFF"}
+    def test_set_invalid_mode_raises(self):
+        a = make_agent()
+        with pytest.raises(ValueError):
+            a.set_autonomy_mode("bogus")
 
-    @pytest.mark.asyncio
-    async def test_returns_empty_on_invalid_llm_response(self):
-        agent = self._make_agent_with_llm("not valid json")
-        with patch("cloud.esp32.tools.publish_task"):
-            result = await agent.run_intent("s1", "开灯", ["esp32_desk_led"])
-        assert result["task_ids"] == []
-        assert result["status"] == "dispatched"
+    def test_should_act_true_in_reactive(self):
+        assert make_agent()._should_act() is True
 
-    @pytest.mark.asyncio
-    async def test_skips_malformed_commands(self):
-        agent = self._make_agent_with_llm(
-            '[{"device_id": "esp32_desk_led"}, {"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {}}]'
-        )
-        with patch("cloud.esp32.tools.publish_task") as mock_pub:
-            result = await agent.run_intent("s1", "开灯", ["esp32_desk_led"])
-        assert len(result["task_ids"]) == 1
-        mock_pub.assert_called_once()
+    def test_should_act_false_in_manual(self):
+        a = make_agent()
+        a.set_autonomy_mode("manual")
+        assert a._should_act() is False
 
 
-from fastapi.testclient import TestClient
-from fastapi import FastAPI
-from cloud.esp32.router import router as esp32_router
-import cloud.esp32.agent as agent_mod
+class TestUserHold:
+    def test_no_hold_by_default(self):
+        assert make_agent()._in_user_hold() is False
+
+    def test_mark_user_command_sets_hold(self):
+        a = make_agent()
+        a.mark_user_command("esp32_desk_led")
+        assert a._in_user_hold() is True
+
+    def test_should_act_false_during_hold(self):
+        a = make_agent()
+        a.mark_user_command("esp32_desk_led")
+        assert a._should_act() is False
+
+    def test_hold_expires(self):
+        a = make_agent()
+        a.mark_user_command("esp32_desk_led")
+        a._user_hold_until = time.time() - 1   # 模拟窗口已过期
+        assert a._in_user_hold() is False
+        assert a._should_act() is True
 
 
-class TestRouter:
-    def setup_method(self):
-        from unittest.mock import AsyncMock
-        mock_llm = MagicMock()
-        mock_llm.ainvoke = AsyncMock(return_value=AIMessage(
-            content='[{"device_id": "esp32_desk_led", "action": "SET_STATE", "params": {"state": "BRIGHT"}}]'
-        ))
-        mock_state = MagicMock(spec=ESP32State)
-        mock_state.get_manifest.return_value = {"capabilities": ["SET_STATE"]}
-        agent_mod._agent = ESP32Agent(mock_state, llm=mock_llm)
-
+class TestAutonomyRouter:
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import cloud.esp32.agent as agent_mod
+        from cloud.esp32.router import router as esp32_router
+        agent_mod._agent = make_agent()
         app = FastAPI()
         app.include_router(esp32_router)
-        self.client = TestClient(app)
+        return TestClient(app)
 
-    def test_run_returns_200(self):
-        with patch("cloud.esp32.tools.publish_task"):
-            resp = self.client.post("/api/esp32/run", json={
-                "session_id": "test_s1",
-                "goal": "开灯",
-                "device_ids": ["esp32_desk_led"],
-            })
+    def test_get_default_mode(self):
+        resp = self._client().get("/api/esp32/autonomy")
         assert resp.status_code == 200
+        assert resp.json()["mode"] == "reactive"
 
-    def test_run_returns_task_ids(self):
-        with patch("cloud.esp32.tools.publish_task"):
-            resp = self.client.post("/api/esp32/run", json={
-                "session_id": "test_s1",
-                "goal": "开灯",
-                "device_ids": ["esp32_desk_led"],
-            })
-        data = resp.json()
-        assert "task_ids" in data
-        assert data["status"] == "dispatched"
+    def test_put_switches_mode(self):
+        c = self._client()
+        resp = c.put("/api/esp32/autonomy", json={"mode": "manual"})
+        assert resp.status_code == 200
+        assert resp.json()["mode"] == "manual"
+        assert c.get("/api/esp32/autonomy").json()["mode"] == "manual"
 
-    def test_run_returns_503_when_no_agent(self):
+    def test_put_invalid_mode_400(self):
+        resp = self._client().put("/api/esp32/autonomy", json={"mode": "bogus"})
+        assert resp.status_code == 400
+
+    def test_503_when_no_agent(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import cloud.esp32.agent as agent_mod
+        from cloud.esp32.router import router as esp32_router
         agent_mod._agent = None
-        resp = self.client.post("/api/esp32/run", json={
-            "session_id": "s1", "goal": "开灯", "device_ids": []
-        })
-        assert resp.status_code == 503
+        app = FastAPI(); app.include_router(esp32_router)
+        assert TestClient(app).get("/api/esp32/autonomy").status_code == 503
+
+
+class TestDispatchTool:
+    def test_executes_known_tool(self):
+        a = make_agent()
+        with patch("cloud.esp32.tools.set_led_state", return_value="ok") as m:
+            ok = a._dispatch_tool("set_led_state", {"state": "BRIGHT"}, "esp32_desk_led")
+        assert ok is True
+        m.assert_called_once()
+
+    def test_skips_within_cooldown(self):
+        a = make_agent()
+        with patch("cloud.esp32.tools.set_led_state", return_value="ok") as m:
+            a._dispatch_tool("set_led_state", {"state": "BRIGHT"}, "esp32_desk_led")
+            ok2 = a._dispatch_tool("set_led_state", {"state": "BRIGHT"}, "esp32_desk_led")
+        assert ok2 is False
+        assert m.call_count == 1
+
+    def test_unknown_tool_returns_false(self):
+        assert make_agent()._dispatch_tool("bogus", {}, "esp32_desk_led") is False
+
+    def test_speak_not_cooldown_gated(self):
+        a = make_agent()
+        with patch("cloud.esp32.tools.speak", return_value="ok") as m:
+            a._dispatch_tool("speak", {"text": "hi"}, "esp32_desk_led")
+            a._dispatch_tool("speak", {"text": "hi"}, "esp32_desk_led")
+        assert m.call_count == 2
+

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class CardRegistry:
     """运行时 Agent Card 注册表。
 
-    内部以 slug 为 key 维护 AgentCard 字典。
+    内部以 unit_id 为 key 维护 AgentCard 字典。
     宿主进程在 MQTT 回调中调用 handle_message 即可保持注册表最新。
     线程安全：MQTT 回调线程写，FastAPI 请求线程读，均通过 _lock 保护。
     """
@@ -37,17 +37,21 @@ class CardRegistry:
         client.subscribe([
             ("ssm/agents/+/card",     0),
             ("ssm/agents/+/manifest", 0),
+            ("ssm/agents/+/status",   0),
         ])
-        logger.info("[CardRegistry] Subscribed to ssm/agents/+/card and ssm/agents/+/manifest")
+        logger.info("[CardRegistry] Subscribed to card / manifest / status")
 
     def handle_message(self, topic: str, payload: bytes | str) -> None:
         """处理 MQTT 消息，更新注册表。
 
+        topic 匹配 ssm/agents/+/status：
+            - online/offline → 按 unit_id 或 parent_id 匹配，维护 card.online（含 LWT）
         topic 匹配 ssm/agents/+/card：
-            - 空 payload → 移除该 slug（设备离线）
+            - 空 payload → 移除该 card（设备离线）
             - 非空 payload → parse_card 后存入
         topic 匹配 ssm/agents/+/manifest：
-            - json parse → build_card_from_manifest → 以 card.slug 存入
+            - 空 payload → 移除该单元 card（单元缺席）
+            - 非空 payload → build_card_from_manifest → 以 card.unit_id 存入（保留已知 online）
         其他 topic：静默忽略。
         """
         parts = topic.split("/")
@@ -57,26 +61,42 @@ class CardRegistry:
         msg_type = parts[3]
         raw = payload if isinstance(payload, bytes) else payload.encode()
 
+        # status：父设备/设备级在线状态（含 LWT），按 unit_id 或 parent_id 匹配
+        if msg_type == "status":
+            device_id = parts[2]
+            online = (raw.strip() == b"online")
+            with self._lock:
+                for c in self._cards.values():
+                    if c.get("unit_id") == device_id or c.get("parent_id") == device_id:
+                        c["online"] = online
+            logger.info("[CardRegistry] %s → online=%s", device_id, online)
+            return
+
         if msg_type == "card":
+            unit_id = parts[2]
             if not raw.strip():
-                unit_id = parts[2]
                 with self._lock:
-                    removed = [s for s, c in list(self._cards.items()) if c.get("slug") == unit_id or s == unit_id]
-                    for slug in removed:
-                        del self._cards[slug]
-                        logger.info("[CardRegistry] Removed card: %s", slug)
+                    if unit_id in self._cards:
+                        del self._cards[unit_id]
+                        logger.info("[CardRegistry] Removed card: %s", unit_id)
             else:
                 try:
                     data = json.loads(raw)
                     card = parse_card(data)
                     with self._lock:
-                        self._cards[card["slug"]] = card
-                    logger.info("[CardRegistry] Stored card (self-described): %s", card["slug"])
+                        self._cards[card["unit_id"]] = card
+                    logger.info("[CardRegistry] Stored card (self-described): %s", card["unit_id"])
                 except Exception as exc:
                     logger.warning("[CardRegistry] Failed to parse card payload: %s", exc)
 
         elif msg_type == "manifest":
+            unit_id = parts[2]
+            # 空 manifest = 该单元缺席，移除对应 card
             if not raw.strip():
+                with self._lock:
+                    if unit_id in self._cards:
+                        del self._cards[unit_id]
+                        logger.info("[CardRegistry] Removed card (manifest cleared): %s", unit_id)
                 return
             try:
                 data = json.loads(raw)
@@ -87,8 +107,12 @@ class CardRegistry:
                     return
                 card = build_card_from_manifest(data)
                 with self._lock:
-                    self._cards[card["slug"]] = card
-                logger.info("[CardRegistry] Stored card (from manifest): %s", card["slug"])
+                    # 保留已知 online（status 可能先于 manifest 到达，且是在线真相）
+                    prev = self._cards.get(card["unit_id"])
+                    if prev is not None and "online" in prev:
+                        card["online"] = prev["online"]
+                    self._cards[card["unit_id"]] = card
+                logger.info("[CardRegistry] Stored card (from manifest): %s", card["unit_id"])
             except Exception as exc:
                 logger.warning("[CardRegistry] Failed to build card from manifest: %s", exc)
 
@@ -97,10 +121,10 @@ class CardRegistry:
         with self._lock:
             return dict(self._cards)
 
-    def get_card(self, slug: str) -> AgentCard | None:
-        """按 slug 查找 AgentCard，返回副本以防止调用方修改内部状态。"""
+    def get_card(self, unit_id: str) -> AgentCard | None:
+        """按 unit_id 查找 AgentCard，返回副本以防止调用方修改内部状态。"""
         with self._lock:
-            card = self._cards.get(slug)
+            card = self._cards.get(unit_id)
             return dict(card) if card is not None else None
 
 

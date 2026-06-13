@@ -53,17 +53,17 @@ class TestHandleManifest:
             json.dumps(LED_MANIFEST).encode(),
         )
         cards = registry.get_all_cards()
-        assert "desk-lamp" in cards
+        assert "esp32_desk_led" in cards
 
-    def test_manifest_card_slug_正确(self, registry):
-        """从 manifest 构建的 card slug 应为 manifest['slug']。"""
+    def test_manifest_card_以_unit_id_为_key(self, registry):
+        """card 以 unit_id 为 key，忽略 manifest['slug']。"""
         registry.handle_message(
             "ssm/agents/esp32_desk_led/manifest",
             json.dumps(LED_MANIFEST).encode(),
         )
-        card = registry.get_card("desk-lamp")
-        assert card is not None
-        assert card["slug"] == "desk-lamp"
+        cards = registry.get_all_cards()
+        assert "esp32_desk_led" in cards
+        assert "desk-lamp" not in cards   # slug 不再是 key
 
     def test_manifest_card_agent_type_正确(self, registry):
         """从 manifest 构建的 card agent_type 应为 actuator。"""
@@ -71,7 +71,7 @@ class TestHandleManifest:
             "ssm/agents/esp32_desk_led/manifest",
             json.dumps(LED_MANIFEST).encode(),
         )
-        card = registry.get_card("desk-lamp")
+        card = registry.get_card("esp32_desk_led")
         assert card["agent_type"] == "actuator"
 
     def test_manifest_card_有_skills(self, registry):
@@ -80,13 +80,13 @@ class TestHandleManifest:
             "ssm/agents/esp32_desk_led/manifest",
             json.dumps(LED_MANIFEST).encode(),
         )
-        card = registry.get_card("desk-lamp")
+        card = registry.get_card("esp32_desk_led")
         assert len(card["skills"]) == 3
 
     def test_空_payload_manifest_被忽略(self, registry):
         """空 payload 的 manifest 消息应静默忽略，不报错。"""
         registry.handle_message("ssm/agents/esp32_desk_led/manifest", b"")
-        assert registry.get_card("desk-lamp") is None
+        assert registry.get_card("esp32_desk_led") is None
 
     def test_无效_json_manifest_被忽略(self, registry):
         """无效 JSON 的 manifest 应静默忽略，不抛异常。"""
@@ -107,7 +107,7 @@ class TestHandleCard:
         )
         card = registry.get_card("go2")
         assert card is not None
-        assert card["slug"] == "go2"
+        assert card["unit_id"] == "go2"
 
     def test_收到_card_agent_type_正确(self, registry):
         """自描述 card 的 agent_type 应保持原值。"""
@@ -189,6 +189,50 @@ class TestIgnoreIrrelevantTopics:
         assert len(registry.get_all_cards()) == 0
 
 
+# ── status / 在线状态测试 ───────────────────────────────────────
+
+class TestStatusOnline:
+    """测试按 /status topic（含 LWT）维护 card.online。"""
+
+    def test_父设备_status_offline_使子单元离线(self, registry):
+        """父设备 LWT 触发 status=offline → 子单元 card.online 转 False，再 online 恢复。"""
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        assert registry.get_card("esp32_desk_led")["online"] is True
+
+        registry.handle_message("ssm/agents/esp32_desk/status", b"offline")
+        assert registry.get_card("esp32_desk_led")["online"] is False
+
+        registry.handle_message("ssm/agents/esp32_desk/status", b"online")
+        assert registry.get_card("esp32_desk_led")["online"] is True
+
+    def test_manifest_重发不覆盖_offline(self, registry):
+        """status=offline 后即便 manifest 重发，online 仍保持 False（status 是真相）。"""
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        registry.handle_message("ssm/agents/esp32_desk/status", b"offline")
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        assert registry.get_card("esp32_desk_led")["online"] is False
+
+
+class TestEmptyManifestRemoves:
+    """测试空 manifest（缺席单元）移除对应 card。"""
+
+    IR_MANIFEST = {
+        "unit_id": "esp32_desk_ir", "parent_id": "esp32_desk",
+        "agent_type": "sensor", "name": "ir_presence",
+        "hw_platform": "esp32", "capabilities": [], "tags": ["presence"],
+    }
+
+    def test_空_manifest_移除_card(self, registry):
+        registry.handle_message(
+            "ssm/agents/esp32_desk_ir/manifest", json.dumps(self.IR_MANIFEST).encode())
+        assert registry.get_card("esp32_desk_ir") is not None
+        registry.handle_message("ssm/agents/esp32_desk_ir/manifest", b"")
+        assert registry.get_card("esp32_desk_ir") is None
+
+
 # ── 多设备并存测试 ──────────────────────────────────────────────
 
 def test_多设备并存(registry):
@@ -202,6 +246,6 @@ def test_多设备并存(registry):
         json.dumps(GO2_CARD).encode(),
     )
     cards = registry.get_all_cards()
-    assert "desk-lamp" in cards
+    assert "esp32_desk_led" in cards
     assert "go2" in cards
     assert len(cards) == 2

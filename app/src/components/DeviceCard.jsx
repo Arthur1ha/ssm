@@ -47,7 +47,7 @@ function ActuatorCard({ agent, unitData }) {
 
   return (
     <div
-      onClick={canClick ? () => navigate('#/devices/' + (agent.slug || uid)) : undefined}
+      onClick={canClick ? () => navigate('#/devices/' + uid) : undefined}
       className={`glass${canClick ? ' interactive' : ''}`}
       style={{
         padding: '12px 14px', marginBottom: 10,

@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 from cloud.esp32.state import ESP32State
 from cloud.esp32 import tools as _tools
 
+USER_HOLD_TTL = 300   # 用户/编排器命令后，自主层让位时长（秒）
+_VALID_AUTONOMY_MODES = ("manual", "reactive")
+
 AGENT_PERSONA = """
 你是一个桌面空间智能体，性格设定如下：
 - 说话贱贱的，嘴比较刁，但不失礼貌
@@ -53,6 +56,36 @@ class ESP32Agent:
         self._last_proactive_ts: float = 0.0
         self._belief_summary: str = ""
         self._beliefs_since_summary: int = 0
+        self._autonomy_mode: str = "reactive"
+        self._user_hold_until: float = 0.0
+
+    def get_autonomy_mode(self) -> str:
+        """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""
+        return self._autonomy_mode
+
+    def set_autonomy_mode(self, mode: str) -> None:
+        """切换自主模式；非法值抛 ValueError。"""
+        if mode not in _VALID_AUTONOMY_MODES:
+            raise ValueError(f"未知自主模式: {mode}")
+        self._autonomy_mode = mode
+        logger.info("autonomy mode → %s", mode)
+
+    def mark_user_command(self, unit_id: str) -> None:
+        """收到非自身发出的命令时调用，开启自主层让位窗口。"""
+        self._user_hold_until = time.time() + USER_HOLD_TTL
+        logger.info("user command on %s → 自主层让位 %ds", unit_id, USER_HOLD_TTL)
+
+    def _in_user_hold(self) -> bool:
+        """当前是否处于用户让位窗口内。"""
+        return time.time() < self._user_hold_until
+
+    def _should_act(self) -> bool:
+        """自主层本拍是否应主动行动：manual 或处于用户让位窗口时返回 False。"""
+        if self._autonomy_mode == "manual":
+            return False
+        if self._in_user_hold():
+            return False
+        return True
 
     def _make_llm(self):
         model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
@@ -71,63 +104,6 @@ class ESP32Agent:
     def start(self):
         t = threading.Thread(target=self._loop, daemon=True, name="ESP32Agent")
         t.start()
-
-    async def run_intent(self, session_id: str, goal: str, device_ids: list) -> dict:
-        device_context = []
-        for device_id in device_ids:
-            manifest = self._state.get_manifest(device_id)
-            if manifest:
-                caps = manifest.get("capabilities", [])
-                device_context.append(
-                    f"{device_id}（能力：{json.dumps(caps, ensure_ascii=False)}）"
-                )
-
-        if not device_context:
-            registry = self._state.get_capability_registry()
-            seen = set()
-            for uids in registry.values():
-                for uid in uids:
-                    if uid not in seen:
-                        seen.add(uid)
-                        m = self._state.get_manifest(uid)
-                        if m:
-                            device_context.append(
-                                f"{uid}（能力：{json.dumps(m.get('capabilities', []), ensure_ascii=False)}）"
-                            )
-
-        device_str = "\n".join(device_context) if device_context else "无可用设备"
-
-        prompt = (
-            f"你是 ESP32 设备控制智能体。根据目标生成 MQTT 控制指令列表。\n\n"
-            f"目标：{goal}\n"
-            f"可用设备：\n{device_str}\n\n"
-            f"直接输出 JSON 数组，不含代码块或解释，每项包含 device_id、action、params。\n"
-            f"action 可选：SET_STATE（params: {{state: BRIGHT|DIM|OFF}}）、"
-            f"SET_COLOR（params: {{r,g,b,brightness 0-255}}）、PLAY（params: {{pattern: NOTIFY|ALERT}}）\n"
-            f"示例：[{{\"device_id\": \"esp32_desk_led\", \"action\": \"SET_COLOR\", "
-            f"\"params\": {{\"r\": 255, \"g\": 200, \"b\": 100, \"brightness\": 180}}}}]"
-        )
-
-        try:
-            resp = await self._llm.ainvoke([HumanMessage(content=prompt)])
-            content = resp.content.strip()
-            content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
-            idx_s, idx_e = content.find("["), content.rfind("]")
-            cmds = json.loads(content[idx_s:idx_e + 1]) if idx_s != -1 else []
-        except Exception as e:
-            logger.warning("run_intent parse error: %s", e)
-            cmds = []
-
-        task_ids = []
-        for i, cmd in enumerate(cmds):
-            if not isinstance(cmd, dict) or "device_id" not in cmd or "action" not in cmd:
-                continue
-            task_id = f"{session_id}_t{i}"
-            _tools.publish_task(cmd["device_id"], task_id, cmd["action"], cmd.get("params", {}), session_id)
-            task_ids.append(task_id)
-            logger.info("intent → %s %s task_id=%s", cmd["device_id"], cmd["action"], task_id)
-
-        return {"task_ids": task_ids, "status": "dispatched"}
 
     def push_sensor_event(self, unit_id: str, payload: dict):
         now = time.time()
@@ -255,45 +231,44 @@ class ESP32Agent:
         snap = self._state.actuator_snapshot()
         return (snap.get(led_device, {}).get("state") or {}).get("ism", "").upper()
 
-    def _execute(self, tool_calls: list, led_device: str):
-        """执行 planner 输出的工具调用列表。"""
+    def _dispatch_tool(self, tool_name: str, params: dict, led_device: str) -> bool:
+        """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
+
+        set_led_state / set_led_color 共享 self._cooldown（同参 5 分钟内只发一次）；
+        speak 等不受冷却约束。色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
+        """
         from cloud.esp32 import tools as _tools_mod
         now = time.time()
+        params = dict(params)
+
+        if tool_name in ("set_led_state", "set_led_color"):
+            params["device_id"] = led_device
+            key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
+            if now - self._cooldown.get(key, 0) < 300:
+                logger.debug("cooldown skip: %s", key)
+                return False
+            self._cooldown[key] = now
+            self._last_act_ts = now
+
+        if tool_name not in _tools_mod.TOOL_FN_MAP:
+            logger.warning("unknown tool: %s", tool_name)
+            return False
+        fn = getattr(_tools_mod, tool_name, None)
+        if fn is None:
+            logger.warning("unknown tool: %s", tool_name)
+            return False
+        try:
+            fn(**params)
+            logger.info("execute %s %s", tool_name, params)
+            return True
+        except Exception as e:
+            logger.warning("tool %s failed: %s", tool_name, e)
+            return False
+
+    def _execute(self, tool_calls: list, led_device: str):
+        """执行 planner 输出的工具调用列表（逐个走单一执行口）。"""
         for call in tool_calls:
-            tool_name = call.get("tool", "")
-            params = dict(call.get("params", {}))
-
-            if tool_name in ("set_led_state", "set_led_color"):
-                params["device_id"] = led_device
-                key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
-                if now - self._cooldown.get(key, 0) < 300:
-                    if tool_name == "set_led_state":
-                        target = params.get("state", "").upper()
-                        current = self._get_current_ism(led_device)
-                        if current and current == target:
-                            logger.debug("cooldown skip: already %s", target)
-                            continue
-                        else:
-                            logger.debug("cooldown skip: %s", key)
-                            continue
-                    else:
-                        logger.debug("cooldown skip: %s", key)
-                        continue
-                self._cooldown[key] = now
-                self._last_act_ts = now
-
-            if tool_name not in _tools_mod.TOOL_FN_MAP:
-                logger.warning("unknown tool: %s", tool_name)
-                continue
-            fn = getattr(_tools_mod, tool_name, None)
-            if fn is None:
-                logger.warning("unknown tool: %s", tool_name)
-                continue
-            try:
-                fn(**params)
-                logger.info("execute %s %s", tool_name, params)
-            except Exception as e:
-                logger.warning("tool %s failed: %s", tool_name, e)
+            self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
 
     def _set_led_mood(self, mood: str):
         _tools.publish_led_mood(mood)
@@ -372,6 +347,11 @@ class ESP32Agent:
                 logger.debug("sense: %s", sense)
 
                 sense["proactive_hints"] = self._check_proactive(sense)
+
+                if not self._should_act():
+                    logger.debug("autonomy gated (mode=%s hold=%s), skip self-action",
+                                 self._autonomy_mode, self._in_user_hold())
+                    continue
 
                 self._set_led_mood("thinking")
                 tool_calls = self._reason(sense)

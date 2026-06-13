@@ -22,7 +22,7 @@ import tools as _t          # noqa: E402
 # ── card fixtures ────────────────────────────────────────────────
 
 LED_CARD = {
-    "slug": "esp32_desk_led",
+    "unit_id": "esp32_desk_led",
     "name": "桌面灯",
     "description": "WS2812 灯环",
     "agent_type": "actuator",
@@ -48,7 +48,7 @@ LED_CARD = {
 }
 
 GO2_CARD = {
-    "slug": "go2",
+    "unit_id": "go2",
     "name": "Go2 机器狗",
     "description": "四足机器人",
     "agent_type": "robot",
@@ -78,13 +78,13 @@ class FakeRegistry:
     """最小 CardRegistry 替身，返回固定 card 集合。"""
 
     def __init__(self, cards):
-        self._cards = {c["slug"]: c for c in cards}
+        self._cards = {c["unit_id"]: c for c in cards}
 
     def get_all_cards(self):
         return dict(self._cards)
 
-    def get_card(self, slug):
-        c = self._cards.get(slug)
+    def get_card(self, unit_id):
+        c = self._cards.get(unit_id)
         return dict(c) if c else None
 
 
@@ -120,7 +120,7 @@ def test_planner_builds_valid_tasks(monkeypatch):
 
     llm = _stub_llm(
         '{"route": "act", "tasks": '
-        '[{"slug": "esp32_desk_led", "skill_id": "set_light_state", "params": {"state": "BRIGHT"}}]}'
+        '[{"unit_id": "esp32_desk_led", "skill_id": "set_light_state", "params": {"state": "BRIGHT"}}]}'
     )
     node = graph_mod._make_planner_node(llm)
     out = node(_planner_state("s1", "开灯"))
@@ -129,7 +129,7 @@ def test_planner_builds_valid_tasks(monkeypatch):
     assert out["early_exit"] is False
     assert len(out["planned_tasks"]) == 1
     t = out["planned_tasks"][0]
-    assert t["slug"] == "esp32_desk_led"
+    assert t["unit_id"] == "esp32_desk_led"
     assert t["skill_id"] == "set_light_state"
     assert t["task_id"] == "s1_t0"
     assert t["params"] == {"state": "BRIGHT"}
@@ -142,9 +142,9 @@ def test_planner_filters_invalid_slug_and_skill(monkeypatch):
 
     llm = _stub_llm(
         '{"route": "act", "tasks": ['
-        '{"slug": "nonexistent", "skill_id": "set_light_state", "params": {}},'   # bad slug
-        '{"slug": "esp32_desk_led", "skill_id": "bogus_skill", "params": {}},'    # bad skill
-        '{"slug": "go2", "skill_id": "go2_navigate", "params": {"name": "厨房"}}'  # valid
+        '{"unit_id": "nonexistent", "skill_id": "set_light_state", "params": {}},'   # bad slug
+        '{"unit_id": "esp32_desk_led", "skill_id": "bogus_skill", "params": {}},'    # bad skill
+        '{"unit_id": "go2", "skill_id": "go2_navigate", "params": {"name": "厨房"}}'  # valid
         ']}'
     )
     node = graph_mod._make_planner_node(llm)
@@ -152,7 +152,7 @@ def test_planner_filters_invalid_slug_and_skill(monkeypatch):
 
     assert out["route"] == "act"
     assert len(out["planned_tasks"]) == 1
-    assert out["planned_tasks"][0]["slug"] == "go2"
+    assert out["planned_tasks"][0]["unit_id"] == "go2"
     assert out["planned_tasks"][0]["skill_id"] == "go2_navigate"
 
 
@@ -207,8 +207,8 @@ def test_planner_route_define_rule(monkeypatch):
     assert out["planned_tasks"] == []
 
 
-def test_planner_defaults_to_act_on_unparseable(monkeypatch):
-    """LLM 输出无法解析时降级为 act（空 tasks）。"""
+def test_planner_unparseable_falls_back_to_chat(monkeypatch):
+    """LLM 输出无法解析 → 默认 act → 无合法 tasks → 降级为 chat（友好回复，不崩条件边）。"""
     monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
     monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
 
@@ -216,12 +216,12 @@ def test_planner_defaults_to_act_on_unparseable(monkeypatch):
     node = graph_mod._make_planner_node(llm)
     out = node(_planner_state("sx", "???"))
 
-    assert out["route"] == "act"
+    assert out["route"] == "chat"
     assert out["planned_tasks"] == []
 
 
-def test_planner_defaults_to_act_on_unknown_route(monkeypatch):
-    """JSON 合法但 route 不在已知值时，降级为 act，不让条件边崩溃。"""
+def test_planner_unknown_route_falls_back_to_chat(monkeypatch):
+    """route 不在已知值且 tasks 为空 → 默认 act → 降级为 chat，不让条件边崩溃。"""
     monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
     monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
 
@@ -229,7 +229,7 @@ def test_planner_defaults_to_act_on_unknown_route(monkeypatch):
     node = graph_mod._make_planner_node(llm)
     out = node(_planner_state("su", "???"))
 
-    assert out["route"] == "act"
+    assert out["route"] == "chat"
     assert out["planned_tasks"] == []
 
 
@@ -284,7 +284,7 @@ def test_dispatcher_mqtt_uses_publish_task(monkeypatch):
     state = {
         "session_id": "s1",
         "planned_tasks": [
-            {"slug": "esp32_desk_led", "skill_id": "set_light_state",
+            {"unit_id": "esp32_desk_led", "skill_id": "set_light_state",
              "task_id": "s1_t0", "params": {"state": "BRIGHT"}}
         ],
         "task_results": {}, "early_exit": False,
@@ -293,7 +293,7 @@ def test_dispatcher_mqtt_uses_publish_task(monkeypatch):
 
     pub.assert_called_once()
     args = pub.call_args.args
-    assert args[0] == "esp32_desk_led"   # slug
+    assert args[0] == "esp32_desk_led"   # unit_id
     assert args[1] == "s1_t0"            # task_id
     assert args[2] == "SET_STATE"        # action from invoke
     assert args[3] == {"state": "BRIGHT"}
@@ -312,7 +312,7 @@ def test_dispatcher_http_uses_thread_pool(monkeypatch):
     state = {
         "session_id": "sess",
         "planned_tasks": [
-            {"slug": "go2", "skill_id": "go2_navigate",
+            {"unit_id": "go2", "skill_id": "go2_navigate",
              "task_id": "sess_t0", "params": {"name": "厨房"}}
         ],
         "task_results": {}, "early_exit": False,
@@ -346,7 +346,7 @@ def test_dispatcher_http_timeout_recorded(monkeypatch):
     state = {
         "session_id": "sess",
         "planned_tasks": [
-            {"slug": "go2", "skill_id": "go2_sport",
+            {"unit_id": "go2", "skill_id": "go2_sport",
              "task_id": "sess_t0", "params": {"cmd": "Hello"}}
         ],
         "task_results": {}, "early_exit": False,
@@ -366,7 +366,7 @@ def test_dispatcher_non_navigation_timeout_is_10s(monkeypatch):
     state = {
         "session_id": "sess",
         "planned_tasks": [
-            {"slug": "go2", "skill_id": "go2_sport",
+            {"unit_id": "go2", "skill_id": "go2_sport",
              "task_id": "sess_t0", "params": {"cmd": "Hello"}}
         ],
         "task_results": {}, "early_exit": False,
@@ -389,8 +389,8 @@ def test_evaluator_skips_polling_for_http_results(monkeypatch):
     state = {
         "early_exit": False,
         "planned_tasks": [
-            {"slug": "go2", "skill_id": "go2_sport", "task_id": "s_t0", "params": {}},
-            {"slug": "esp32_desk_led", "skill_id": "set_light_state", "task_id": "s_t1", "params": {}},
+            {"unit_id": "go2", "skill_id": "go2_sport", "task_id": "s_t0", "params": {}},
+            {"unit_id": "esp32_desk_led", "skill_id": "set_light_state", "task_id": "s_t1", "params": {}},
         ],
         "task_results": {"s_t0": {"result": "ok", "task_id": "s_t0"}},
     }
@@ -436,7 +436,7 @@ def test_graph_routes_act_to_dispatcher(monkeypatch):
     """route=act → 走 Dispatcher（不走 ChatNode / RuleBuilderNode）。"""
     nodes = _run_graph(
         monkeypatch,
-        '{"route": "act", "tasks": [{"slug": "esp32_desk_led", '
+        '{"route": "act", "tasks": [{"unit_id": "esp32_desk_led", '
         '"skill_id": "set_light_state", "params": {"state": "BRIGHT"}}]}',
         [LED_CARD],
     )

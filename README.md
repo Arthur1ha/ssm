@@ -27,21 +27,19 @@
   └─────────────────────────────────────────────────────────────┘
 ```
 
-**控制优先级**：手机指令 > 云端智能体 > ESP32 本地规则（离线兜底）
+**控制优先级**：用户指令 > 智能体 > 本地规则（离线兜底）
 
 云端有三个 LLM 智能体：
 - **编排器**（`cloud/orchestrator/`，独立进程）：订阅用户意图，经 LangGraph 图统筹全局，MQTT 派发到 ESP32、HTTP 委托到 Go2。
 - **ESP32 桌面智能体**（`cloud/esp32/agent.py`）：带 persona 的 sense→reason→act，自主响应传感器事件。
 - **Go2 机器狗智能体**（`cloud/go2/`）：独立 LangGraph，含性格演化、记忆、导航、视觉，经 HTTP 暴露 `/api/go2/*`。
 
-## 硬件引脚
+## esp硬件引脚
 
 | 硬件 | GPIO | 模式 |
 |------|------|------|
 | WS2812 灯环（数据线） | GPIO4 | 单总线 |
-| 蜂鸣器（无源） | GPIO5 | PWM |
 | 光线传感器 | GPIO34 | 模拟（ADC1） |
-| 红外传感器 | GPIO19 | 数字，低电平有效 |
 | 声音传感器 | GPIO15 | 数字，上升沿触发 |
 
 传感器是否在线由 `edge/probe.py` 在启动时自动探测（拉电阻技巧），无需手动配置开关。具体接线以 `edge/config.py` 的 `UNIT_CONFIGS` 为准。
@@ -70,18 +68,17 @@
 
 ### 云端服务（`cloud/`）
 
-环境变量统一存放在 `cloud/.env`（见 `cloud/.env.example`）。LLM 分两条通道：编排器 / Go2 / ESP32 智能体用火山方舟 Ark `deepseek-v4-*`（`MODEL_LIST`）；意图解析 `/api/intent` 用腾讯混元 MaaS（`CHAT_MODEL`）。
+环境变量统一存放在 `cloud/.env`（见 `cloud/.env.example`）。编排器 / Go2 / ESP32 智能体均用火山方舟 Ark `deepseek-v4-*`（`MODEL_LIST`）。
 
 #### API（`cloud/api/`，FastAPI，端口 8082）
 
 | 接口 | 说明 |
 |------|------|
-| `POST /api/intent` | 意图解析：返回结构化需求 + session_id（`nlu.py`） |
 | `GET  /api/devices` | 列出所有在线设备（`devices.py`） |
 | `GET  /api/devices/{slug}/agent` | **A2A Agent Card**：机器可读的能力描述 |
 | `GET/POST/DELETE /api/rules` | 自动化规则 CRUD（`rules.py`） |
 | `/api/go2/*` | Go2 连接 / 运动 / 导航 / 视觉 / 对话（`cloud/go2/router.py`） |
-| `POST /api/esp32/intents` | ESP32 桌面智能体入口（`cloud/esp32/router.py`） |
+| `GET/PUT /api/esp32/autonomy` | ESP32 灯智能体自主模式（manual/reactive，`cloud/esp32/router.py`） |
 
 `api/main.py` 同时承载一个 ESP32 MQTT 桥，订阅 `manifest/state/event/result` 并喂给 ESP32 桌面智能体。
 
@@ -120,7 +117,7 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 
 **控制 topic**：
 - `ssm/agents/{id}/command` —— 执行器直接指令
-- `ssm/intent/{session_id}` —— 手机意图（`/api/intent` 解析后发布）
+- `ssm/intent/{session_id}` —— 手机意图（PWA 直接发布，编排器订阅）
 - `ssm/task/{device_id}/{task_id}` —— 编排任务
 - `ssm/feedback/{session_id}` —— 渐进式执行反馈
 
@@ -203,7 +200,6 @@ PWA 内 MQTT 地址自动切换：HTTPS 访问时用 `wss://{tunnel域名}/mqtt`
 **手机自然语言控制：**
 ```
 用户说"把灯调暗一点"
-  → /api/intent 解析意图 → 返回 session_id + requirements
   → 手机发布 ssm/intent/{session_id}
   → 编排器 Planner 生成任务 → Dispatcher 下发（ESP32 走 MQTT / Go2 走 HTTP）
   → 设备执行 → Evaluator 确认 → 手机收到 ssm/feedback/{session_id}

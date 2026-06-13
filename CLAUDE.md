@@ -9,7 +9,7 @@
 **核心业务逻辑**：
 1. ESP32 启动时探测引脚 → 向 broker 发布已接设备的 manifest（retained）
 2. 手机 PWA 订阅 `ssm/agents/#`，自动发现所有在线设备，按 GPS 距离排序
-3. 用户语音/文字 → `/api/intent` 解析意图 → 编排器 Planner→Dispatcher→Evaluator→Responder 执行并反馈
+3. 用户语音/文字 → PWA 经 MQTT 发布 `ssm/intent/{session_id}` → 编排器 Planner（唯一大脑，一次 LLM 完成 act/chat/define_rule 分类）→ Dispatcher→Evaluator→Responder 执行并反馈
 4. 传感器事件也触发云端 ESP32 智能体自动决策（如变暗自动开灯）
 5. 云端离线时 ESP32 本地规则接管（兜底层）
 6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{slug}/agent`）暴露能力，供编排器与 PWA 动态发现
@@ -25,7 +25,6 @@
 | 消息代理 | Mosquitto | 运行于云服务器 `47.116.137.202`，TCP 1883 / WS 9001 |
 | 云端 AI | LangGraph + LangChain + ChatOpenAI（兼容接口） | langgraph≥0.2、langchain≥0.3 |
 | LLM（编排/Go2/ESP32 智能体） | 火山方舟 Ark `deepseek-v4-flash` / `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
-| LLM（意图解析 `/api/intent`） | 腾讯混元 MaaS `hy3-preview`（独立通道） | 见 `cloud/.env: CHAT_MODEL` |
 | Go2 机器狗 | `unitree-webrtc-connect`（WebRTC）+ YOLO（ultralytics）视觉 | HTTP REST，非 MQTT |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
 | 手机 PWA | React 18（无构建，Babel standalone） + MQTT.js | React 18.3.1、mqtt.js 5.3.4 |
@@ -49,23 +48,21 @@ ssm/
 │   ├── boot.py          ← WiFi 连接（先于 main.py 执行）
 │   └── main.py          ← 主循环入口
 ├── cloud/               ← 云端服务（跑在服务器上）
-│   ├── .env             ← LLM API Key、MQTT 地址、MODEL_LIST / CHAT_MODEL（见 .env.example）
+│   ├── .env             ← LLM API Key、MQTT 地址、MODEL_LIST（见 .env.example）
 │   ├── api/             ← FastAPI 聚合入口（端口 8082），装配下面所有 router
 │   │   ├── main.py      ← app 装配 + ESP32 MQTT 桥（订阅 manifest/state/event/result）
-│   │   ├── nlu.py       ← `POST /api/intent` 意图解析（腾讯混元 MaaS）
 │   │   ├── rules.py     ← `/api/rules` 自动化规则 CRUD
 │   │   └── devices.py   ← `/api/devices` + `/api/devices/{slug}/agent`（★ A2A Agent Card）
 │   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + LangGraph）
 │   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 编排图
 │   │   ├── graph.py     ← LangGraph：Planner→Dispatcher→Evaluator→Responder（支持 ESP32/MQTT 与 Go2/HTTP）
 │   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助（供图节点使用）
-│   │   ├── shared_state.py ← 线程安全设备/任务快照（合并 MQTT manifest + devices.json）
-│   │   ├── devices.json ← 文件型设备注册表（go2 等非 MQTT 设备）
-│   │   ├── rules.json   ← 自动化规则存储
-│   │   └── rule_engine.py ← ⚠️ 当前无任何引用（遗留代码，勿依赖）
+│   │   ├── shared_state.py ← 线程安全传感器/执行器/任务快照（按 manifest agent_type 分桶）
+│   │   ├── devices.json ← 预留：文件型非 MQTT 设备注册表（当前为空，go2 已走 MQTT card）
+│   │   └── rules.json   ← 自动化规则存储
 │   ├── esp32/           ← ESP32 桌面空间智能体（云端侧，原 orchestrator/desk_agent）
 │   │   ├── agent.py     ← 带 persona 的 sense→reason→act 智能体
-│   │   ├── router.py    ← `/api/esp32/intents`
+│   │   ├── router.py    ← `/api/esp32/autonomy`（灯自主模式 manual/reactive）
 │   │   ├── state.py     ← ESP32 设备/任务状态
 │   │   ├── tools.py     ← MQTT 发布辅助
 │   │   └── tts.py       ← TTS 合成封装
@@ -102,10 +99,11 @@ ssm/
 | 硬件 | GPIO | 状态 |
 |------|------|------|
 | WS2812 灯环 | GPIO4 | 已接 |
-| 蜂鸣器（无源） | GPIO5 | 未接（`BUZZER_ENABLED=False`） |
 | 光线传感器 | GPIO34 | 已接（ADC 模拟） |
-| 红外传感器 | GPIO19 | 未接 |
+| 红外传感器 | GPIO19 | 未接（`UNIT_CONFIGS` 有条目，探测缺席不发 manifest） |
 | 声音传感器 | GPIO15 | 已接 |
+
+> 注：蜂鸣器在 `config.py` 中无任何条目（既未接线也无配置），故不在此表。
 
 ---
 
@@ -118,7 +116,7 @@ ssm/
 | ESP32 agent ID | `{device_id}_{unit}` | `esp32_desk_led` |
 | MQTT topic | `ssm/agents/{unit_id}/{type}` | `ssm/agents/esp32_desk_led/state` |
 | Python 变量/函数 | `snake_case` | `probe_digital`, `ism_light` |
-| MicroPython 常量 | `UPPER_SNAKE` | `BUZZER_PIN`, `UNIT_CONFIGS` |
+| MicroPython 常量 | `UPPER_SNAKE` | `WS2812_PIN`, `UNIT_CONFIGS` |
 | LangGraph 节点 | `{role}_node` | `planner_node`, `evaluator_node` |
 
 ### MicroPython 特定注意事项
@@ -179,6 +177,14 @@ ssm/
 **原因**：原有"长按订阅"逻辑和 MQTT 订阅无关，是误导性的 UI 概念；去掉后设备接入体验从"发现→订阅→控制"变为"发现→控制"。
 
 **避免**：重新引入 `subscribed` state、`toggleSub` 或 `localStorage` 的订阅持久化。
+
+### 6. 灯智能体自主模式（manual / reactive）+ 用户让位窗口
+
+**决策**：ESP32 灯桌面智能体有 `manual`（仅听编排器/用户命令）/ `reactive`（自发看上下文调色温+亮度，默认）两种模式，经 `PUT /api/esp32/autonomy` 切换；reactive 下收到非自身发出的命令会进入让位窗口（`USER_HOLD_TTL` 秒），窗口内不自发改灯，尊重用户设置。
+
+**原因**：灯的价值是"自动选合适的色温/亮度"而非开关，但自主调光与用户/编排器命令并发会互相打架。模式开关 + 让位窗口让"全自动可介入 / 完全用户控制"成为可切换实验条件，且 LLM 始终是调色唯一大脑，不降级为规则表。仿机器狗 `_autonomy_mode` + `user_interrupt`，但灯是 tick 循环故用带 TTL 的窗口而非瞬时标志。
+
+**避免**：在灯智能体里写"什么情况配什么颜色"的硬编码规则表；manual 模式误解为只能开关灯（富命令仍可控）；让位窗口逻辑依赖 go2 agentcore（各智能体自主逻辑独立）。
 
 ---
 

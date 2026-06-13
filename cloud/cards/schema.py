@@ -42,14 +42,13 @@ class Transport(TypedDict):
 class AgentCard(TypedDict):
     """智能体能力描述卡片，供编排器和 PWA 动态发现与调用。
 
-    slug：LLM / 展示层别名（如 desk-lamp），唯一索引，缺省同 unit_id。
-    unit_id：MQTT 传输层真实标识符（如 esp32_desk_led），用于 topic 构造。
-    online 字段为动态状态，由 registry 根据 LWT 或 card 消息维护。
+    unit_id：唯一标识（如 esp32_desk_led）。寻址/topic/注册表 key/URL 全用它。
+    online 字段为动态状态，由 registry 根据 status/LWT 或 card 消息维护。
     state 字段为动态状态，由对应 state topic 更新，builder 不填充。
     """
 
-    slug: str
-    unit_id: NotRequired[str]   # MQTT 传输层标识符，缺省同 slug
+    unit_id: str                # 唯一标识：寻址/topic/注册表 key/URL 都用它
+    parent_id: NotRequired[str] # 父设备 device_id，用于按 status 继承在线状态
     name: str
     description: str
     agent_type: str   # "actuator" | "sensor" | "robot" | "decision"
