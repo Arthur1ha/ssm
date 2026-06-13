@@ -52,6 +52,8 @@ def _on_esp32_connect(client, userdata, flags, rc):
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
+        # API 启动时重置 Go2 在线状态，清除上次会话 retained 的 "online"
+        client.publish(go2_router_module.GO2_STATUS_TOPIC, "offline", retain=True, qos=1)
         logger.info("[ESP32Agent MQTT] Connected and subscribed")
 
 

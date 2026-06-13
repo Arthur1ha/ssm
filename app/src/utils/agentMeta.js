@@ -32,7 +32,7 @@ function getStateLabel(agent, unitData) {
   const uid  = agent.unit_id;
   const s    = (unitData[uid] || {}).state || {};
   switch (agentKind(agent)) {
-    case 'robot':  return '待命';
+    case 'robot':  return s.ism || '待命';
     case 'led':    return s.ism || (s.state === 'OFF' ? '已关闭' : '待命');
     case 'buzzer': return s.ism || '待命';
     case 'ir':     return s.presence !== undefined ? (s.presence ? '有人' : '无人') : '监测中';
