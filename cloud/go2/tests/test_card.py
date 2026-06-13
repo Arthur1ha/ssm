@@ -11,6 +11,7 @@ def _make_go2_stub():
     stub = MagicMock()
     stub.fsm_state = "idle"
     stub.available_actions = ["StandUp", "StandDown"]
+    stub.is_connected = True   # card.online 现在反映实际连接状态，需为真实 bool
     return stub
 
 
@@ -89,10 +90,13 @@ class TestBuildGo2Card:
         card = self.router_mod._build_go2_card()
         assert card["state"] == {}
 
-    def test_online_is_true(self):
-        """连接后发布的 card online 字段必须为 True。"""
-        card = self.router_mod._build_go2_card()
-        assert card["online"] is True
+    def test_online_reflects_connection(self):
+        """card online 字段反映实际连接状态：已连接为 True，断开为 False。"""
+        # stub 默认 is_connected=True
+        assert self.router_mod._build_go2_card()["online"] is True
+        # 断开后应反映为 False（真相由 status topic 维护，card 不再硬编码 True）
+        self.go2_stub.is_connected = False
+        assert self.router_mod._build_go2_card()["online"] is False
 
     def test_card_is_json_serializable(self):
         """card 必须可以被 json.dumps 序列化（用于 MQTT publish）。"""

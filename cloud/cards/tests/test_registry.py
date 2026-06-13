@@ -213,7 +213,21 @@ class TestStatusOnline:
         registry.handle_message("ssm/agents/esp32_desk/status", b"offline")
         registry.handle_message(
             "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
+        registry.handle_message("ssm/agents/esp32_desk/status", b"offline")
+        registry.handle_message(
+            "ssm/agents/esp32_desk_led/manifest", json.dumps(LED_MANIFEST).encode())
         assert registry.get_card("esp32_desk_led")["online"] is False
+
+    def test_card_重发不覆盖_offline(self, registry):
+        """竞态：status=offline 后即便 retained card（online:true）后到，online 仍保持 False。"""
+        # 先插入自描述 card（card 内硬编码 online:true）
+        registry.handle_message("ssm/agents/go2/card", json.dumps(GO2_CARD).encode())
+        # status=offline 先到，将 online 置为真相 False
+        registry.handle_message("ssm/agents/go2/status", b"offline")
+        assert registry.get_card("go2")["online"] is False
+        # 后到的 retained card（online:true）不应覆盖 status 派生的离线真相
+        registry.handle_message("ssm/agents/go2/card", json.dumps(GO2_CARD).encode())
+        assert registry.get_card("go2")["online"] is False
 
 
 class TestEmptyManifestRemoves:

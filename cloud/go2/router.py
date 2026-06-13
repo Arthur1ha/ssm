@@ -42,7 +42,8 @@ def _build_go2_card() -> dict:
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",
-        "online": True,
+        # online 反映实际 WebRTC 连接状态，真相由 status topic 维护，这里避免硬编码误导
+        "online": go2.is_connected,
         "transport": {
             "kind": "http",
             "endpoint": "/api/go2/chat",

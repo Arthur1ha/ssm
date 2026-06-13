@@ -27,6 +27,16 @@ import tools as _t
 logger = logging.getLogger("orchestrator")
 
 
+# ── 编排器自身人格 ───────────────────────────────────────────────
+# 编排器是智慧空间的"管家/协调者"：温暖、简洁、像主人贴心的贴身管家。
+# 只负责"框住整体计划与结果"，不复述各设备的具体动作细节（细节由设备自己的
+# 台词去说），避免与设备台词重复打架。
+AGENT_PERSONA = (
+    "你是这个智慧空间的贴心管家，像主人身边温暖体贴的老朋友。"
+    "说话简洁自然、有人情味，只负责把整体安排和结果轻轻交代一句，不啰嗦细节。"
+)
+
+
 # ── 对话历史 ─────────────────────────────────────────────────────
 _conversation_history: list = []
 _MAX_HISTORY = 10
@@ -115,7 +125,10 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
     env_str = f"当前环境状态：\n{env_state}\n\n" if env_state else ""
 
     return (
-        f"你是 SSM 多智能体编排中枢，兼任智能家居助理。根据用户意图，输出一个 JSON 对象（不含代码块）。\n\n"
+        f"你是 SSM 多智能体编排中枢，兼任智能家居管家。根据用户意图，输出一个 JSON 对象（不含代码块）。\n"
+        f"人格设定（仅影响 route=chat 时 answer 的语气）：{AGENT_PERSONA}\n"
+        f"当 route=chat 时，answer 用这位管家的口吻，温暖简洁、像贴心老朋友；"
+        f"当 route=act 时只框住整体安排（如'都给你安排好咯'），不要复述各设备的具体动作。\n\n"
         f"{history_str}"
         f"{env_str}"
         f"用户原话：{user_msg}\n"
@@ -123,12 +136,22 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"可用智能体：\n{agents_str}\n\n"
         f"分类规则：\n"
         f"1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
-        f"2. 如果用户宣布到场/离开/开始某项活动（如'我回来了'、'我要工作了'、'开始学习'、'准备睡觉'、'我走了'）→ route=\"act\"，同时规划所有相关任务：\n"
+        f"2. 如果用户宣布到场/离开/开始某项活动（如'我回来了'、'我要工作了'、'开始学习'、'准备睡觉'、'我走了'、'客人来了'）→ route=\"act\"，同时规划所有相关任务：\n"
         f"   ① 若灯光/环境状态需要调整，加入灯光任务；\n"
-        f"   ② 若 Go2 机器狗在线，加入 go2_chat 任务（params.message 为体现机器狗性格的自然中文回应，如问候/互动，简洁有趣）。\n"
+        f"   ② 若 Go2 机器狗在线，加入一个对话类（conversation）任务，把用户的真实意图/目标转告它。\n"
         f"3. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
         f"4. 其他（纯问答、闲聊、环境无需调整且无明确设备指向）→ route=\"chat\"，输出 answer 字符串。\n\n"
-        f"重要：tasks 数组可同时包含多个智能体；go2_chat 的 params 必须含 message 字段（自然中文，体现机器狗性格）。\n"
+        f"技能路由引导（按 skill 的 tags 选择，保持通用 card-driven）：\n"
+        f"- 明确的肢体动作（跳舞/站起/坐下/打招呼/握手等）→ 选带 motion 类 tag 的 skill，"
+        f"params 按其 schema 填（通常是 cmd）。\n"
+        f"- 要去某个地点/导航 → 选带 navigation 类 tag 的 skill，params 填目标位置（通常是 name）。\n"
+        f"- 开放式目标/场景意图（如'客人来了'、'我回来了'、'去门口看看'）→ 选带 conversation 类 tag 的 skill"
+        f"（如 go2_chat）。\n\n"
+        f"★ 关键：conversation 类 skill（go2_chat）的 params.message 必须是【用户真实意图/目标的忠实转述原文】，"
+        f"不要写成机器狗的人格台词或拟声词。下游智能体会用这段文字作为指令意图，自主规划要做的动作。\n"
+        f"  例：用户'客人回来了' → message=\"客人回来了，去门口迎接打招呼\"；"
+        f"用户'我回来了' → message=\"主人回来了，去门口迎接\"。\n"
+        f"  反例（禁止）：message=\"汪汪我来啦\"、\"摇尾巴欢迎你\" 这类台词——会导致机器狗规划不出动作。\n\n"
         f"act 校验：unit_id 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
         f"找不到合适的 unit_id/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
@@ -248,7 +271,8 @@ def _make_planner_node(llm):
         # tasks 校验后为空 → 退化为闲聊，避免 Dispatcher 返回冷冰冰的错误
         if not tasks:
             try:
-                chat_prompt = (f"用户说：'{state['user_msg']}'。"
+                chat_prompt = (f"{AGENT_PERSONA}\n"
+                               f"用户说：'{state['user_msg']}'。"
                                f"没有合适的设备可以执行，请用一句简短友好的中文回应用户，"
                                f"不要提技术细节。")
                 chat_resp = llm.invoke([HumanMessage(content=chat_prompt)])
@@ -291,9 +315,10 @@ def _make_rule_builder_node():
     def rule_builder_node(state: OrchestratorState) -> OrchestratorState:
         session_id = state["session_id"]
         rule = state.get("rule", {}) or {}
+        # 管家口吻的规则确认语（静态文案，不调 LLM，保持轻快温暖）。
         _t.do_publish_feedback(
             session_id, "pending_rule",
-            f"我来帮你设置规则「{rule.get('name', '')}」，请确认后生效。",
+            f"好嘞，我来帮你记下规则「{rule.get('name', '')}」，你确认一下我就让它生效哈~",
             rule=rule,
         )
         logger.info("[RuleBuilder] pending rule=%s", rule.get("name", ""))
@@ -351,10 +376,16 @@ def _make_dispatcher_node():
 
             elif kind == "http":
                 endpoint = card.get("transport", {}).get("endpoint", "")
+                # message 是给下游（Go2 agent）的指令意图：
+                # 优先用 params.message（Planner 已忠实转述用户真实意图），
+                # 否则退回用户原话，最后才退回 skill 名+params（保证非空）。
+                message = (task["params"].get("message")
+                           or state.get("user_msg")
+                           or (skill.get("name", "") + ": "
+                               + json.dumps(task["params"], ensure_ascii=False)))
                 body = {
                     "session_id": session_id,
-                    "message":    (task["params"].get("message")
-                                   or skill.get("name", "") + ": " + json.dumps(task["params"], ensure_ascii=False)),
+                    "message":    message,
                     "skill_id":   task["skill_id"],
                     "params":     task["params"],
                 }
@@ -465,19 +496,26 @@ def _make_responder_node(llm):
 
         fallbacks = {"done": "好的，指令已全部执行！", "partial": "部分指令已执行。",
                      "failed": "智能体未响应，请检查连接后重试。"}
+        # 管家只"框住整体结果"，不复述各设备具体动作（细节由设备自己的台词去说）。
+        persona_hint = (f"{AGENT_PERSONA}\n"
+                        f"只用管家口吻框住整体结果（如'都给你安排好咯~''交给狗狗啦~'），"
+                        f"不要复述每个设备做了什么具体动作。\n")
         try:
             if stage == "done":
-                prompt = (f"用户说：'{state['user_msg']}'。任务已全部执行成功。"
-                          f"用1句简短中文告诉用户结果，语气自然友好，不提技术细节。")
+                prompt = (f"{persona_hint}"
+                          f"用户说：'{state['user_msg']}'。任务已全部执行成功。"
+                          f"用1句简短中文告诉用户都安排好了，语气自然温暖，不提技术细节、不列动作清单。")
             elif stage == "partial":
-                prompt = (f"用户说：'{state['user_msg']}'。部分任务成功（{statuses}）。"
-                          f"用1句简短中文说明并给出建议。")
+                prompt = (f"{persona_hint}"
+                          f"用户说：'{state['user_msg']}'。部分任务成功（{statuses}）。"
+                          f"用1句简短中文说明大致安排好了、还有一点没成，并轻轻给个建议。")
             else:
                 tried = [f"{t['unit_id']}.{t['skill_id']}({t['params']})" for t in state.get("planned_tasks", [])]
                 reasons = {k: v.get("result") for k, v in results.items()}
-                prompt = (f"用户说：'{state['user_msg']}'。"
+                prompt = (f"{persona_hint}"
+                          f"用户说：'{state['user_msg']}'。"
                           f"系统尝试执行{tried}但失败（{reasons}）。"
-                          f"用1句简短友好中文告诉用户执行失败，建议检查设备连接，不提技术细节。")
+                          f"用1句简短温暖中文告诉用户这次没安排成，建议检查下设备连接，不提技术细节。")
             resp = llm.invoke([HumanMessage(content=prompt)])
             text = resp.content.strip()
         except Exception:

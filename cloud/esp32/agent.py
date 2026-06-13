@@ -75,6 +75,46 @@ class ESP32Agent:
         self._user_hold_until = time.time() + USER_HOLD_TTL
         logger.info("user command on %s → 自主层让位 %ds", unit_id, USER_HOLD_TTL)
 
+    def narrate_command(self, action: str, params: dict) -> None:
+        """收到用户/编排器命令时，用 persona 生成一句台词并发 thought。
+
+        与 Go2 行为一致：执行后用性格大脑吐一句确认/吐槽，PWA 经
+        ssm/agents/+/thought 通配渲染。必须能安全地从子线程调用——
+        内部全部 try/except 包好，LLM 异常时用兜底台词，绝不向外抛。
+        """
+        try:
+            params = params or {}
+            desc_parts = []
+            if "state" in params:
+                desc_parts.append(f"state={params['state']}")
+            for k in ("r", "g", "b", "brightness"):
+                if k in params:
+                    desc_parts.append(f"{k}={params[k]}")
+            params_desc = "、".join(desc_parts) if desc_parts else "无额外参数"
+
+            prompt = (
+                f"{AGENT_PERSONA}\n"
+                "刚刚有人（用户或编排器）给你下达了一条控制 LED 灯的命令，你已经照做了。\n"
+                f"命令动作：{action}（SET_STATE=开关/亮度，SET_COLOR=调色温/亮度）\n"
+                f"命令参数：{params_desc}\n\n"
+                "用你的性格说一句简短的话，确认或吐槽这次动作。"
+                "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"
+                "例如：行吧，给你开了。 / 这就给你调暖点。 / 又要关灯啊，随你。"
+            )
+            try:
+                resp = self._llm.invoke([HumanMessage(content=prompt)])
+                text = (resp.content or "").strip()
+                text = text.strip("\"'`").strip()
+            except Exception as e:
+                logger.warning("narrate_command llm error: %s", e)
+                text = "行吧，照你说的办了。"
+            if not text:
+                text = "行吧，照你说的办了。"
+            _tools.publish_thought(text, unit_id="esp32_desk_led")
+            logger.info("narrate_command %s → %s", action, text)
+        except Exception as e:
+            logger.warning("narrate_command failed: %s", e)
+
     def _in_user_hold(self) -> bool:
         """当前是否处于用户让位窗口内。"""
         return time.time() < self._user_hold_until

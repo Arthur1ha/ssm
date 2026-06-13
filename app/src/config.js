@@ -9,12 +9,14 @@ const POPUP_RADIUS_M  = 5000;
 
 /* ── 智能体气泡颜色注册表（新增智能体在此追加） ── */
 var AGENT_BUBBLE_COLORS = {
-  orchestrator: '#7C6DFF',
-  go2:          '#00D4FF',
+  orchestrator:   '#7C6DFF',
+  go2:            '#00D4FF',
+  esp32_desk_led: '#FF9A5A',
 };
 var AGENT_DISPLAY_NAMES = {
-  orchestrator: '编排器',
-  go2:          'Go2',
+  orchestrator:   '管家',
+  go2:            'Go2',
+  esp32_desk_led: '灯',
 };
 
 function getAgentBubbleColor(agentId) {

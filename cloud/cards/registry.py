@@ -84,6 +84,10 @@ class CardRegistry:
                     data = json.loads(raw)
                     card = parse_card(data)
                     with self._lock:
+                        # 保留已知 online（status 可能先于 card 到达，且是在线真相）
+                        prev = self._cards.get(card["unit_id"])
+                        if prev is not None and "online" in prev:
+                            card["online"] = prev["online"]
                         self._cards[card["unit_id"]] = card
                     logger.info("[CardRegistry] Stored card (self-described): %s", card["unit_id"])
                 except Exception as exc:

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -95,6 +96,16 @@ def _on_esp32_message(client, userdata, msg):
             agent = esp32_agent_mod.get_agent()
             if agent:
                 agent.mark_user_command(parts[2])
+                # 灯被命令时也用 persona 吐一句台词（发 thought），与 Go2 行为一致。
+                # LLM 调用是秒级的，另起 daemon 线程跑，绝不阻塞 MQTT 回调线程。
+                action = payload.get("action")
+                params = payload.get("params", {})
+                threading.Thread(
+                    target=agent.narrate_command,
+                    args=(action, params),
+                    daemon=True,
+                    name="ESP32Narrate",
+                ).start()
 
 
 @asynccontextmanager

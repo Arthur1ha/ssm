@@ -125,7 +125,7 @@ function App() {
       mqttBus.subscribe('ssm/agents/+/thought');
       if (!greetedRef.current) {
         greetedRef.current = true;
-        appendActivity({ type: 'ai', text: '你好呀，我是智慧空间管家，有什么可以帮你的嘛？' });
+        appendActivity({ type: 'ai', agent: 'orchestrator', text: '你好呀，我是智慧空间管家，有什么可以帮你的嘛？' });
       }
     };
     const handleDisconnect = () => {
@@ -181,16 +181,16 @@ function App() {
       });
       const saved = pendingRule;
       setPendingRule(null);
-      appendActivity({ type: 'ai', text: `规则「${saved.name}」已保存，条件触发时自动执行。` });
+      appendActivity({ type: 'ai', agent: 'orchestrator', text: `规则「${saved.name}」已保存，条件触发时自动执行。` });
     } catch {
-      appendActivity({ type: 'ai', text: '规则保存失败，请重试。' });
+      appendActivity({ type: 'ai', agent: 'orchestrator', text: '规则保存失败，请重试。' });
     }
     setSavingRule(false);
   };
 
   const handleCancelRule = () => {
     setPendingRule(null);
-    appendActivity({ type: 'ai', text: '已取消，规则未保存。' });
+    appendActivity({ type: 'ai', agent: 'orchestrator', text: '已取消，规则未保存。' });
   };
 
   /* ── 主屏发送 ── */
@@ -200,7 +200,7 @@ function App() {
     appendActivity({ type: 'user', text: t });
 
     send(t, {
-      onMessage:     (msg)  => appendActivity({ type: 'ai', text: msg }),
+      onMessage:     (msg)  => appendActivity({ type: 'ai', agent: 'orchestrator', text: msg }),
       onPendingRule: (rule) => setPendingRule(rule),
     });
   };

@@ -31,8 +31,13 @@ def publish_led_mood(mood: str):
     _mqtt.publish("ssm/agents/desk/led_mood", json.dumps({"mood": mood}, ensure_ascii=False))
 
 
-def publish_thought(text: str):
-    _mqtt.publish("ssm/agents/desk/thought", json.dumps({"text": text}, ensure_ascii=False))
+def publish_thought(text: str, unit_id: str = "esp32_desk_led"):
+    """发布智能体的"心声"台词，PWA 用 ssm/agents/+/thought 通配渲染。
+
+    topic 按 unit_id 拼接（默认灯设备 esp32_desk_led），与 Go2 的
+    ssm/agents/go2/thought 行为一致。
+    """
+    _mqtt.publish(f"ssm/agents/{unit_id}/thought", json.dumps({"text": text}, ensure_ascii=False))
 
 
 TOOL_DESCRIPTIONS = """可用工具（系统自动注入目标设备 ID）：
