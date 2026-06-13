@@ -207,8 +207,8 @@ def test_planner_route_define_rule(monkeypatch):
     assert out["planned_tasks"] == []
 
 
-def test_planner_defaults_to_act_on_unparseable(monkeypatch):
-    """LLM 输出无法解析时降级为 act（空 tasks）。"""
+def test_planner_unparseable_falls_back_to_chat(monkeypatch):
+    """LLM 输出无法解析 → 默认 act → 无合法 tasks → 降级为 chat（友好回复，不崩条件边）。"""
     monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
     monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
 
@@ -216,12 +216,12 @@ def test_planner_defaults_to_act_on_unparseable(monkeypatch):
     node = graph_mod._make_planner_node(llm)
     out = node(_planner_state("sx", "???"))
 
-    assert out["route"] == "act"
+    assert out["route"] == "chat"
     assert out["planned_tasks"] == []
 
 
-def test_planner_defaults_to_act_on_unknown_route(monkeypatch):
-    """JSON 合法但 route 不在已知值时，降级为 act，不让条件边崩溃。"""
+def test_planner_unknown_route_falls_back_to_chat(monkeypatch):
+    """route 不在已知值且 tasks 为空 → 默认 act → 降级为 chat，不让条件边崩溃。"""
     monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
     monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
 
@@ -229,7 +229,7 @@ def test_planner_defaults_to_act_on_unknown_route(monkeypatch):
     node = graph_mod._make_planner_node(llm)
     out = node(_planner_state("su", "???"))
 
-    assert out["route"] == "act"
+    assert out["route"] == "chat"
     assert out["planned_tasks"] == []
 
 
