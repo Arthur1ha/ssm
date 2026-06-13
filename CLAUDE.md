@@ -101,10 +101,11 @@ ssm/
 | 硬件 | GPIO | 状态 |
 |------|------|------|
 | WS2812 灯环 | GPIO4 | 已接 |
-| 蜂鸣器（无源） | GPIO5 | 未接（`BUZZER_ENABLED=False`） |
 | 光线传感器 | GPIO34 | 已接（ADC 模拟） |
-| 红外传感器 | GPIO19 | 未接 |
+| 红外传感器 | GPIO19 | 未接（`UNIT_CONFIGS` 有条目，探测缺席不发 manifest） |
 | 声音传感器 | GPIO15 | 已接 |
+
+> 注：蜂鸣器在 `config.py` 中无任何条目（既未接线也无配置），故不在此表。
 
 ---
 
@@ -117,7 +118,7 @@ ssm/
 | ESP32 agent ID | `{device_id}_{unit}` | `esp32_desk_led` |
 | MQTT topic | `ssm/agents/{unit_id}/{type}` | `ssm/agents/esp32_desk_led/state` |
 | Python 变量/函数 | `snake_case` | `probe_digital`, `ism_light` |
-| MicroPython 常量 | `UPPER_SNAKE` | `BUZZER_PIN`, `UNIT_CONFIGS` |
+| MicroPython 常量 | `UPPER_SNAKE` | `WS2812_PIN`, `UNIT_CONFIGS` |
 | LangGraph 节点 | `{role}_node` | `planner_node`, `evaluator_node` |
 
 ### MicroPython 特定注意事项
