@@ -72,63 +72,6 @@ class ESP32Agent:
         t = threading.Thread(target=self._loop, daemon=True, name="ESP32Agent")
         t.start()
 
-    async def run_intent(self, session_id: str, goal: str, device_ids: list) -> dict:
-        device_context = []
-        for device_id in device_ids:
-            manifest = self._state.get_manifest(device_id)
-            if manifest:
-                caps = manifest.get("capabilities", [])
-                device_context.append(
-                    f"{device_id}（能力：{json.dumps(caps, ensure_ascii=False)}）"
-                )
-
-        if not device_context:
-            registry = self._state.get_capability_registry()
-            seen = set()
-            for uids in registry.values():
-                for uid in uids:
-                    if uid not in seen:
-                        seen.add(uid)
-                        m = self._state.get_manifest(uid)
-                        if m:
-                            device_context.append(
-                                f"{uid}（能力：{json.dumps(m.get('capabilities', []), ensure_ascii=False)}）"
-                            )
-
-        device_str = "\n".join(device_context) if device_context else "无可用设备"
-
-        prompt = (
-            f"你是 ESP32 设备控制智能体。根据目标生成 MQTT 控制指令列表。\n\n"
-            f"目标：{goal}\n"
-            f"可用设备：\n{device_str}\n\n"
-            f"直接输出 JSON 数组，不含代码块或解释，每项包含 device_id、action、params。\n"
-            f"action 可选：SET_STATE（params: {{state: BRIGHT|DIM|OFF}}）、"
-            f"SET_COLOR（params: {{r,g,b,brightness 0-255}}）、PLAY（params: {{pattern: NOTIFY|ALERT}}）\n"
-            f"示例：[{{\"device_id\": \"esp32_desk_led\", \"action\": \"SET_COLOR\", "
-            f"\"params\": {{\"r\": 255, \"g\": 200, \"b\": 100, \"brightness\": 180}}}}]"
-        )
-
-        try:
-            resp = await self._llm.ainvoke([HumanMessage(content=prompt)])
-            content = resp.content.strip()
-            content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
-            idx_s, idx_e = content.find("["), content.rfind("]")
-            cmds = json.loads(content[idx_s:idx_e + 1]) if idx_s != -1 else []
-        except Exception as e:
-            logger.warning("run_intent parse error: %s", e)
-            cmds = []
-
-        task_ids = []
-        for i, cmd in enumerate(cmds):
-            if not isinstance(cmd, dict) or "device_id" not in cmd or "action" not in cmd:
-                continue
-            task_id = f"{session_id}_t{i}"
-            _tools.publish_task(cmd["device_id"], task_id, cmd["action"], cmd.get("params", {}), session_id)
-            task_ids.append(task_id)
-            logger.info("intent → %s %s task_id=%s", cmd["device_id"], cmd["action"], task_id)
-
-        return {"task_ids": task_ids, "status": "dispatched"}
-
     def push_sensor_event(self, unit_id: str, payload: dict):
         now = time.time()
         if unit_id.endswith("_sound"):
