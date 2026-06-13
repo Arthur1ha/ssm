@@ -24,7 +24,8 @@
 4. 能力标签字段统一叫 `tags`，禁止 `agent_tag` / `resource_tags`。
 5. 显示名一律放 `name`，禁止靠 `name` 子串反推设备类型（用 `tags`）。
 
-## 已知历史遗留（待收敛）
+## 收敛历史
 
-- ESP32 消息 payload 仍用键名 `agent` 装 unit_id 值，待改为 `unit_id`（固件改动 + 重新烧录）。
-- `config.py` 常量 `AGENT_LIGHT` 等实为 unit、`AGENT_ID` 实为 device_id，待改 `UNIT_*` / `DEVICE_ID`。
+- ✅ slug 已删除，合并进 unit_id。
+- ✅ ESP32 payload 自标识键已由 `agent` 改为 `unit_id`。
+- ✅ `config.py` 常量已由 `AGENT_*` 改为 `UNIT_*` / `DEVICE_ID`。

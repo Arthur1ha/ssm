@@ -3,7 +3,7 @@
 
 import time
 from ism import Trigger
-from config import AGENT_ID, AGENT_LIGHT, AGENT_IR, AGENT_SOUND, AGENT_LED
+from config import DEVICE_ID, UNIT_LIGHT, UNIT_IR, UNIT_SOUND, UNIT_LED
 
 _LED_STATE_TRIG = {
     "OFF":    Trigger.CMD_OFF,
@@ -21,9 +21,9 @@ class TriggerMap:
         self._mqtt       = mqtt
         self._local      = local_rules
 
-        self._led_cmd_topic  = "ssm/agents/{}/command".format(AGENT_LED)
-        self._led_task_pfx   = "ssm/task/{}/".format(AGENT_LED)
-        self._rules_topic    = "ssm/rules/{}".format(AGENT_ID)
+        self._led_cmd_topic  = "ssm/agents/{}/command".format(UNIT_LED)
+        self._led_task_pfx   = "ssm/task/{}/".format(UNIT_LED)
+        self._rules_topic    = "ssm/rules/{}".format(DEVICE_ID)
         self._led_mood_topic = "ssm/agents/desk/led_mood"
 
     # ─────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ class TriggerMap:
                 self._bsm.led_mood_set(mood)
 
         elif topic == "ssm/sys/ping":
-            self._mqtt.publish("ssm/sys/pong/{}".format(AGENT_ID),
+            self._mqtt.publish("ssm/sys/pong/{}".format(DEVICE_ID),
                                {"ts": time.time()})
 
     # ─────────────────────────────────────────────────────────
@@ -101,38 +101,38 @@ class TriggerMap:
         ts = time.time()
 
         if event in ("LIGHT_CHANGED", "LIGHT_HEARTBEAT"):
-            payload = {"agent": AGENT_LIGHT, "value": data["value"],
+            payload = {"unit_id": UNIT_LIGHT, "value": data["value"],
                        "level": data["level"], "ts": ts}
-            self._mqtt.publish("ssm/agents/{}/state".format(AGENT_LIGHT),
+            self._mqtt.publish("ssm/agents/{}/state".format(UNIT_LIGHT),
                                payload, retain=True)
             if event == "LIGHT_CHANGED":
-                self._mqtt.publish("ssm/agents/{}/event".format(AGENT_LIGHT), payload)
+                self._mqtt.publish("ssm/agents/{}/event".format(UNIT_LIGHT), payload)
                 self._local.on_light_event(data["level"])
-            self._mqtt.publish("ssm/agents/{}/report".format(AGENT_LIGHT), {
-                "agent": AGENT_LIGHT, "level": data["level"],
+            self._mqtt.publish("ssm/agents/{}/report".format(UNIT_LIGHT), {
+                "unit_id": UNIT_LIGHT, "level": data["level"],
                 "type": "observation", "ts": ts
             })
             if self._ism_light.state == "ERROR":
                 self._ism_light.transition(Trigger.SENSOR_RECOVERED)
 
         elif event in ("IR_CHANGED", "IR_HEARTBEAT"):
-            payload = {"agent": AGENT_IR, "presence": data["presence"],
+            payload = {"unit_id": UNIT_IR, "presence": data["presence"],
                        "raw": data["raw"], "ts": ts}
-            self._mqtt.publish("ssm/agents/{}/state".format(AGENT_IR),
+            self._mqtt.publish("ssm/agents/{}/state".format(UNIT_IR),
                                payload, retain=True)
             if event == "IR_CHANGED":
-                self._mqtt.publish("ssm/agents/{}/event".format(AGENT_IR), payload)
+                self._mqtt.publish("ssm/agents/{}/event".format(UNIT_IR), payload)
                 self._local.on_ir_event(data["presence"])
-            self._mqtt.publish("ssm/agents/{}/report".format(AGENT_IR), {
-                "agent": AGENT_IR, "presence": data["presence"],
+            self._mqtt.publish("ssm/agents/{}/report".format(UNIT_IR), {
+                "unit_id": UNIT_IR, "presence": data["presence"],
                 "type": "observation", "ts": ts
             })
 
         elif event == "SOUND_DETECTED":
-            payload = {"agent": AGENT_SOUND, "detected": True, "ts": ts}
-            self._mqtt.publish("ssm/agents/{}/event".format(AGENT_SOUND), payload)
-            self._mqtt.publish("ssm/agents/{}/report".format(AGENT_SOUND), {
-                "agent": AGENT_SOUND, "type": "observation", "detected": True, "ts": ts
+            payload = {"unit_id": UNIT_SOUND, "detected": True, "ts": ts}
+            self._mqtt.publish("ssm/agents/{}/event".format(UNIT_SOUND), payload)
+            self._mqtt.publish("ssm/agents/{}/report".format(UNIT_SOUND), {
+                "unit_id": UNIT_SOUND, "type": "observation", "detected": True, "ts": ts
             })
             self._local.on_sound_event()
 
@@ -149,20 +149,20 @@ class TriggerMap:
         action     = p.get("action") if isinstance(p, dict) else None
         params     = p.get("params", {}) if isinstance(p, dict) else {}
         ok = self._exec_led(action, params) if action else False
-        self._mqtt.publish("ssm/result/{}/{}".format(AGENT_LED, task_id), {
+        self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), {
             "task_id": task_id, "session_id": session_id,
             "result": "ok" if ok else "blocked",
             "ism_state": self._ism_led.state, "ts": time.time(),
         })
 
     def _publish_led_state(self):
-        self._mqtt.publish("ssm/agents/{}/state".format(AGENT_LED), {
-            "agent": AGENT_LED, "ism": self._ism_led.state, "ts": time.time()
+        self._mqtt.publish("ssm/agents/{}/state".format(UNIT_LED), {
+            "unit_id": UNIT_LED, "ism": self._ism_led.state, "ts": time.time()
         }, retain=True)
 
     def _publish_led_report(self, cmd, ok):
-        self._mqtt.publish("ssm/agents/{}/report".format(AGENT_LED), {
-            "agent": AGENT_LED, "cmd": cmd,
+        self._mqtt.publish("ssm/agents/{}/report".format(UNIT_LED), {
+            "unit_id": UNIT_LED, "cmd": cmd,
             "result": "ok" if ok else "blocked",
             "ism_state": self._ism_led.state, "ts": time.time()
         })

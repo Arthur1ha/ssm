@@ -14,7 +14,7 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 - `unit_id`：传输单元唯一标识，`{device_id}_{unit}`，如 `esp32_desk_led`。**所有 topic 段、payload 自标识键一律用它。**
 - `device_id`：整机 / 连接，如 `esp32_desk`；仅用于 status / location / rules / pong。
 - `type`：`state`（retained）、`event`、`report`、`command`、`manifest`、`status`。
-- ⚠️ payload 自标识键应为 `unit_id`；ESP32 固件当前仍用旧键 `agent`（待收敛）。
+- payload 自标识键一律为 `unit_id`。
 
 ## 核心 Topic 列表
 
@@ -36,14 +36,14 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/agents/{unit_id}/state` | ESP32 | `{"agent": "...", "ism": "OFF\|BRIGHT\|DIM\|COLOR", "ts": 1234567}` |
+| `ssm/agents/{unit_id}/state` | ESP32 | `{"unit_id": "...", "ism": "OFF\|BRIGHT\|DIM\|COLOR", "ts": 1234567}` |
 
 ### 传感器事件
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/agents/{unit_id}/event` | ESP32 | 光线：`{"agent":"...","value":1800,"level":"NORMAL","ts":...}` |
-| `ssm/agents/{unit_id}/event` | ESP32 | 声音：`{"agent":"...","detected":true,"ts":...}` |
+| `ssm/agents/{unit_id}/event` | ESP32 | 光线：`{"unit_id":"...","value":1800,"level":"NORMAL","ts":...}` |
+| `ssm/agents/{unit_id}/event` | ESP32 | 声音：`{"unit_id":"...","detected":true,"ts":...}` |
 | `ssm/agents/{unit_id}/report` | ESP32 | 同 event，加 `"type":"observation"` |
 
 ### 指令下发

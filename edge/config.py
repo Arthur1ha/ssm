@@ -14,14 +14,14 @@ MQTT_BROKER_IP = "47.116.137.202"  # cloud server public IP
 MQTT_PORT      = 1883
 MQTT_USER      = "ssm_user"        # broker auth username
 MQTT_PASSWORD  = "Wl4sErQrlrpEbm7r"
-AGENT_ID       = "esp32_desk"
+DEVICE_ID       = "esp32_desk"
 FIRMWARE_VER   = "0.2.0"
 
-# Per-unit agent IDs
-AGENT_LIGHT = AGENT_ID + "_light"
-AGENT_IR    = AGENT_ID + "_ir"
-AGENT_SOUND = AGENT_ID + "_sound"
-AGENT_LED   = AGENT_ID + "_led"
+# Per-unit IDs（unit_id = device_id + unit，见 protocol/identifiers.md）
+UNIT_LIGHT = DEVICE_ID + "_light"
+UNIT_IR    = DEVICE_ID + "_ir"
+UNIT_SOUND = DEVICE_ID + "_sound"
+UNIT_LED   = DEVICE_ID + "_led"
 
 # ── Hardware Pins（实际接线）─────────────────────────────────
 WS2812_PIN       = 4    # D4  — WS2812 灯环数据线
@@ -61,7 +61,7 @@ HEARTBEAT_MS         = 60000  # agent keepalive interval
 #   {'type': 'flag',    'enabled': True|False}
 #     执行器或无法探测引脚时使用手动开关
 UNIT_CONFIGS = {
-    AGENT_LIGHT: {
+    UNIT_LIGHT: {
         'agent_type': 'sensor',
         'name': 'ambient_light',
         'probe': {'type': 'adc', 'pin': LIGHT_SENSOR_PIN, 'min_val': 30},
@@ -71,7 +71,7 @@ UNIT_CONFIGS = {
             'ism_states': ['SAMPLING', 'ERROR'],
         },
     },
-    AGENT_IR: {
+    UNIT_IR: {
         'agent_type': 'sensor',
         'name': 'ir_presence',
         'probe': {'type': 'digital', 'pin': IR_SENSOR_PIN, 'pull': 'down', 'active': 1},
@@ -81,7 +81,7 @@ UNIT_CONFIGS = {
             'ism_states': ['MONITORING', 'ERROR'],
         },
     },
-    AGENT_SOUND: {
+    UNIT_SOUND: {
         'agent_type': 'sensor',
         'name': 'sound',
         # DO 引脚为开漏输出，安静时浮空无法数字探测，改为手动标志位
@@ -91,7 +91,7 @@ UNIT_CONFIGS = {
             'values': ['detected'],
         },
     },
-    AGENT_LED: {
+    UNIT_LED: {
         'agent_type': 'actuator',
         'name': 'ws2812_ring',
         'probe': {'type': 'flag', 'enabled': True},
