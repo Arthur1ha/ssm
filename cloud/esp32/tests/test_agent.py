@@ -269,3 +269,47 @@ class TestBeliefHistory:
         assert isinstance(result, list)
 
 
+class TestAutonomyMode:
+    def test_default_mode_is_reactive(self):
+        assert make_agent().get_autonomy_mode() == "reactive"
+
+    def test_set_mode_manual(self):
+        a = make_agent()
+        a.set_autonomy_mode("manual")
+        assert a.get_autonomy_mode() == "manual"
+
+    def test_set_invalid_mode_raises(self):
+        a = make_agent()
+        with pytest.raises(ValueError):
+            a.set_autonomy_mode("bogus")
+
+    def test_should_act_true_in_reactive(self):
+        assert make_agent()._should_act() is True
+
+    def test_should_act_false_in_manual(self):
+        a = make_agent()
+        a.set_autonomy_mode("manual")
+        assert a._should_act() is False
+
+
+class TestUserHold:
+    def test_no_hold_by_default(self):
+        assert make_agent()._in_user_hold() is False
+
+    def test_mark_user_command_sets_hold(self):
+        a = make_agent()
+        a.mark_user_command("esp32_desk_led")
+        assert a._in_user_hold() is True
+
+    def test_should_act_false_during_hold(self):
+        a = make_agent()
+        a.mark_user_command("esp32_desk_led")
+        assert a._should_act() is False
+
+    def test_hold_expires(self):
+        a = make_agent()
+        a.mark_user_command("esp32_desk_led")
+        a._user_hold_until = time.time() - 1   # 模拟窗口已过期
+        assert a._in_user_hold() is False
+        assert a._should_act() is True
+

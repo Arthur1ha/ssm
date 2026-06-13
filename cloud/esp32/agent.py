@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 from cloud.esp32.state import ESP32State
 from cloud.esp32 import tools as _tools
 
+USER_HOLD_TTL = 300   # 用户/编排器命令后，自主层让位时长（秒）
+_VALID_AUTONOMY_MODES = ("manual", "reactive")
+
 AGENT_PERSONA = """
 你是一个桌面空间智能体，性格设定如下：
 - 说话贱贱的，嘴比较刁，但不失礼貌
@@ -53,6 +56,36 @@ class ESP32Agent:
         self._last_proactive_ts: float = 0.0
         self._belief_summary: str = ""
         self._beliefs_since_summary: int = 0
+        self._autonomy_mode: str = "reactive"
+        self._user_hold_until: float = 0.0
+
+    def get_autonomy_mode(self) -> str:
+        """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""
+        return self._autonomy_mode
+
+    def set_autonomy_mode(self, mode: str) -> None:
+        """切换自主模式；非法值抛 ValueError。"""
+        if mode not in _VALID_AUTONOMY_MODES:
+            raise ValueError(f"未知自主模式: {mode}")
+        self._autonomy_mode = mode
+        logger.info("autonomy mode → %s", mode)
+
+    def mark_user_command(self, unit_id: str) -> None:
+        """收到非自身发出的命令时调用，开启自主层让位窗口。"""
+        self._user_hold_until = time.time() + USER_HOLD_TTL
+        logger.info("user command on %s → 自主层让位 %ds", unit_id, USER_HOLD_TTL)
+
+    def _in_user_hold(self) -> bool:
+        """当前是否处于用户让位窗口内。"""
+        return time.time() < self._user_hold_until
+
+    def _should_act(self) -> bool:
+        """自主层本拍是否应主动行动：manual 或处于用户让位窗口时返回 False。"""
+        if self._autonomy_mode == "manual":
+            return False
+        if self._in_user_hold():
+            return False
+        return True
 
     def _make_llm(self):
         model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
@@ -315,6 +348,11 @@ class ESP32Agent:
                 logger.debug("sense: %s", sense)
 
                 sense["proactive_hints"] = self._check_proactive(sense)
+
+                if not self._should_act():
+                    logger.debug("autonomy gated (mode=%s hold=%s), skip self-action",
+                                 self._autonomy_mode, self._in_user_hold())
+                    continue
 
                 self._set_led_mood("thinking")
                 tool_calls = self._reason(sense)
