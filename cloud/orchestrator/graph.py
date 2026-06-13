@@ -123,9 +123,12 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"可用智能体：\n{agents_str}\n\n"
         f"分类规则：\n"
         f"1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
-        f"2. 如果用户宣布开始某项活动（如'我要工作了'、'开始学习'、'准备睡觉'）且当前环境状态需要调整（如灯光过暗/过亮）→ route=\"act\"，主动规划合适的任务。\n"
+        f"2. 如果用户宣布到场/离开/开始某项活动（如'我回来了'、'我要工作了'、'开始学习'、'准备睡觉'、'我走了'）→ route=\"act\"，同时规划所有相关任务：\n"
+        f"   ① 若灯光/环境状态需要调整，加入灯光任务；\n"
+        f"   ② 若 Go2 机器狗在线，加入 go2_chat 任务（params.message 为体现机器狗性格的自然中文回应，如问候/互动，简洁有趣）。\n"
         f"3. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
-        f"4. 其他（问候、闲聊、纯问答、不明确指向某设备且环境无需调整）→ route=\"chat\"，输出 answer 字符串。\n\n"
+        f"4. 其他（纯问答、闲聊、环境无需调整且无明确设备指向）→ route=\"chat\"，输出 answer 字符串。\n\n"
+        f"重要：tasks 数组可同时包含多个智能体；go2_chat 的 params 必须含 message 字段（自然中文，体现机器狗性格）。\n"
         f"act 校验：unit_id 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
         f"找不到合适的 unit_id/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
@@ -350,7 +353,8 @@ def _make_dispatcher_node():
                 endpoint = card.get("transport", {}).get("endpoint", "")
                 body = {
                     "session_id": session_id,
-                    "message":    skill.get("name", "") + ": " + json.dumps(task["params"], ensure_ascii=False),
+                    "message":    (task["params"].get("message")
+                                   or skill.get("name", "") + ": " + json.dumps(task["params"], ensure_ascii=False)),
                     "skill_id":   task["skill_id"],
                     "params":     task["params"],
                 }
