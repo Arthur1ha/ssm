@@ -48,6 +48,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
             ("ssm/agents/+/event",  0),
             ("ssm/agents/+/report", 0),
             ("ssm/result/+/+",      0),
+            ("ssm/task/+/+",        0),
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
@@ -84,6 +85,14 @@ def _on_esp32_message(client, userdata, msg):
         task_id = parts[3]
         if isinstance(payload, dict):
             _esp32_state.store_task_result(task_id, payload)
+
+    elif len(parts) == 4 and parts[1] == "task":
+        # 识别"用户/编排器对设备的命令"（排除灯智能体自身的 agent_auto 任务），
+        # 触发自主层让位窗口，避免自主调光立刻翻掉用户设置。
+        if isinstance(payload, dict) and payload.get("session_id") not in (None, "agent_auto", "auto"):
+            agent = esp32_agent_mod.get_agent()
+            if agent:
+                agent.mark_user_command(parts[2])
 
 
 @asynccontextmanager
