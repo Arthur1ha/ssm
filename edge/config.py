@@ -63,7 +63,7 @@ HEARTBEAT_MS         = 60000  # agent keepalive interval
 UNIT_CONFIGS = {
     UNIT_LIGHT: {
         'agent_type': 'sensor',
-        'name': 'ambient_light',
+        'name': '光敏传感器',
         'probe': {'type': 'adc', 'pin': LIGHT_SENSOR_PIN, 'min_val': 30},
         'manifest': {
             'tags': ['light_level'],
@@ -73,7 +73,7 @@ UNIT_CONFIGS = {
     },
     UNIT_IR: {
         'agent_type': 'sensor',
-        'name': 'ir_presence',
+        'name': '红外传感器',
         'probe': {'type': 'digital', 'pin': IR_SENSOR_PIN, 'pull': 'down', 'active': 1},
         'manifest': {
             'tags': ['presence'],
@@ -83,7 +83,7 @@ UNIT_CONFIGS = {
     },
     UNIT_SOUND: {
         'agent_type': 'sensor',
-        'name': 'sound',
+        'name': '声音传感器',
         # DO 引脚为开漏输出，安静时浮空无法数字探测，改为手动标志位
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
@@ -93,7 +93,7 @@ UNIT_CONFIGS = {
     },
     UNIT_LED: {
         'agent_type': 'actuator',
-        'name': 'ws2812_ring',
+        'name': '智能灯',
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
             'slug': 'desk-lamp',
