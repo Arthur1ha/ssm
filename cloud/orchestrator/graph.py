@@ -160,8 +160,11 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"act 校验：unit_id 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
         f"找不到合适的 unit_id/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
+        f"★ act 时附带 ack 字段：一句管家口吻、温暖简短的【即时确认】，表示你已领会用户意图、这就去张罗"
+        f"（在动作执行前先说给用户，让 ta 立刻收到回应）。例：用户'我回来了' → "
+        f"ack='欢迎回来，我这就安排大家为你接风～'。ack 是开场,不要把执行结果写进去（结果由收尾语负责）。\n\n"
         f"输出格式（四选一，直接输出 JSON，不含代码块或解释）：\n"
-        f'- act:         {{"route": "act", "tasks": [{{"unit_id": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
+        f'- act:         {{"route": "act", "ack": "...", "tasks": [{{"unit_id": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
         f'- chat:        {{"route": "chat", "answer": "..."}}\n'
         f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{"tag": "light_level|presence|sound", "event": "..."}}, "action": {{"tag": "lighting", "cmd": "SET_STATE", "params": {{...}}}}}}}}'
     )
@@ -292,6 +295,13 @@ def _make_planner_node(llm):
         for i, t in enumerate(tasks):
             logger.info("[Planner]   [%d] %s → %s  params=%s",
                         i, t["unit_id"], t["skill_id"], json.dumps(t["params"], ensure_ascii=False))
+
+        # 即时确认：Planner 一领会意图就先回一句开场白（动作执行前），
+        # 让用户立刻收到管家回应；最终结果由 Responder 收尾。
+        ack = (out.get("ack") or "").strip()
+        if ack:
+            _t.do_publish_feedback(session_id, "ack", ack)
+            logger.info("[Planner] ack → %s", ack)
         return {**state, "route": "act", "planned_tasks": tasks, "early_exit": False}
 
     return planner_node

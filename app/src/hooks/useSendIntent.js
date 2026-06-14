@@ -53,6 +53,15 @@ function useSendIntent() {
           onMessage?.('操作超时，设备可能无响应');
         }, 40000);
         setThinkingText(stage === 'planning' ? pick(PLANNING_TEXTS) : pick(EXECUTING_TEXTS));
+      } else if (stage === 'ack') {
+        // Planner 的即时开场白：先上屏一句气泡，本轮还没结束，thinking 继续
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          done();
+          onMessage?.('操作超时，设备可能无响应');
+        }, 40000);
+        onMessage?.(msg);
+        setThinkingText(pick(EXECUTING_TEXTS));
       } else if (stage === 'pending_rule' && rule) {
         clearTimeout(timeoutId);
         done();

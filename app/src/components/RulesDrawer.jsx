@@ -56,7 +56,7 @@ function RulesDrawer({ open, onClose }) {
 
         {/* RulesScreen 内容 */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          <RulesScreen embedded={true} onRulesChange={setRules}/>
+          <RulesScreen embedded={true} onRulesChange={setRules} open={open}/>
         </div>
       </div>
     </>

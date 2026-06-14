@@ -1,6 +1,6 @@
 const { useState: useStateR, useEffect: useEffectR } = React;
 
-function RulesScreen({ embedded = false, onRulesChange }) {
+function RulesScreen({ embedded = false, onRulesChange, open }) {
   const [rules, setRules] = useStateR([]);
   const [pendingDelete, setPendingDelete] = useStateR(null); // rule_id | null
 
@@ -30,6 +30,7 @@ function RulesScreen({ embedded = false, onRulesChange }) {
   };
 
   useEffectR(() => { load(); }, []);
+  useEffectR(() => { if (open) load(); }, [open]);
 
   const handleDelete = async (rule_id) => {
     await fetch(`/api/rules/${rule_id}`, { method: 'DELETE' });
