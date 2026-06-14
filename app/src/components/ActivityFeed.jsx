@@ -45,14 +45,19 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
           );
         }
         if (e.type === 'event') {
+          /* 设备状态变化：居中的低存在感小药丸，明显区别于左右对话气泡，不抢戏 */
           return (
-            <div key={i} style={{ marginBottom: 6, padding: '0 4px' }}>
+            <div key={i} style={{ display: 'flex', justifyContent: 'center', marginBottom: 8 }}>
               <span style={{
-                fontSize: 11, color: 'var(--color-text-dim)',
-                fontFamily: 'var(--font-mono)',
+                fontSize: 10.5, color: 'var(--color-text-dim)',
+                fontFamily: 'var(--font-mono)', letterSpacing: '0.02em',
+                background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+                borderRadius: 999, padding: '3px 10px', opacity: 0.85,
               }}>
-                {new Date(e.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-                {'  '}{e.text}
+                {e.text}
+                <span style={{ marginLeft: 6, opacity: 0.6 }}>
+                  {new Date(e.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                </span>
               </span>
             </div>
           );

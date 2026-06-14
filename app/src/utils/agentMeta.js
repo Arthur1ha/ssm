@@ -33,7 +33,10 @@ function getStateLabel(agent, unitData) {
   const s    = (unitData[uid] || {}).state || {};
   switch (agentKind(agent)) {
     case 'robot':  return s.ism || '待命';
-    case 'led':    return s.ism || (s.state === 'OFF' ? '已关闭' : '待命');
+    case 'led': {
+      const map = { OFF: '待命', DIM: '微亮', BRIGHT: '亮灯', COLOR: '彩色', BLINK: '闪烁中' };
+      return map[s.ism] || '待命';
+    }
     case 'buzzer': return s.ism || '待命';
     case 'ir':     return s.presence !== undefined ? (s.presence ? '有人' : '无人') : '监测中';
     case 'sound':  return s.detected ? '检测到声音' : '静默';
@@ -48,7 +51,7 @@ function getSensorReading(agent, unitData) {
   const s   = d.state || d.event || {};
   switch (agentKind(agent)) {
     case 'light': {
-      const map = { DARK: ['暗', '#6B6CFF'], DIM: ['微亮', '#7EE8A2'], NORMAL: ['正常', '#C8FF3E'], BRIGHT: ['强光', '#FFD060'] };
+      const map = { DARK: ['暗', '#6B6CFF'], DIM: ['微亮', '#7EE8A2'], NORMAL: ['明亮', '#C8FF3E'], BRIGHT: ['强光', '#FFD060'] };
       const [label, color] = map[s.level] || ['...', 'rgba(255,255,255,0.25)'];
       return { value: label, color };
     }
@@ -60,7 +63,7 @@ function getSensorReading(agent, unitData) {
       const recentDetect = ev.detected && (Date.now() / 1000 - (ev.ts || 0) < 5);
       return recentDetect
         ? { value: '检测到声音', color: '#E26BFF' }
-        : { value: '静默',       color: 'rgba(255,255,255,0.25)' };
+        : { value: '暂无声音',     color: 'rgba(226,107,255,0.55)' };
     }
     default:
       return { value: '...', color: 'rgba(255,255,255,0.25)' };
@@ -68,12 +71,7 @@ function getSensorReading(agent, unitData) {
 }
 
 function isAgentActive(agent, unitData) {
-  const uid = agent.unit_id;
-  const s   = (unitData[uid] || {}).state || {};
   switch (agentKind(agent)) {
-    case 'led':   return s.ism && s.ism !== 'OFF' && s.ism !== 'IDLE';
-    case 'ir':    return !!s.detected;
-    case 'sound': return !!s.detected;
-    default:      return true;
+    default: return true;
   }
 }

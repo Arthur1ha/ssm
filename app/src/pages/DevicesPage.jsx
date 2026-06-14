@@ -1,7 +1,7 @@
 /* DevicesScreen — 主屏设备分组列表 */
 function DevicesScreen({ agents, unitData }) {
   const { useState: useStateD } = React;
-  const [sensorsOpen, setSensorsOpen] = useStateD(true);
+  const [sensorsOpen, setSensorsOpen] = useStateD(false);
 
   const agentDevices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
   const sensors      = agents.filter(a => a.agent_type !== 'robot' && a.agent_type !== 'actuator');

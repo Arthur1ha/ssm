@@ -1,5 +1,5 @@
 // Service Worker — network-first for app files, cache for offline fallback
-const CACHE = 'ssm-v10';
+const CACHE = 'ssm-v12';
 
 // 只预缓存真正稳定的外壳资源
 const PRECACHE = [
@@ -17,9 +17,10 @@ self.addEventListener('activate', e => {
     e.waitUntil(
         caches.keys().then(keys =>
             Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-        )
+        ).then(() => self.clients.claim())
+          .then(() => self.clients.matchAll({ type: 'window' }))
+          .then(clients => clients.forEach(c => c.postMessage({ type: 'SW_UPDATED' })))
     );
-    self.clients.claim();
 });
 
 self.addEventListener('fetch', e => {
@@ -28,9 +29,9 @@ self.addEventListener('fetch', e => {
 
     // 所有同源请求：先网络，失败再用缓存
     e.respondWith(
-        fetch(e.request)
+        fetch(new Request(e.request, { cache: 'no-store' }))
             .then(res => {
-                // 成功拿到网络响应，顺手更新缓存
+                // 成功拿到网络响应，顺手更新缓存（离线兜底用）
                 if (res && res.status === 200 && res.type === 'basic') {
                     const clone = res.clone();
                     caches.open(CACHE).then(c => c.put(e.request, clone));
