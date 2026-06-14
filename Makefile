@@ -27,6 +27,7 @@ endef
 broker:
 	@mkdir -p $(LOG_DIR)/broker
 	@pkill -f "[m]osquitto" || true
+	@sleep 1
 	@SSM_DIR=$(SSM_DIR) envsubst < infra/broker/mosquitto.conf.tmpl > $(BROKER_CONF)
 	mosquitto -c $(BROKER_CONF) -d
 	@echo "Broker started: TCP :1883  WS :9001"
@@ -43,7 +44,7 @@ api:
 orchestrator:
 	@while true; do \
 		PYTHONPATH=$(SSM_DIR) uv run python -u cloud/orchestrator/main.py; \
-		echo "[`date '+%H:%M:%S'`] Orchestrator 退出，3 秒后自动重启... (Ctrl+C 停止)"; \
+		echo "[`date '+%Y-%m-%d %H:%M:%S'`] Orchestrator 退出，3 秒后自动重启... (Ctrl+C 停止)"; \
 		sleep 3; \
 	done
 
@@ -52,10 +53,10 @@ orchestrator-bg:
 
 # ── PWA ──────────────────────────────────────────────────────
 pwa:
-	uv run python -m http.server 8081 --directory app
+	uv run python app/serve.py
 
 pwa-bg:
-	$(call bg,[h]ttp.server 8081,uv run python -m http.server 8081 --directory app,pwa)
+	$(call bg,[h]ttp.server 8081,uv run python app/serve.py,pwa)
 
 # ── Cloudflare Tunnel ────────────────────────────────────────
 tunnel:
@@ -71,13 +72,13 @@ stop:
 	@pkill -9 -f "[m]osquitto"                || true
 	@pkill -9 -f "[u]vicorn cloud.api.main"   || true
 	@pkill -9 -f "cloud/orchestrator/main.py" || true
-	@pkill -9 -f "[h]ttp.server 8081"         || true
+	@pkill -9 -f "[a]pp/serve.py"             || true
 	@pkill -9 -f "[c]loudflared"              || true
 	@echo "All SSM services stopped."
 
 # ── 工具 ─────────────────────────────────────────────────────
 ps:
-	@pgrep -a -f "mosquitto|uvicorn|http\.server|cloudflared|orchestrator/main\.py" || echo "(none)"
+	@pgrep -a -f "mosquitto|uvicorn|app/serve\.py|cloudflared|orchestrator/main\.py" || echo "(none)"
 
 logs:
 	@echo "=== API ===" && tail -20 logs/api.log 2>/dev/null || echo "(no log)"
@@ -90,8 +91,9 @@ tunnel-url:
 
 trace:
 	@while true; do \
-		mosquitto_sub -h 127.0.0.1 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t "ssm/#" -v; \
-		echo "[`date '+%H:%M:%S'`] MQTT 连接断开，2 秒后重连..."; \
+		mosquitto_sub -h 127.0.0.1 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t "ssm/#" -v \
+			| awk '{ print strftime("%Y-%m-%d %H:%M:%S"), $$0; fflush() }'; \
+		echo "[`date '+%Y-%m-%d %H:%M:%S'`] MQTT 连接断开，2 秒后重连..."; \
 		sleep 2; \
 	done
 

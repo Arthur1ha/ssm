@@ -15,8 +15,8 @@ var AGENT_BUBBLE_COLORS = {
 };
 var AGENT_DISPLAY_NAMES = {
   orchestrator:   '管家',
-  go2:            'Go2',
-  esp32_desk_led: '灯',
+  go2:            'GO2',
+  esp32_desk_led: '智能灯',
 };
 
 function getAgentBubbleColor(agentId) {
