@@ -142,7 +142,7 @@ make api           # 前台启动 FastAPI（端口 8082，--reload）
 make orchestrator  # 前台启动编排器（崩溃自动重启）
 make pwa-bg        # 后台启动 PWA 文件服务（端口 8081）
 make tunnel-bg     # 后台启动 Cloudflare Tunnel HTTPS 隧道
-make tunnel-url    # 查询当前公网地址
+make tunnel-url    # 输出公网地址（https://ssm.eliottxu.top）
 make ps / logs     # 查看进程 / 日志
 ```
 
@@ -163,7 +163,7 @@ mpremote connect <端口> reset
 
 ### 3. 打开手机 PWA
 
-浏览器访问 `make tunnel-url` 输出的公网地址，允许位置权限后即可看到附近设备雷达图。
+浏览器访问 `https://ssm.eliottxu.top`，允许位置权限后即可看到附近设备雷达图。
 
 ## 网络拓扑
 
@@ -171,7 +171,7 @@ mpremote connect <端口> reset
 手机浏览器（HTTPS）
     │
     ▼
-Cloudflare Tunnel（https://xxx.trycloudflare.com）  ← 提供 HTTPS/WSS
+Cloudflare Tunnel（https://ssm.eliottxu.top）  ← 提供 HTTPS/WSS
     │
     ▼ HTTP（端口 8080）
 nginx
@@ -183,7 +183,7 @@ ESP32
     └── TCP 1883 → Mosquitto（直连，无需 TLS）
 ```
 
-PWA 内 MQTT 地址自动切换：HTTPS 访问时用 `wss://{tunnel域名}/mqtt`，HTTP 访问时直连 `ws://47.116.137.202:9001`。
+PWA 内 MQTT 地址自动切换：HTTPS 访问时用 `wss://ssm.eliottxu.top/mqtt`，HTTP 访问时直连 `ws://47.116.137.202:9001`。
 
 ## 数据流示例
 

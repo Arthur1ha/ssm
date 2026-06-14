@@ -30,7 +30,7 @@ BROKER_HOST   = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
 BROKER_PORT   = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 BROKER_USER   = os.getenv("MQTT_USER", "ssm_user")
 BROKER_PASSWD = os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r")
-PC_AGENT_ID   = os.getenv("PC_AGENT_ID", "pc_decision")
+ORCHESTRATOR_ID = os.getenv("ORCHESTRATOR_ID", "cloud_orchestrator")
 
 state = SharedState()
 registry = CardRegistry()   # 编排器进程自有 CardRegistry（MQTT retained 保证与 api 同源）
@@ -58,22 +58,22 @@ def _subscribe_and_announce(client):
     registry.subscribe(client)
     client.publish("ssm/decision/active", "true", retain=True)
     client.publish(
-        f"ssm/agents/{PC_AGENT_ID}/manifest",
+        f"ssm/agents/{ORCHESTRATOR_ID}/manifest",
         json.dumps({
-            "unit_id":    PC_AGENT_ID,
+            "unit_id":    ORCHESTRATOR_ID,
             "agent_type": "decision",
             "name":       "llm_orchestrator",
-            "hw_platform":"pc",
+            "hw_platform":"cloud",
             "topics": {
-                "manifest": f"ssm/agents/{PC_AGENT_ID}/manifest",
-                "state":    f"ssm/agents/{PC_AGENT_ID}/state",
+                "manifest": f"ssm/agents/{ORCHESTRATOR_ID}/manifest",
+                "state":    f"ssm/agents/{ORCHESTRATOR_ID}/state",
             }
         }),
         retain=False,
     )
-    client.publish(f"ssm/agents/{PC_AGENT_ID}/state",
+    client.publish(f"ssm/agents/{ORCHESTRATOR_ID}/state",
                    json.dumps({"ism": "ACTIVE", "ts": time.time()}), retain=False)
-    logger.info("[MQTT] Subscribed and announced as %s", PC_AGENT_ID)
+    logger.info("[MQTT] Subscribed and announced as %s", ORCHESTRATOR_ID)
 
 
 def on_message(client, userdata, msg):
@@ -136,7 +136,7 @@ def on_disconnect(client, userdata, rc):
     logger.info("[MQTT] Disconnected (rc=%s), reconnecting...", rc)
 
 
-mqtt_client = mqtt_lib.Client(client_id=PC_AGENT_ID, clean_session=True)
+mqtt_client = mqtt_lib.Client(client_id=ORCHESTRATOR_ID, clean_session=True)
 mqtt_client.username_pw_set(BROKER_USER, BROKER_PASSWD)
 mqtt_client.will_set("ssm/decision/active", "false", retain=True)
 mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)

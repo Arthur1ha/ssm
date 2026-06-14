@@ -2,8 +2,8 @@
 const { useState, useEffect, useRef } = React;
 
 // LIME 来自 config.js 全局，此处不重复声明
-const EXCL_TYPES = new Set(['decision', 'supervisor']);
-const EXCL_PLAT  = new Set(['pc', 'pwa']);
+const EXCL_TYPES = new Set(['decision']);
+const EXCL_PLAT  = new Set(['cloud']);
 const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
 
 const GO2_STATIC_DEVICE = {
@@ -38,11 +38,24 @@ function App() {
   const agentsRef     = useRef([]);
   const prevStatesRef = useRef({});
   const greetedRef    = useRef(false);
+  const thinkingRef   = useRef(false);
+  const pendingChipsRef = useRef([]);
 
   useEffect(() => { agentsRef.current = agents; }, [agents]);
 
   const appendActivity = (entry) =>
     setActivityLog(prev => [...prev.slice(-19), { ...entry, ts: Date.now() }]);
+
+  /* 命令进行中（thinking）期间到达的设备状态变化先缓存，待这一轮的
+     管家/灯气泡落地后再追加，保证灰色状态条排在气泡之后而非抢到前面。 */
+  useEffect(() => {
+    thinkingRef.current = thinking;
+    if (!thinking && pendingChipsRef.current.length) {
+      const chips = pendingChipsRef.current;
+      pendingChipsRef.current = [];
+      chips.forEach(text => appendActivity({ type: 'event', text }));
+    }
+  }, [thinking]);
 
   /* ── REST 预载：立即获取已知设备，不等 MQTT ── */
   useEffect(() => {
@@ -77,10 +90,19 @@ function App() {
         const merged = prev.map(d => {
           const id = d.unit_id;
           const mqtt = mqttByUnitId.get(id);
-          if (!mqtt) return d;
-          mqttByUnitId.delete(id);
-          if (id === 'go2') return { ...GO2_STATIC_DEVICE, _online: mqtt._online === true };
-          return { ...d, ...mqtt };
+          if (mqtt) {
+            mqttByUnitId.delete(id);
+            if (id === 'go2') return { ...GO2_STATIC_DEVICE, _online: mqtt._online === true };
+            return { ...d, ...mqtt };
+          }
+          // go2 只发 card+status、不发 manifest，故没 agent_type、被上面的过滤丢掉，
+          // 不会进 mqttByUnitId。但它的在线状态仍要实时同步到已有卡片，
+          // 否则上线/掉线后卡片不刷新（必须手动刷 PWA）。
+          const reg = registry.get(id);
+          if (reg && reg._online !== undefined && (reg._online === true) !== (d._online === true)) {
+            return { ...d, _online: reg._online === true };
+          }
+          return d;
         });
         // 追加 MQTT 报告但 REST 列表里没有的新设备
         for (const a of mqttByUnitId.values()) merged.push(a);
@@ -108,7 +130,10 @@ function App() {
             if (prevStatesRef.current[uid] !== undefined) {
               const agent = agentsRef.current.find(a => (a.unit_id) === uid);
               const name  = agent?.name || uid;
-              appendActivity({ type: 'event', text: `${name} → ${ism}` });
+              const text  = `${name} → ${ism}`;
+              /* turn 进行中先缓存，turn 结束（thinking→false）后由上面的 effect 追加 */
+              if (thinkingRef.current) pendingChipsRef.current.push(text);
+              else appendActivity({ type: 'event', text });
             }
             prevStatesRef.current[uid] = ism;
           }

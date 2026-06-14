@@ -105,9 +105,9 @@ class CardRegistry:
             try:
                 data = json.loads(raw)
                 # 系统/监控节点不参与编排
-                if data.get("agent_type") in ("supervisor", "decision"):
+                if data.get("agent_type") == "decision":
                     return
-                if data.get("hw_platform") in ("pwa", "pc"):
+                if data.get("hw_platform") == "cloud":
                     return
                 card = build_card_from_manifest(data)
                 with self._lock:
