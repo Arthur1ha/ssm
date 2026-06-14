@@ -27,10 +27,6 @@ def publish_speech(text: str, priority: str = "normal"):
     _mqtt.publish("ssm/agents/esp32_desk_led/speech", json.dumps(payload, ensure_ascii=False))
 
 
-def publish_led_mood(mood: str):
-    _mqtt.publish("ssm/agents/esp32_desk_led/led_mood", json.dumps({"mood": mood}, ensure_ascii=False))
-
-
 def publish_thought(text: str, unit_id: str = "esp32_desk_led"):
     """发布智能体的"心声"台词，PWA 用 ssm/agents/+/thought 通配渲染。
 

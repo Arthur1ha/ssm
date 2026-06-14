@@ -24,7 +24,7 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
                 "r":          {"type": "integer", "minimum": 0, "maximum": 255, "description": "红色通道"},
                 "g":          {"type": "integer", "minimum": 0, "maximum": 255, "description": "绿色通道"},
                 "b":          {"type": "integer", "minimum": 0, "maximum": 255, "description": "蓝色通道"},
-                "brightness": {"type": "integer", "minimum": 0, "maximum": 100,  "description": "亮度百分比"},
+                "brightness": {"type": "integer", "minimum": 0, "maximum": 255,  "description": "亮度，0-255 整数（与硬件量纲一致）"},
             },
         },
         "invoke": {"action": "SET_COLOR"},

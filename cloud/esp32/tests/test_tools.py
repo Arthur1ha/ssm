@@ -32,20 +32,6 @@ class TestPublishTask:
         assert mqtt.publish.call_args[1].get("qos") == 1
 
 
-class TestPublishLedMood:
-    def test_publishes_to_led_mood_topic(self):
-        mqtt = make_mock_mqtt()
-        tools.publish_led_mood("thinking")
-        topic = mqtt.publish.call_args[0][0]
-        assert topic == "ssm/agents/esp32_desk_led/led_mood"
-
-    def test_payload_contains_mood(self):
-        mqtt = make_mock_mqtt()
-        tools.publish_led_mood("idle")
-        payload = json.loads(mqtt.publish.call_args[0][1])
-        assert payload["mood"] == "idle"
-
-
 class TestPublishThought:
     def test_publishes_to_thought_topic(self):
         mqtt = make_mock_mqtt()

@@ -56,8 +56,9 @@ class ESP32Agent:
         self._last_proactive_ts: float = 0.0
         self._belief_summary: str = ""
         self._beliefs_since_summary: int = 0
-        self._autonomy_mode: str = "reactive"
+        self._autonomy_mode: str = "manual"   # 默认手动：连上不自动控灯，reactive 需显式开启
         self._user_hold_until: float = 0.0
+        self._last_reason_sig: tuple | None = None   # 上次问 LLM 时的情境签名（实质变化门）
 
     def get_autonomy_mode(self) -> str:
         """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""
@@ -68,6 +69,8 @@ class ESP32Agent:
         if mode not in _VALID_AUTONOMY_MODES:
             raise ValueError(f"未知自主模式: {mode}")
         self._autonomy_mode = mode
+        if mode == "reactive":
+            self._last_reason_sig = None   # 切回自主时清签名，立刻按当前情境评估一次
         logger.info("autonomy mode → %s", mode)
 
     def mark_user_command(self, unit_id: str) -> None:
@@ -310,9 +313,6 @@ class ESP32Agent:
         for call in tool_calls:
             self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
 
-    def _set_led_mood(self, mood: str):
-        _tools.publish_led_mood(mood)
-
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
         if now - self._last_proactive_ts < 600:
@@ -393,11 +393,17 @@ class ESP32Agent:
                                  self._autonomy_mode, self._in_user_hold())
                     continue
 
-                self._set_led_mood("thinking")
+                # 实质变化门：只有慢变量（光照档位 / 时段）变了才值得问 LLM。
+                # 声音等高频噪声不进签名，避免反复花配额让 LLM 决定"不用动灯"。
+                sig = (sense["light_level"], sense["time_period"])
+                if sig == self._last_reason_sig:
+                    logger.debug("no material change %s, skip LLM", sig)
+                    continue
+
                 tool_calls = self._reason(sense)
                 if tool_calls is None:
-                    self._set_led_mood("idle")
                     continue
+                self._last_reason_sig = sig   # 这个情境已评估过，下次相同则跳过
 
                 logger.info("tool_calls (%d): %s", len(tool_calls), json.dumps(tool_calls, ensure_ascii=False))
 
@@ -415,15 +421,8 @@ class ESP32Agent:
                     self._beliefs_since_summary = 0
 
                 if tool_calls:
-                    has_speech = any(c["tool"] == "speak" for c in tool_calls)
-                    if has_speech:
-                        self._set_led_mood("speaking")
                     led_device = self._find_led_device()
                     self._execute(tool_calls, led_device)
-
-                self._set_led_mood("done")
-                time.sleep(2)
-                self._set_led_mood("idle")
 
             except Exception as e:
                 logger.error("loop error: %s", e, exc_info=True)

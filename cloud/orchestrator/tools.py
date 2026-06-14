@@ -66,7 +66,10 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     抛出的异常由调用方（Dispatcher）捕获并记为 timeout/error。
     """
     url = endpoint if endpoint.startswith("http") else f"{GO2_API_BASE}{endpoint}"
-    resp = requests.post(url, json=body, timeout=timeout)
+    # HTTP 设备走本地 API（127.0.0.1），显式绕过系统代理，
+    # 否则 HTTP_PROXY 会把 localhost 请求塞进代理回环失败 → 502 Bad Gateway。
+    resp = requests.post(url, json=body, timeout=timeout,
+                         proxies={"http": None, "https": None})
     resp.raise_for_status()
     try:
         return resp.json()
