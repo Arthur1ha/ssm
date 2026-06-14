@@ -21,9 +21,8 @@ class TriggerMap:
         self._mqtt       = mqtt
         self._local      = local_rules
 
-        self._led_task_pfx   = "ssm/task/{}/".format(UNIT_LED)
-        self._rules_topic    = "ssm/rules/{}".format(DEVICE_ID)
-        self._led_mood_topic = "ssm/agents/{}/led_mood".format(UNIT_LED)
+        self._led_task_pfx = "ssm/task/{}/".format(UNIT_LED)
+        self._rules_topic  = "ssm/rules/{}".format(DEVICE_ID)
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
@@ -40,11 +39,6 @@ class TriggerMap:
         elif topic == self._rules_topic:
             if isinstance(payload, list):
                 self._local.load_rules(payload)
-
-        elif topic == self._led_mood_topic:
-            if isinstance(payload, dict):
-                mood = payload.get("mood", "idle")
-                self._bsm.led_mood_set(mood)
 
     # ─────────────────────────────────────────────────────────
     #  本地兜底规则直接调用（不经 MQTT 自环）：执行 LED 命令

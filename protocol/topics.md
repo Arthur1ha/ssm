@@ -67,5 +67,4 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
 | `ssm/agents/esp32_desk_led/speech` | Cloud | `{"text":"...","priority":"normal","audio":"base64..."}` |
-| `ssm/agents/esp32_desk_led/led_mood` | Cloud | `{"mood":"thinking\|speaking\|done\|idle"}` |
 | `ssm/agents/{unit_id}/thought` | Cloud | `{"text":"...","type":"think\|act"}`；灯用 `esp32_desk_led`，机器狗用 `go2` |

@@ -60,7 +60,6 @@ mqtt.set_reconnect_callback(on_reconnect)
 mqtt.subscribe("ssm/task/{}/+".format(UNIT_LED))
 mqtt.subscribe("ssm/decision/active")
 mqtt.subscribe("ssm/rules/{}".format(DEVICE_ID))
-mqtt.subscribe("ssm/agents/{}/led_mood".format(UNIT_LED))
 
 mqtt.begin()
 

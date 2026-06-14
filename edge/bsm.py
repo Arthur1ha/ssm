@@ -73,10 +73,6 @@ class BSM:
         self._blink_g     = 255
         self._blink_b     = 255
 
-        # ── LED Mood ──────────────────────────────────────────
-        self._mood       = None
-        self._mood_step  = 0
-        self._mood_last  = 0
 
     # ── Main loop (call every iteration) ─────────────────────
     def tick(self):
@@ -87,7 +83,6 @@ class BSM:
         if PRESENCE.get(UNIT_SOUND):
             self._tick_sound(now)
         self._tick_blink(now)
-        self._tick_mood(now)
 
     # ─────────────────────────────────────────────────────────
     #  LIGHT SENSOR
@@ -210,7 +205,6 @@ class BSM:
             self._led_brightness = 40
         else:
             return
-        self._mood = None
         self._apply_led()
 
     def led_blink(self, r=255, g=255, b=255, count=3):
@@ -238,53 +232,6 @@ class BSM:
                 self._blinking = False
                 self._event_cb("BLINK_DONE", {})
 
-    # ─────────────────────────────────────────────────────────
-    #  LED MOOD
-    # ─────────────────────────────────────────────────────────
-    def led_mood_set(self, mood):
-        if mood == "idle":
-            self._mood = None
-            self._apply_led()
-            return
-        # Don't override a deliberately OFF state with mood animations
-        if self._led_brightness == 0:
-            return
-        self._mood      = mood
-        self._mood_step = 0
-        self._mood_last = time.ticks_ms()
-
-    def _tick_mood(self, now):
-        if self._mood is None:
-            return
-
-        if self._mood == "thinking":
-            if time.ticks_diff(now, self._mood_last) < 100:
-                return
-            self._mood_last = now
-            self._mood_step = (self._mood_step + 1) % 20
-            s = self._mood_step
-            bri = (5 + s * 5) if s < 10 else (55 - (s - 10) * 5)
-            self._set_raw(0, 0, bri)
-
-        elif self._mood == "speaking":
-            if time.ticks_diff(now, self._mood_last) < 120:
-                return
-            self._mood_last = now
-            self._mood_step += 1
-            if self._mood_step % 2 == 0:
-                bri = 20 + (self._mood_step * 7) % 50
-                self._set_raw(bri, bri, bri)
-            else:
-                self._set_raw(5, 5, 5)
-
-        elif self._mood == "done":
-            if self._mood_step == 0:
-                self._set_raw(200, 200, 200)
-                self._mood_last = now
-                self._mood_step = 1
-            elif self._mood_step == 1 and time.ticks_diff(now, self._mood_last) >= 300:
-                self._mood = None
-                self._apply_led()
 
     def _apply_led(self):
         bri = self._led_brightness / 255.0
