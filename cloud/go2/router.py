@@ -392,10 +392,6 @@ class PatrolRequest(BaseModel):
     stops: list[str]
 
 
-class ObstacleAvoidanceRequest(BaseModel):
-    enabled: bool
-
-
 class LedRequest(BaseModel):
     color: str = "white"
     duration: int = 60
@@ -487,14 +483,6 @@ def nav_state():
     from cloud.go2.navigation.navigator import navigator
     s = navigator.state
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
-
-
-@router.put("/obstacle-avoidance")
-async def set_obstacle_avoidance(req: ObstacleAvoidanceRequest):
-    if not go2.is_connected:
-        raise HTTPException(status_code=503, detail="Go2 未连接")
-    await go2.set_obstacle_avoidance(req.enabled)
-    return {"ok": True, "enabled": req.enabled}
 
 
 @router.put("/led")

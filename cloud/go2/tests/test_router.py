@@ -73,11 +73,6 @@ def test_nav_state_returns_mode(client):
     assert "mode" in r.json()
 
 
-def test_obstacle_avoidance_400_bad_payload(client):
-    r = client.put("/api/go2/obstacle-avoidance", json={})
-    assert r.status_code == 422
-
-
 def test_led_400_unknown_color(client):
     import cloud.go2.connection as conn_module
     conn_module.go2.is_connected = True

@@ -168,9 +168,3 @@ def test_balance_stand_raises_when_not_connected():
     conn = Go2Connection()
     with pytest.raises(RuntimeError, match="not connected"):
         asyncio.run(conn.balance_stand())
-
-
-def test_set_obstacle_avoidance_raises_when_not_connected():
-    conn = Go2Connection()
-    with pytest.raises(RuntimeError, match="not connected"):
-        asyncio.run(conn.set_obstacle_avoidance(True))

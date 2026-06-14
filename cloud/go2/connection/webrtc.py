@@ -188,14 +188,6 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         )
         self.fsm_state = "standing"
 
-    async def set_obstacle_avoidance(self, enabled: bool) -> None:
-        if not self.is_connected or not self._conn:
-            raise RuntimeError("Go2 not connected")
-        await self._conn.datachannel.pub_sub.publish_request_new(
-            RTC_TOPIC["OBSTACLES_AVOID"],
-            {"api_id": 1001, "parameter": {"enable": int(enabled)}},
-        )
-
     async def set_led(self, color: str = "white", duration: int = 60) -> None:
         if color not in _VALID_LED_COLORS:
             raise ValueError(

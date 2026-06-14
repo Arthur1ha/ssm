@@ -214,13 +214,6 @@ def go2_list_locations() -> str:
     )
 
 
-async def go2_set_obstacle_avoidance(enabled: bool) -> str:
-    if not go2.is_connected:
-        return "Go2 未连接"
-    await go2.set_obstacle_avoidance(enabled)
-    return f"内置避障已{'开启' if enabled else '关闭'}"
-
-
 async def go2_set_led(color: str = "white", duration: int = 60) -> str:
     if not go2.is_connected:
         return "Go2 未连接"
@@ -243,7 +236,6 @@ TOOL_FN_MAP = {
     "go2_tag_location":           go2_tag_location,
     "go2_navigate_to":            go2_navigate_to,
     "go2_list_locations":         go2_list_locations,
-    "go2_set_obstacle_avoidance": go2_set_obstacle_avoidance,
     "go2_set_led":                go2_set_led,
 }
 
@@ -258,5 +250,4 @@ TOOL_DESCRIPTIONS = """\
 - go2_tag_location(name): 将当前位置保存为命名地点，供导航使用
 - go2_navigate_to(name): 导航到已保存的命名地点，支持模糊描述
 - go2_list_locations(): 列出所有已保存的命名地点
-- go2_set_obstacle_avoidance(enabled): 开启/关闭 Go2 内置避障（布尔值）
 - go2_set_led(color="white", duration=60): 设置 LED 颜色，支持 white/red/yellow/blue/green/cyan/purple"""
