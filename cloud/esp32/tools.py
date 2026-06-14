@@ -24,11 +24,11 @@ def publish_speech(text: str, priority: str = "normal"):
     audio_b64 = synthesize(text)
     if audio_b64:
         payload["audio"] = audio_b64
-    _mqtt.publish("ssm/agents/desk/speech", json.dumps(payload, ensure_ascii=False))
+    _mqtt.publish("ssm/agents/esp32_desk_led/speech", json.dumps(payload, ensure_ascii=False))
 
 
 def publish_led_mood(mood: str):
-    _mqtt.publish("ssm/agents/desk/led_mood", json.dumps({"mood": mood}, ensure_ascii=False))
+    _mqtt.publish("ssm/agents/esp32_desk_led/led_mood", json.dumps({"mood": mood}, ensure_ascii=False))
 
 
 def publish_thought(text: str, unit_id: str = "esp32_desk_led"):

@@ -3,19 +3,24 @@
 # Suppressed by ssm/decision/active = "true".
 
 import ujson
-from config import UNIT_LED
 
-_LED_CMD        = "ssm/agents/{}/command".format(UNIT_LED)
 _RULES_CACHE    = "rules_cache.json"
 _MAX_RULES      = 10
 
 
 class LocalRules:
-    def __init__(self, mqtt):
-        self._mqtt            = mqtt
+    def __init__(self):
+        self._led_exec        = None   # 由 TriggerMap 注入，规则命中时直接执行
         self._decision_active = False
         self._rules           = []
         self._load_from_file()
+
+    def set_led_executor(self, fn):
+        """注入 LED 执行回调（TriggerMap.exec_command）。
+
+        兜底规则命中时直接调用本地执行口，不再经 MQTT broker 自环。
+        """
+        self._led_exec = fn
 
     def set_decision_active(self, active: bool):
         self._decision_active = active
@@ -79,4 +84,5 @@ class LocalRules:
         return False
 
     def _cmd_led(self, payload):
-        self._mqtt.publish(_LED_CMD, payload)
+        if self._led_exec:
+            self._led_exec(payload)

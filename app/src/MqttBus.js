@@ -23,13 +23,7 @@ class MqttBus extends EventTarget {
             keepalive: 60,
             reconnectPeriod: 3000,
             username: opts.username,
-            password: opts.password,
-            will: {
-                topic: 'ssm/sys/phone_will',
-                payload: 'offline',
-                retain: true,
-                qos: 1
-            }
+            password: opts.password
         });
 
         this._client.on('connect', () => {

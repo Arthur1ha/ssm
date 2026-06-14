@@ -120,8 +120,7 @@ function App() {
 
     const handleConnect = () => {
       setConnected(true);
-      mqttBus.publish('ssm/agents/phone_ui/manifest', '', { retain: true });
-      mqttBus.subscribe('ssm/agents/desk/speech');
+      mqttBus.subscribe('ssm/agents/esp32_desk_led/speech');
       mqttBus.subscribe('ssm/agents/+/thought');
       if (!greetedRef.current) {
         greetedRef.current = true;
@@ -143,7 +142,7 @@ function App() {
       const { audio } = e.detail || {};
       if (audio) playAudioB64(audio);
     };
-    mqttBus.addEventListener('topic:ssm/agents/desk/speech', handleSpeech);
+    mqttBus.addEventListener('topic:ssm/agents/esp32_desk_led/speech', handleSpeech);
 
     /* 多智能体 thought 气泡 */
     const handleThought = (e) => {
@@ -164,7 +163,7 @@ function App() {
       mqttBus.removeEventListener('connect',    handleConnect);
       mqttBus.removeEventListener('disconnect', handleDisconnect);
       mqttBus.removeEventListener('reconnect',  handleReconnect);
-      mqttBus.removeEventListener('topic:ssm/agents/desk/speech', handleSpeech);
+      mqttBus.removeEventListener('topic:ssm/agents/esp32_desk_led/speech', handleSpeech);
       mqttBus.removeEventListener('message', handleThought);
     };
   }, []);

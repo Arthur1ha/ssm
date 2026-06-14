@@ -1,21 +1,20 @@
 /**
  * ISMTracker.js — Tracks current state and events for all agent units.
- * Subscribes to ssm/agents/+/{state,event,report}.
+ * Subscribes to ssm/agents/+/{state,event}.
  * snapshot() returns familiar light/ir/led/buzzer keys by matching unit_id suffix.
  */
 
 class ISMTracker extends EventTarget {
     constructor(bus) {
         super();
-        // { unitId: { state: {...}, event: {...}, report: {...} } }
+        // { unitId: { state: {...}, event: {...} } }
         this._units = {};
 
         bus.subscribe('ssm/agents/+/state');
         bus.subscribe('ssm/agents/+/event');
-        bus.subscribe('ssm/agents/+/report');
 
         bus.onMessage(({ topic, msg }) => {
-            const m = topic.match(/^ssm\/agents\/([^/]+)\/(state|event|report)$/);
+            const m = topic.match(/^ssm\/agents\/([^/]+)\/(state|event)$/);
             if (!m) return;
 
             const [, unitId, msgType] = m;

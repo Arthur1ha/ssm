@@ -47,7 +47,6 @@ def _on_esp32_connect(client, userdata, flags, rc):
         client.subscribe([
             ("ssm/agents/+/state",  0),
             ("ssm/agents/+/event",  0),
-            ("ssm/agents/+/report", 0),
             ("ssm/result/+/+",      0),
             ("ssm/task/+/+",        0),
         ])
@@ -75,7 +74,7 @@ def _on_esp32_message(client, userdata, msg):
         msg_type = parts[3]
         if msg_type == "manifest" and isinstance(payload, dict):
             _esp32_state.on_manifest(unit_id, payload)
-        if msg_type in ("state", "event", "report") and isinstance(payload, dict):
+        if msg_type in ("state", "event") and isinstance(payload, dict):
             _esp32_state.on_agent_msg(unit_id, msg_type, payload)
         if msg_type == "event":
             suffix = unit_id.split("_")[-1]

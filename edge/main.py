@@ -22,7 +22,7 @@ ism_light = ISM(State.SAMPLING,   UNIT_LIGHT, SENSOR_TABLE)
 ism_ir    = ISM(State.MONITORING, UNIT_IR,    SENSOR_TABLE)
 ism_led   = ISM(State.OFF,        UNIT_LED,   LED_TABLE)
 
-local_rules = LocalRules(mqtt)
+local_rules = LocalRules()
 
 bsm = BSM(event_cb=lambda e, d: None)  # placeholder
 
@@ -36,6 +36,8 @@ trigger_map = TriggerMap(
 )
 
 bsm._event_cb = trigger_map.on_bsm_event
+# 本地兜底规则命中时直接走 TriggerMap 执行口（不经 MQTT 自环）
+local_rules.set_led_executor(trigger_map.exec_command)
 
 # ── 重连后重新发布函数 ────────────────────────────────────────
 def on_reconnect():
@@ -55,12 +57,10 @@ def on_reconnect():
 mqtt.set_callback(trigger_map.on_mqtt)
 mqtt.set_reconnect_callback(on_reconnect)
 
-mqtt.subscribe("ssm/agents/{}/command".format(UNIT_LED))
 mqtt.subscribe("ssm/task/{}/+".format(UNIT_LED))
 mqtt.subscribe("ssm/decision/active")
 mqtt.subscribe("ssm/rules/{}".format(DEVICE_ID))
-mqtt.subscribe("ssm/sys/ping")
-mqtt.subscribe("ssm/agents/desk/led_mood")
+mqtt.subscribe("ssm/agents/{}/led_mood".format(UNIT_LED))
 
 mqtt.begin()
 

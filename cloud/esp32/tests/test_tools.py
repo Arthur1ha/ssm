@@ -37,7 +37,7 @@ class TestPublishLedMood:
         mqtt = make_mock_mqtt()
         tools.publish_led_mood("thinking")
         topic = mqtt.publish.call_args[0][0]
-        assert topic == "ssm/agents/desk/led_mood"
+        assert topic == "ssm/agents/esp32_desk_led/led_mood"
 
     def test_payload_contains_mood(self):
         mqtt = make_mock_mqtt()
@@ -51,7 +51,7 @@ class TestPublishThought:
         mqtt = make_mock_mqtt()
         tools.publish_thought("interesting pattern")
         topic = mqtt.publish.call_args[0][0]
-        assert topic == "ssm/agents/desk/thought"
+        assert topic == "ssm/agents/esp32_desk_led/thought"
 
     def test_payload_contains_text(self):
         mqtt = make_mock_mqtt()
@@ -66,7 +66,7 @@ class TestPublishSpeech:
         with patch("cloud.esp32.tts.synthesize", return_value=None):
             tools.publish_speech("你好")
         topic = mqtt.publish.call_args[0][0]
-        assert topic == "ssm/agents/desk/speech"
+        assert topic == "ssm/agents/esp32_desk_led/speech"
 
     def test_payload_includes_audio_when_tts_succeeds(self):
         mqtt = make_mock_mqtt()
@@ -136,14 +136,14 @@ class TestSpeakTool:
         with patch("cloud.esp32.tts.synthesize", return_value=None):
             tools.speak("灯已调暖色")
         topics = [call[0][0] for call in mqtt.publish.call_args_list]
-        assert "ssm/agents/desk/thought" in topics
+        assert "ssm/agents/esp32_desk_led/thought" in topics
 
     def test_speak_thought_payload_contains_text(self):
         mqtt = make_mock_mqtt()
         with patch("cloud.esp32.tts.synthesize", return_value=None):
             tools.speak("行吧，给你暖了")
         thought_calls = [c for c in mqtt.publish.call_args_list
-                         if c[0][0] == "ssm/agents/desk/thought"]
+                         if c[0][0] == "ssm/agents/esp32_desk_led/thought"]
         assert len(thought_calls) == 1
         payload = json.loads(thought_calls[0][0][1])
         assert payload["text"] == "行吧，给你暖了"

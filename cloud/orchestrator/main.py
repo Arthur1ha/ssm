@@ -50,7 +50,6 @@ def _subscribe_and_announce(client):
     client.subscribe([
         ("ssm/agents/+/state",  0),
         ("ssm/agents/+/event",  0),
-        ("ssm/agents/+/report", 0),
         ("ssm/decision/active", 0),
         ("ssm/intent/+",        0),
         ("ssm/result/+/+",      0),
@@ -103,7 +102,7 @@ def on_message(client, userdata, msg):
             state.on_manifest(unit_id, payload)
             return
 
-        if msg_type in ("state", "event", "report") and isinstance(payload, dict):
+        if msg_type in ("state", "event") and isinstance(payload, dict):
             state.on_agent_msg(unit_id, msg_type, payload)
 
         return

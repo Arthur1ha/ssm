@@ -303,7 +303,7 @@ function Go2DevicePage({ onBack }) {
         onAppendRef.current({ role: 'step', agent: 'go2', text: ev.text });
       }
     };
-    mqttBus.subscribe("ssm/agents/go2/thought");
+    // 订阅由 app.jsx 的通配 ssm/agents/+/thought 统一完成，这里只挂监听
     mqttBus.addEventListener(eventType, listener);
     return () => mqttBus.removeEventListener(eventType, listener);
   }, [status]);

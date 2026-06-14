@@ -29,11 +29,8 @@ def publish(mqtt):
                 'manifest': topic,
                 'state':    base + "/state",
                 'event':    base + "/event",
-                'report':   base + "/report",
             },
         }
-        if cfg['agent_type'] == 'actuator':
-            manifest['topics']['command'] = base + "/command"
         manifest.update(cfg.get('manifest', {}))
         mqtt.publish(topic, manifest, retain=True)
         count += 1
