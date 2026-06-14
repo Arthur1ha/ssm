@@ -33,9 +33,10 @@ def _publish_thought(payload: dict) -> None:
         client.publish(_THOUGHT_TOPIC, _json.dumps(payload, ensure_ascii=False))
 
 
-_CURIOSITY_THRESHOLD   = 10   # 3s 无事件 → EXPLORING
-_PERSON_GONE_TIMEOUT   = 30   # 人消失 30s → 回 IDLE
-_SOCIAL_CHECK_INTERVAL = 5    # SOCIAL 状态下每 8s 主动检查
+_CURIOSITY_THRESHOLD   = 10   # 10s 无事件 → EXPLORING
+_PERSON_GONE_TIMEOUT   = 30   # 人体消失 30s（已不用于社交退出，保留备用）
+_SOCIAL_CHECK_INTERVAL = 5    # SOCIAL 状态下每 5s 主动检查
+_ENGAGE_GONE_TIMEOUT   = 3    # 人脸消失 3s → 从 SOCIAL 回 IDLE
 
 
 class MotivationalState(str, Enum):
@@ -51,12 +52,13 @@ class Drive:
     def __init__(self) -> None:
         self._state           = MotivationalState.IDLE
         self._curiosity       = 0
-        self._person_present  = False   # HOG 检测到人体（含远处背景人）
-        self._person_engaging = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
-        self._last_person_ts  = 0.0
-        self._last_action_ts  = 0.0
-        self._social_tick     = 0
-        self.user_interrupt   = False
+        self._person_present   = False   # HOG 检测到人体（含远处背景人）
+        self._person_engaging  = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
+        self._last_person_ts   = 0.0
+        self._last_engaging_ts = 0.0    # 人脸最后一次消失的时间戳（用于 SOCIAL→IDLE 超时判断）
+        self._last_action_ts   = 0.0
+        self._social_tick      = 0
+        self.user_interrupt    = False
         self._task: Optional[asyncio.Task] = None
 
     @property
@@ -102,6 +104,7 @@ class Drive:
             episode_memory.add(EventType.VISION_CHANGE, "检测到面向镜头的人，进入社交模式")
         elif not currently_engaging and self._person_engaging:
             self._person_engaging = False
+            self._last_engaging_ts = time.time()
 
         if frame["changed"] and frame["change_type"] != "none" and not currently_present and not self._person_present:
             episode_memory.add(EventType.VISION_CHANGE, f"视觉变化：{frame['change_type']}")
@@ -119,26 +122,43 @@ class Drive:
             self._social_tick += 1
 
             if self._state == MotivationalState.SOCIAL:
-                if not self._person_present:
-                    if time.time() - self._last_person_ts >= _PERSON_GONE_TIMEOUT:
-                        self._state = MotivationalState.IDLE
-                        self._curiosity = 0
+                # 改动 2：用人脸消失超时（_ENGAGE_GONE_TIMEOUT）替代人体消失超时退出 SOCIAL
+                if (not self._person_engaging and
+                        time.time() - self._last_engaging_ts >= _ENGAGE_GONE_TIMEOUT):
+                    self._state = MotivationalState.IDLE
+                    self._curiosity = 0
                 elif self._social_tick >= _SOCIAL_CHECK_INTERVAL:
                     self._social_tick = 0
                     await self._do_social()
 
             elif self._state == MotivationalState.IDLE:
                 if self._curiosity >= _CURIOSITY_THRESHOLD:
-                    self._state = MotivationalState.EXPLORING
                     self._curiosity = 0
-                    await self._do_explore()
-                    self._state = MotivationalState.IDLE
+                    # 改动 1a：curiosity 达阈值时先看有无人脸，有则直接进 SOCIAL
+                    if self._person_engaging:
+                        self._state = MotivationalState.SOCIAL
+                        self._social_tick = 0
+                    else:
+                        self._state = MotivationalState.EXPLORING
+                        await self._do_explore()
+                        # 改动 1b：探索结束后根据 person_engaging 决定下一状态
+                        if self._person_engaging:
+                            self._state = MotivationalState.SOCIAL
+                            self._social_tick = 0
+                        else:
+                            self._state = MotivationalState.IDLE
 
     async def _do_explore(self) -> None:
         """EXPLORING 状态：LLM 驱动的多步自主探索，最多 15 步，被人打断或用户打断时提前结束。"""
         _MAX_STEPS = 15
         history: list[dict] = []
         logger.info("[Drive] 开始自主探索会话")
+
+        # 改动 3：进入时先检查打断条件，避免不必要的 LLM 调用
+        if self.user_interrupt or self._person_engaging:
+            logger.info("[Drive] 探索进入即被打断（user_interrupt=%s person_engaging=%s），跳过",
+                        self.user_interrupt, self._person_engaging)
+            return
 
         # 进入探索前先观察一次，让第一步决策有视觉上下文
         try:
@@ -437,11 +457,12 @@ class Drive:
         """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
-        self._state           = MotivationalState.IDLE
-        self._curiosity       = 0
-        self._person_present  = False
-        self._person_engaging = False
-        self._task            = asyncio.create_task(self._run_loop())
+        self._state            = MotivationalState.IDLE
+        self._curiosity        = 0
+        self._person_present   = False
+        self._person_engaging  = False
+        self._last_engaging_ts = 0.0
+        self._task             = asyncio.create_task(self._run_loop())
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self) -> None:
