@@ -113,7 +113,13 @@ async def lifespan(app):
     logging.getLogger("uvicorn.access").addFilter(_DropSnapshotLogs())
 
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s", datefmt="%H:%M:%S")
+    # 规范日志格式：年月日 + 时间 + 级别 + logger 名 + 消息
+    _fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    # uvicorn 自带访问/错误日志默认无时间戳，统一套上规范格式
+    for _uvi_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        for _h in logging.getLogger(_uvi_name).handlers:
+            _h.setFormatter(_fmt)
 
     # Go2 日志独立写 go2.log，不再冒泡到 uvicorn/api.log
     _go2_handler = logging.FileHandler(_LOG_DIR / "go2.log")

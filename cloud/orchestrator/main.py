@@ -9,8 +9,8 @@ import logging
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[%(asctime)s] %(message)s",
-    datefmt="%H:%M:%S",
+    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
     force=True,
 )
 logger = logging.getLogger("orchestrator.main")

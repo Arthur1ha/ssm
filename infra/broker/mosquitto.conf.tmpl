@@ -25,6 +25,8 @@ log_type error
 log_type warning
 log_type notice
 log_type information
+# 规范日志时间戳：年月日 + 时间（mosquitto 默认输出 Unix 秒，不可读）
+log_timestamp_format %Y-%m-%d %H:%M:%S
 
 # Connection settings
 max_keepalive 120
