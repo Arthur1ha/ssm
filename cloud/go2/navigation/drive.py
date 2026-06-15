@@ -236,8 +236,9 @@ class Drive:
                 f"本次探索历史：\n{history_str}\n\n"
                 f"可用工具（每个都标注了「何时用」，按当前场景选最合适的一个）：\n"
                 f"  explore_direction → direction: {'/'.join(frontier_mod.DIRECTIONS)}\n"
-                f"      何时用：想往某个方向去看看没去过的区域。优先选★开阔方向，避免朝家具底部、墙角或狭窄通道；\n"
-                f"             返回「路径不通」就立刻改选其他★开阔或○可通行方向。系统会按地图自动算安全目标并导航过去。\n"
+                f"      何时用：【只】从★开阔或○可通行方向里选，绝不朝✗受阻方向（家具底部、墙角、狭窄通道）走。\n"
+                f"             系统自动计算安全目标并导航过去。返回「路径不通」或「建议远观」时，\n"
+                f"             立刻用 go2_observe 远观 + go2_tag_location 标记，然后换★开阔方向，不要重试同一方向。\n"
                 f"  go2_tag_location  → name: 给当前位置起名并记下来\n"
                 f"      何时用：边走边记。走到值得记住的地方就标下来——独特的物体、有趣的角落、显眼的家具、你喜欢的位置等。\n"
                 f"             起个好记的名字（如「窗边」「红椅子旁」）。已知地点里已经有的就别重复标。\n"
@@ -245,12 +246,14 @@ class Drive:
                 f"      何时用：用动作表达情绪。看到喜欢/有趣的东西可以 Hello、Stretch、Dance1/Dance2 撒个欢；\n"
                 f"             累了想歇就 StandDown。这是你表达心情的方式，不必每步都做。\n"
                 f"  go2_observe       → question: 想看清什么\n"
-                f"      何时用：原地想把某处看仔细、或拿不准要不要标记某个东西时。（每次移动到位后系统已自动观察一次，\n"
-                f"             所以只在需要「再凑近仔细看看」时才单独用，别浪费步数。）\n"
+                f"      何时用：想把✗受阻方向的兴趣点看仔细（远观但不走过去），或拿不准是否值得标记时。\n"
+                f"             每次移动到位后系统已自动观察一次，只在「想凑近再看看」时才单独用，别浪费步数。\n"
                 f"  go2_navigate_to   → name: 回到一个已标记的地点\n"
                 f"      何时用：想回到之前 go2_tag_location 标过的某个地点（只能去「已知地点」里列出来的）。\n"
                 f"  stop              → 结束探索\n"
                 f"      何时用：逛够了、满足了、或累了想回家休息。\n\n"
+                f"【移动策略】视觉上有趣 ≠ 走得过去。✗受阻方向的兴趣点要远观+标记，不要用 explore_direction 硬闯：\n"
+                f"  发现✗受阻方向有趣 → go2_observe 远看 → go2_tag_location 标记 → 换★开阔方向继续。\n\n"
                 f"reason 用第一人称、带点情绪和好奇心写（这是你的心里话，会被说出来让主人听见），别写成干巴巴的功能描述。\n"
                 f"直接输出 JSON，不含代码块：\n"
                 f"{{\"tool\": \"工具名\", \"params\": {{...}}, \"reason\": \"一句话\", \"done\": false}}"
@@ -374,8 +377,13 @@ class Drive:
         goal_raw   = grid_obj.odom_to_grid(target_x, target_y)
         goal_cell  = _nearest_free_cell(grid_obj, goal_raw, max_r=20)
         if goal_cell is None or not astar(grid_obj.grid, start_cell, goal_cell):
-            logger.info("[Drive] explore_direction=%s A*预检查不通，跳过导航", direction)
-            return f"方向「{direction}」路径不通（目的地被障碍包围），请选其他方向"
+            logger.info("[Drive] explore_direction=%s A*预检查不通，引导远观绕行", direction)
+            return (
+                f"方向「{direction}」路径不通，走不过去。"
+                f"建议：先用 go2_observe 远观该方向的兴趣点，"
+                f"再用 go2_tag_location 标记下来，"
+                f"然后从★开阔或○可通行方向继续探索。"
+            )
 
         tmp_name = f"_explore_{int(time.time())}"
         spatial_memory.tag_location(tmp_name, {"x": target_x, "y": target_y, "heading": 0.0})

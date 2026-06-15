@@ -343,3 +343,35 @@ def test_do_explore_sets_social_after_when_person_engaging(monkeypatch):
         "探索结束时 person_engaging=True 应进入 SOCIAL 而非 IDLE"
     )
     observe_mock.assert_not_called()
+
+
+# ── Bug A 修复：死路转圈 ───────────────────────────────────────────────────
+
+def test_exec_explore_direction_blocked_message_guides_observe(monkeypatch):
+    """Bug A 修复：explore_direction A*预检查失败时，返回消息应提示 go2_observe + go2_tag_location + 换开阔方向。"""
+    import cloud.go2.navigation.drive as drive_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+
+    fake_odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
+    fake_grid = MagicMock()
+    fake_grid.odom_to_grid.return_value = (64, 64)
+    fake_grid.grid = MagicMock()
+
+    # go2.odom/occupancy_grid 是 property，用 patch 而非 monkeypatch
+    with patch.object(type(drive_mod.go2), "odom",
+                      new_callable=lambda: property(lambda self: fake_odom)):
+        with patch.object(type(drive_mod.go2), "occupancy_grid",
+                          new_callable=lambda: property(lambda self: fake_grid)):
+            monkeypatch.setattr(drive_mod.frontier_mod, "find_exploration_target",
+                                MagicMock(return_value=(1.0, 0.0)))
+
+            with patch("cloud.go2.navigation.astar.astar", return_value=[]):
+                with patch("cloud.go2.navigation.navigator._nearest_free_cell",
+                           return_value=(65, 64)):
+                    d = drive_mod.Drive()
+                    result = asyncio.run(d._exec_explore_direction("forward"))
+
+    assert "go2_observe" in result, f"阻塞方向应提示用 go2_observe 远观，实际：{result}"
+    assert "go2_tag_location" in result, f"阻塞方向应提示用 go2_tag_location 标记，实际：{result}"
+    assert "★开阔" in result or "可通行" in result, f"阻塞方向应提示换开阔方向，实际：{result}"
