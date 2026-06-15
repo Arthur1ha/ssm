@@ -187,24 +187,6 @@ def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
 
 # ── 社交活锁 Bug B 修复测试 ────────────────────────────────────────────
 
-def _make_tick_result(d, person_engaging: bool) -> str:
-    """辅助：模拟单次 tick 的状态决策，返回触发的下一动作。
-
-    抽取自 _run_loop 中 IDLE 分支的决策逻辑，用于同步测试状态机行为。
-    这是为了测试"tick 决策"而不启动真实 async 无限循环。
-    """
-    import cloud.go2.navigation.drive as drive_mod
-    d._person_engaging = person_engaging
-    d._curiosity += 1
-    if d._state == drive_mod.MotivationalState.IDLE:
-        if d._curiosity >= drive_mod._CURIOSITY_THRESHOLD:
-            if d._person_engaging:
-                return "SOCIAL"
-            else:
-                return "EXPLORING"
-    return "NOOP"
-
-
 def test_person_engaging_prevents_exploring_enters_social(monkeypatch):
     """Bug B 修复①：person_engaging 为 True 且 curiosity 达阈值时，IDLE 应转 SOCIAL 而非 EXPLORING。"""
     import cloud.go2.navigation.drive as drive_mod
@@ -229,8 +211,28 @@ def test_person_engaging_prevents_exploring_enters_social(monkeypatch):
     assert d._curiosity == 0
 
 
+async def _run_one_tick(d, *, mock_social=True):
+    """运行 _run_loop 恰好一个 tick，然后取消。mock_social 避免 LLM 调用。"""
+    import cloud.go2.navigation.drive as drive_mod
+    with patch.object(d, "_do_social", new_callable=AsyncMock):
+        call_count = [0]
+        original_sleep = asyncio.sleep
+
+        async def mock_sleep(t):
+            call_count[0] += 1
+            if call_count[0] > 1:
+                raise asyncio.CancelledError()
+
+        with patch("cloud.go2.navigation.drive.asyncio.sleep", side_effect=mock_sleep):
+            task = asyncio.create_task(d._run_loop())
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 def test_social_exit_on_engage_gone_timeout(monkeypatch):
-    """Bug B 修复②：人脸消失满 _ENGAGE_GONE_TIMEOUT 秒后从 SOCIAL 回 IDLE。"""
+    """Bug B 修复②：人脸消失满 _ENGAGE_GONE_TIMEOUT 秒后，_run_loop 一个 tick 内从 SOCIAL 回 IDLE。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
@@ -238,23 +240,18 @@ def test_social_exit_on_engage_gone_timeout(monkeypatch):
     d = drive_mod.Drive()
     d._state = drive_mod.MotivationalState.SOCIAL
     d._person_engaging = False
-    # 模拟人脸已消失超过 _ENGAGE_GONE_TIMEOUT 秒
     d._last_engaging_ts = time.time() - (drive_mod._ENGAGE_GONE_TIMEOUT + 1)
 
-    # 模拟 _run_loop 中 SOCIAL 分支退出检查
-    import time as _time
-    if (not d._person_engaging and
-            _time.time() - d._last_engaging_ts >= drive_mod._ENGAGE_GONE_TIMEOUT):
-        d._state = drive_mod.MotivationalState.IDLE
-        d._curiosity = 0
+    asyncio.run(_run_one_tick(d))
 
     assert d._state == drive_mod.MotivationalState.IDLE, (
         "人脸消失满 _ENGAGE_GONE_TIMEOUT 秒后应从 SOCIAL 回 IDLE"
     )
+    assert d._social_tick == 0, "_social_tick 应在 SOCIAL→IDLE 时被重置"
 
 
 def test_social_no_exit_before_engage_gone_timeout(monkeypatch):
-    """Bug B 修复②：人脸刚消失未满 _ENGAGE_GONE_TIMEOUT 秒，不应离开 SOCIAL。"""
+    """Bug B 修复②：人脸刚消失未满 _ENGAGE_GONE_TIMEOUT 秒，_run_loop 不应离开 SOCIAL。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
@@ -264,10 +261,7 @@ def test_social_no_exit_before_engage_gone_timeout(monkeypatch):
     d._person_engaging = False
     d._last_engaging_ts = time.time() - 1   # 只过了 1s，未达超时
 
-    import time as _time
-    if (not d._person_engaging and
-            _time.time() - d._last_engaging_ts >= drive_mod._ENGAGE_GONE_TIMEOUT):
-        d._state = drive_mod.MotivationalState.IDLE
+    asyncio.run(_run_one_tick(d))
 
     assert d._state == drive_mod.MotivationalState.SOCIAL, (
         "人脸消失未满 _ENGAGE_GONE_TIMEOUT 秒时不应离开 SOCIAL"

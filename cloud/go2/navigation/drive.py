@@ -1,7 +1,7 @@
 """
 机器人内驱动系统，根据视觉感知自主切换行为状态。
 状态机：IDLE → SOCIAL（检测到人）/ EXPLORING（长时间无事件）。
-SOCIAL 状态下每 8s 观察并决策是否互动；EXPLORING 状态下 LLM 驱动最多 15 步自主探索。
+SOCIAL 状态下每 5s 观察并决策是否互动；EXPLORING 状态下 LLM 驱动最多 15 步自主探索。
 """
 import asyncio
 import json
@@ -34,7 +34,6 @@ def _publish_thought(payload: dict) -> None:
 
 
 _CURIOSITY_THRESHOLD   = 10   # 10s 无事件 → EXPLORING
-_PERSON_GONE_TIMEOUT   = 30   # 人体消失 30s（已不用于社交退出，保留备用）
 _SOCIAL_CHECK_INTERVAL = 5    # SOCIAL 状态下每 5s 主动检查
 _ENGAGE_GONE_TIMEOUT   = 3    # 人脸消失 3s → 从 SOCIAL 回 IDLE
 
@@ -55,7 +54,7 @@ class Drive:
         self._person_present   = False   # HOG 检测到人体（含远处背景人）
         self._person_engaging  = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
         self._last_person_ts   = 0.0
-        self._last_engaging_ts = 0.0    # 人脸最后一次消失的时间戳（用于 SOCIAL→IDLE 超时判断）
+        self._last_engaging_ts = time.time()  # 人脸最后一次消失的时间戳（用于 SOCIAL→IDLE 超时判断）
         self._last_action_ts   = 0.0
         self._social_tick      = 0
         self.user_interrupt    = False
@@ -127,6 +126,7 @@ class Drive:
                         time.time() - self._last_engaging_ts >= _ENGAGE_GONE_TIMEOUT):
                     self._state = MotivationalState.IDLE
                     self._curiosity = 0
+                    self._social_tick = 0
                 elif self._social_tick >= _SOCIAL_CHECK_INTERVAL:
                     self._social_tick = 0
                     await self._do_social()
@@ -461,7 +461,7 @@ class Drive:
         self._curiosity        = 0
         self._person_present   = False
         self._person_engaging  = False
-        self._last_engaging_ts = 0.0
+        self._last_engaging_ts = time.time()
         self._task             = asyncio.create_task(self._run_loop())
         logger.info("[Drive] 内驱动循环已启动")
 
