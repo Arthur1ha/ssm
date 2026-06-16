@@ -2,17 +2,17 @@
 
 ## 项目概述
 
-**一句话**：SSM（Smart System Mesh）是一个以 MQTT 为消息总线的分布式多智能体 IoT 系统，让 ESP32 边缘设备、云端 AI 编排器和手机 PWA 通过标准化 topic 协议自主协作，无需任何中心控制器。
+**一句话**：SSM（Smart System Mesh）是一个无中心的分布式多智能体 IoT 系统——以 MQTT 为统一**控制总线**（发现、在线状态、能力声明 card），**数据面按设备本性选传输**（ESP32 走 MQTT、Go2 走 HTTP/SSE），让 ESP32 边缘设备、云端 AI 编排器和手机 PWA 自主协作，无需任何中心控制器。
 
 **目标用户**：探索边缘-云端-移动端三层分布式智能体架构的开发者；核心体验是"新接一个传感器，整个系统自动感知并纳入决策"。
 
 **核心业务逻辑**：
 1. ESP32 启动时探测引脚 → 向 broker 发布已接设备的 manifest（retained）
-2. 手机 PWA 订阅 `ssm/agents/#`，自动发现所有在线设备，按 GPS 距离排序
+2. 手机 PWA 订阅 `ssm/agents/#`，自动发现所有在线设备，以设备卡片列表呈现
 3. 用户语音/文字 → PWA 经 MQTT 发布 `ssm/intent/{session_id}` → 编排器 Planner（唯一大脑，一次 LLM 完成 act/chat/define_rule 分类）→ Dispatcher→Evaluator→Responder 执行并反馈
 4. 传感器事件也触发云端 ESP32 智能体自动决策（如变暗自动开灯）
 5. 云端离线时 ESP32 本地规则接管（兜底层）
-6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{slug}/agent`）暴露能力，供编排器与 PWA 动态发现
+6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{unit_id}/agent`）暴露能力，供编排器与 PWA 动态发现
 
 ---
 
@@ -52,7 +52,8 @@ ssm/
 │   ├── api/             ← FastAPI 聚合入口（端口 8082），装配下面所有 router
 │   │   ├── main.py      ← app 装配 + ESP32 MQTT 桥（订阅 manifest/state/event/result）
 │   │   ├── rules.py     ← `/api/rules` 自动化规则 CRUD
-│   │   └── devices.py   ← `/api/devices` + `/api/devices/{slug}/agent`（★ A2A Agent Card）
+│   │   └── devices.py   ← `/api/devices` + `/api/devices/{unit_id}/agent`（★ A2A Agent Card，数据取自 cards/）
+│   ├── cards/           ← ★ A2A 设备卡注册表：registry.py（订阅 card/manifest/status，全局单一真相）、builder.py（manifest→AgentCard）、schema.py
 │   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + LangGraph）
 │   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 编排图
 │   │   ├── graph.py     ← LangGraph：Planner→Dispatcher→Evaluator→Responder（支持 ESP32/MQTT 与 Go2/HTTP）
@@ -66,7 +67,7 @@ ssm/
 │   │   ├── state.py     ← ESP32 设备/任务状态
 │   │   ├── tools.py     ← MQTT 发布辅助
 │   │   └── tts.py       ← TTS 合成封装
-│   └── go2/             ← Go2 机器狗智能体（HTTP，非 MQTT）
+│   └── go2/             ← Go2 机器狗智能体（数据面 HTTP；控制面 card/status 仍走 MQTT）
 │       ├── agent.py     ← Planner→Executor LangGraph（独立于编排器）
 │       ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
 │       ├── agentcore/   ← 智能体内核（当前 go2 专属）：soul（性格+演化）、memory（episode/spatial/daily_summary）、tools、skills（vision/reactive）
@@ -75,12 +76,13 @@ ssm/
 ├── app/                 ← 用户端 PWA（跑在手机/浏览器）
 │   ├── index.html / manifest.json / sw.js / styles/app.css
 │   └── src/
-│       ├── app.jsx      ← ★ 主 React 应用（路由、MQTT 引导、聊天状态）
+│       ├── app.jsx      ← ★ 主 React 应用（单屏聊天中心 + hash 子页、MQTT 引导、聊天状态）
 │       ├── config.js    ← Broker 地址、阈值等前端配置
 │       ├── MqttBus.js / AgentRegistry.js / ISMTracker.js ← MQTT 总线 / 设备注册表 / 状态跟踪
-│       ├── pages/       ← DiscoverPage、DevicesPage、DeviceDetailPage、Go2Page、RulesPage
-│       ├── components/  ← RadarScan、DeviceCard、ChatPanel/ChatSheet、TabBar 等
-│       └── utils/       ← geo（haversine）、agentMeta、audio
+│       ├── hooks/       ← useSendIntent.js（发布 ssm/intent）
+│       ├── pages/       ← DeviceDetailPage、DevicesPage、Go2Page、RulesPage（hash 子页）
+│       ├── components/  ← ActivityFeed（活动流气泡）、ChatPanel、DeviceCard、Icon、RulesDrawer
+│       └── utils/       ← agentMeta、audio
 ├── protocol/            ← MQTT 协议契约（单一真实来源）
 │   └── topics.md        ← 所有 topic 格式定义
 ├── infra/               ← 运维与部署配置

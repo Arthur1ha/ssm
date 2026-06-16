@@ -1,6 +1,6 @@
 # SSM — 智能系统网格（Smart System Mesh）
 
-以 MQTT 消息总线为核心的分布式多智能体 IoT 系统，连接 ESP32 边缘设备、云端 AI 智能体（编排器 / ESP32 桌面智能体 / Go2 机器狗）和手机 PWA 控制界面。新智能体通过 A2A Agent Card 暴露能力即可被动态发现与调用。
+无中心的分布式多智能体 IoT 系统：以 MQTT 为统一**控制总线**（发现、在线状态、能力声明 card），**数据面按设备本性选传输**（ESP32 走 MQTT、Go2 走 HTTP/SSE）。连接 ESP32 边缘设备、云端 AI 智能体（编排器 / ESP32 桌面智能体 / Go2 机器狗）和手机 PWA 控制界面。新智能体通过 A2A Agent Card 暴露能力即可被动态发现与调用。
 
 ## 系统架构
 
@@ -75,7 +75,7 @@
 | 接口 | 说明 |
 |------|------|
 | `GET  /api/devices` | 列出所有在线设备（`devices.py`） |
-| `GET  /api/devices/{slug}/agent` | **A2A Agent Card**：机器可读的能力描述 |
+| `GET  /api/devices/{unit_id}/agent` | **A2A Agent Card**：机器可读的能力描述（数据取自 `cloud/cards/`） |
 | `GET/POST/DELETE /api/rules` | 自动化规则 CRUD（`rules.py`） |
 | `/api/go2/*` | Go2 连接 / 运动 / 导航 / 视觉 / 对话（`cloud/go2/router.py`） |
 | `GET/PUT /api/esp32/autonomy` | ESP32 灯智能体自主模式（manual/reactive，`cloud/esp32/router.py`） |
@@ -92,36 +92,40 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 | `graph.py` | LangGraph：Planner→Dispatcher→Evaluator→Responder（含多模型 fallback） |
 | `tools.py` | MQTT/HTTP 派发与反馈辅助 |
 | `shared_state.py` | 线程安全设备/任务快照（合并 MQTT manifest + `devices.json`） |
-| `devices.json` | 文件型设备注册表（go2 等非 MQTT 设备） |
+| `devices.json` | 预留：文件型非 MQTT 设备注册表（当前为空 `{}`，go2 已走 MQTT card） |
 | `rules.json` | 自动化规则存储 |
 
-> ⚠️ `orchestrator/rule_engine.py` 当前无任何引用，为遗留代码。
+> 设备能力卡注册表见 `cloud/cards/`（`registry.py` 订阅 card/manifest/status，是 A2A 单一真相）。
 
 ### 手机 PWA（`app/`）
 
 无构建步骤的 React 应用（Babel standalone），通过 WebSocket 连接 MQTT 代理（端口 9001）。自动订阅 `ssm/agents/#`，实时接收所有设备状态。
 
-功能：GPS 雷达图与就近发现、传感器实时数据、执行器控制、自然语言对话、自动化规则管理、Go2 专属控制页。源码分层：`pages/`（页面）、`components/`（组件）、`utils/`（geo/audio 等），MQTT 统一经 `MqttBus` 单例。
+界面形态：**单屏聊天中心 + hash 子页**——主屏自上而下为「设备卡片列表（`DevicesScreen`/`DeviceCard`）→ 活动流气泡（`ActivityFeed`）→ 底部输入栏」，子页经 hash 路由（`#go2` / `#<unit_id>`）。功能：设备自动发现、传感器实时数据、执行器控制、自然语言对话、自动化规则管理（`RulesDrawer`）、Go2 专属控制页。源码分层：`pages/`、`components/`、`hooks/`、`utils/`（agentMeta/audio），MQTT 统一经 `MqttBus` 单例。
 
 ## MQTT 消息协议
 
-完整定义见 `protocol/topics.md`（单一真实来源）。每个 agent unit 发布以下 topic：
+**完整定义以 `protocol/topics.md` 为单一真实来源**，下表为概览：
 
-| 类型 | Topic | 保留 | 说明 |
-|------|-------|------|------|
-| `manifest` | `ssm/agents/{id}/manifest` | 是 | 设备能力声明，启动时发布 |
-| `state` | `ssm/agents/{id}/state` | 是 | 当前 ISM 状态，变更时发布 |
-| `event` | `ssm/agents/{id}/event` | 否 | 传感器事件或执行器触发 |
-| `report` | `ssm/agents/{id}/report` | 否 | 传感器观测值或执行器反馈 |
-| `location` | `ssm/agents/{id}/location` | 是 | 设备地理坐标（GCJ-02，目前仅 ESP32 发布） |
+| 类型 | Topic | 保留 | 发布者 | 说明 |
+|------|-------|------|--------|------|
+| `manifest` | `ssm/agents/{unit_id}/manifest` | 是 | ESP32 | 设备能力声明，启动时发布；空 payload = 单元缺席移除 |
+| `card` | `ssm/agents/{unit_id}/card` | 是 | Go2 | 完整 AgentCard JSON（自描述设备） |
+| `state` | `ssm/agents/{unit_id}/state` | 是 | ESP32 | 当前 ISM 状态，变更时发布 |
+| `event` | `ssm/agents/{unit_id}/event` | 否 | ESP32 | 传感器事件 |
+| `status` | `ssm/agents/{device_id}/status` | 是 | ESP32 / Go2 | `online`/`offline`（掉线由 LWT 自动置 offline）|
+| `location` | `ssm/agents/{device_id}/location` | 是 | ESP32 | 设备地理坐标（GCJ-02） |
 
-**控制 topic**：
-- `ssm/agents/{id}/command` —— 执行器直接指令
-- `ssm/intent/{session_id}` —— 手机意图（PWA 直接发布，编排器订阅）
-- `ssm/task/{device_id}/{task_id}` —— 编排任务
-- `ssm/feedback/{session_id}` —— 渐进式执行反馈
+**控制 / 编排 / 表达 topic**：
+- `ssm/intent/{session_id}` —— 手机意图（PWA 发布，编排器订阅）
+- `ssm/task/{unit_id}/{task_id}` —— 任务下发（云端 → 设备）
+- `ssm/result/{unit_id}/{task_id}` —— 任务结果（设备 → 云端，`ok`/`blocked`）
+- `ssm/feedback/{session_id}` —— 编排器渐进式执行反馈
+- `ssm/decision/active` —— 云端在线总开关（`true`/`false`，离线时 ESP32 本地规则接管）
+- `ssm/rules/{device_id}` —— 自动化规则（retained）
+- `ssm/agents/{unit_id}/thought`、`ssm/agents/esp32_desk_led/speech` —— 拟人化思考 / 语音表达
 
-所有 payload 均为 JSON，每条消息带 `agent_id` 和 `ts`（Unix 时间戳）。
+所有 payload 均为 JSON，每条消息带 `unit_id`（自标识键）和 `ts`（Unix 时间戳）。
 
 ## 快速上手
 
@@ -163,7 +167,7 @@ mpremote connect <端口> reset
 
 ### 3. 打开手机 PWA
 
-浏览器访问 `https://ssm.eliottxu.top`，允许位置权限后即可看到附近设备雷达图。
+浏览器访问 `https://ssm.eliottxu.top`，即可看到自动发现的设备卡片列表,并通过底部输入栏自然语言操作。
 
 ## 网络拓扑
 
