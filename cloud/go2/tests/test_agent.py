@@ -263,7 +263,7 @@ def chat_client():
 
 def test_chat_returns_response(chat_client, monkeypatch):
     import cloud.go2.agent as agent_mod
-    async def fake_run_agent(session_id, message):
+    async def fake_run_agent(session_id, message, skill_id=None, params=None):
         return {"response": "好的，已站起来", "actions_taken": ["go2_sport"]}
     monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)
     r = chat_client.post("/api/go2/chat", json={"session_id": "test", "message": "站起来"})
@@ -281,7 +281,7 @@ def test_chat_missing_message_returns_422(chat_client):
 def test_chat_default_session_id(chat_client, monkeypatch):
     import cloud.go2.agent as agent_mod
     received = {}
-    async def fake_run_agent(session_id, message):
+    async def fake_run_agent(session_id, message, skill_id=None, params=None):
         received["session_id"] = session_id
         return {"response": "ok", "actions_taken": []}
     monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)

@@ -23,3 +23,6 @@ paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin
 cloudflared
+
+# Go2 运行期状态（记忆/性格/规则）
+cloud/go2/data/
