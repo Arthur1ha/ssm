@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pytest
@@ -9,8 +10,8 @@ import cloud.go2.agentcore.memory.spatial as sm
 
 
 @pytest.fixture(autouse=True)
-def tmp_db(tmp_path, monkeypatch):
-    monkeypatch.setattr(sm, "MEMORY_DB", tmp_path / "test.db")
+def tmp_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(sm, "SPATIAL_FILE", tmp_path / "spatial.json")
 
 
 def test_tag_and_list_location():
@@ -48,16 +49,10 @@ def test_find_location_llm_fallback():
     sm.tag_location("讲台", {"x": 0.5, "y": 0.0, "heading": 0.0})
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=AsyncMock(content="讲台"))
-    with patch("cloud.go2.spatial_memory._get_text_llm", return_value=mock_llm):
+    with patch.object(sm, "_get_text_llm", return_value=mock_llm):
         result = asyncio.run(sm.find_location("站台"))
     assert result is not None
     assert result["name"] == "讲台"
-
-
-def test_record_trajectory_tick_not_in_list_locations():
-    sm.record_trajectory_tick({"x": 1.0, "y": 2.0, "heading": 0.5})
-    locs = sm.list_locations()
-    assert len(locs) == 0  # trajectory ticks are not named locations
 
 
 def test_delete_location():
@@ -65,3 +60,7 @@ def test_delete_location():
     assert sm.delete_location("黑板") is True
     assert sm.delete_location("黑板") is False
     assert sm.list_locations() == []
+
+
+def test_no_record_trajectory_tick():
+    assert not hasattr(sm, "record_trajectory_tick")
