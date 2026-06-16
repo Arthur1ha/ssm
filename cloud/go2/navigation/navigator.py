@@ -24,7 +24,6 @@ KP_YAW               = 0.8
 STUCK_CHECK_INTERVAL = 6.0    # s
 STUCK_DISTANCE       = 0.30   # m，卡住判定
 MAX_RETRIES          = 6
-TRAJ_INTERVAL        = 5.0    # s
 MIN_LINEAR_VEL       = 0.1    # m/s，路径跟随最低线速度
 LOOKAHEAD_DIST       = 0.6    # m，前瞻距离
 REPLAN_INTERVAL      = 1.0    # s，重规划间隔
@@ -125,7 +124,6 @@ class Navigator:
         odom_init = go2.odom
         last_pos  = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
         last_stuck_check = time.monotonic()
-        last_traj_tick   = time.monotonic()
         spin_start: Optional[float] = None
         phase = "initial_rotation"
 
@@ -204,10 +202,6 @@ class Navigator:
                     last_pos         = {"x": odom["x"], "y": odom["y"]}
                     last_stuck_check = now
 
-            if now - last_traj_tick >= TRAJ_INTERVAL:
-                spatial_memory.record_trajectory_tick(odom)
-                last_traj_tick = now
-
             await asyncio.sleep(0.1)
 
     # ── A* 路径跟随 ───────────────────────────────────────────────────────
@@ -236,7 +230,6 @@ class Navigator:
         self.current_grid_obj = grid_obj
         last_replan      = time.monotonic()
         last_stuck_check = time.monotonic()
-        last_traj_tick   = time.monotonic()
         retries          = 0
         odom_init        = go2.odom
         last_pos = {"x": odom_init["x"], "y": odom_init["y"]} if odom_init else {"x": 0.0, "y": 0.0}
@@ -327,7 +320,6 @@ class Navigator:
                 last_stuck_check = now
 
             # 定期重规划
-            if now - last_replan >= REPLAN_INTERVAL:
                 new_path = self._plan_path(goal_loc)
                 if new_path and len(new_path) > 1:
                     path     = new_path
@@ -335,10 +327,6 @@ class Navigator:
                     self.current_path     = path
                     self.current_grid_obj = grid_obj
                 last_replan = now
-
-            if now - last_traj_tick >= TRAJ_INTERVAL:
-                spatial_memory.record_trajectory_tick(odom)
-                last_traj_tick = now
 
             await asyncio.sleep(0.1)
 
