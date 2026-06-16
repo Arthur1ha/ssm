@@ -1,17 +1,20 @@
+# cloud/go2/tests/test_episode_memory.py
+import json
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from cloud.go2.agentcore.memory.episode import EpisodeMemory, EventType
+from cloud.go2.agentcore.memory.episode import EpisodeMemory, EventType, read_day
 
 
 @pytest.fixture
 def mem(tmp_path):
-    return EpisodeMemory(db_path=tmp_path / "test.db")
+    return EpisodeMemory(episodes_dir=tmp_path)
 
 
 def test_format_context_returns_placeholder_when_empty(mem):
@@ -22,15 +25,26 @@ def test_format_today_returns_placeholder_when_empty(mem):
     assert mem.format_today() == "（今天暂无记录）"
 
 
-def test_add_persists_to_sqlite(tmp_path):
-    db = tmp_path / "persist.db"
-    m1 = EpisodeMemory(db_path=db)
+def test_add_persists_to_dated_jsonl(tmp_path):
+    m1 = EpisodeMemory(episodes_dir=tmp_path)
     m1.add(EventType.ACTION_TAKEN, "执行了 Hello")
 
-    m2 = EpisodeMemory(db_path=db)
+    today = datetime.now().strftime("%Y-%m-%d")
+    f = tmp_path / f"{today}.jsonl"
+    assert f.exists()
+    line = f.read_text(encoding="utf-8").strip()
+    rec = json.loads(line)
+    assert rec["content"] == "执行了 Hello"
+    assert rec["event_type"] == "ACTION_TAKEN"
+
+
+def test_add_reloads_into_buffer_on_restart(tmp_path):
+    m1 = EpisodeMemory(episodes_dir=tmp_path)
+    m1.add(EventType.ACTION_TAKEN, "执行了 Hello")
+
+    m2 = EpisodeMemory(episodes_dir=tmp_path)
     entries = m2.entries()
-    assert len(entries) == 1
-    assert entries[0]["content"] == "执行了 Hello"
+    assert any(e["content"] == "执行了 Hello" for e in entries)
 
 
 def test_add_creates_entry_with_correct_fields(mem):
@@ -61,29 +75,33 @@ def test_format_context_uses_human_readable_time(mem):
     assert "秒前" in ctx or "分钟前" in ctx or "今天" in ctx
 
 
-def test_cleanup_removes_old_records(tmp_path):
-    db = tmp_path / "old.db"
-    import sqlite3
-    conn = sqlite3.connect(db)
-    conn.execute("""
-        CREATE TABLE episodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL, event_type TEXT, content TEXT
-        )
-    """)
-    old_ts = time.time() - 8 * 86400  # 8 天前
-    conn.execute("INSERT INTO episodes (ts, event_type, content) VALUES (?, ?, ?)",
-                 (old_ts, "ACTION_TAKEN", "很久以前的事"))
-    conn.commit()
-    conn.close()
+def test_read_day_returns_entries(tmp_path):
+    mem = EpisodeMemory(episodes_dir=tmp_path)
+    mem.add(EventType.OBSERVATION, "今天的事件")
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = read_day(today, episodes_dir=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["content"] == "今天的事件"
 
-    mem = EpisodeMemory(db_path=db)
-    assert all(e["content"] != "很久以前的事" for e in mem.entries())
 
-    conn2 = sqlite3.connect(db)
-    rows = conn2.execute("SELECT count(*) FROM episodes WHERE content='很久以前的事'").fetchone()
-    conn2.close()
-    assert rows[0] == 0
+def test_read_day_missing_file_returns_empty(tmp_path):
+    assert read_day("2026-01-01", episodes_dir=tmp_path) == []
+
+
+def test_cleanup_removes_old_day_files(tmp_path):
+    old_date = (datetime.now() - timedelta(days=8)).strftime("%Y-%m-%d")
+    old_file = tmp_path / f"{old_date}.jsonl"
+    old_file.write_text(
+        json.dumps({"ts": time.time() - 8 * 86400,
+                    "event_type": "ACTION_TAKEN", "content": "很久以前的事"}) + "\n",
+        encoding="utf-8",
+    )
+    EpisodeMemory(episodes_dir=tmp_path)
+    assert not old_file.exists()
+
+
+def test_event_type_has_agent_response():
+    assert EventType.AGENT_RESPONSE.value == "AGENT_RESPONSE"
 
 
 def test_singleton_is_episode_memory_instance():
