@@ -12,7 +12,7 @@ import asyncio
 # ── 规则引擎测试 ─────────────────────────────────────────────────
 
 def test_load_rules_returns_empty_list_when_file_empty(tmp_path, monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
@@ -22,7 +22,7 @@ def test_load_rules_returns_empty_list_when_file_empty(tmp_path, monkeypatch):
 def test_save_and_load_rules_roundtrip(tmp_path, monkeypatch):
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
     rules = [{"trigger": "人", "action": "Hello", "cooldown_s": 30, "last_triggered": 0}]
     tools_mod.save_rules(rules)
@@ -33,7 +33,7 @@ def test_check_rules_triggers_matching_rule(tmp_path, monkeypatch):
     rules_file = tmp_path / "rules.json"
     rule = {"trigger": "人", "action": "Hello", "cooldown_s": 30, "last_triggered": 0}
     rules_file.write_text(json.dumps([rule]))
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
     triggered = tools_mod.check_rules("画面中有一个人站在桌子旁边")
     assert triggered == ["Hello"]
@@ -46,7 +46,7 @@ def test_check_rules_respects_cooldown(tmp_path, monkeypatch):
     rule = {"trigger": "人", "action": "Hello", "cooldown_s": 30,
             "last_triggered": time.time()}
     rules_file.write_text(json.dumps([rule]))
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
     triggered = tools_mod.check_rules("画面中有一个人")
     assert triggered == []
@@ -56,7 +56,7 @@ def test_check_rules_no_match_returns_empty(tmp_path, monkeypatch):
     rules_file = tmp_path / "rules.json"
     rule = {"trigger": "猫", "action": "Dance1", "cooldown_s": 10, "last_triggered": 0}
     rules_file.write_text(json.dumps([rule]))
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
     triggered = tools_mod.check_rules("画面中有一张桌子")
     assert triggered == []
@@ -65,7 +65,7 @@ def test_check_rules_no_match_returns_empty(tmp_path, monkeypatch):
 # ── 工具函数测试 ─────────────────────────────────────────────────
 
 def test_go2_sport_returns_error_when_not_connected():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     conn_mod.go2.is_connected = False
     result = asyncio.run(tools_mod.go2_sport("StandUp"))
@@ -73,7 +73,7 @@ def test_go2_sport_returns_error_when_not_connected():
 
 
 def test_go2_sport_rejects_unknown_cmd():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     conn_mod.go2.is_connected = True
     result = asyncio.run(tools_mod.go2_sport("FlyToMoon"))
@@ -82,7 +82,7 @@ def test_go2_sport_rejects_unknown_cmd():
 
 
 def test_go2_sport_sends_command():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     from unittest.mock import AsyncMock, patch
     conn_mod.go2.is_connected = True
@@ -94,7 +94,7 @@ def test_go2_sport_sends_command():
 
 
 def test_go2_move_rejects_unknown_direction():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     conn_mod.go2.is_connected = True
     result = asyncio.run(tools_mod.go2_move("diagonal"))
@@ -103,7 +103,7 @@ def test_go2_move_rejects_unknown_direction():
 
 
 def test_go2_move_sends_move_then_stop():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     from unittest.mock import AsyncMock, patch
     import pytest
@@ -121,7 +121,7 @@ def test_go2_move_sends_move_then_stop():
 
 
 def test_go2_observe_returns_no_frame_message():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     conn_mod.go2._latest_frame = None
     result = asyncio.run(tools_mod.go2_observe("有没有人？"))
@@ -129,7 +129,7 @@ def test_go2_observe_returns_no_frame_message():
 
 
 def test_go2_observe_calls_vision_llm(monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     from unittest.mock import AsyncMock, MagicMock
     conn_mod.go2._latest_frame = b"\xff\xd8\xff"
@@ -142,7 +142,7 @@ def test_go2_observe_calls_vision_llm(monkeypatch):
 
 
 def test_go2_status_disconnected():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     conn_mod.go2.is_connected = False
     result = tools_mod.go2_status()
@@ -150,7 +150,7 @@ def test_go2_status_disconnected():
 
 
 def test_go2_status_connected():
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     import cloud.go2.connection as conn_mod
     conn_mod.go2.is_connected = True
     conn_mod.go2._robot_state = {"mode": 1, "body_height": 0.32, "velocity": [0, 0, 0]}
@@ -160,7 +160,7 @@ def test_go2_status_connected():
 
 
 def test_go2_add_rule_rejects_invalid_action(tmp_path, monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     monkeypatch.setattr(tools_mod, "RULES_FILE", tmp_path / "rules.json")
     (tmp_path / "rules.json").write_text("[]")
     result = tools_mod.go2_add_rule("人", "FlyAway")
@@ -168,7 +168,7 @@ def test_go2_add_rule_rejects_invalid_action(tmp_path, monkeypatch):
 
 
 def test_go2_add_rule_writes_to_file(tmp_path, monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
@@ -180,7 +180,7 @@ def test_go2_add_rule_writes_to_file(tmp_path, monkeypatch):
 
 
 def test_go2_add_rule_deduplicates(tmp_path, monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     existing = [{"trigger": "人", "action": "Hello", "cooldown_s": 30, "last_triggered": 0}]
     rules_file.write_text(json.dumps(existing))
@@ -192,7 +192,7 @@ def test_go2_add_rule_deduplicates(tmp_path, monkeypatch):
 
 
 def test_go2_list_rules_empty(tmp_path, monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
@@ -200,7 +200,7 @@ def test_go2_list_rules_empty(tmp_path, monkeypatch):
 
 
 def test_go2_list_rules_shows_rules(tmp_path, monkeypatch):
-    import cloud.go2.tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text(json.dumps([
         {"trigger": "人", "action": "Hello", "cooldown_s": 30, "last_triggered": 0}
@@ -290,7 +290,7 @@ def test_chat_default_session_id(chat_client, monkeypatch):
 
 
 def test_new_tools_in_fn_map():
-    from cloud.go2.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS
+    from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS
     for name in ("go2_tag_location", "go2_navigate_to", "go2_list_locations",
                  "go2_set_led"):
         assert name in TOOL_FN_MAP, f"{name} missing from TOOL_FN_MAP"
@@ -300,8 +300,8 @@ def test_new_tools_in_fn_map():
 # ── ReactiveMind 性格与记忆集成测试 ──────────────────────────────────
 
 def test_autonomous_reason_uses_system_message(monkeypatch):
-    import cloud.go2.reactive_mind as rm_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    import cloud.go2.agentcore.skills.reactive as rm_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
     from langchain_core.messages import SystemMessage
 
     fresh_memory = EpisodeMemory()
@@ -329,9 +329,9 @@ def test_autonomous_reason_uses_system_message(monkeypatch):
 
 
 def test_autonomous_reason_records_action_taken_in_memory(monkeypatch):
-    import cloud.go2.reactive_mind as rm_mod
+    import cloud.go2.agentcore.skills.reactive as rm_mod
     import cloud.go2.connection as conn_mod
-    from cloud.go2.episode_memory import EpisodeMemory
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
 
     fresh_memory = EpisodeMemory()
     monkeypatch.setattr(rm_mod, "episode_memory", fresh_memory)
@@ -359,8 +359,8 @@ def test_autonomous_reason_records_action_taken_in_memory(monkeypatch):
 def test_run_agent_records_user_command_in_memory(monkeypatch):
     import cloud.go2.agent as agent_mod
     import cloud.go2.connection as conn_mod
-    from cloud.go2.episode_memory import EpisodeMemory
-    import cloud.go2.episode_memory as mem_mod
+    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.agentcore.memory.episode as mem_mod
 
     fresh_memory = EpisodeMemory()
     monkeypatch.setattr(mem_mod, "episode_memory", fresh_memory)
@@ -493,7 +493,7 @@ def test_rule_match_takes_priority_over_autonomous(monkeypatch):
 
 def test_go2_add_rule_strips_tool_prefix(tmp_path, monkeypatch):
     """LLM 常把工具名混进 action（"go2_sport Hello"），应剥掉前缀只存动作名。"""
-    from cloud.go2.agentcore.tools import tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
@@ -505,7 +505,7 @@ def test_go2_add_rule_strips_tool_prefix(tmp_path, monkeypatch):
 
 def test_go2_add_rule_normalizes_case(tmp_path, monkeypatch):
     """大小写不敏感，归一到规范动作名。"""
-    from cloud.go2.agentcore.tools import tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
@@ -515,7 +515,7 @@ def test_go2_add_rule_normalizes_case(tmp_path, monkeypatch):
 
 
 def test_go2_add_rule_rejects_truly_unknown(tmp_path, monkeypatch):
-    from cloud.go2.agentcore.tools import tools as tools_mod
+    import cloud.go2.agentcore.tools.tools as tools_mod
     rules_file = tmp_path / "rules.json"
     rules_file.write_text("[]")
     monkeypatch.setattr(tools_mod, "RULES_FILE", rules_file)
