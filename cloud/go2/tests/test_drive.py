@@ -28,11 +28,11 @@ def test_initial_state_is_idle():
     assert d.state_snapshot["curiosity"] == 0
 
 
-def test_on_vision_frame_person_with_face_transitions_to_social(monkeypatch):
+def test_on_vision_frame_person_with_face_transitions_to_social(monkeypatch, tmp_path):
     """人脸可见（近距主动互动）才触发 SOCIAL。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     d.on_vision_frame(_make_frame(person_detected=True, count=1, face_detected=True,
@@ -43,11 +43,11 @@ def test_on_vision_frame_person_with_face_transitions_to_social(monkeypatch):
     assert d.state_snapshot["curiosity"] == 0
 
 
-def test_on_vision_frame_background_person_stays_idle(monkeypatch):
+def test_on_vision_frame_background_person_stays_idle(monkeypatch, tmp_path):
     """远处背景人（无人脸）不切换 SOCIAL，探索不被打断。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     d.on_vision_frame(_make_frame(person_detected=True, count=1, face_detected=False,
@@ -57,10 +57,10 @@ def test_on_vision_frame_background_person_stays_idle(monkeypatch):
     assert d._person_engaging is False
 
 
-def test_on_vision_frame_person_enter_records_vision_change(monkeypatch):
+def test_on_vision_frame_person_enter_records_vision_change(monkeypatch, tmp_path):
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    fresh = EpisodeMemory()
+    fresh = EpisodeMemory(episodes_dir=tmp_path)
     monkeypatch.setattr(drive_mod, "episode_memory", fresh)
 
     d = drive_mod.Drive()
@@ -71,10 +71,10 @@ def test_on_vision_frame_person_enter_records_vision_change(monkeypatch):
     assert "进入画面" in entries[0]["content"]
 
 
-def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch):
+def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch, tmp_path):
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    fresh = EpisodeMemory()
+    fresh = EpisodeMemory(episodes_dir=tmp_path)
     monkeypatch.setattr(drive_mod, "episode_memory", fresh)
 
     d = drive_mod.Drive()
@@ -85,10 +85,10 @@ def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch):
     assert any("离开" in e["content"] for e in fresh.entries())
 
 
-def test_no_double_social_transition(monkeypatch):
+def test_no_double_social_transition(monkeypatch, tmp_path):
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     frame = _make_frame(person_detected=True, count=1, face_detected=True,
@@ -105,10 +105,10 @@ def test_state_snapshot_contains_required_fields():
         assert key in snap
 
 
-def test_start_creates_task_and_resets_state(monkeypatch):
+def test_start_creates_task_and_resets_state(monkeypatch, tmp_path):
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     d._curiosity = 99
@@ -125,10 +125,10 @@ def test_start_creates_task_and_resets_state(monkeypatch):
     asyncio.run(run())
 
 
-def test_stop_cancels_task(monkeypatch):
+def test_stop_cancels_task(monkeypatch, tmp_path):
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
 
@@ -187,11 +187,11 @@ def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
 
 # ── 社交活锁 Bug B 修复测试 ────────────────────────────────────────────
 
-def test_person_engaging_prevents_exploring_enters_social(monkeypatch):
+def test_person_engaging_prevents_exploring_enters_social(monkeypatch, tmp_path):
     """Bug B 修复①：person_engaging 为 True 且 curiosity 达阈值时，IDLE 应转 SOCIAL 而非 EXPLORING。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     d._state = drive_mod.MotivationalState.IDLE
@@ -231,11 +231,11 @@ async def _run_one_tick(d, *, mock_social=True):
                 pass
 
 
-def test_social_exit_on_engage_gone_timeout(monkeypatch):
+def test_social_exit_on_engage_gone_timeout(monkeypatch, tmp_path):
     """Bug B 修复②：人脸消失满 _ENGAGE_GONE_TIMEOUT 秒后，_run_loop 一个 tick 内从 SOCIAL 回 IDLE。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     d._state = drive_mod.MotivationalState.SOCIAL
@@ -250,11 +250,11 @@ def test_social_exit_on_engage_gone_timeout(monkeypatch):
     assert d._social_tick == 0, "_social_tick 应在 SOCIAL→IDLE 时被重置"
 
 
-def test_social_no_exit_before_engage_gone_timeout(monkeypatch):
+def test_social_no_exit_before_engage_gone_timeout(monkeypatch, tmp_path):
     """Bug B 修复②：人脸刚消失未满 _ENGAGE_GONE_TIMEOUT 秒，_run_loop 不应离开 SOCIAL。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
     d._state = drive_mod.MotivationalState.SOCIAL
@@ -268,11 +268,11 @@ def test_social_no_exit_before_engage_gone_timeout(monkeypatch):
     )
 
 
-def test_do_explore_skips_observe_when_person_engaging(monkeypatch):
+def test_do_explore_skips_observe_when_person_engaging(monkeypatch, tmp_path):
     """Bug B 修复③：_do_explore 进入时已有 person_engaging=True，不调用 go2_observe，直接返回。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     observe_mock = AsyncMock()
     monkeypatch.setattr(drive_mod, "go2_observe", observe_mock)
@@ -288,11 +288,11 @@ def test_do_explore_skips_observe_when_person_engaging(monkeypatch):
     observe_mock.assert_not_called()
 
 
-def test_do_explore_skips_observe_when_user_interrupt(monkeypatch):
+def test_do_explore_skips_observe_when_user_interrupt(monkeypatch, tmp_path):
     """Bug B 修复③：_do_explore 进入时 user_interrupt=True，不调用 go2_observe，直接返回。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     observe_mock = AsyncMock()
     monkeypatch.setattr(drive_mod, "go2_observe", observe_mock)
@@ -308,7 +308,7 @@ def test_do_explore_skips_observe_when_user_interrupt(monkeypatch):
     observe_mock.assert_not_called()
 
 
-def test_do_explore_sets_social_after_when_person_engaging(monkeypatch):
+def test_do_explore_sets_social_after_when_person_engaging(monkeypatch, tmp_path):
     """Bug B 修复①②：_do_explore 结束时若 person_engaging=True，调用方应转入 SOCIAL 而非 IDLE。
 
     这个测试通过在 person_engaging=True 的情况下模拟探索后的状态决策来验证。
@@ -316,7 +316,7 @@ def test_do_explore_sets_social_after_when_person_engaging(monkeypatch):
     """
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     observe_mock = AsyncMock(return_value="当前场景：空旷走廊")
     monkeypatch.setattr(drive_mod, "go2_observe", observe_mock)
@@ -347,11 +347,11 @@ def test_do_explore_sets_social_after_when_person_engaging(monkeypatch):
 
 # ── Bug A 修复：死路转圈 ───────────────────────────────────────────────────
 
-def test_exec_explore_direction_blocked_message_guides_observe(monkeypatch):
+def test_exec_explore_direction_blocked_message_guides_observe(monkeypatch, tmp_path):
     """Bug A 修复：explore_direction A*预检查失败时，返回消息应提示 go2_observe + go2_tag_location + 换开阔方向。"""
     import cloud.go2.navigation.drive as drive_mod
     from cloud.go2.agentcore.memory.episode import EpisodeMemory
-    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory())
+    monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     fake_odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
     fake_grid = MagicMock()

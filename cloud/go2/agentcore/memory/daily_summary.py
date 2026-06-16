@@ -1,4 +1,5 @@
 """每日情节摘要：懒触发 LLM 生成、持久化、按日检索。"""
+import json
 import logging
 import sqlite3
 import time
@@ -6,22 +7,17 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from cloud.go2.agentcore.memory.episode import EPISODES_DB
+from cloud.go2.agentcore.memory.episode import read_day
+from cloud.go2.paths import MEMORY_DIR
 from cloud.go2.agentcore.tools.tools import get_text_llm
 
 logger = logging.getLogger(__name__)
 
+_SUMMARIES_DB = MEMORY_DIR / "daily_summaries.db"
+
 
 def _get_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    c = sqlite3.connect(db_path or EPISODES_DB)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS episodes (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts         REAL NOT NULL,
-            event_type TEXT NOT NULL,
-            content    TEXT NOT NULL
-        )
-    """)
+    c = sqlite3.connect(db_path or _SUMMARIES_DB)
     c.execute("""
         CREATE TABLE IF NOT EXISTS daily_summaries (
             date          TEXT PRIMARY KEY,
@@ -43,27 +39,20 @@ def get_summary(date_str: str, db_path: Optional[Path] = None) -> Optional[str]:
     return row[0] if row else None
 
 
-def _get_episodes_for_date(date_str: str, db_path: Optional[Path] = None) -> list[str]:
-    """从 episodes 表读取指定日期的所有记录，格式化为带时间标签的文本列表。"""
-    d = datetime.strptime(date_str, "%Y-%m-%d").date()
-    day_start = datetime(d.year, d.month, d.day).timestamp()
-    day_end = day_start + 86400
-    with _get_conn(db_path) as c:
-        rows = c.execute(
-            "SELECT ts, content FROM episodes WHERE ts >= ? AND ts < ? ORDER BY ts ASC",
-            (day_start, day_end),
-        ).fetchall()
+def _get_episodes_for_date(date_str: str, episodes_dir: Optional[Path] = None) -> list[str]:
+    """从 JSONL 文件读取指定日期的所有记录，格式化为带时间标签的文本列表。"""
+    rows = read_day(date_str, episodes_dir)
     return [
-        f"[{datetime.fromtimestamp(ts).strftime('%H:%M')}] {content}"
-        for ts, content in rows
+        f"[{datetime.fromtimestamp(e['ts']).strftime('%H:%M')}] {e['content']}"
+        for e in rows
     ]
 
 
 async def generate_and_save(
-    date_str: str, db_path: Optional[Path] = None
+    date_str: str, db_path: Optional[Path] = None, episodes_dir: Optional[Path] = None
 ) -> Optional[str]:
     """调用 LLM 生成指定日期的摘要并写入数据库，无记录则返回 None。"""
-    episodes = _get_episodes_for_date(date_str, db_path)
+    episodes = _get_episodes_for_date(date_str, episodes_dir)
     if not episodes:
         return None
 
@@ -114,12 +103,12 @@ def get_recent_summaries(n_days: int = 6, db_path: Optional[Path] = None) -> lis
     return result
 
 
-async def ensure_yesterday_summary(db_path: Optional[Path] = None) -> None:
+async def ensure_yesterday_summary(db_path: Optional[Path] = None, episodes_dir: Optional[Path] = None) -> None:
     """懒触发：若昨天有 episode 记录但无摘要，则自动生成，不阻塞调用方。"""
     yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     if get_summary(yesterday, db_path) is not None:
         return
-    if not _get_episodes_for_date(yesterday, db_path):
+    if not _get_episodes_for_date(yesterday, episodes_dir):
         return
     logger.info("[DailySummary] 昨天（%s）缺少摘要，后台生成中...", yesterday)
-    await generate_and_save(yesterday, db_path)
+    await generate_and_save(yesterday, db_path, episodes_dir)
