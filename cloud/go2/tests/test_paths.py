@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 
-def test_default_data_dir_under_go2():
+def test_default_data_dir_under_go2(monkeypatch):
+    monkeypatch.delenv("GO2_DATA_DIR", raising=False)
     import cloud.go2.paths as paths
     importlib.reload(paths)
     assert paths.DATA_DIR.name == "data"
