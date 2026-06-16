@@ -8,10 +8,9 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
 from cloud.go2.connection import go2
+from cloud.go2.paths import RULES_FILE
 
 # ── 规则存储 ──────────────────────────────────────────────────────
-
-RULES_FILE = Path(__file__).parent.parent.parent / "rules.json"
 
 
 def load_rules() -> list:
@@ -21,6 +20,7 @@ def load_rules() -> list:
 
 
 def save_rules(rules: list) -> None:
+    RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
     RULES_FILE.write_text(
         json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -64,8 +64,8 @@ def get_text_llm() -> ChatOpenAI:
     if _text_llm is None:
         _text_llm = ChatOpenAI(
             model=os.getenv("GO2_TEXT_MODEL", "deepseek-chat"),
-            base_url=os.getenv("SJTU_BASE_URL"),
-            api_key=os.getenv("SJTU_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY"),
             temperature=0,
             timeout=30,
         )
@@ -77,8 +77,8 @@ def get_vision_llm() -> ChatOpenAI:
     if _vision_llm is None:
         _vision_llm = ChatOpenAI(
             model=os.getenv("GO2_VISION_MODEL", "qwen"),
-            base_url=os.getenv("SJTU_BASE_URL"),
-            api_key=os.getenv("SJTU_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY"),
             temperature=0,
             timeout=30,
         )
@@ -241,7 +241,7 @@ TOOL_FN_MAP = {
 
 TOOL_DESCRIPTIONS = """\
 可用工具：
-- go2_sport(cmd): 执行预定义动作。cmd取值必须严格在下列范围内:StandUp/StandDown/StopMove/Hello/Stretch/Dance1/Dance2
+- go2_sport(cmd): 执行预定义动作。cmd 取值及含义：StandUp（站起来）/StandDown（趴下/安静休息/待命）/StopMove（停止移动）/Hello（打招呼）/Stretch（伸展）/Dance1/Dance2（跳舞）
 - go2_move(direction, speed=0.3, duration=1.0): 移动机器狗。direction: forward/backward/left/right/turn_left/turn_right
 - go2_observe(question="描述你看到的场景"): 用摄像头分析当前画面，返回视觉描述
 - go2_status(): 查询连接状态和机器狗当前姿态

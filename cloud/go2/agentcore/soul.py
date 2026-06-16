@@ -7,11 +7,12 @@ from typing import Optional
 
 from cloud.go2.agentcore.tools.tools import get_text_llm
 from cloud.go2.agentcore.memory.daily_summary import get_summary
+from cloud.go2.paths import SOUL_DIR
 
 logger = logging.getLogger(__name__)
 
-_PERSONALITY_FILE = Path(__file__).parent / "personality.json"
-_TRAITS_FILE      = Path(__file__).parent / "traits.json"
+_PERSONALITY_FILE = SOUL_DIR / "personality.json"
+_TRAITS_FILE      = SOUL_DIR / "traits.json"
 _TRAIT_KEYS       = ("curiosity", "extraversion", "boldness")
 
 _DEFAULT_PERSONALITY = (
@@ -40,6 +41,7 @@ def get_system_prompt() -> str:
 
 
 def set_personality(prompt: str) -> None:
+    _PERSONALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
     _PERSONALITY_FILE.write_text(
         json.dumps({"prompt": prompt}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -58,6 +60,7 @@ def _load_traits(traits_path: Optional[Path] = None) -> dict:
 
 def _save_traits(traits: dict, traits_path: Optional[Path] = None) -> None:
     path = traits_path or _TRAITS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(traits, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
