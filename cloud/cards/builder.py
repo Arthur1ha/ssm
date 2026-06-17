@@ -80,25 +80,37 @@ _LED_LABELS = {
     "CMD_OFF": "关灯", "CMD_BRIGHT": "亮", "CMD_DIM": "调暗",
     "CMD_COLOR": "彩色", "CMD_BLINK": "闪烁",
 }
+
+# (src, trigger, dst, action, params) — action/params 供前端直接发 MQTT task
 _LED_EDGES = [
-    ("OFF", "CMD_BRIGHT", "BRIGHT"), ("OFF", "CMD_DIM", "DIM"),
-    ("OFF", "CMD_COLOR", "COLOR"),   ("OFF", "CMD_BLINK", "BLINK"),
-    ("BRIGHT", "CMD_OFF", "OFF"),    ("BRIGHT", "CMD_DIM", "DIM"),
-    ("BRIGHT", "CMD_COLOR", "COLOR"),("BRIGHT", "CMD_BLINK", "BLINK"),
-    ("DIM", "CMD_OFF", "OFF"),       ("DIM", "CMD_BRIGHT", "BRIGHT"),
-    ("DIM", "CMD_COLOR", "COLOR"),   ("DIM", "CMD_BLINK", "BLINK"),
-    ("COLOR", "CMD_OFF", "OFF"),     ("COLOR", "CMD_BRIGHT", "BRIGHT"),
-    ("COLOR", "CMD_DIM", "DIM"),     ("COLOR", "CMD_BLINK", "BLINK"),
-    ("BLINK", "CMD_OFF", "OFF"),     ("BLINK", "CMD_BRIGHT", "BRIGHT"),
-    ("BLINK", "CMD_DIM", "DIM"),     ("BLINK", "CMD_COLOR", "COLOR"),
+    ("OFF",    "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
+    ("OFF",    "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
+    ("OFF",    "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
+    ("OFF",    "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
+    ("BRIGHT", "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
+    ("BRIGHT", "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
+    ("BRIGHT", "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
+    ("BRIGHT", "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
+    ("DIM",    "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
+    ("DIM",    "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
+    ("DIM",    "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
+    ("DIM",    "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
+    ("COLOR",  "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
+    ("COLOR",  "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
+    ("COLOR",  "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
+    ("COLOR",  "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
+    ("BLINK",  "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
+    ("BLINK",  "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
+    ("BLINK",  "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
+    ("BLINK",  "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
 ]
 
 FSM_DEFS: dict[str, StateMachine] = {
     "led": {
         "states": ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK", "ERROR"],
         "transitions": [
-            {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t]}
-            for (s, t, d) in _LED_EDGES
+            {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t], "action": a, "params": p}
+            for (s, t, d, a, p) in _LED_EDGES
         ],
         "initial": "OFF",
     },

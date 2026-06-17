@@ -14,6 +14,8 @@ class FsmTransition(TypedDict):
     dst: str        # 目标状态
     trigger: str    # 触发命令名（ESP32: CMD_BRIGHT；Go2: Move 等）
     label: str      # 人类可读按钮文案，如「开灯」
+    action: NotRequired[str]   # MQTT action 名（如 SET_STATE），供前端直接派发
+    params: NotRequired[dict]  # 该转移的默认 params（颜色/亮度等）
 
 
 class StateMachine(TypedDict):
@@ -48,12 +50,16 @@ class Transport(TypedDict):
     """传输层配置，描述如何与该智能体通信。
 
     kind = "mqtt"：通过 MQTT 发布任务消息，task_topic 为目标 topic 模板。
-    kind = "http"：通过 HTTP 调用 endpoint。
+    kind = "http"：通过 HTTP 调用 endpoint（LLM 编排入口）；
+                   command_endpoint 为 FSM transition 直接派发端点；
+                   state_stream 为 SSE 实时状态流端点。
     """
 
     kind: Literal["mqtt", "http"]
-    task_topic: NotRequired[str]   # mqtt only: ssm/task/{unit_id}/{task_id}
-    endpoint: NotRequired[str]     # http only: /api/go2/chat 等
+    task_topic: NotRequired[str]        # mqtt only: ssm/task/{unit_id}/{task_id}
+    endpoint: NotRequired[str]          # http: LLM 编排/对话入口（如 /api/go2/chat）
+    command_endpoint: NotRequired[str]  # http: FSM 转移直接派发（如 /api/go2/commands）
+    state_stream: NotRequired[str]      # http: SSE 实时状态流（如 /api/go2/connection/stream）
 
 
 class AgentCard(TypedDict):

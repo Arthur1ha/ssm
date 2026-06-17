@@ -1,116 +1,267 @@
-/* FsmDevicePage — 通用状态机设备页（V2）。读 card.state_machine + 实时当前态。 */
+/* FsmDevicePage — 通用状态机设备页（V2）。
+ * 布局：头部（固定）→ 状态图（固定高）→ ChatPanel（撑满剩余）
+ * 完全由 Agent Card 的 transport / state_machine 驱动，无设备特判。
+ */
 function FsmDevicePage({ unitId, device, liveState, onBack }) {
   const { useState, useEffect, useRef } = React;
-  const [sm, setSm]       = useState(null);       // card.state_machine
-  const [transport, setTransport] = useState(null);
-  const [sseState, setSseState]   = useState(null);
-  const [open, setOpen]   = useState(false);
+
+  /* ── Card 拓扑：优先用 device prop（来自 registry，无需等待 fetch） ── */
+  const [sm, setSm]                 = useState(device?.state_machine || null);
+  const [transport, setTransport]   = useState(device?.transport || null);
+  const [cardLoaded, setCardLoaded] = useState(!!(device?.state_machine || device?.transport));
+
+  /* ── HTTP 设备实时状态 ── */
+  const [sseState, setSseState] = useState(null);
   const esRef = useRef(null);
 
-  const isGo2 = unitId === 'go2';
+  /* ── 对话 ── */
+  const initialMsg = {
+    role: 'assistant', agent: unitId,
+    text: `你好，我是 ${device?.name || unitId}，有什么可以帮你？`,
+  };
+  const [messages, setMessages] = useState([initialMsg]);
+  const { thinking, thinkingText, send } = useSendIntent();
 
-  /* 拉取 Agent Card 拓扑 */
+  /* ── LED 自主模式 ── */
+  const isLed = (() => {
+    const n = (device?.name || unitId).toLowerCase();
+    return n.includes('led') || n.includes('rgb') || n.includes('ws2812')
+      || n.includes('ring') || n.includes('灯');
+  })();
+  const LED_CMDS = ['开灯', '关灯', '调亮', '调暗', '彩虹', '白色'];
+  const [autonomy, setAutonomy] = useState('reactive');
+
+  useEffect(() => {
+    if (!isLed) return;
+    fetch('/api/esp32/autonomy')
+      .then(r => r.json())
+      .then(d => d.mode && setAutonomy(d.mode))
+      .catch(() => {});
+  }, [isLed]);
+
+  const switchAutonomy = mode => {
+    setAutonomy(mode);
+    fetch('/api/esp32/autonomy', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    }).catch(() => {});
+  };
+
+  /* ── 后台刷新 Agent Card（prop 已提供初始值，fetch 仅作热更新） ── */
   useEffect(() => {
     fetch('/api/devices/' + unitId + '/agent')
       .then(r => r.json())
-      .then(c => { setSm(c.state_machine || null); setTransport(c.transport || null); })
-      .catch(() => {});
+      .then(c => {
+        if (c.state_machine) setSm(c.state_machine);
+        if (c.transport)     setTransport(c.transport);
+        setCardLoaded(true);
+      })
+      .catch(() => setCardLoaded(true));
   }, [unitId]);
 
-  /* Go2 当前态走 SSE；ESP32 当前态来自 liveState（ISM state.ism） */
+  /* ── HTTP 设备：订阅 SSE 实时状态流 ── */
   useEffect(() => {
-    if (!isGo2) return;
-    const es = new EventSource('/api/go2/connection/stream');
+    const url = transport?.state_stream;
+    if (!url) return;
+    const es = new EventSource(url);
     esRef.current = es;
     es.onmessage = e => {
-      try { const d = JSON.parse(e.data); if (d.fsm_state) setSseState(d.fsm_state); } catch (_) {}
+      try {
+        const d = JSON.parse(e.data);
+        if (d.fsm_state) setSseState(d.fsm_state);
+      } catch (_) {}
     };
-    return () => es.close();
-  }, [isGo2]);
+    return () => { es.close(); esRef.current = null; };
+  }, [transport?.state_stream]);
 
-  const current = isGo2 ? (sseState || 'offline')
-                        : (liveState?.state?.ism || sm?.initial || '');
+  /* ── 当前态 ── */
+  const isHttp  = transport?.kind === 'http';
+  const current = isHttp
+    ? (sseState || sm?.initial || '')
+    : (liveState?.state?.ism || sm?.initial || '');
 
-  /* 派发一条转移 */
-  const fire = (trigger) => {
-    if (isGo2 || transport?.kind === 'http') {
-      fetch('/api/go2/commands', {
+  /* ── 派发 FSM 转移 ── */
+  const fire = trigger => {
+    const t = (sm?.transitions || []).find(
+      tr => tr.src === current && tr.trigger === trigger
+    );
+    if (!t?.action) {
+      console.warn('[V2] transition missing action:', { unitId, trigger, t });
+      return;
+    }
+    if (isHttp) {
+      const endpoint = transport.command_endpoint || transport.endpoint;
+      fetch(endpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cmd: trigger }),
-      }).catch(() => {});
+        body: JSON.stringify({ action: t.action, params: t.params || {} }),
+      }).catch(e => console.error('[V2] HTTP command failed:', e));
     } else {
-      console.warn('[V2] ssm-fire dispatched (no MQTT handler yet):', { unitId, trigger });
-      window.dispatchEvent(new CustomEvent('ssm-fire', { detail: { unitId, trigger } }));
+      const task_id = 'v2_' + Date.now();
+      mqttBus.publish(
+        `ssm/task/${unitId}/${task_id}`,
+        { task_id, session_id: task_id, action: t.action, params: t.params || {}, ts: Date.now() },
+      );
     }
   };
 
-  const ACCENT = 'var(--color-accent)';
-  const outgoing = (sm?.transitions || []).filter(t => t.src === current);
+  /* ── 发送对话 ── */
+  const handleSend = text => {
+    if (!text || thinking) return;
+    setMessages(prev => [...prev, { role: 'user', text }]);
+    send(text, {
+      deviceHint: unitId,
+      onMessage: msg => setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: msg }]),
+      onPendingRule: rule => setMessages(prev => [...prev, {
+        role: 'assistant', agent: unitId,
+        text: `收到规则「${rule.name}」，请在主界面确认保存。`,
+      }]),
+    });
+  };
+
+  const meta   = getAgentMeta(device || { unit_id: unitId, name: unitId });
+  const ACCENT = meta.color;
+  const outgoing = sm ? (sm.transitions || []).filter(t => t.src === current) : [];
+  const hasUserMsg = messages.some(m => m.role === 'user');
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'var(--color-bg)', color: '#ccc',
-      fontFamily: 'var(--font-sans)', paddingTop: 'env(safe-area-inset-top,0px)',
-      display: 'flex', flexDirection: 'column' }}>
+    <div style={{
+      position: 'fixed', inset: 0,
+      background: 'var(--color-bg)', color: '#ccc',
+      fontFamily: 'var(--font-sans)',
+      paddingTop: 'env(safe-area-inset-top,0px)',
+      display: 'flex', flexDirection: 'column',
+    }}>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px',
-        borderBottom: '1px solid var(--color-border)', background: 'var(--color-surface-1)' }}>
-        <button onClick={onBack} style={{ background: 'none', border: 'none',
-          color: 'var(--color-text-dim)', cursor: 'pointer', fontSize: 18 }}>←</button>
-        <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.15em', color: ACCENT,
-          textShadow: '0 0 14px var(--color-accent)' }}>{(device?.name || unitId).toUpperCase()}</div>
-        <span style={{ marginLeft: 'auto', fontSize: 10, color: ACCENT, letterSpacing: '0.1em',
-          fontFamily: 'var(--font-mono)' }}>{(current || '—').toUpperCase()}</span>
+      {/* ── 头部 ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '11px 16px',
+        borderBottom: '1px solid var(--color-border)',
+        background: 'var(--color-surface-1)',
+        flexShrink: 0,
+      }}>
+        <button onClick={onBack} style={{
+          background: 'none', border: 'none',
+          color: 'var(--color-text-dim)', cursor: 'pointer', fontSize: 18,
+        }}>←</button>
+
+        <div style={{
+          fontSize: 13, fontWeight: 700, letterSpacing: '0.15em',
+          color: ACCENT, textShadow: '0 0 14px var(--color-accent)',
+        }}>
+          {(device?.name || unitId).toUpperCase()}
+        </div>
+
+        <div style={{
+          marginLeft: 'auto',
+          padding: '3px 10px', borderRadius: 999,
+          background: 'var(--color-accent-dim)',
+          border: '1px solid rgba(200,255,62,0.3)',
+          fontSize: 9, color: ACCENT,
+          letterSpacing: '0.12em', fontFamily: 'var(--font-mono)',
+        }}>
+          {(current || '—').toUpperCase()}
+        </div>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-
-        {/* 当前态大卡 */}
-        <div style={{ textAlign: 'center', padding: '22px 0', border: '1px solid var(--color-accent-border)',
-          borderRadius: 'var(--radius-sm)', background: 'var(--color-accent-dim)' }}>
-          <div style={{ fontSize: 9, color: 'var(--color-text-dim)', letterSpacing: '0.25em' }}>CURRENT STATE</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: ACCENT, marginTop: 6,
-            textShadow: '0 0 18px var(--color-accent)', fontFamily: 'var(--font-mono)' }}>
-            {(current || '—').toUpperCase()}</div>
-        </div>
-
-        {/* 态内富控件插槽 */}
-        {window.fsmWidget && window.fsmWidget(unitId, current)}
-
-        {/* 可执行转移按钮 */}
-        <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8 }}>
-          {outgoing.length === 0 && (
-            <div style={{ gridColumn: '1/4', textAlign: 'center', fontSize: 11,
-              color: 'var(--color-text-dim)', padding: '10px 0', letterSpacing: '0.15em' }}>
-              — 当前态无可执行转移 —</div>
-          )}
-          {outgoing.map(t => (
-            <button key={t.trigger + t.dst} onClick={() => fire(t.trigger)} style={{
-              padding: '12px 0', background: 'var(--color-accent-dim)', color: ACCENT,
-              border: '1px solid rgba(200,255,62,0.28)', borderRadius: 'var(--radius-sm)',
-              fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'var(--font-mono)',
-              letterSpacing: '0.05em', WebkitTapHighlightColor: 'transparent' }}>
-              {t.label}<div style={{ fontSize: 8, opacity: 0.5, marginTop: 2 }}>→ {t.dst}</div>
-            </button>
-          ))}
-        </div>
-
-        {/* 完整状态图（可折叠） */}
-        <button onClick={() => setOpen(o => !o)} style={{ marginTop: 16, width: '100%',
-          background: 'none', border: 'none', color: 'var(--color-text-dim)', fontSize: 9,
-          letterSpacing: '0.2em', textAlign: 'left', cursor: 'pointer' }}>
-          STATE GRAPH {open ? '▴' : '▾'}</button>
-        {open && sm && (
-          <div style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10 }}>
-            {sm.transitions.map(t => (
-              <div key={t.src + t.trigger + t.dst} style={{ padding: '3px 0',
-                color: t.src === current ? ACCENT : 'var(--color-text-dim)' }}>
-                {t.src} ──{t.label}──▸ {t.dst}
+      {/* ── 状态图区（固定，不随对话滚动） ── */}
+      {cardLoaded && (
+        <div style={{ flexShrink: 0, overflowX: 'hidden' }}>
+          {sm ? (
+            <div style={{
+              borderBottom: '1px solid var(--color-border)',
+              background: 'var(--color-surface-1)',
+              padding: '6px 4px 4px',
+            }}>
+              <div style={{
+                fontSize: 7, color: 'var(--color-text-dim)',
+                letterSpacing: '0.22em', textAlign: 'center', marginBottom: 2,
+              }}>STATE GRAPH</div>
+              <FsmGraph
+                states={sm.states}
+                transitions={sm.transitions}
+                current={current}
+                onFire={fire}
+                color={ACCENT}
+              />
+            </div>
+          ) : (
+            <div style={{
+              textAlign: 'center', padding: '16px 0',
+              borderBottom: '1px solid var(--color-border)',
+              background: 'var(--color-accent-dim)',
+            }}>
+              <div style={{ fontSize: 8, color: 'var(--color-text-dim)', letterSpacing: '0.25em' }}>
+                CURRENT STATE
               </div>
+              <div style={{
+                fontSize: 24, fontWeight: 700, color: ACCENT, marginTop: 4,
+                textShadow: '0 0 18px var(--color-accent)', fontFamily: 'var(--font-mono)',
+              }}>
+                {(current || '—').toUpperCase()}
+              </div>
+            </div>
+          )}
+
+          {/* 态内富控件（Go2 摇杆/视频等） */}
+          {window.fsmWidget && window.fsmWidget(unitId, current)}
+        </div>
+      )}
+
+      {/* ── ChatPanel（撑满剩余高度） ── */}
+      <ChatPanel
+        messages={messages}
+        thinking={thinking}
+        thinkingText={thinkingText}
+        thinkingAgent={unitId}
+        onSend={handleSend}
+        placeholder="告诉设备要做什么…"
+        variant="inline"
+      >
+        {/* 自主模式切换（LED 专属） */}
+        {isLed && (
+          <div style={{ display: 'flex', gap: 6, padding: '8px 12px 0' }}>
+            {[
+              { key: 'reactive', label: '自动调光', icon: '◉' },
+              { key: 'manual',   label: '仅听指令', icon: '◎' },
+            ].map(({ key, label, icon }) => {
+              const active = autonomy === key;
+              const c = key === 'reactive' ? '#00d4ff' : ACCENT;
+              return (
+                <button key={key} onClick={() => switchAutonomy(key)} style={{
+                  flex: 1, padding: '7px 4px',
+                  background: active ? `${c}18` : 'var(--color-surface-1)',
+                  color: active ? c : 'var(--color-text-dim)',
+                  border: `1px solid ${active ? `${c}40` : 'var(--color-border)'}`,
+                  borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
+                  cursor: 'pointer', letterSpacing: '0.07em', fontFamily: 'inherit',
+                  WebkitTapHighlightColor: 'transparent', transition: 'all 0.15s',
+                }}>{icon} {label}</button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* LED 快捷指令 */}
+        {isLed && !hasUserMsg && !thinking && (
+          <div style={{
+            padding: '6px 12px 0', display: 'flex', gap: 6,
+            overflowX: 'auto', scrollbarWidth: 'none',
+          }}>
+            {LED_CMDS.map(cmd => (
+              <button key={cmd} onClick={() => handleSend(cmd)} style={{
+                flexShrink: 0, padding: '7px 14px',
+                borderRadius: 'var(--radius-card)',
+                background: 'var(--color-surface-2)',
+                border: '1px solid var(--color-border-strong)',
+                color: 'var(--color-text-muted)', fontSize: 13,
+                cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+                WebkitTapHighlightColor: 'transparent',
+              }}>{cmd}</button>
             ))}
           </div>
         )}
-      </div>
+      </ChatPanel>
     </div>
   );
 }

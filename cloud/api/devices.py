@@ -23,10 +23,12 @@ def list_devices():
     cards = get_registry().get_all_cards()
     return [
         {
-            "unit_id":    card.get("unit_id"),
-            "name":       card.get("name"),
-            "agent_type": card.get("agent_type"),
-            "online":     card.get("online", False),
+            "unit_id":       card.get("unit_id"),
+            "name":          card.get("name"),
+            "agent_type":    card.get("agent_type"),
+            "online":        card.get("online", False),
+            "transport":     card.get("transport"),
+            "state_machine": card.get("state_machine"),
         }
         for card in cards.values()
     ]

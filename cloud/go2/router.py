@@ -49,6 +49,8 @@ def _go2_state_machine() -> dict:
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
                 "label": _GO2_FSM_LABELS.get(trigger, trigger),
+                "action": trigger,  # HTTP command_endpoint 接收 {action, params}
+                "params": {},
             })
     return {
         "states": list(_FSM_AVAILABLE.keys()),
@@ -73,6 +75,8 @@ def _build_go2_card() -> dict:
         "transport": {
             "kind": "http",
             "endpoint": "/api/go2/chat",
+            "command_endpoint": "/api/go2/commands",
+            "state_stream": "/api/go2/connection/stream",
         },
         "skills": [
             {
@@ -275,7 +279,8 @@ async def go2_state():
 
 
 class CommandRequest(BaseModel):
-    cmd: str
+    cmd: str = ""
+    action: str = ""   # 与 cmd 等价，通用 FSM 派发字段；两者取非空者
     params: dict = {}
 
 
@@ -291,8 +296,11 @@ class VelocityRequest(BaseModel):
 
 @router.post("/commands")
 async def go2_command(req: CommandRequest):
+    cmd = req.action or req.cmd
+    if not cmd:
+        raise HTTPException(status_code=400, detail="cmd or action required")
     try:
-        await go2.send_command(req.cmd, req.params or None)
+        await go2.send_command(cmd, req.params or None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

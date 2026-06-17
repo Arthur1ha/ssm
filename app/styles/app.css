@@ -78,6 +78,16 @@
   40%           { transform: translateY(-4px); opacity: 1; }
 }
 
+/* 设备详情页：右滑入 / 右滑出 */
+@keyframes page-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+@keyframes page-slide-out {
+  from { transform: translateX(0); }
+  to   { transform: translateX(100%); }
+}
+
 body {
   background: var(--bg-gradient);
   color: var(--color-text);
