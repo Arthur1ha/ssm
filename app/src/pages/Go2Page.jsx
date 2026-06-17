@@ -880,3 +880,5 @@ function Go2DevicePage({ onBack }) {
 }
 
 window.Go2DevicePage = Go2DevicePage;
+window.VirtualJoystick = VirtualJoystick;
+window.VideoCanvas = VideoCanvas;
