@@ -1,39 +1,43 @@
-/* fsmWidgets — (unit_id, state) → 态内富控件。复用 Go2Page 的摇杆/视频组件。 */
-function fsmWidget(unitId, state) {
-  if (unitId !== 'go2') return null;
-
-  const sendVelocity = (vx, vy, vyaw) => fetch('/api/go2/velocity', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ vx, vy, vyaw }),
-  }).catch(e => console.error('[go2] velocity failed:', e));
+/* fsmWidgets — 按 card.widgets 声明渲染态内富控件（type 枚举：joystick/video/map）。 */
+function fsmWidget(unitId, state, widgets) {
+  if (!widgets || !widgets.length) return null;
 
   const VirtualJoystick = window.VirtualJoystick;
   const VideoCanvas = window.VideoCanvas;
 
-  /* moving 态：实时双摇杆 */
-  if (state === 'moving' && VirtualJoystick) {
-    return (
-      <div key="joy" style={{ marginTop: 14, display: 'flex', justifyContent: 'space-between' }}>
-        <VirtualJoystick label="MOVE" disabled={false}
-          onMove={(dx, dy) => sendVelocity(+(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
-          onStop={() => sendVelocity(0, 0, 0)}/>
-        <VirtualJoystick label="ROTATE" disabled={false}
-          onMove={(dx) => sendVelocity(0, 0, +(-dx * 0.8).toFixed(2))}
-          onStop={() => sendVelocity(0, 0, 0)}/>
-      </div>
-    );
-  }
+  // 只渲染当前状态匹配的 widget（states 为空=全程显示）
+  const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
+  if (!active.length) return null;
 
-  /* standing/executing：摄像头画面 */
-  if (['standing', 'executing'].includes(state) && VideoCanvas) {
-    return (
-      <div key="cam" style={{ marginTop: 14, aspectRatio: '16/9', background: '#0a0c14',
-        border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
-        overflow: 'hidden' }}>
-        <VideoCanvas connected={true}/>
-      </div>
-    );
-  }
-  return null;
+  const sendVelocity = (endpoint, vx, vy, vyaw) => fetch(endpoint, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vx, vy, vyaw }),
+  }).catch(e => console.error('[fsmWidget] velocity failed:', e));
+
+  return active.map((w, idx) => {
+    if (w.type === 'joystick' && VirtualJoystick) {
+      const ep = w.endpoint || '/api/go2/velocity';
+      return (
+        <div key={'joy' + idx} style={{ marginTop: 14, display: 'flex', justifyContent: 'space-between' }}>
+          <VirtualJoystick label="MOVE" disabled={false}
+            onMove={(dx, dy) => sendVelocity(ep, +(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
+            onStop={() => sendVelocity(ep, 0, 0, 0)}/>
+          <VirtualJoystick label="ROTATE" disabled={false}
+            onMove={(dx) => sendVelocity(ep, 0, 0, +(-dx * 0.8).toFixed(2))}
+            onStop={() => sendVelocity(ep, 0, 0, 0)}/>
+        </div>
+      );
+    }
+    if (w.type === 'video' && VideoCanvas) {
+      return (
+        <div key={'cam' + idx} style={{ marginTop: 14, aspectRatio: '16/9', background: '#0a0c14',
+          border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
+          overflow: 'hidden' }}>
+          <VideoCanvas connected={true}/>
+        </div>
+      );
+    }
+    return null;
+  });
 }
 window.fsmWidget = fsmWidget;

@@ -25,9 +25,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   /* ── 模式轴（通用，由 card.modes 驱动） ── */
   const [modes, setModes]       = useState(device?.modes || []);
   const [modeVals, setModeVals] = useState({});   // axis.id → 当前 value
+  const [widgets, setWidgets]   = useState(device?.widgets || []);
 
-  // card 热更新后同步 modes（fetch 见下方 Agent Card effect）
+  // card 热更新后同步 modes/widgets（fetch 见下方 Agent Card effect）
   useEffect(() => { if (device?.modes) setModes(device.modes); }, [device?.modes]);
+  useEffect(() => { if (device?.widgets) setWidgets(device.widgets); }, [device?.widgets]);
 
   // 各轴拉当前值（http: GET 端点返回 {mode}）
   useEffect(() => {
@@ -57,6 +59,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         if (c.state_machine) setSm(c.state_machine);
         if (c.transport)     setTransport(c.transport);
         if (c.modes)         setModes(c.modes);
+        if (c.widgets)       setWidgets(c.widgets);
         setCardLoaded(true);
       })
       .catch(() => setCardLoaded(true));
@@ -204,8 +207,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
             </div>
           )}
 
-          {/* 态内富控件（Go2 摇杆/视频等） */}
-          {window.fsmWidget && window.fsmWidget(unitId, current)}
+          {/* 态内富控件（由 card.widgets 驱动） */}
+          {window.fsmWidget && window.fsmWidget(unitId, current, widgets)}
         </div>
       )}
 
