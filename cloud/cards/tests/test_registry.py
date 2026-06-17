@@ -81,7 +81,7 @@ class TestHandleManifest:
             json.dumps(LED_MANIFEST).encode(),
         )
         card = registry.get_card("esp32_desk_led")
-        assert len(card["skills"]) == 3
+        assert len(card["skills"]) == 4  # 3 capabilities + set_autonomy 模式 skill
 
     def test_空_payload_manifest_被忽略(self, registry):
         """空 payload 的 manifest 消息应静默忽略，不报错。"""
