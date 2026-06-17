@@ -421,4 +421,4 @@ function MainInputBar({ onSend, thinking }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+window.App = App;

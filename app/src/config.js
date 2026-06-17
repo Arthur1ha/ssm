@@ -44,3 +44,10 @@ function getAgentDisplayName(agentId) {
 function navigate(hash) {
   window.location.hash = hash;
 }
+
+/* ── UI 版本开关：?ui=v2 > localStorage > 默认 v1 ── */
+const UI_VERSION = (() => {
+  const p = new URLSearchParams(location.search).get('ui');
+  if (p) { try { localStorage.setItem('ssm_ui', p); } catch (e) {} return p; }
+  try { return localStorage.getItem('ssm_ui') || 'v1'; } catch (e) { return 'v1'; }
+})();
