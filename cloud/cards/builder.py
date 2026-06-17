@@ -163,8 +163,9 @@ def parse_card(payload: dict) -> AgentCard:
     """验证并返回自描述 Agent Card（Go2 等 HTTP 设备使用）。
 
     unit_id 缺省回退 payload['slug']，兼容烧录/重启前的旧 retained card。
+    state_machine 字段若存在则原样透传（Go2 等设备自带拓扑描述）。
     """
-    return AgentCard(
+    card = AgentCard(
         unit_id=payload.get("unit_id") or payload.get("slug", ""),
         name=payload.get("name", ""),
         description=payload.get("description", ""),
@@ -174,3 +175,6 @@ def parse_card(payload: dict) -> AgentCard:
         skills=payload.get("skills", []),
         state=payload.get("state", {}),
     )
+    if "state_machine" in payload:
+        card["state_machine"] = payload["state_machine"]
+    return card

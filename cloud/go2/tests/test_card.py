@@ -17,11 +17,16 @@ def _make_go2_stub():
 
 def _load_router_with_stub():
     """用 stub 替换重量级依赖后加载 cloud.go2.router，返回模块对象。"""
+    import importlib
     go2_stub = _make_go2_stub()
+
+    # cloud.go2.connection.fsm 只依赖 asyncio/logging，直接用真实模块，无需 stub
+    real_fsm = importlib.import_module("cloud.go2.connection.fsm")
 
     # 构造最小假包结构，避免实际 import 引入 ultralytics / WebRTC 等
     patches = {
         "cloud.go2.connection":                   types.ModuleType("cloud.go2.connection"),
+        "cloud.go2.connection.fsm":               real_fsm,
         "cloud.go2.navigation.drive":              types.ModuleType("cloud.go2.navigation.drive"),
         "cloud.go2.agentcore.skills.reactive":     types.ModuleType("cloud.go2.agentcore.skills.reactive"),
         "cloud.go2.agentcore.skills.vision":       types.ModuleType("cloud.go2.agentcore.skills.vision"),
@@ -142,3 +147,30 @@ class TestPublishClearGo2Card:
         """_mqtt_client 为 None 时，_clear_go2_card 静默失败，不抛异常。"""
         self.router_mod._mqtt_client = None
         self.router_mod._clear_go2_card()  # 不应抛异常
+
+
+def test_go2_card_has_state_machine():
+    router_mod, _ = _load_router_with_stub()
+    card = router_mod._build_go2_card()
+    sm = card.get("state_machine")
+    assert sm is not None
+    assert "standing" in sm["states"]
+    assert "moving" in sm["states"]
+    # standing --Move--> moving 这条转移存在且有 label
+    t = next(x for x in sm["transitions"]
+             if x["src"] == "standing" and x["trigger"] == "Move")
+    assert t["dst"] == "moving"
+    assert t["label"]
+
+
+def test_parse_card_keeps_state_machine():
+    from cloud.cards.builder import parse_card
+
+    payload = {
+        "unit_id": "go2", "name": "Go2", "agent_type": "robot",
+        "online": True, "transport": {"kind": "http"}, "skills": [],
+        "state": {},
+        "state_machine": {"states": ["standing"], "transitions": []},
+    }
+    card = parse_card(payload)
+    assert card.get("state_machine") == payload["state_machine"]

@@ -31,6 +31,32 @@ def init_mqtt(client) -> None:
     _mqtt_client = client
 
 
+_GO2_FSM_LABELS = {
+    "StandUp": "起立", "StandDown": "趴下", "Move": "前进", "StopMove": "停止",
+    "Hello": "挥手", "Stretch": "伸展", "Dance1": "舞蹈1", "Dance2": "舞蹈2",
+}
+
+
+def _go2_state_machine() -> dict:
+    """依据 connection/fsm.py 的 _FSM_NEXT 生成静态状态机拓扑（单一真相）。
+
+    延迟导入以避免在测试 stub 环境中与 cloud.go2.connection 补丁冲突。
+    """
+    from cloud.go2.connection.fsm import _FSM_AVAILABLE, _FSM_NEXT  # noqa: PLC0415
+    transitions = []
+    for src, edges in _FSM_NEXT.items():
+        for trigger, dst in edges.items():
+            transitions.append({
+                "src": src, "dst": dst, "trigger": trigger,
+                "label": _GO2_FSM_LABELS.get(trigger, trigger),
+            })
+    return {
+        "states": list(_FSM_AVAILABLE.keys()),
+        "transitions": transitions,
+        "initial": "standing",
+    }
+
+
 def _build_go2_card() -> dict:
     """构建 Go2 Agent Card dict（静态能力描述，符合 AgentCard schema）。
 
@@ -89,6 +115,7 @@ def _build_go2_card() -> dict:
         ],
         # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
         "state": {},
+        "state_machine": _go2_state_machine(),
     }
 
 
