@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from cloud.cards.schema import AgentCard, SkillDef, SkillInvoke, Transport
+from cloud.cards.schema import AgentCard, SkillDef, SkillInvoke, StateMachine, Transport
 
 # ── 声明式技能映射表 ──────────────────────────────────────────────
 # 将 ESP32 manifest.capabilities 中的每条 action 映射到完整 SkillDef 结构。
@@ -73,6 +73,48 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
     },
 }
 
+# ── 声明式状态机表 ────────────────────────────────────────────────
+# 镜像 edge/ism.py 的 LED_TABLE/SENSOR_TABLE（设备侧是真行为，此表给 UI 画图）。
+# 新增状态：先改 ism.py（真行为），再在此表加对应转移。
+_LED_LABELS = {
+    "CMD_OFF": "关灯", "CMD_BRIGHT": "亮", "CMD_DIM": "调暗",
+    "CMD_COLOR": "彩色", "CMD_BLINK": "闪烁",
+}
+_LED_EDGES = [
+    ("OFF", "CMD_BRIGHT", "BRIGHT"), ("OFF", "CMD_DIM", "DIM"),
+    ("OFF", "CMD_COLOR", "COLOR"),   ("OFF", "CMD_BLINK", "BLINK"),
+    ("BRIGHT", "CMD_OFF", "OFF"),    ("BRIGHT", "CMD_DIM", "DIM"),
+    ("BRIGHT", "CMD_COLOR", "COLOR"),("BRIGHT", "CMD_BLINK", "BLINK"),
+    ("DIM", "CMD_OFF", "OFF"),       ("DIM", "CMD_BRIGHT", "BRIGHT"),
+    ("DIM", "CMD_COLOR", "COLOR"),   ("DIM", "CMD_BLINK", "BLINK"),
+    ("COLOR", "CMD_OFF", "OFF"),     ("COLOR", "CMD_BRIGHT", "BRIGHT"),
+    ("COLOR", "CMD_DIM", "DIM"),     ("COLOR", "CMD_BLINK", "BLINK"),
+    ("BLINK", "CMD_OFF", "OFF"),     ("BLINK", "CMD_BRIGHT", "BRIGHT"),
+    ("BLINK", "CMD_DIM", "DIM"),     ("BLINK", "CMD_COLOR", "COLOR"),
+]
+
+FSM_DEFS: dict[str, StateMachine] = {
+    "led": {
+        "states": ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK", "ERROR"],
+        "transitions": [
+            {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t]}
+            for (s, t, d) in _LED_EDGES
+        ],
+        "initial": "OFF",
+    },
+}
+
+
+def _fsm_key(manifest: dict) -> str:
+    """选用哪张 FSM：优先 manifest['fsm'] 提示，否则按 name/unit_id 猜。"""
+    hint = manifest.get("fsm")
+    if hint in FSM_DEFS:
+        return hint
+    name = (manifest.get("name", "") + manifest.get("unit_id", "")).lower()
+    if any(k in name for k in ("led", "rgb", "ws2812", "ring", "灯")):
+        return "led"
+    return ""
+
 
 def build_card_from_manifest(manifest: dict) -> AgentCard:
     """从 ESP32 MQTT manifest 字典组装完整 AgentCard。
@@ -111,6 +153,9 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         state={},
     )
     card["parent_id"] = manifest.get("parent_id", "")
+    fsm_key = _fsm_key(manifest)
+    if fsm_key:
+        card["state_machine"] = FSM_DEFS[fsm_key]
     return card
 
 

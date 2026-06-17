@@ -261,3 +261,25 @@ def test_第二次_manifest_覆盖第一次():
     card = registry.get_card("esp32_desk_led")
     assert card["name"] == "ws2812_ring_v2"
     assert len(card["skills"]) == 2
+
+
+# ── state_machine 注入测试 ──────────────────────────────────────
+
+def test_led_manifest_carries_state_machine():
+    """LED 设备 manifest 应构建出包含 state_machine 拓扑的 card。"""
+    manifest = {
+        "unit_id": "esp32_desk_led",
+        "name": "智能灯",
+        "agent_type": "actuator",
+        "fsm": "led",
+        "capabilities": [{"action": "SET_STATE"}],
+    }
+    card = build_card_from_manifest(manifest)
+    sm = card.get("state_machine")
+    assert sm is not None
+    assert "BRIGHT" in sm["states"]
+    # OFF --CMD_BRIGHT--> BRIGHT 这条转移存在且有中文 label
+    t = next(x for x in sm["transitions"]
+             if x["src"] == "OFF" and x["trigger"] == "CMD_BRIGHT")
+    assert t["dst"] == "BRIGHT"
+    assert t["label"]
