@@ -81,3 +81,10 @@ def test_led_400_unknown_color(client):
         assert r.status_code == 400
     finally:
         conn_module.go2.is_connected = False
+
+
+def test_go2_mode_setter_已删除():
+    """死代码 PUT /api/go2/mode 已删除（切 normal 会让狗忽略遥控，是踩坑端点）。"""
+    from cloud.go2.router import router
+    paths = {(r.path, m) for r in router.routes for m in getattr(r, "methods", set())}
+    assert ("/api/go2/mode", "PUT") not in paths

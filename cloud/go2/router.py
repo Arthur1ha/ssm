@@ -284,10 +284,6 @@ class CommandRequest(BaseModel):
     params: dict = {}
 
 
-class ModeRequest(BaseModel):
-    mode: str
-
-
 class VelocityRequest(BaseModel):
     vx: float = 0.0
     vy: float = 0.0
@@ -319,17 +315,6 @@ async def go2_velocity(req: VelocityRequest):
         logging.error("[Go2/Velocity] move_velocity 异常: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc))
     return {"ok": True}
-
-
-@router.put("/mode")
-async def go2_mode(req: ModeRequest):
-    if req.mode not in ("normal", "ai", "mcf"):
-        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
-    try:
-        await go2.switch_mode(req.mode)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    return {"ok": True, "mode": req.mode}
 
 
 class ChatRequest(BaseModel):
