@@ -331,3 +331,28 @@ def test_led_card_注入_autonomy_modes():
     assert "reactive" in vals and "manual" in vals
     assert modes[0]["set"] == "/api/esp32/autonomy"
     assert "set_autonomy" in [s["id"] for s in card["skills"]]
+
+
+def test_parse_card_透传并展开_modes():
+    """自描述 card 的 modes/telemetry/widgets 应透传，modes 展开进 skills。"""
+    payload = {
+        "unit_id": "go2", "name": "Go2", "agent_type": "robot", "online": True,
+        "transport": {"kind": "http"},
+        "skills": [],
+        "state": {},
+        "modes": [{
+            "id": "autonomy", "label": "自主性",
+            "options": [
+                {"value": "remote", "label": "遥控", "description": ""},
+                {"value": "free_explore", "label": "自由探索", "description": ""},
+            ],
+            "set": "/api/go2/autonomy",
+        }],
+        "telemetry": [{"key": "fsm_state", "label": "动作状态"}],
+        "widgets": [{"type": "joystick", "states": ["moving"], "endpoint": "/api/go2/velocity"}],
+    }
+    card = parse_card(payload)
+    assert card["modes"][0]["id"] == "autonomy"
+    assert card["telemetry"][0]["key"] == "fsm_state"
+    assert card["widgets"][0]["type"] == "joystick"
+    assert "set_autonomy" in [s["id"] for s in card["skills"]]

@@ -238,4 +238,12 @@ def parse_card(payload: dict) -> AgentCard:
     )
     if "state_machine" in payload:
         card["state_machine"] = payload["state_machine"]
+    for key in ("modes", "telemetry", "widgets"):
+        if key in payload:
+            card[key] = payload[key]
+    if payload.get("modes"):
+        existing = {s["id"] for s in card["skills"]}
+        card["skills"] = list(card["skills"]) + [
+            s for s in expand_mode_skills(payload["modes"]) if s["id"] not in existing
+        ]
     return card
