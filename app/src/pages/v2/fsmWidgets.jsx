@@ -5,7 +5,7 @@ function fsmWidget(unitId, state) {
   const sendVelocity = (vx, vy, vyaw) => fetch('/api/go2/velocity', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ vx, vy, vyaw }),
-  });
+  }).catch(e => console.error('[go2] velocity failed:', e));
 
   const VirtualJoystick = window.VirtualJoystick;
   const VideoCanvas = window.VideoCanvas;
