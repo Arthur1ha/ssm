@@ -1,16 +1,18 @@
 /* AppV2 — V2 根：主屏复用 V1 体验，设备详情页换成状态机驱动的 FsmDevicePage */
+function useHashLocal() {
+  const { useState, useEffect } = React;
+  const [h, setH] = useState(window.location.hash);
+  useEffect(() => {
+    const f = () => setH(window.location.hash);
+    window.addEventListener('hashchange', f);
+    return () => window.removeEventListener('hashchange', f);
+  }, []);
+  return h;
+}
+
 function AppV2() {
   const { connected, agents, unitData } = useSsmCore();
-  const currentHash = (function useHashLocal() {
-    const { useState, useEffect } = React;
-    const [h, setH] = useState(window.location.hash);
-    useEffect(() => {
-      const f = () => setH(window.location.hash);
-      window.addEventListener('hashchange', f);
-      return () => window.removeEventListener('hashchange', f);
-    }, []);
-    return h;
-  })();
+  const currentHash = useHashLocal();
 
   const m = currentHash.match(/^#\/devices\/([^/]+)$/);
   if (m) {

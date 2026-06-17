@@ -39,6 +39,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         body: JSON.stringify({ cmd: trigger }),
       }).catch(() => {});
     } else {
+      console.warn('[V2] ssm-fire dispatched (no MQTT handler yet):', { unitId, trigger });
       window.dispatchEvent(new CustomEvent('ssm-fire', { detail: { unitId, trigger } }));
     }
   };

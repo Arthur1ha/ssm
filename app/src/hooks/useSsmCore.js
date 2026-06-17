@@ -36,7 +36,7 @@ function useSsmCore() {
     const onDisc = () => setConnected(false);
     mqttBus.addEventListener('connect', onConn);
     mqttBus.addEventListener('disconnect', onDisc);
-    mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
+    if (!mqttBus._client) mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
 
     fetch('/api/devices').then(r => r.json()).then(ds => {
       setAgents(prev => prev.length ? prev : ds.map(d => ({ ...d, _online: d.online ?? false })));
