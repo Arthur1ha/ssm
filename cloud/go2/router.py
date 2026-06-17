@@ -120,6 +120,25 @@ def _build_go2_card() -> dict:
         # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
         "state": {},
         "state_machine": _go2_state_machine(),
+        "modes": [{
+            "id": "autonomy",
+            "label": "自主性",
+            "options": [
+                {"value": "remote",       "label": "遥控",     "description": "由用户/编排器遥控决定行动"},
+                {"value": "free_explore", "label": "自由探索", "description": "机器狗自主探索环境"},
+            ],
+            "get": "/api/go2/autonomy",
+            "set": "/api/go2/autonomy",
+        }],
+        "telemetry": [
+            {"key": "fsm_state",   "label": "动作状态"},
+            {"key": "body_height", "label": "身高", "unit": "m"},
+            {"key": "velocity",    "label": "速度", "unit": "m/s"},
+        ],
+        "widgets": [
+            {"type": "joystick", "states": ["moving"],                "endpoint": "/api/go2/velocity"},
+            {"type": "video",    "states": ["standing", "executing"], "endpoint": "/api/go2/video"},
+        ],
     }
 
 

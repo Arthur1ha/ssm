@@ -174,3 +174,17 @@ def test_parse_card_keeps_state_machine():
     }
     card = parse_card(payload)
     assert card.get("state_machine") == payload["state_machine"]
+
+
+def test_go2_card_含_autonomy_modes_与_widgets():
+    """Go2 card 应带 autonomy 模式轴、telemetry 字段与 joystick/video 富控件。"""
+    from cloud.go2.router import _build_go2_card
+    card = _build_go2_card()
+    modes = card.get("modes")
+    assert modes and modes[0]["id"] == "autonomy"
+    vals = [o["value"] for o in modes[0]["options"]]
+    assert "remote" in vals and "free_explore" in vals
+    assert modes[0]["set"] == "/api/go2/autonomy"
+    assert any(t["key"] == "fsm_state" for t in card.get("telemetry", []))
+    types = [w["type"] for w in card.get("widgets", [])]
+    assert "joystick" in types and "video" in types
