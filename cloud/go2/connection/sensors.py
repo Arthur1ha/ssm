@@ -24,6 +24,7 @@ class Go2Sensors:
             "progress":    progress,
             "body_height": inner.get("body_height"),
             "velocity":    inner.get("velocity"),
+            "fsm_state":   self.fsm_state,
         }
         self._fsm_on_progress(progress)
         for q in self._state_queues:
