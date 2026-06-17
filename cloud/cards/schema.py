@@ -7,6 +7,23 @@ from __future__ import annotations
 from typing import Literal, NotRequired, TypedDict
 
 
+class FsmTransition(TypedDict):
+    """状态机一条转移：从 src 态经 trigger 命令到 dst 态。"""
+
+    src: str        # 源状态
+    dst: str        # 目标状态
+    trigger: str    # 触发命令名（ESP32: CMD_BRIGHT；Go2: Move 等）
+    label: str      # 人类可读按钮文案，如「开灯」
+
+
+class StateMachine(TypedDict):
+    """智能体静态状态机拓扑。不含当前态——当前态由实时通道提供。"""
+
+    states: list[str]
+    transitions: list[FsmTransition]
+    initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
+
+
 class SkillInvoke(TypedDict):
     """技能调用信息：描述如何触发该技能。
 
@@ -56,3 +73,4 @@ class AgentCard(TypedDict):
     transport: Transport
     skills: list[SkillDef]
     state: dict        # 动态状态，初始为空
+    state_machine: NotRequired[StateMachine]   # 静态拓扑，无此字段则前端回退富页
