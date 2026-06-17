@@ -92,9 +92,9 @@ class TestBuildCardFromManifestActuator:
         assert self.card["transport"]["task_topic"] == "ssm/task/esp32_desk_led/{task_id}"
         assert "desk-lamp" not in self.card["transport"]["task_topic"]
 
-    def test_skills_数量_为_三个(self):
-        """LED manifest 有三条 capabilities，应产出三个 skill。"""
-        assert len(self.card["skills"]) == 3
+    def test_skills_数量_为_四个(self):
+        """LED manifest 有三条 capabilities + 一条 set_autonomy 模式 skill，共四个。"""
+        assert len(self.card["skills"]) == 4
 
     def test_SET_STATE_skill_id_正确(self):
         """SET_STATE 对应 skill id 为 set_light_state。"""
@@ -260,7 +260,8 @@ def test_第二次_manifest_覆盖第一次():
 
     card = registry.get_card("esp32_desk_led")
     assert card["name"] == "ws2812_ring_v2"
-    assert len(card["skills"]) == 2
+    # 2 条 capabilities skill + 1 条 set_autonomy 模式 skill
+    assert len(card["skills"]) == 3
 
 
 # ── state_machine 注入测试 ──────────────────────────────────────
@@ -312,3 +313,21 @@ def test_expand_mode_skills_空输入():
     from cloud.cards.builder import expand_mode_skills
     assert expand_mode_skills([]) == []
     assert expand_mode_skills(None) == []
+
+
+def test_led_card_注入_autonomy_modes():
+    """LED card 应带 autonomy 模式轴，并展开出 set_autonomy skill。"""
+    manifest = {
+        "unit_id": "esp32_desk_led",
+        "name": "智能灯",
+        "agent_type": "actuator",
+        "fsm": "led",
+        "capabilities": [{"action": "SET_STATE"}],
+    }
+    card = build_card_from_manifest(manifest)
+    modes = card.get("modes")
+    assert modes and modes[0]["id"] == "autonomy"
+    vals = [o["value"] for o in modes[0]["options"]]
+    assert "reactive" in vals and "manual" in vals
+    assert modes[0]["set"] == "/api/esp32/autonomy"
+    assert "set_autonomy" in [s["id"] for s in card["skills"]]

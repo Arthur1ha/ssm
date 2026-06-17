@@ -143,6 +143,21 @@ FSM_DEFS: dict[str, StateMachine] = {
     },
 }
 
+# ── 声明式模式轴表 ────────────────────────────────────────────────
+# 灯只有「自主性」一个轴；端点指向现有 /api/esp32/autonomy（不改后端）。
+_LED_MODES: list[dict] = [{
+    "id": "autonomy",
+    "label": "自主性",
+    "options": [
+        {"value": "reactive", "label": "自动调光", "description": "灯自发根据环境调色温与亮度"},
+        {"value": "manual",   "label": "仅听指令", "description": "只执行用户/编排器命令，不自发改灯"},
+    ],
+    "get": "/api/esp32/autonomy",
+    "set": "/api/esp32/autonomy",
+}]
+
+MODE_DEFS: dict[str, list[dict]] = {"led": _LED_MODES}
+
 
 def _fsm_key(manifest: dict) -> str:
     """选用哪张 FSM：优先 manifest['fsm'] 提示，否则按 name/unit_id 猜。"""
@@ -195,6 +210,13 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     fsm_key = _fsm_key(manifest)
     if fsm_key:
         card["state_machine"] = FSM_DEFS[fsm_key]
+        modes = MODE_DEFS.get(fsm_key)
+        if modes:
+            card["modes"] = modes
+            existing = {s["id"] for s in card["skills"]}
+            card["skills"].extend(
+                s for s in expand_mode_skills(modes) if s["id"] not in existing
+            )
     return card
 
 
