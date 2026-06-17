@@ -9,6 +9,33 @@ from __future__ import annotations
 
 from cloud.cards.schema import AgentCard, SkillDef, SkillInvoke, StateMachine, Transport
 
+
+def expand_mode_skills(modes: list[dict] | None) -> list[SkillDef]:
+    """把每个 ModeAxis 展开成一条 set_{axis_id} skill，供编排器统一调用。
+
+    params_schema.value 的 enum 即该轴 options 的 value 集合；
+    invoke.action 取 set（http 端点）或 set_topic（mqtt topic）。
+    """
+    skills: list[SkillDef] = []
+    for axis in modes or []:
+        axis_id = axis.get("id", "")
+        if not axis_id:
+            continue
+        values = [o["value"] for o in axis.get("options", [])]
+        skills.append({
+            "id": f"set_{axis_id}",
+            "name": f"切换{axis.get('label', axis_id)}",
+            "tags": ["mode"],
+            "params_schema": {
+                "type": "object",
+                "required": ["value"],
+                "properties": {"value": {"enum": values}},
+            },
+            "invoke": {"action": axis.get("set") or axis.get("set_topic") or ""},
+        })
+    return skills
+
+
 # ── 声明式技能映射表 ──────────────────────────────────────────────
 # 将 ESP32 manifest.capabilities 中的每条 action 映射到完整 SkillDef 结构。
 # 新增传感器 action 只需在此表添加一条，build_card_from_manifest 无需修改。

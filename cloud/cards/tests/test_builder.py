@@ -283,3 +283,32 @@ def test_led_manifest_carries_state_machine():
              if x["src"] == "OFF" and x["trigger"] == "CMD_BRIGHT")
     assert t["dst"] == "BRIGHT"
     assert t["label"]
+
+
+# ── 模式轴展开测试 ──────────────────────────────────────────────
+
+def test_expand_mode_skills_生成_set_skill():
+    """每个模式轴应展开成一条 set_{axis_id} skill，params 枚举为 options 值。"""
+    from cloud.cards.builder import expand_mode_skills
+    modes = [{
+        "id": "autonomy", "label": "自主性",
+        "options": [
+            {"value": "reactive", "label": "自动", "description": ""},
+            {"value": "manual",   "label": "仅听指令", "description": ""},
+        ],
+        "set": "/api/esp32/autonomy",
+    }]
+    skills = expand_mode_skills(modes)
+    assert len(skills) == 1
+    s = skills[0]
+    assert s["id"] == "set_autonomy"
+    assert s["tags"] == ["mode"]
+    assert s["params_schema"]["properties"]["value"]["enum"] == ["reactive", "manual"]
+    assert s["invoke"]["action"] == "/api/esp32/autonomy"
+
+
+def test_expand_mode_skills_空输入():
+    """无模式轴时返回空列表，不报错。"""
+    from cloud.cards.builder import expand_mode_skills
+    assert expand_mode_skills([]) == []
+    assert expand_mode_skills(None) == []

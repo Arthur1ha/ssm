@@ -62,6 +62,42 @@ class Transport(TypedDict):
     state_stream: NotRequired[str]      # http: SSE 实时状态流（如 /api/go2/connection/stream）
 
 
+class ModeOption(TypedDict):
+    """模式轴的一个可选值。"""
+
+    value: str          # 设备原生模式值，如 "reactive" / "free_explore"
+    label: str          # 按钮文案，如 "自动调光"
+    description: str     # 一句话说明
+
+
+class ModeAxis(TypedDict):
+    """一个可独立设置的模式轴（如自主性）。一个设备可有 0~N 个轴。"""
+
+    id: str             # 轴标识，如 "autonomy"
+    label: str          # 轴名，如 "自主性"
+    options: list[ModeOption]
+    get: NotRequired[str]        # http: GET 端点，返回 {mode}
+    set: NotRequired[str]        # http: PUT 端点，body 发 {mode: value}
+    get_topic: NotRequired[str]  # mqtt: 读当前值的 topic
+    set_topic: NotRequired[str]  # mqtt: 切换发布的 topic
+
+
+class TelemetryField(TypedDict):
+    """设备实时上报的一个字段声明，供 UI 取数展示。"""
+
+    key: str            # 字段名，如 "fsm_state" / "body_height"
+    label: str
+    unit: NotRequired[str]
+
+
+class Widget(TypedDict):
+    """态内富控件声明，type 为 PWA 内置实现的有限集合。"""
+
+    type: Literal["joystick", "video", "map"]
+    states: list[str]            # 在哪些状态下显示（空=全程）
+    endpoint: NotRequired[str]   # 绑定的 transport 端点
+
+
 class AgentCard(TypedDict):
     """智能体能力描述卡片，供编排器和 PWA 动态发现与调用。
 
@@ -80,3 +116,6 @@ class AgentCard(TypedDict):
     skills: list[SkillDef]
     state: dict        # 动态状态，初始为空
     state_machine: NotRequired[StateMachine]   # 静态拓扑，无此字段则前端回退富页
+    modes: NotRequired[list[ModeAxis]]          # 声明式模式轴；无则无模式开关
+    telemetry: NotRequired[list[TelemetryField]] # 实时字段声明；无则无字段展示
+    widgets: NotRequired[list[Widget]]           # 态内富控件；无则无摇杆/视频/地图
