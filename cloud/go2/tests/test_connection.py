@@ -173,6 +173,8 @@ def test_balance_stand_raises_when_not_connected():
 def test_on_state_includes_fsm_state():
     conn = Go2Connection()
     conn.fsm_state = "executing"
+    q = conn.new_state_queue()
     conn._on_state({"data": {"data": {"mode": 1, "progress": 0.5,
                                       "body_height": 0.3, "velocity": [0, 0, 0]}}})
-    assert conn._robot_state["fsm_state"] == "executing"
+    state = q.get_nowait()
+    assert state["fsm_state"] == "executing"
