@@ -32,6 +32,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   useEffect(() => { if (device?.widgets) setWidgets(device.widgets); }, [device?.widgets]);
 
   // 各轴拉当前值（http: GET 端点返回 {mode}）
+  // 用轴 id 拼接字符串作依赖，避免 setModes 产生新数组引用时重复 fetch
+  const modeIds = modes.map(a => a.id).join(',');
   useEffect(() => {
     modes.forEach(axis => {
       if (!axis.get) return;
@@ -40,7 +42,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         .then(d => d.mode && setModeVals(prev => ({ ...prev, [axis.id]: d.mode })))
         .catch(() => {});
     });
-  }, [modes]);
+  }, [modeIds]);
 
   const switchMode = (axis, value) => {
     setModeVals(prev => ({ ...prev, [axis.id]: value }));

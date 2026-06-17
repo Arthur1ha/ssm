@@ -14,7 +14,7 @@ function fsmWidget(unitId, state, widgets) {
     body: JSON.stringify({ vx, vy, vyaw }),
   }).catch(e => console.error('[fsmWidget] velocity failed:', e));
 
-  return active.map((w, idx) => {
+  const nodes = active.map((w, idx) => {
     if (w.type === 'joystick' && VirtualJoystick) {
       const ep = w.endpoint || '/api/go2/velocity';
       return (
@@ -29,6 +29,8 @@ function fsmWidget(unitId, state, widgets) {
       );
     }
     if (w.type === 'video' && VideoCanvas) {
+      // w.endpoint 字段（如 /api/go2/video）暂未消费：
+      // VideoCanvas 内部硬编码抓帧路径（/api/go2/video/snapshot），不接受外部 url prop。
       return (
         <div key={'cam' + idx} style={{ marginTop: 14, aspectRatio: '16/9', background: '#0a0c14',
           border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
@@ -38,6 +40,9 @@ function fsmWidget(unitId, state, widgets) {
       );
     }
     return null;
-  });
+  }).filter(Boolean);
+
+  if (!nodes.length) return null;
+  return nodes;
 }
 window.fsmWidget = fsmWidget;
