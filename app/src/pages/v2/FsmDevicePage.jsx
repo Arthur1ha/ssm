@@ -22,28 +22,30 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   const [messages, setMessages] = useState([initialMsg]);
   const { thinking, thinkingText, send } = useSendIntent();
 
-  /* ── LED 自主模式 ── */
-  const isLed = (() => {
-    const n = (device?.name || unitId).toLowerCase();
-    return n.includes('led') || n.includes('rgb') || n.includes('ws2812')
-      || n.includes('ring') || n.includes('灯');
-  })();
-  const LED_CMDS = ['开灯', '关灯', '调亮', '调暗', '彩虹', '白色'];
-  const [autonomy, setAutonomy] = useState('reactive');
+  /* ── 模式轴（通用，由 card.modes 驱动） ── */
+  const [modes, setModes]       = useState(device?.modes || []);
+  const [modeVals, setModeVals] = useState({});   // axis.id → 当前 value
 
+  // card 热更新后同步 modes（fetch 见下方 Agent Card effect）
+  useEffect(() => { if (device?.modes) setModes(device.modes); }, [device?.modes]);
+
+  // 各轴拉当前值（http: GET 端点返回 {mode}）
   useEffect(() => {
-    if (!isLed) return;
-    fetch('/api/esp32/autonomy')
-      .then(r => r.json())
-      .then(d => d.mode && setAutonomy(d.mode))
-      .catch(() => {});
-  }, [isLed]);
+    modes.forEach(axis => {
+      if (!axis.get) return;
+      fetch(axis.get)
+        .then(r => r.json())
+        .then(d => d.mode && setModeVals(prev => ({ ...prev, [axis.id]: d.mode })))
+        .catch(() => {});
+    });
+  }, [modes]);
 
-  const switchAutonomy = mode => {
-    setAutonomy(mode);
-    fetch('/api/esp32/autonomy', {
+  const switchMode = (axis, value) => {
+    setModeVals(prev => ({ ...prev, [axis.id]: value }));
+    if (!axis.set) return;
+    fetch(axis.set, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode: value }),
     }).catch(() => {});
   };
 
@@ -54,6 +56,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
       .then(c => {
         if (c.state_machine) setSm(c.state_machine);
         if (c.transport)     setTransport(c.transport);
+        if (c.modes)         setModes(c.modes);
         setCardLoaded(true);
       })
       .catch(() => setCardLoaded(true));
@@ -120,8 +123,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
 
   const meta   = getAgentMeta(device || { unit_id: unitId, name: unitId });
   const ACCENT = meta.color;
-  const outgoing = sm ? (sm.transitions || []).filter(t => t.src === current) : [];
-  const hasUserMsg = messages.some(m => m.role === 'user');
 
   return (
     <div style={{
@@ -218,17 +219,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         placeholder="告诉设备要做什么…"
         variant="inline"
       >
-        {/* 自主模式切换（LED 专属） */}
-        {isLed && (
-          <div style={{ display: 'flex', gap: 6, padding: '8px 12px 0' }}>
-            {[
-              { key: 'reactive', label: '自动调光', icon: '◉' },
-              { key: 'manual',   label: '仅听指令', icon: '◎' },
-            ].map(({ key, label, icon }) => {
-              const active = autonomy === key;
-              const c = key === 'reactive' ? '#00d4ff' : ACCENT;
+        {/* 模式轴切换（通用，零设备特判） */}
+        {modes.map(axis => (
+          <div key={axis.id} style={{ display: 'flex', gap: 6, padding: '8px 12px 0' }}>
+            {axis.options.map((opt, i) => {
+              const active = modeVals[axis.id] === opt.value;
+              const c = i === 0 ? '#00d4ff' : ACCENT;
               return (
-                <button key={key} onClick={() => switchAutonomy(key)} style={{
+                <button key={opt.value} onClick={() => switchMode(axis, opt.value)} title={opt.description} style={{
                   flex: 1, padding: '7px 4px',
                   background: active ? `${c}18` : 'var(--color-surface-1)',
                   color: active ? c : 'var(--color-text-dim)',
@@ -236,31 +234,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
                   borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
                   cursor: 'pointer', letterSpacing: '0.07em', fontFamily: 'inherit',
                   WebkitTapHighlightColor: 'transparent', transition: 'all 0.15s',
-                }}>{icon} {label}</button>
+                }}>{opt.label}</button>
               );
             })}
           </div>
-        )}
-
-        {/* LED 快捷指令 */}
-        {isLed && !hasUserMsg && !thinking && (
-          <div style={{
-            padding: '6px 12px 0', display: 'flex', gap: 6,
-            overflowX: 'auto', scrollbarWidth: 'none',
-          }}>
-            {LED_CMDS.map(cmd => (
-              <button key={cmd} onClick={() => handleSend(cmd)} style={{
-                flexShrink: 0, padding: '7px 14px',
-                borderRadius: 'var(--radius-card)',
-                background: 'var(--color-surface-2)',
-                border: '1px solid var(--color-border-strong)',
-                color: 'var(--color-text-muted)', fontSize: 13,
-                cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
-                WebkitTapHighlightColor: 'transparent',
-              }}>{cmd}</button>
-            ))}
-          </div>
-        )}
+        ))}
       </ChatPanel>
     </div>
   );
