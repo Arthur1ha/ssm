@@ -57,7 +57,7 @@ class Transport(TypedDict):
 
     kind: Literal["mqtt", "http"]
     task_topic: NotRequired[str]        # mqtt only: ssm/task/{unit_id}/{task_id}
-    chat_endpoint: NotRequired[str]     # mqtt 设备聊天端点（如 /api/esp32/{unit_id}/chat）
+    chat_endpoint: NotRequired[str]     # mqtt 设备 HTTP 对话端点（如 /api/esp32/{unit_id}/chat），补充 mqtt 传输
     endpoint: NotRequired[str]          # http: LLM 编排/对话入口（如 /api/go2/chat）
     command_endpoint: NotRequired[str]  # http: FSM 转移直接派发（如 /api/go2/commands）
     state_stream: NotRequired[str]      # http: SSE 实时状态流（如 /api/go2/connection/stream）

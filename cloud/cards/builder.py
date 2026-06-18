@@ -186,7 +186,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     transport: Transport = {
         "kind": "mqtt",
         "task_topic": f"ssm/task/{unit_id}/{{task_id}}",  # 用 unit_id，保证 ESP32 能收到
-        "chat_endpoint": f"/api/esp32/{unit_id}/chat",    # 灯页面对话入口
+        "chat_endpoint": f"/api/esp32/{unit_id}/chat",    # ESP32 设备对话端点（所有 esp32 unit；执行器详情页使用，单一 ESP32 智能体处理）
     }
 
     capabilities: list[dict] = manifest.get("capabilities", [])
