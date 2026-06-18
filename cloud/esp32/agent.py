@@ -118,6 +118,36 @@ class ESP32Agent:
         except Exception as e:
             logger.warning("narrate_command failed: %s", e)
 
+    def handle_user_text(self, text: str) -> str:
+        """处理设备页直达的用户文本：LLM 分类『闲聊/调教』，调教则落库。
+
+        本入口不执行即时命令（仍走 FSM 按钮/MQTT task）。全程 try/except，
+        解析失败降级为礼貌回复，绝不抛出。
+        """
+        from cloud.esp32.memory import taught
+        prompt = (
+            f"{AGENT_PERSONA}\n"
+            "用户对你说了一句话。判断这是『闲聊』，还是『调教』"
+            "（教你以后遇到某情境就做某事）。\n"
+            f"用户说：{text}\n\n"
+            "只输出 JSON，不含代码块：\n"
+            '{"type": "teach"或"chat", "trigger": "情境(调教时填，自然语言)", '
+            '"behavior": "行为(调教时填，自然语言)", "reply": "你回复用户的一句话"}'
+        )
+        try:
+            resp = self._llm.invoke([HumanMessage(content=prompt)])
+            content = resp.content.strip()
+            content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
+            data = json.loads(content[content.find("{"):content.rfind("}") + 1])
+        except Exception as e:
+            logger.warning("handle_user_text parse error: %s", e)
+            return "我没太听明白，可以再说一遍吗？"
+
+        if data.get("type") == "teach" and data.get("trigger") and data.get("behavior"):
+            taught.add(data["trigger"], data["behavior"])
+            return data.get("reply") or f"学会了：{data['trigger']}就{data['behavior']}"
+        return data.get("reply") or "好的~"
+
     def _in_user_hold(self) -> bool:
         """当前是否处于用户让位窗口内。"""
         return time.time() < self._user_hold_until
