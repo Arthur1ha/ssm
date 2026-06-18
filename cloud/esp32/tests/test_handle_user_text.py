@@ -12,8 +12,9 @@ class _StubLLM:
 
     def invoke(self, _messages):
         class _Resp:
-            content = json.dumps(self._payload, ensure_ascii=False)
-        return _Resp()
+            def __init__(self, payload):
+                self.content = json.dumps(payload, ensure_ascii=False)
+        return _Resp(self._payload)
 
 
 def test_teach_message_persists(tmp_path, monkeypatch):
@@ -38,4 +39,19 @@ def test_chat_message_does_not_persist(tmp_path, monkeypatch):
     reply = agent.handle_user_text("你好")
 
     assert reply == "你好呀~"
+    assert taught.list_all() == []
+
+
+def test_llm_parse_error_degrades_gracefully(tmp_path, monkeypatch):
+    monkeypatch.setattr(taught, "TAUGHT_FILE", tmp_path / "taught.json")
+
+    class _BrokenLLM:
+        def invoke(self, _messages):
+            class _Resp:
+                content = "not json at all"
+            return _Resp()
+
+    agent = ESP32Agent(ESP32State(), llm=_BrokenLLM())
+    reply = agent.handle_user_text("随便说点什么")
+    assert "没太听明白" in reply
     assert taught.list_all() == []
