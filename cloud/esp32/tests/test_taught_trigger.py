@@ -8,11 +8,14 @@ from cloud.esp32.memory import taught
 class _StubLLM:
     def __init__(self, payload):
         self._payload = payload
+        self.last_prompt = ""
 
-    def invoke(self, _messages):
+    def invoke(self, messages):
+        self.last_prompt = messages[-1].content if messages else ""
         class _Resp:
-            content = json.dumps(self._payload, ensure_ascii=False)
-        return _Resp()
+            def __init__(self, p):
+                self.content = json.dumps(p, ensure_ascii=False)
+        return _Resp(self._payload)
 
 
 def test_reason_includes_taught_and_execute_counts(tmp_path, monkeypatch):
@@ -32,6 +35,8 @@ def test_reason_includes_taught_and_execute_counts(tmp_path, monkeypatch):
              "time_str": "20:00", "time_period": "夜间", "proactive_hints": []}
 
     calls = agent._reason(sense)
+    assert rule["id"] in agent._llm.last_prompt
+    assert "主人教过的规矩" in agent._llm.last_prompt
     assert any(c.get("taught_id") == rule["id"] for c in calls)
 
     # 执行（stub 掉真正下发，只验证计数）
