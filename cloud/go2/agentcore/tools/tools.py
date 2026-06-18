@@ -49,15 +49,20 @@ def _is_negated(trigger: str, text: str) -> bool:
 
 
 def check_rules(observation: str) -> list[str]:
-    rules = load_rules()
+    """对视觉观测做确定性匹配，返回命中的 action 列表，并记一次命中。"""
+    rules = [_migrate_rule(r) for r in load_rules()]
     now = time.time()
-    triggered = []
+    triggered: list[str] = []
     changed = False
     for rule in rules:
+        if not rule.get("enabled", True):
+            continue
         trigger = rule["trigger"]
         if trigger in observation and not _is_negated(trigger, observation):
             if now - rule.get("last_triggered", 0) >= rule["cooldown_s"]:
                 rule["last_triggered"] = now
+                rule["last_fired_ts"] = now
+                rule["hit_count"] = rule.get("hit_count", 0) + 1
                 triggered.append(rule["action"])
                 changed = True
     if changed:
