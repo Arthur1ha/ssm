@@ -263,6 +263,20 @@ class ESP32Agent:
             hint_strs = "、".join(hint_labels.get(h, h) for h in proactive_hints)
             hints_str = f"\n提示信息（供参考，不强制触发动作）：{hint_strs}"
 
+        from cloud.esp32.memory import taught as _taught
+        taught_rules = [r for r in _taught.list_all() if r.get("enabled", True)]
+        if taught_rules:
+            taught_lines = "\n".join(
+                f'- [{r["id"]}] 当「{r["trigger"]}」时：{r["behavior"]}'
+                for r in taught_rules
+            )
+            taught_str = (
+                "\n\n主人教过的规矩（命中时，在对应工具调用里加 "
+                '"taught_id" 字段标明依据的规矩 id）：\n' + taught_lines
+            )
+        else:
+            taught_str = ""
+
         prompt = (
             f"{AGENT_PERSONA}\n"
             "你负责控制桌面 LED 灯，根据当前传感器观测自主决定是否采取行动。\n\n"
@@ -271,7 +285,7 @@ class ESP32Agent:
             "sound_detected（近 5 秒内是否有声音）、led_state（当前灯状态）、time_period（时段）\n\n"
             f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
             f"{history_lines}"
-            f"{hints_str}\n\n"
+            f"{hints_str}{taught_str}\n\n"
             "根据观测自主判断，输出 JSON 数组，无需任何动作时输出 []，不含代码块或解释。\n"
             "示例：[{\"tool\": \"set_led_color\", \"params\": {\"r\": 255, \"g\": 160, \"b\": 60, \"brightness\": 160}}, "
             "{\"tool\": \"speak\", \"params\": {\"text\": \"傍晚了，给你调个暖黄\"}}]"
@@ -339,9 +353,15 @@ class ESP32Agent:
             return False
 
     def _execute(self, tool_calls: list, led_device: str):
-        """执行 planner 输出的工具调用列表（逐个走单一执行口）。"""
+        """执行 planner 输出的工具调用列表（逐个走单一执行口）。
+
+        若某调用带 taught_id 且执行成功，记一次调教命中。
+        """
+        from cloud.esp32.memory import taught as _taught
         for call in tool_calls:
-            self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
+            ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
+            if ok and call.get("taught_id"):
+                _taught.touch(call["taught_id"])
 
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
