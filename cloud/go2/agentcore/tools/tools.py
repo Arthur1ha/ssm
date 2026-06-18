@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import time
-import time as _time
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
@@ -29,11 +28,11 @@ def save_rules(rules: list) -> None:
 
 def _migrate_rule(rule: dict) -> dict:
     """把旧记录 {trigger, action, cooldown_s, last_triggered} 补全为富 schema。"""
-    rule.setdefault("id", f"tb_{int(_time.time() * 1000)}")
+    rule.setdefault("id", f"tb_{int(time.time() * 1000)}")
     rule.setdefault("behavior", rule.get("action", ""))
     rule.setdefault("action_hint", {"skill": rule.get("action", "")})
     rule.setdefault("enabled", True)
-    rule.setdefault("created_ts", _time.time())
+    rule.setdefault("created_ts", time.time())
     rule.setdefault("hit_count", 0)
     rule.setdefault("last_fired_ts", None)
     return rule
@@ -185,7 +184,7 @@ def go2_add_rule(trigger: str, action: str, cooldown_s: int = 30,
     rules = [_migrate_rule(r) for r in load_rules()]
     rules = [r for r in rules if not (r["trigger"] == trigger and r["action"] == action)]
     rules.append({
-        "id":            f"tb_{int(_time.time() * 1000)}",
+        "id":            f"tb_{int(time.time() * 1000)}",
         "trigger":       trigger,
         "action":        action,
         "behavior":      behavior or action,
@@ -193,7 +192,7 @@ def go2_add_rule(trigger: str, action: str, cooldown_s: int = 30,
         "cooldown_s":    cooldown_s,
         "last_triggered": 0,
         "enabled":       True,
-        "created_ts":    _time.time(),
+        "created_ts":    time.time(),
         "hit_count":     0,
         "last_fired_ts": None,
     })
