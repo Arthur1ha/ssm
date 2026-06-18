@@ -24,3 +24,4 @@ def test_memory_endpoint(monkeypatch, tmp_path):
     assert len(body["taught"]) == 1
     assert body["taught"][0]["hit_count"] == 2
     assert "today" in body
+    assert isinstance(body["today"], str)
