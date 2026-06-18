@@ -20,6 +20,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
     text: `你好，我是 ${device?.name || unitId}，有什么可以帮你？`,
   };
   const [messages, setMessages] = useState([initialMsg]);
+  const [sending, setSending] = useState(false);
   const { thinking, thinkingText, send } = useSendIntent();
 
   /* ── 模式轴（通用，由 card.modes 驱动） ── */
@@ -120,7 +121,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
 
   /* ── 发送对话 ── */
   const handleSend = text => {
-    if (!text || thinking) return;
+    if (!text || thinking || sending) return;
     setMessages(prev => [...prev, { role: 'user', text }]);
 
     // 有 chat 端点 → 直达执行体（两类执行体的请求/响应字段不同）
@@ -129,17 +130,19 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
       const body = isEsp32
         ? { text }
         : { session_id: sessionRef.current, message: text };  // go2：{message}->{response}
+      setSending(true);
       fetch(chatEndpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-        .then(r => r.json())
+        .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
         .then(d => setMessages(prev => [...prev, {
           role: 'assistant', agent: unitId, text: d.reply || d.response || '(无回复)',
         }]))
         .catch(() => setMessages(prev => [...prev, {
           role: 'assistant', agent: unitId, text: '设备没有响应~',
-        }]));
+        }]))
+        .finally(() => setSending(false));
       return;
     }
 
@@ -259,7 +262,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
       }}>
       <ChatPanel
         messages={messages}
-        thinking={thinking}
+        thinking={thinking || sending}
         thinkingText={thinkingText}
         thinkingAgent={unitId}
         onSend={handleSend}
