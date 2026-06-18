@@ -114,10 +114,36 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
     }
   };
 
+  /* ── 对话直达执行体：优先取 chat_endpoint（灯）或 endpoint（go2） ── */
+  const chatEndpoint = transport?.chat_endpoint || transport?.endpoint || null;
+  const sessionRef = useRef('fsm_' + unitId + '_' + Date.now());
+
   /* ── 发送对话 ── */
   const handleSend = text => {
     if (!text || thinking) return;
     setMessages(prev => [...prev, { role: 'user', text }]);
+
+    // 有 chat 端点 → 直达执行体（两类执行体的请求/响应字段不同）
+    if (chatEndpoint) {
+      const isEsp32 = !!transport?.chat_endpoint;        // 灯：{text}->{reply}
+      const body = isEsp32
+        ? { text }
+        : { session_id: sessionRef.current, message: text };  // go2：{message}->{response}
+      fetch(chatEndpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+        .then(r => r.json())
+        .then(d => setMessages(prev => [...prev, {
+          role: 'assistant', agent: unitId, text: d.reply || d.response || '(无回复)',
+        }]))
+        .catch(() => setMessages(prev => [...prev, {
+          role: 'assistant', agent: unitId, text: '设备没有响应~',
+        }]));
+      return;
+    }
+
+    // 否则回退编排器（保持原有逻辑）
     send(text, {
       deviceHint: unitId,
       onMessage: msg => setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: msg }]),
