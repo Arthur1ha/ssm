@@ -158,6 +158,17 @@ _LED_MODES: list[dict] = [{
 
 MODE_DEFS: dict[str, list[dict]] = {"led": _LED_MODES}
 
+# ── 声明式快捷指令表 ──────────────────────────────────────────────
+# 设备页对话的快捷词，由 card.suggestions 驱动（前端无设备特判）。
+# 灯走直达调教入口，故给的是"调教/对话"风格示例而非即时控制命令。
+_LED_SUGGESTIONS: list[str] = [
+    "以后天黑了就调亮一点",
+    "我睡觉时开助眠灯",
+    "我工作时开护眼光",
+]
+
+SUGGESTION_DEFS: dict[str, list[str]] = {"led": _LED_SUGGESTIONS}
+
 
 def _fsm_key(manifest: dict) -> str:
     """选用哪张 FSM：优先 manifest['fsm'] 提示，否则按 name/unit_id 猜。"""
@@ -218,6 +229,9 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
             card["skills"].extend(
                 s for s in expand_mode_skills(modes) if s["id"] not in existing
             )
+        suggestions = SUGGESTION_DEFS.get(fsm_key)
+        if suggestions:
+            card["suggestions"] = suggestions
     return card
 
 
@@ -239,7 +253,7 @@ def parse_card(payload: dict) -> AgentCard:
     )
     if "state_machine" in payload:
         card["state_machine"] = payload["state_machine"]
-    for key in ("modes", "telemetry", "widgets"):
+    for key in ("modes", "telemetry", "widgets", "suggestions"):
         if key in payload:
             card[key] = payload[key]
     if payload.get("modes"):

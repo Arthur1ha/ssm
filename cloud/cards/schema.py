@@ -120,3 +120,4 @@ class AgentCard(TypedDict):
     modes: NotRequired[list[ModeAxis]]          # 声明式模式轴；无则无模式开关
     telemetry: NotRequired[list[TelemetryField]] # 实时字段声明；无则无字段展示
     widgets: NotRequired[list[Widget]]           # 态内富控件；无则无摇杆/视频/地图
+    suggestions: NotRequired[list[str]]          # 设备页对话快捷指令词；无则不显示
