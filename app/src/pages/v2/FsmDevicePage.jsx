@@ -45,6 +45,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   }, [modeIds]);
 
   const switchMode = (axis, value) => {
+    if (offline) return;
     setModeVals(prev => ({ ...prev, [axis.id]: value }));
     if (!axis.set) return;
     fetch(axis.set, {
@@ -90,6 +91,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
 
   /* ── 派发 FSM 转移 ── */
   const fire = trigger => {
+    if (offline) return;
     const t = (sm?.transitions || []).find(
       tr => tr.src === current && tr.trigger === trigger
     );
@@ -126,8 +128,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
     });
   };
 
-  const meta   = getAgentMeta(device || { unit_id: unitId, name: unitId });
-  const ACCENT = meta.color;
+  const meta    = getAgentMeta(device || { unit_id: unitId, name: unitId });
+  const ACCENT  = meta.color;
+  const offline = !device?._online;   // 离线：控制面板置灰、禁用交互
 
   return (
     <div style={{
@@ -153,7 +156,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
 
         <div style={{
           fontSize: 13, fontWeight: 700, letterSpacing: '0.15em',
-          color: ACCENT, textShadow: '0 0 14px var(--color-accent)',
+          color: offline ? 'var(--color-text-dim)' : ACCENT,
+          textShadow: offline ? 'none' : '0 0 14px var(--color-accent)',
         }}>
           {(device?.name || unitId).toUpperCase()}
         </div>
@@ -161,18 +165,24 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         <div style={{
           marginLeft: 'auto',
           padding: '3px 10px', borderRadius: 999,
-          background: 'var(--color-accent-dim)',
-          border: '1px solid rgba(200,255,62,0.3)',
-          fontSize: 9, color: ACCENT,
+          background: offline ? 'var(--color-surface-2)' : 'var(--color-accent-dim)',
+          border: `1px solid ${offline ? 'var(--color-border)' : 'rgba(200,255,62,0.3)'}`,
+          fontSize: 9, color: offline ? 'var(--color-text-dim)' : ACCENT,
           letterSpacing: '0.12em', fontFamily: 'var(--font-mono)',
         }}>
-          {(current || '—').toUpperCase()}
+          {offline ? '离线' : (current || '—').toUpperCase()}
         </div>
       </div>
 
-      {/* ── 状态图区（固定，不随对话滚动） ── */}
+      {/* ── 状态图区（固定，不随对话滚动）；离线置灰并禁用交互 ── */}
       {cardLoaded && (
-        <div style={{ flexShrink: 0, overflowX: 'hidden' }}>
+        <div style={{
+          flexShrink: 0, overflowX: 'hidden',
+          filter: offline ? 'grayscale(1)' : 'none',
+          opacity: offline ? 0.45 : 1,
+          pointerEvents: offline ? 'none' : 'auto',
+          transition: 'filter 0.2s, opacity 0.2s',
+        }}>
           {sm ? (
             <div style={{
               borderBottom: '1px solid var(--color-border)',
@@ -214,19 +224,29 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         </div>
       )}
 
-      {/* ── ChatPanel（撑满剩余高度） ── */}
+      {/* ── ChatPanel（撑满剩余高度）；离线整体置灰并禁用输入 ── */}
+      <div style={{
+        flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column',
+        filter: offline ? 'grayscale(1)' : 'none',
+        opacity: offline ? 0.45 : 1,
+        transition: 'filter 0.2s, opacity 0.2s',
+      }}>
       <ChatPanel
         messages={messages}
         thinking={thinking}
         thinkingText={thinkingText}
         thinkingAgent={unitId}
         onSend={handleSend}
-        placeholder="告诉设备要做什么…"
+        placeholder={offline ? '设备离线，暂不可用' : '告诉设备要做什么…'}
+        disabled={offline}
         variant="inline"
       >
         {/* 模式轴切换（通用，零设备特判） */}
         {modes.map(axis => (
-          <div key={axis.id} style={{ display: 'flex', gap: 6, padding: '8px 12px 0' }}>
+          <div key={axis.id} style={{
+            display: 'flex', gap: 6, padding: '8px 12px 0',
+            pointerEvents: offline ? 'none' : 'auto',
+          }}>
             {axis.options.map((opt, i) => {
               const active = modeVals[axis.id] === opt.value;
               const c = i === 0 ? '#00d4ff' : ACCENT;
@@ -245,6 +265,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
           </div>
         ))}
       </ChatPanel>
+      </div>
     </div>
   );
 }
