@@ -23,14 +23,16 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   const [sending, setSending] = useState(false);
   const { thinking, thinkingText, send } = useSendIntent();
 
-  /* ── 模式轴（通用，由 card.modes 驱动） ── */
+  /* ── 模式轴 / 富控件 / 快捷指令（通用，由 card 驱动） ── */
   const [modes, setModes]       = useState(device?.modes || []);
   const [modeVals, setModeVals] = useState({});   // axis.id → 当前 value
   const [widgets, setWidgets]   = useState(device?.widgets || []);
+  const [suggestions, setSuggestions] = useState(device?.suggestions || []);
 
-  // card 热更新后同步 modes/widgets（fetch 见下方 Agent Card effect）
+  // card 热更新后同步 modes/widgets/suggestions（fetch 见下方 Agent Card effect）
   useEffect(() => { if (device?.modes) setModes(device.modes); }, [device?.modes]);
   useEffect(() => { if (device?.widgets) setWidgets(device.widgets); }, [device?.widgets]);
+  useEffect(() => { if (device?.suggestions) setSuggestions(device.suggestions); }, [device?.suggestions]);
 
   // 各轴拉当前值（http: GET 端点返回 {mode}）
   // 用轴 id 拼接字符串作依赖，避免 setModes 产生新数组引用时重复 fetch
@@ -64,6 +66,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         if (c.transport)     setTransport(c.transport);
         if (c.modes)         setModes(c.modes);
         if (c.widgets)       setWidgets(c.widgets);
+        if (c.suggestions)   setSuggestions(c.suggestions);
         setCardLoaded(true);
       })
       .catch(() => setCardLoaded(true));
@@ -160,6 +163,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   const meta    = getAgentMeta(device || { unit_id: unitId, name: unitId });
   const ACCENT  = meta.color;
   const offline = !device?._online;   // 离线：控制面板置灰、禁用交互
+  const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
+  const hasUserMsg = messages.some(m => m.role === 'user');
 
   return (
     <div style={{
@@ -178,28 +183,56 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         background: 'var(--color-surface-1)',
         flexShrink: 0,
       }}>
+        {/* 返回按钮 */}
         <button onClick={onBack} style={{
           background: 'none', border: 'none',
-          color: 'var(--color-text-dim)', cursor: 'pointer', fontSize: 18,
+          color: 'var(--color-text-dim)', cursor: 'pointer',
+          fontSize: 18, padding: '0 4px', lineHeight: 1,
+          fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
         }}>←</button>
 
-        <div style={{
-          fontSize: 13, fontWeight: 700, letterSpacing: '0.15em',
-          color: offline ? 'var(--color-text-dim)' : ACCENT,
-          textShadow: offline ? 'none' : '0 0 14px var(--color-accent)',
-        }}>
-          {(device?.name || unitId).toUpperCase()}
+        {/* 设备名 + 副标题 */}
+        <div>
+          <div style={{
+            fontSize: 13, fontWeight: 700, letterSpacing: '0.12em',
+            color: offline ? 'var(--color-text-dim)' : ACCENT,
+            textShadow: (isOn && !offline) ? `0 0 12px ${ACCENT}80` : 'none',
+            transition: 'text-shadow 0.4s',
+          }}>{(device?.name || unitId).toUpperCase()}</div>
+          <div style={{
+            fontSize: 9, color: 'var(--color-text-dim)',
+            letterSpacing: '0.18em', marginTop: 1,
+          }}>{(meta.label || '').toUpperCase()}</div>
         </div>
 
-        <div style={{
-          marginLeft: 'auto',
-          padding: '3px 10px', borderRadius: 999,
-          background: offline ? 'var(--color-surface-2)' : 'var(--color-accent-dim)',
-          border: `1px solid ${offline ? 'var(--color-border)' : 'rgba(200,255,62,0.3)'}`,
-          fontSize: 9, color: offline ? 'var(--color-text-dim)' : ACCENT,
-          letterSpacing: '0.12em', fontFamily: 'var(--font-mono)',
-        }}>
-          {offline ? '离线' : (current || '—').toUpperCase()}
+        {/* 右侧：状态点 + 当前态文字 + AGENT 按钮 */}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: offline ? 'var(--color-offline)' : ACCENT,
+            boxShadow: (isOn && !offline) ? `0 0 8px ${ACCENT}` : 'none',
+            transition: 'box-shadow 0.4s',
+          }}/>
+          <span style={{
+            fontSize: 10, letterSpacing: '0.1em',
+            color: offline ? 'var(--color-text-dim)' : ACCENT,
+            fontFamily: 'var(--font-mono)',
+          }}>
+            {offline ? 'OFFLINE' : (current || 'ONLINE').toUpperCase()}
+          </span>
+          <a href={'/api/devices/' + unitId + '/agent'} target="_blank" rel="noopener"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              background: `${ACCENT}12`, color: ACCENT,
+              border: `1px solid ${ACCENT}30`,
+              borderRadius: 'var(--radius-sm)', padding: '5px 10px',
+              fontSize: 10, letterSpacing: '0.1em',
+              cursor: 'pointer', textDecoration: 'none',
+              fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
+            }}>
+            <Icon name="zap" size={10} color={ACCENT}/>
+            AGENT
+          </a>
         </div>
       </div>
 
@@ -288,11 +321,31 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
                   borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
                   cursor: 'pointer', letterSpacing: '0.07em', fontFamily: 'inherit',
                   WebkitTapHighlightColor: 'transparent', transition: 'all 0.15s',
-                }}>{opt.label}</button>
+                }}>{(i === 0 ? '◉' : '◎')} {opt.label}</button>
               );
             })}
           </div>
         ))}
+
+        {/* 快捷指令（card.suggestions 驱动）：无用户消息时显示，位置与主屏建议一致 */}
+        {suggestions.length > 0 && !hasUserMsg && !thinking && !offline && (
+          <div style={{
+            padding: '6px 12px 0', display: 'flex', gap: 6,
+            overflowX: 'auto', scrollbarWidth: 'none',
+          }}>
+            {suggestions.map(cmd => (
+              <button key={cmd} onClick={() => handleSend(cmd)} style={{
+                flexShrink: 0, padding: '7px 14px',
+                borderRadius: 'var(--radius-card)',
+                background: 'var(--color-surface-2)',
+                border: '1px solid var(--color-border-strong)',
+                color: 'var(--color-text-muted)', fontSize: 13,
+                cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+                WebkitTapHighlightColor: 'transparent',
+              }}>{cmd}</button>
+            ))}
+          </div>
+        )}
       </ChatPanel>
       </div>
     </div>
