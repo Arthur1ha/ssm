@@ -163,12 +163,14 @@ def test_drive_state_endpoint_returns_expected_shape(client):
         assert key in data
 
 
-def test_memory_endpoint_returns_entries_list(client):
+def test_memory_endpoint_returns_taught_and_today(client):
     r = client.get("/api/go2/memory")
     assert r.status_code == 200
     data = r.json()
-    assert "entries" in data
-    assert isinstance(data["entries"], list)
+    assert "taught" in data
+    assert isinstance(data["taught"], list)
+    assert "today" in data
+    assert isinstance(data["today"], str)
 
 
 def test_personality_get_returns_prompt(client):

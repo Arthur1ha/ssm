@@ -542,8 +542,10 @@ def go2_drive_state():
 
 @router.get("/memory")
 def go2_memory():
+    """返回 Go2 的成长资产：调教记录 + 今天的事件流。"""
+    from cloud.go2.agentcore.tools.tools import load_rules
     from cloud.go2.agentcore.memory.episode import episode_memory
-    return {"entries": episode_memory.entries()}
+    return {"taught": load_rules(), "today": episode_memory.format_today()}
 
 
 @router.get("/autonomy")
