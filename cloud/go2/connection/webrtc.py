@@ -84,8 +84,6 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     async def disconnect(self) -> None:
         self.is_connected = False
         self.fsm_state = "offline"
-        if self._exec_reset_task and not self._exec_reset_task.done():
-            self._exec_reset_task.cancel()
         if self._status_task and not self._status_task.done():
             self._status_task.cancel()
             self._status_task = None
@@ -144,13 +142,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
         next_state = self.fsm_next(cmd)
         if next_state is not None:
-            if next_state == self._fsm_state == "executing":
-                logger.info("[Go2/FSM] executing ↺ executing (打断，重新执行 %s)", cmd)
-                self._schedule_exec_reset()
-            else:
-                self.fsm_state = next_state
-                if next_state == "executing":
-                    self._schedule_exec_reset()
+            self.fsm_state = next_state
 
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
