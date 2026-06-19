@@ -137,7 +137,7 @@ def _build_go2_card() -> dict:
         ],
         "widgets": [
             {"type": "joystick", "states": ["moving"],                "endpoint": "/api/go2/velocity"},
-            {"type": "video",    "states": ["standing", "executing"], "endpoint": "/api/go2/video"},
+            {"type": "video",    "states": ["standing", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
         ],
     }
 

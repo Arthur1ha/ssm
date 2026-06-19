@@ -188,3 +188,25 @@ def test_go2_card_含_autonomy_modes_与_widgets():
     assert any(t["key"] == "fsm_state" for t in card.get("telemetry", []))
     types = [w["type"] for w in card.get("widgets", [])]
     assert "joystick" in types and "video" in types
+
+
+def test_state_machine_has_action_states_not_executing():
+    """状态机含 4 个动作态、不含 executing，且 standing--Hello-->greeting 存在。"""
+    from cloud.go2.router import _go2_state_machine
+    sm = _go2_state_machine()
+    names = set(sm["states"])
+    assert {"greeting", "stretching", "dancing1", "dancing2"} <= names
+    assert "executing" not in names
+    assert any(
+        t["src"] == "standing" and t["trigger"] == "Hello" and t["dst"] == "greeting"
+        for t in sm["transitions"]
+    )
+
+
+def test_video_widget_states_drop_executing():
+    """video 富控件显示状态对齐动作态，不再引用已删除的 executing。"""
+    from cloud.go2.router import _build_go2_card
+    card = _build_go2_card()
+    video = next(w for w in card["widgets"] if w["type"] == "video")
+    assert "executing" not in video["states"]
+    assert "greeting" in video["states"]
