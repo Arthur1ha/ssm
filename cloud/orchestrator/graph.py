@@ -54,6 +54,13 @@ _conversation_history: list = []
 _MAX_HISTORY = 10
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _format_env_state(sensors: dict, actuators: dict) -> str:
     """把传感器和执行器快照格式化为可读字符串，注入 Planner prompt。"""
     lines = []
@@ -77,13 +84,19 @@ def _make_llm():
     """构建带 fallback 链的 ChatOpenAI（按 MODEL_LIST 顺序重试）。"""
     model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
     models = [m.strip() for m in model_list_str.split(",") if m.strip()]
+    if not models:
+        models = ["deepseek-chat"]
 
     base_kwargs = dict(
         base_url=os.getenv("OPENAI_BASE_URL"),
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0,
-        timeout=30,
+        timeout=_int_env("LLM_TIMEOUT", 30),
+        max_retries=_int_env("LLM_MAX_RETRIES", 1),
     )
+    max_tokens = _int_env("ORCHESTRATOR_MAX_TOKENS", 900)
+    if max_tokens > 0:
+        base_kwargs["max_tokens"] = max_tokens
     llms = [ChatOpenAI(model=m, **base_kwargs) for m in models]
     logger.info("[Graph] LLM fallback chain: %s", " → ".join(models))
     return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
@@ -214,7 +227,10 @@ def _looks_like_discovery_request(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
         return False
-    discovery_terms = ("新成员", "可接入", "接入设备", "发现设备", "附近设备")
+    discovery_terms = (
+        "新成员", "可接入", "可以接入", "接入设备", "发现设备", "附近设备",
+        "哪些设备", "有什么设备", "看看设备", "查看设备", "看看成员", "查看成员",
+    )
     return any(term in t for term in discovery_terms)
 
 
@@ -280,12 +296,23 @@ def _make_planner_node(llm):
 
         try:
             resp = llm.invoke([HumanMessage(content=prompt)])
-            out = _parse_planner_output(resp.content)
-            if not out:
-                raise ValueError("empty planner output")
+            content = (resp.content or "").strip()
         except Exception as e:
-            logger.error("[Planner] llm/parse error: %s", e)
+            logger.error("[Planner] llm invoke error: %s", e)
             return {**state, "route": "chat", "response_text": LLM_UNAVAILABLE_REPLY,
+                    "planned_tasks": [], "early_exit": False}
+
+        try:
+            out = _parse_planner_output(content)
+        except Exception as e:
+            logger.error("[Planner] parse error: %s | raw=%r", e, content[:500])
+            answer = "我刚才收到的规划结果有点乱，不放心替你安排。你换句话再说一次，我重新听。"
+            return {**state, "route": "chat", "response_text": answer,
+                    "planned_tasks": [], "early_exit": False}
+        if not out:
+            logger.error("[Planner] parse error: empty/non-json output | raw=%r", content[:500])
+            answer = "我刚才收到的规划结果有点乱，不放心替你安排。你换句话再说一次，我重新听。"
+            return {**state, "route": "chat", "response_text": answer,
                     "planned_tasks": [], "early_exit": False}
 
         route = out.get("route", "act")

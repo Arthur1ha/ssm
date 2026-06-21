@@ -52,8 +52,9 @@ def _on_esp32_connect(client, userdata, flags, rc):
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
-        # API 启动时重置 Go2 在线状态，清除上次会话 retained 的 "online"
-        client.publish(go2_router_module.GO2_STATUS_TOPIC, "offline", retain=True, qos=1)
+        # API 进程在线即可暴露 Go2 智能体 card；真实机器狗连接状态由 /api/go2/connection 给出。
+        go2_router_module._publish_go2_card()
+        go2_router_module._publish_go2_status(True)
         logger.info("[ESP32Agent MQTT] Connected and subscribed")
 
 
@@ -146,6 +147,7 @@ async def lifespan(app):
     _esp32_mqtt_client.on_connect = _on_esp32_connect
     _esp32_mqtt_client.on_message = _on_esp32_message
     _esp32_mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)
+    go2_router_module.init_mqtt(_esp32_mqtt_client)
 
     # LWT：api 进程意外崩溃时把 Go2 标记离线（能力卡 retained 保留，靠 online=false 表达失活，
     # 与 ESP32 的 status/LWT 模型一致）。paho 单客户端仅一个 will，故选 status 离线。
@@ -159,7 +161,6 @@ async def lifespan(app):
         logger.error("[ESP32Agent MQTT] Connection failed: %s", e)
 
     esp32_tools.init(_esp32_mqtt_client)
-    go2_router_module.init_mqtt(_esp32_mqtt_client)
     agent = esp32_agent_mod.init(_esp32_state)
     agent.start()
 

@@ -55,7 +55,7 @@ def _go2_state_machine() -> dict:
     return {
         "states": list(_FSM_AVAILABLE.keys()),
         "transitions": transitions,
-        "initial": "standing",
+        "initial": "offline",
     }
 
 
@@ -71,8 +71,8 @@ def _build_go2_card() -> dict:
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",
-        # online 反映实际 WebRTC 连接状态，真相由 status topic 维护，这里避免硬编码误导
-        "online": go2.is_connected,
+        # online 表示 Go2 API 智能体在线；真实机器狗 WebRTC 状态由 state_stream 暴露。
+        "online": True,
         "transport": {
             "kind": "http",
             "endpoint": "/api/go2/chat",
@@ -137,6 +137,12 @@ def _build_go2_card() -> dict:
             {"key": "velocity",    "label": "速度", "unit": "m/s"},
         ],
         "widgets": [
+            {
+                "type": "connection",
+                "states": ["offline", "connecting"],
+                "endpoint": "/api/go2/connection",
+                "status_endpoint": "/api/go2/connection",
+            },
             {"type": "joystick", "states": ["moving"],                "endpoint": "/api/go2/velocity"},
             {"type": "video",    "states": ["standing", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
         ],
@@ -160,7 +166,7 @@ def _publish_go2_card() -> None:
 
 
 def _publish_go2_status(online: bool) -> None:
-    """发布 Go2 在线状态（retained，含 LWT 语义），由 CardRegistry 维护 card.online。"""
+    """发布 Go2 API 智能体在线状态（retained，含 API 进程 LWT 语义）。"""
     if _mqtt_client is None:
         return
     try:
@@ -240,8 +246,8 @@ async def go2_disconnect():
     _active_drive_cb = None
     _autonomy_mode   = "manual"
     await go2.disconnect()
-    _clear_go2_card()
-    _publish_go2_status(False)
+    _publish_go2_card()
+    _publish_go2_status(True)
     return {"status": "disconnected"}
 
 
@@ -286,12 +292,22 @@ async def go2_state():
     async def sse_gen():
         q = go2.new_state_queue()
         try:
-            while go2.is_connected:
+            while True:
                 try:
-                    state = await asyncio.wait_for(q.get(), timeout=5.0)
-                    yield f"data: {json.dumps(state)}\n\n"
+                    state = await asyncio.wait_for(q.get(), timeout=2.0)
                 except asyncio.TimeoutError:
-                    yield "data: {}\n\n"
+                    state = {}
+                payload = {
+                    "connected": go2.is_connected,
+                    "fsm_state": go2.fsm_state,
+                    "available_actions": go2.available_actions,
+                    "state": go2._robot_state,
+                    "error": getattr(go2, "_last_error", None),
+                }
+                if isinstance(state, dict):
+                    payload.update(state)
+                    payload["fsm_state"] = state.get("fsm_state") or go2.fsm_state
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             go2.remove_state_queue(q)
 
