@@ -2,11 +2,9 @@
  * 主屏始终挂载；设备页以 position:fixed 包裹层叠在上方，
  * 进入时右滑入，返回时右滑出，避免整棵树切换导致的闪烁。
  */
-const GO2_STATIC_V2 = {
-  unit_id: 'go2', name: 'Go2 Air', agent_type: 'robot', _online: false,
-  capabilities: ['MOVE', 'STAND_UP', 'SIT_DOWN', 'HELLO', 'STRETCH', 'DANCE'],
-};
 const SUGGESTIONS_V2 = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
+const ONBOARDING_SUGGESTIONS_V2 = ['帮我看看有什么新成员？'];
+const ONBOARDING_BUBBLE_V2 = '我刚醒来，还没认识这个空间里的新成员。要不要让我先四处听一听，看看谁在等着加入？';
 
 function useHashLocal() {
   const { useState, useEffect } = React;
@@ -24,7 +22,7 @@ function navigate(hash) { window.location.hash = hash; }
 
 function AppV2() {
   const { useState } = React;
-  const { connected, agents, unitData } = useSsmCore();
+  const { connected, agents, loadingAgents, unitData, refreshAgents } = useSsmCore();
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHashLocal();
 
@@ -32,11 +30,19 @@ function AppV2() {
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
+  const [adoptingDeviceId, setAdoptingDeviceId] = useState(null);
 
   /* 退出动画：保留即将消失的 uid，待动画完成后清除 */
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
+  const ready = !loadingAgents;
+  const onboarding = ready && agents.length === 0;
+  const hasDevices = ready && agents.length > 0;
+  const displayEntries = onboarding && activityLog.length === 0
+    ? [{ type: 'ai', agent: 'orchestrator', text: ONBOARDING_BUBBLE_V2 }]
+    : activityLog;
+  const suggestions = onboarding ? ONBOARDING_SUGGESTIONS_V2 : (hasDevices ? SUGGESTIONS_V2 : []);
 
   const handleSend = text => {
     const t = text.trim();
@@ -45,7 +51,49 @@ function AppV2() {
     send(t, {
       onMessage:     msg  => appendActivity({ type: 'ai', agent: 'orchestrator', text: msg }),
       onPendingRule: rule => setPendingRule(rule),
+      onDiscoveryCandidates: (devices, msg) => {
+        appendActivity({
+          type: 'discovery',
+          text: msg || '我听到几个新成员在打招呼，先把它们的名片递给你。',
+          devices,
+        });
+      },
     });
+  };
+
+  const handleScan = () => {
+    appendActivity({
+      type: 'ai',
+      agent: 'orchestrator',
+      text: '扫码接入还在准备中。先让我用能力名片听一圈，也能找到正在等你的新成员。',
+    });
+  };
+
+  const handleAdoptDevice = async candidate => {
+    if (!candidate?.device_id || adoptingDeviceId) return;
+    setAdoptingDeviceId(candidate.device_id);
+    try {
+      const resp = await fetch('/api/devices/adoptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: candidate.device_id }),
+      });
+      if (!resp.ok) throw new Error('adopt failed');
+      await refreshAgents();
+      appendActivity({
+        type: 'ai',
+        agent: 'orchestrator',
+        text: `认识啦，${candidate.name || candidate.device_id} 已经加入这个空间。`,
+      });
+    } catch {
+      appendActivity({
+        type: 'ai',
+        agent: 'orchestrator',
+        text: '这张名片暂时接不进来，等设备在线稳定后我们再试一次。',
+      });
+    } finally {
+      setAdoptingDeviceId(null);
+    }
   };
 
   const handleConfirmRule = () => {
@@ -108,7 +156,7 @@ function AppV2() {
 
         {/* 可滚动主体 */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          <DevicesScreen agents={agents} unitData={unitData}/>
+          {hasDevices && <DevicesScreen agents={agents} unitData={unitData}/>}
 
           {activityLog.length > 0 && (
             <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
@@ -116,7 +164,13 @@ function AppV2() {
             </div>
           )}
 
-          <ActivityFeed entries={activityLog} thinking={thinking} thinkingText={thinkingText}/>
+          <ActivityFeed
+            entries={displayEntries}
+            thinking={thinking}
+            thinkingText={thinkingText}
+            onAdoptDevice={handleAdoptDevice}
+            adoptingDeviceId={adoptingDeviceId}
+          />
 
           {pendingRule && (
             <div style={{ padding: '0 16px 10px' }}>
@@ -159,7 +213,7 @@ function AppV2() {
         }}>
           {activityLog.every(e => e.type !== 'user') && !thinking && (
             <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8, overflowX: 'auto', scrollbarWidth: 'none' }}>
-              {SUGGESTIONS_V2.map(s => (
+              {suggestions.map(s => (
                 <button key={s} onClick={() => handleSend(s)} style={{
                   flexShrink: 0, padding: '8px 16px', borderRadius: 'var(--radius-card)',
                   background: 'var(--color-surface-2)', border: '1px solid var(--color-border-strong)',
@@ -170,7 +224,12 @@ function AppV2() {
               ))}
             </div>
           )}
-          <MainInputBar onSend={handleSend} thinking={thinking}/>
+          <MainInputBar
+            onSend={handleSend}
+            thinking={thinking}
+            placeholder={onboarding ? '问我有哪些新成员可以接入…' : undefined}
+            leadingAction={onboarding ? { icon: 'scan', label: '扫码接入', onClick: handleScan } : null}
+          />
         </div>
 
         <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>

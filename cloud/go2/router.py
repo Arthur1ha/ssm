@@ -67,6 +67,7 @@ def _build_go2_card() -> dict:
     """
     return {
         "unit_id": "go2",
+        "device_id": "go2",
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",

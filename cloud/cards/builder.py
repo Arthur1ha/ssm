@@ -210,6 +210,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
 
     card = AgentCard(
         unit_id=unit_id,
+        device_id=manifest.get("device_id") or manifest.get("parent_id", "") or unit_id,
         name=name,
         description=description,
         agent_type=agent_type,
@@ -243,6 +244,7 @@ def parse_card(payload: dict) -> AgentCard:
     """
     card = AgentCard(
         unit_id=payload.get("unit_id") or payload.get("slug", ""),
+        device_id=payload.get("device_id") or payload.get("parent_id") or payload.get("unit_id") or payload.get("slug", ""),
         name=payload.get("name", ""),
         description=payload.get("description", ""),
         agent_type=payload.get("agent_type", ""),

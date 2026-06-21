@@ -1,17 +1,39 @@
 /* useSsmCore — V2 复用的通信层：连接 + 设备注册表 + ISM 实时快照 */
 const _EXCL_TYPES = new Set(['decision']);
 const _EXCL_PLAT  = new Set(['cloud']);
-const _GO2_STATIC = {
-  unit_id: 'go2', name: 'Go2 Air', agent_type: 'robot', _online: false,
-  capabilities: ['MOVE', 'STAND_UP', 'SIT_DOWN', 'HELLO', 'STRETCH', 'DANCE'],
-};
 
 function useSsmCore() {
-  const { useState, useEffect, useRef } = React;
+  const { useState, useEffect, useRef, useCallback } = React;
   const [connected, setConnected] = useState(false);
   const [agents, setAgents]       = useState([]);
+  const [discoveredAgents, setDiscoveredAgents] = useState([]);
+  const [loadingAgents, setLoadingAgents] = useState(true);
   const [unitData, setUnitData]   = useState({});
   const trackerRef = useRef(null);
+  const adoptedUnitIdsRef = useRef(new Set());
+
+  const normalizeDevices = useCallback(ds => ds
+    .filter(d => d.agent_type && !_EXCL_TYPES.has(d.agent_type) && !_EXCL_PLAT.has(d.hw_platform))
+    .map(d => ({ ...d, _online: d.online ?? d._online ?? false })), []);
+
+  const refreshAgents = useCallback(() => {
+    setLoadingAgents(true);
+    return fetch('/api/devices?scope=adopted')
+    .then(r => r.json())
+    .then(ds => {
+      const list = normalizeDevices(ds);
+      adoptedUnitIdsRef.current = new Set(list.map(d => d.unit_id));
+      setAgents(list);
+      setLoadingAgents(false);
+      return list;
+    })
+    .catch(() => {
+      adoptedUnitIdsRef.current = new Set();
+      setAgents([]);
+      setLoadingAgents(false);
+      return [];
+    });
+  }, [normalizeDevices]);
 
   useEffect(() => {
     const registry   = new AgentRegistry(mqttBus);
@@ -21,11 +43,14 @@ function useSsmCore() {
     const onReg = () => {
       const all = registry.getAll();
       const byId = new Map();
+      const discovered = [];
       for (const a of all) {
         if (a.agent_type && !_EXCL_TYPES.has(a.agent_type) && !_EXCL_PLAT.has(a.hw_platform)) {
-          byId.set(a.unit_id, a);
+          discovered.push(a);
+          if (adoptedUnitIdsRef.current.has(a.unit_id)) byId.set(a.unit_id, a);
         }
       }
+      setDiscoveredAgents(discovered);
       setAgents(prev => {
         const merged = prev.map(d => {
           const mqtt = byId.get(d.unit_id);
@@ -36,7 +61,7 @@ function useSsmCore() {
           return d;
         });
         for (const a of byId.values()) merged.push(a);
-        return merged;
+        return merged.filter(d => adoptedUnitIdsRef.current.has(d.unit_id));
       });
     };
     registry.addEventListener('change', onReg);
@@ -61,14 +86,7 @@ function useSsmCore() {
     mqttBus.addEventListener('disconnect', onDisc);
     if (!mqttBus._client) mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
 
-    // REST 预载：兜底保证 Go2 卡片始终显示（与 V1 app.jsx 一致）
-    fetch('/api/devices').then(r => r.json()).then(ds => {
-      const list = ds
-        .filter(d => d.agent_type && !_EXCL_TYPES.has(d.agent_type) && !_EXCL_PLAT.has(d.hw_platform))
-        .map(d => ({ ...d, _online: d.online ?? false }));
-      const hasGo2 = list.some(d => d.unit_id === 'go2');
-      setAgents(prev => prev.length ? prev : (hasGo2 ? list : [_GO2_STATIC, ...list]));
-    }).catch(() => setAgents(prev => prev.length ? prev : [_GO2_STATIC]));
+    refreshAgents();
 
     return () => {
       registry.removeEventListener('change', onReg);
@@ -78,6 +96,6 @@ function useSsmCore() {
     };
   }, []);
 
-  return { connected, agents, unitData };
+  return { connected, agents, discoveredAgents, loadingAgents, unitData, refreshAgents };
 }
 window.useSsmCore = useSsmCore;

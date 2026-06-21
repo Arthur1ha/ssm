@@ -1,5 +1,23 @@
 /* ActivityFeed — 主屏活动流组件 */
-function ActivityFeed({ entries, thinking, thinkingText }) {
+function ButlerAvatar({ size = 36 }) {
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: '50%', flexShrink: 0,
+      padding: 2,
+      background: 'var(--color-surface-2)',
+      border: '1px solid var(--color-accent-border)',
+      boxShadow: '0 0 16px rgba(200,255,62,0.10)',
+      overflow: 'hidden',
+    }}>
+      <img src="assets/butler-avatar.png" alt="管家" style={{
+        width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%',
+        display: 'block',
+      }}/>
+    </div>
+  );
+}
+
+function ActivityFeed({ entries, thinking, thinkingText, onAdoptDevice, adoptingDeviceId }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
 
@@ -26,20 +44,54 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
         if (e.type === 'ai') {
           const agent = e.agent || 'orchestrator';
           const oc = getAgentBubbleColor(agent);
+          const isButler = agent === 'orchestrator' || agent === 'cloud_orchestrator';
           return (
             <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-              <div style={{ maxWidth: '78%', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
-                  fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                  {getAgentDisplayName(agent)}
+              <div style={{ maxWidth: '88%', display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+                {isButler && <ButlerAvatar/>}
+                <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
+                    fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+                    {getAgentDisplayName(agent)}
+                  </div>
+                  <div style={{
+                    padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
+                    borderRadius: 'var(--radius-card)',
+                    background: `${oc}10`,
+                    border: `1px solid ${oc}25`,
+                    color: 'var(--color-text)',
+                  }}>{e.text}</div>
                 </div>
-                <div style={{
-                  padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
-                  borderRadius: 'var(--radius-card)',
-                  background: `${oc}10`,
-                  border: `1px solid ${oc}25`,
-                  color: 'var(--color-text)',
-                }}>{e.text}</div>
+              </div>
+            </div>
+          );
+        }
+        if (e.type === 'discovery') {
+          const oc = getAgentBubbleColor('orchestrator');
+          return (
+            <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
+              <div style={{ maxWidth: '92%', display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+                <ButlerAvatar/>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
+                    fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', marginBottom: 4 }}>
+                    {getAgentDisplayName('orchestrator')}
+                  </div>
+                  <div style={{
+                    padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
+                    borderRadius: 'var(--radius-card)',
+                    background: `${oc}10`, border: `1px solid ${oc}25`,
+                    color: 'var(--color-text)',
+                  }}>{e.text}</div>
+                  {(e.devices || []).map(candidate => (
+                    <DiscoveryCandidateCard
+                      key={candidate.device_id}
+                      candidate={candidate}
+                      onAdopt={onAdoptDevice}
+                      adopting={adoptingDeviceId === candidate.device_id}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
           );
@@ -81,27 +133,30 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
         const oc = getAgentBubbleColor('orchestrator');
         return (
         <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
-              fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-              {getAgentDisplayName('orchestrator')}
-            </div>
-            <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-card)',
-              background: `${oc}10`, border: `1px solid ${oc}25`,
-              display: 'flex', flexDirection: 'column', gap: 6,
-            }}>
-              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                <span className="typing-dot" style={{ background: oc, opacity: 0.6 }}/>
-                <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.14s' }}/>
-                <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.28s' }}/>
+          <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+            <ButlerAvatar/>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
+                fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+                {getAgentDisplayName('orchestrator')}
               </div>
-              {thinkingText && (
-                <span style={{ fontSize: 11, color: oc, opacity: 0.7,
-                  fontFamily: 'var(--font-mono)' }}>
-                {thinkingText}
-              </span>
-              )}
+              <div style={{
+                padding: '10px 14px', borderRadius: 'var(--radius-card)',
+                background: `${oc}10`, border: `1px solid ${oc}25`,
+                display: 'flex', flexDirection: 'column', gap: 6,
+              }}>
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <span className="typing-dot" style={{ background: oc, opacity: 0.6 }}/>
+                  <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.14s' }}/>
+                  <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.28s' }}/>
+                </div>
+                {thinkingText && (
+                  <span style={{ fontSize: 11, color: oc, opacity: 0.7,
+                    fontFamily: 'var(--font-mono)' }}>
+                  {thinkingText}
+                </span>
+                )}
+              </div>
             </div>
           </div>
         </div>

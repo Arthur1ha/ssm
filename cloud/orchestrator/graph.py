@@ -2,9 +2,10 @@
 
 Planner 是唯一大脑：一次 LLM 调用同时完成分类（act/chat/define_rule）与
 规划/回答/建规则，输出带 route 字段的 JSON。图按 route 条件分支：
-  - act         → Dispatcher → Evaluator → Responder → END
-  - chat        → ChatNode → END
-  - define_rule → RuleBuilderNode → END
+  - act              → Dispatcher → Evaluator → Responder → END
+  - chat             → ChatNode → END
+  - define_rule      → RuleBuilderNode → END
+  - discover_devices → DiscoveryNode → END
 Dispatcher 按 card.transport.kind 分支：mqtt 走 MQTT 发布，http 走线程池非阻塞；
 Evaluator 只对 mqtt task 轮询 result topic，http 结果由 Dispatcher 已填好。
 """
@@ -23,6 +24,11 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 
 import tools as _t
+from cloud.space.registry import (
+    build_adoption_candidates,
+    get_adopted_cards,
+    get_space_registry,
+)
 
 logger = logging.getLogger("orchestrator")
 
@@ -87,7 +93,7 @@ class OrchestratorState(TypedDict):
     session_id:    str
     user_msg:      str
     requirements:  list   # NLU 结果，可选，默认 []
-    route:         str    # "act" / "chat" / "define_rule"，由 Planner 分类，默认 ""
+    route:         str    # "act" / "chat" / "define_rule" / "discover_devices"，由 Planner 分类，默认 ""
     planned_tasks: list   # [{unit_id, skill_id, task_id, params}]
     rule:          dict   # define_rule 时填充的规则定义，默认 {}
     task_results:  dict   # task_id → result payload
@@ -101,7 +107,7 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
                         env_state: str = "", history: list = None) -> str:
     """把在线 card skills、环境状态、对话历史注入 prompt，一次 LLM 完成分类 + 规划。
 
-    Planner 输出带 route 字段的 JSON，四选一：act / chat / define_rule。
+    Planner 输出带 route 字段的 JSON：act / chat / define_rule / discover_devices。
     """
     lines = []
     for unit_id, card in cards.items():
@@ -133,14 +139,15 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"{env_str}"
         f"用户原话：{user_msg}\n"
         f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
-        f"可用智能体：\n{agents_str}\n\n"
+        f"已接入可调用智能体（未接入设备不在此列表中，不能用于 act 任务）：\n{agents_str}\n\n"
         f"分类规则：\n"
-        f"1. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
-        f"2. 如果用户宣布到场/离开/开始某项活动（如'我回来了'、'我要工作了'、'开始学习'、'准备睡觉'、'我走了'、'客人来了'）→ route=\"act\"，同时规划所有相关任务：\n"
+        f"1. 如果用户想发现、查看、接入当前空间里的新设备/新成员 → route=\"discover_devices\"。\n"
+        f"2. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
+        f"3. 如果用户宣布到场/离开/开始某项活动（如'我回来了'、'我要工作了'、'开始学习'、'准备睡觉'、'我走了'、'客人来了'）→ route=\"act\"，同时规划所有相关任务：\n"
         f"   ① 若灯光/环境状态需要调整，加入灯光任务；\n"
         f"   ② 若 Go2 机器狗在线，加入一个对话类（conversation）任务，把用户的真实意图/目标转告它。\n"
-        f"3. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
-        f"4. 其他（纯问答、闲聊、环境无需调整且无明确设备指向）→ route=\"chat\"，输出 answer 字符串。\n\n"
+        f"4. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
+        f"5. 其他（纯问答、闲聊、环境无需调整且无明确设备指向）→ route=\"chat\"，输出 answer 字符串。\n\n"
         f"技能路由引导（按 skill 的 tags 选择，保持通用 card-driven）：\n"
         f"- 明确的肢体动作（跳舞/站起/坐下/打招呼/握手等）→ 选带 motion 类 tag 的 skill，"
         f"params 按其 schema 填（通常是 cmd）。\n"
@@ -157,7 +164,7 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"当用户想要某种感受/氛围、或没有现成预设贴合时，用它，色温和明暗你自己判断。\n"
         f"- set_light_state 只有三个粗预设 OFF/DIM/BRIGHT（其中 DIM 是偏冷的白光）：仅当用户就是直白地要开/关/调暗/调亮时用。\n"
         f"- 用户不再需要灯时（要睡了、离开了）就关灯，别画蛇添足。\n\n"
-        f"act 校验：unit_id 必须在可用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
+        f"act 校验：unit_id 必须在已接入可调用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"
         f"找不到合适的 unit_id/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
         f"★ act 时附带 ack 字段：一句管家口吻、温暖简短的【即时确认】，表示你已领会用户意图、这就去张罗"
@@ -166,7 +173,8 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"输出格式（四选一，直接输出 JSON，不含代码块或解释）：\n"
         f'- act:         {{"route": "act", "ack": "...", "tasks": [{{"unit_id": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
         f'- chat:        {{"route": "chat", "answer": "..."}}\n'
-        f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{"tag": "light_level|presence|sound", "event": "..."}}, "action": {{"tag": "lighting", "cmd": "SET_STATE", "params": {{...}}}}}}}}'
+        f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{"tag": "light_level|presence|sound", "event": "..."}}, "action": {{"tag": "lighting", "cmd": "SET_STATE", "params": {{...}}}}}}}}\n'
+        f'- discover_devices: {{"route": "discover_devices"}}'
     )
 
 
@@ -210,13 +218,13 @@ def _make_planner_node(llm):
         session_id = state["session_id"]
         _t.do_publish_feedback(session_id, "planning", "正在理解你的意图...")
 
-        cards = _t._registry.get_all_cards() if _t._registry else {}
+        discovered_cards = _t._registry.get_all_cards() if _t._registry else {}
+        space_registry = get_space_registry()
+        cards = get_adopted_cards(discovered_cards, space_registry)
         online_ids = [uid for uid, c in cards.items() if c.get("online", True)]
-        logger.info("[Planner] 在线 card：%s", online_ids or "（无）")
-        if not cards:
-            _t.do_publish_feedback(session_id, "failed",
-                "抱歉，我还没有发现可用的智能体，请确认设备已上线。")
-            return {**state, "route": "act", "planned_tasks": [], "early_exit": True}
+        discovered_ids = [uid for uid, c in discovered_cards.items() if c.get("online", True)]
+        logger.info("[Planner] 已接入在线 card：%s", online_ids or "（无）")
+        logger.info("[Planner] 已发现在线 card：%s", discovered_ids or "（无）")
 
         sensors   = _t._state.sensor_snapshot()   if _t._state else {}
         actuators = _t._state.actuator_snapshot() if _t._state else {}
@@ -234,8 +242,26 @@ def _make_planner_node(llm):
             out = {}
 
         route = out.get("route", "act")
-        if route not in ("act", "chat", "define_rule"):
+        if route not in ("act", "chat", "define_rule", "discover_devices"):
             route = "act"
+
+        # ── discover_devices：只生成候选卡，能力内容来自 Agent Card，不让 LLM 编造 ──
+        if route == "discover_devices":
+            candidates = build_adoption_candidates(discovered_cards, space_registry)
+            if candidates:
+                text = "我听到几个新成员在打招呼，先把它们的名片递给你。"
+            else:
+                text = "我暂时没听到新设备上线。你可以先给设备通电联网，等它发出名片我就能认出来。"
+            _t.do_publish_feedback(
+                session_id,
+                "discovery_candidates",
+                text,
+                devices=candidates,
+            )
+            logger.info("[Planner] route=discover_devices | candidates=%d", len(candidates))
+            _append_history(state["user_msg"], text)
+            return {**state, "route": "discover_devices", "planned_tasks": [],
+                    "response_text": text, "early_exit": True}
 
         # ── chat：纯问答/闲聊，answer 直接交给 ChatNode 发出 ──
         if route == "chat":
@@ -340,6 +366,15 @@ def _make_rule_builder_node():
         return state
 
     return rule_builder_node
+
+
+def _make_discovery_node():
+    """Discovery feedback 已在 Planner 发出，本节点只负责闭合 route。"""
+
+    def discovery_node(state: OrchestratorState) -> OrchestratorState:
+        return state
+
+    return discovery_node
 
 
 def _make_dispatcher_node():
@@ -548,9 +583,10 @@ def build_orchestrator():
     """装配 Planner（唯一大脑）+ 条件分支编排图。
 
     Planner 按 route 分流：
-      - act         → Dispatcher → Evaluator → Responder → END
-      - chat        → ChatNode → END
-      - define_rule → RuleBuilderNode → END
+      - act              → Dispatcher → Evaluator → Responder → END
+      - chat             → ChatNode → END
+      - define_rule      → RuleBuilderNode → END
+      - discover_devices → DiscoveryNode → END
     """
     llm = _make_llm()
 
@@ -561,17 +597,24 @@ def build_orchestrator():
     g.add_node("responder",    _make_responder_node(llm))
     g.add_node("chat",         _make_chat_node(llm))
     g.add_node("rule_builder", _make_rule_builder_node())
+    g.add_node("discovery",    _make_discovery_node())
 
     g.set_entry_point("planner")
     g.add_conditional_edges(
         "planner",
         lambda s: s.get("route", "act"),
-        {"act": "dispatcher", "chat": "chat", "define_rule": "rule_builder"},
+        {
+            "act": "dispatcher",
+            "chat": "chat",
+            "define_rule": "rule_builder",
+            "discover_devices": "discovery",
+        },
     )
     g.add_edge("dispatcher",   "evaluator")
     g.add_edge("evaluator",    "responder")
     g.add_edge("responder",    END)
     g.add_edge("chat",         END)
     g.add_edge("rule_builder", END)
+    g.add_edge("discovery",    END)
 
     return g.compile()

@@ -9,7 +9,7 @@ function useSendIntent() {
   const [thinkingText, setThinkingText] = useState('');
   const thinkingRef = useRef(false);
 
-  const send = useCallback((text, { onMessage, onPendingRule, deviceHint } = {}) => {
+  const send = useCallback((text, { onMessage, onPendingRule, onDiscoveryCandidates, deviceHint } = {}) => {
     if (!text.trim() || thinkingRef.current) return;
     thinkingRef.current = true;
     setThinking(true);
@@ -66,6 +66,10 @@ function useSendIntent() {
         clearTimeout(timeoutId);
         done();
         onPendingRule?.(rule);
+      } else if (stage === 'discovery_candidates') {
+        clearTimeout(timeoutId);
+        done();
+        onDiscoveryCandidates?.(e.detail?.devices || [], msg || '');
       } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
         clearTimeout(timeoutId);
         done();

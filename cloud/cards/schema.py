@@ -108,6 +108,7 @@ class AgentCard(TypedDict):
     """
 
     unit_id: str                # 唯一标识：寻址/topic/注册表 key/URL 都用它
+    device_id: NotRequired[str] # 物理设备/节点 ID；多 unit 设备共享同一 device_id
     parent_id: NotRequired[str] # 父设备 device_id，用于按 status 继承在线状态
     name: str
     description: str

@@ -67,7 +67,11 @@ class CardRegistry:
             online = (raw.strip() == b"online")
             with self._lock:
                 for c in self._cards.values():
-                    if c.get("unit_id") == device_id or c.get("parent_id") == device_id:
+                    if (
+                        c.get("unit_id") == device_id
+                        or c.get("device_id") == device_id
+                        or c.get("parent_id") == device_id
+                    ):
                         c["online"] = online
             logger.info("[CardRegistry] %s → online=%s", device_id, online)
             return

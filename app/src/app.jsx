@@ -364,7 +364,7 @@ function App() {
 }
 
 /* ── 底部输入栏 ── */
-function MainInputBar({ onSend, thinking }) {
+function MainInputBar({ onSend, thinking, leadingAction, placeholder }) {
   const [input, setInput] = useState('');
 
   const handleSend = () => {
@@ -387,11 +387,29 @@ function MainInputBar({ onSend, thinking }) {
         border: '1px solid var(--color-border)',
         borderRadius: 999,
       }}>
+        {leadingAction && (
+          <button
+            onClick={leadingAction.onClick}
+            title={leadingAction.label}
+            disabled={thinking}
+            style={{
+              width: 34, height: 34, borderRadius: 999, flexShrink: 0,
+              background: 'var(--color-surface-2)',
+              color: 'var(--color-text-muted)',
+              border: '1px solid var(--color-border)',
+              cursor: thinking ? 'default' : 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              WebkitTapHighlightColor: 'transparent',
+            }}
+          >
+            <Icon name={leadingAction.icon || 'scan'} size={15} sw={2}/>
+          </button>
+        )}
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && !e.isComposing && handleSend()}
-          placeholder={thinking ? '处理中…' : '告诉我想要什么…'}
+          placeholder={thinking ? '处理中…' : (placeholder || '告诉我想要什么…')}
           disabled={thinking}
           style={{
             flex: 1, background: 'transparent', border: 'none',
