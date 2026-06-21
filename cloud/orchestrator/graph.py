@@ -25,6 +25,7 @@ from langgraph.graph import StateGraph, END
 
 import tools as _t
 from cloud.space.registry import (
+    DEFAULT_SPACE_ID,
     build_adoption_candidates,
     get_adopted_cards,
     get_space_registry,
@@ -96,6 +97,7 @@ class OrchestratorState(TypedDict):
     """
 
     session_id:    str
+    space_id:      str
     user_msg:      str
     requirements:  list   # NLU 结果，可选，默认 []
     route:         str    # "act" / "chat" / "define_rule" / "discover_devices"，由 Planner 分类，默认 ""
@@ -230,22 +232,28 @@ def _make_planner_node(llm):
 
     def planner_node(state: OrchestratorState) -> OrchestratorState:
         session_id = state["session_id"]
+        space_id = str(state.get("space_id") or DEFAULT_SPACE_ID)
         _t.do_publish_feedback(session_id, "planning", "正在理解你的意图...")
 
         discovered_cards = _t._registry.get_all_cards() if _t._registry else {}
         space_registry = get_space_registry()
-        cards = get_adopted_cards(discovered_cards, space_registry)
+        cards = get_adopted_cards(discovered_cards, space_registry, space_id)
         online_ids = [uid for uid, c in cards.items() if c.get("online", True)]
         discovered_ids = [uid for uid, c in discovered_cards.items() if c.get("online", True)]
         logger.info("[Planner] 已接入在线 card：%s", online_ids or "（无）")
         logger.info("[Planner] 已发现在线 card：%s", discovered_ids or "（无）")
 
         if state.get("route") == "discover_devices" or _looks_like_discovery_request(state.get("user_msg", "")):
-            candidates = build_adoption_candidates(discovered_cards, space_registry)
+            candidates = build_adoption_candidates(discovered_cards, space_registry, space_id)
             if candidates:
                 text = "我听到几个新成员在打招呼，先把它们的名片递给你。"
             else:
-                offline_candidates = build_adoption_candidates(discovered_cards, space_registry, include_offline=True)
+                offline_candidates = build_adoption_candidates(
+                    discovered_cards,
+                    space_registry,
+                    space_id,
+                    include_offline=True,
+                )
                 text = (
                     "我记得有几位成员来过，但现在没在线。等它们通电联网后，我就能把名片递给你。"
                     if offline_candidates else
@@ -286,11 +294,16 @@ def _make_planner_node(llm):
 
         # ── discover_devices：只生成候选卡，能力内容来自 Agent Card，不让 LLM 编造 ──
         if route == "discover_devices":
-            candidates = build_adoption_candidates(discovered_cards, space_registry)
+            candidates = build_adoption_candidates(discovered_cards, space_registry, space_id)
             if candidates:
                 text = "我听到几个新成员在打招呼，先把它们的名片递给你。"
             else:
-                offline_candidates = build_adoption_candidates(discovered_cards, space_registry, include_offline=True)
+                offline_candidates = build_adoption_candidates(
+                    discovered_cards,
+                    space_registry,
+                    space_id,
+                    include_offline=True,
+                )
                 text = (
                     "我记得有几位成员来过，但现在没在线。等它们通电联网后，我就能把名片递给你。"
                     if offline_candidates else

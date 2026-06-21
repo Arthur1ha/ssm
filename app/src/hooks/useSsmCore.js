@@ -2,7 +2,7 @@
 const _EXCL_TYPES = new Set(['decision']);
 const _EXCL_PLAT  = new Set(['cloud']);
 
-function useSsmCore() {
+function useSsmCore(spaceId = '0') {
   const { useState, useEffect, useRef, useCallback } = React;
   const [connected, setConnected] = useState(false);
   const [agents, setAgents]       = useState([]);
@@ -11,16 +11,21 @@ function useSsmCore() {
   const [unitData, setUnitData]   = useState({});
   const trackerRef = useRef(null);
   const adoptedUnitIdsRef = useRef(new Set());
+  const refreshSeqRef = useRef(0);
 
   const normalizeDevices = useCallback(ds => ds
     .filter(d => d.agent_type && !_EXCL_TYPES.has(d.agent_type) && !_EXCL_PLAT.has(d.hw_platform))
     .map(d => ({ ...d, _online: d.online ?? d._online ?? false })), []);
 
   const refreshAgents = useCallback(() => {
+    const seq = ++refreshSeqRef.current;
     setLoadingAgents(true);
-    return fetch('/api/devices?scope=adopted')
+    adoptedUnitIdsRef.current = new Set();
+    setAgents([]);
+    return fetch(`/api/devices?scope=adopted&space_id=${encodeURIComponent(spaceId || '0')}`)
     .then(r => r.json())
     .then(ds => {
+      if (seq !== refreshSeqRef.current) return [];
       const list = normalizeDevices(ds);
       adoptedUnitIdsRef.current = new Set(list.map(d => d.unit_id));
       setAgents(list);
@@ -28,12 +33,13 @@ function useSsmCore() {
       return list;
     })
     .catch(() => {
+      if (seq !== refreshSeqRef.current) return [];
       adoptedUnitIdsRef.current = new Set();
       setAgents([]);
       setLoadingAgents(false);
       return [];
     });
-  }, [normalizeDevices]);
+  }, [normalizeDevices, spaceId]);
 
   const adoptLocalCandidate = useCallback(candidate => {
     const cards = normalizeDevices(candidate?.cards || []);
@@ -100,8 +106,6 @@ function useSsmCore() {
     mqttBus.addEventListener('disconnect', onDisc);
     if (!mqttBus._client) mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
 
-    refreshAgents();
-
     return () => {
       registry.removeEventListener('change', onReg);
       ismTracker.removeEventListener('update', onIsm);
@@ -109,6 +113,10 @@ function useSsmCore() {
       mqttBus.removeEventListener('disconnect', onDisc);
     };
   }, []);
+
+  useEffect(() => {
+    refreshAgents();
+  }, [refreshAgents]);
 
   return { connected, agents, discoveredAgents, loadingAgents, unitData, refreshAgents, adoptLocalCandidate };
 }

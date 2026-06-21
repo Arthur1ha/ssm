@@ -5,6 +5,17 @@
 const SUGGESTIONS_V2 = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
 const ONBOARDING_SUGGESTIONS_V2 = ['帮我看看有什么新成员？'];
 const ONBOARDING_BUBBLE_V2 = '我刚醒来，还没认识这个空间里的新成员。要不要让我先四处听一听，看看谁在等着加入？';
+const SPACE_ID_STORAGE_KEY = 'ssm_space_id';
+
+function normalizeSpaceId(value) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) return '0';
+  return String(Number(text));
+}
+
+function loadSpaceId() {
+  return normalizeSpaceId(localStorage.getItem(SPACE_ID_STORAGE_KEY) || '0');
+}
 
 function useHashLocal() {
   const { useState, useEffect } = React;
@@ -22,7 +33,8 @@ function navigate(hash) { window.location.hash = hash; }
 
 function AppV2() {
   const { useState, useEffect, useRef } = React;
-  const { connected, agents, loadingAgents, unitData, refreshAgents, adoptLocalCandidate } = useSsmCore();
+  const [spaceId, setSpaceId] = useState(loadSpaceId);
+  const { connected, agents, loadingAgents, unitData, refreshAgents, adoptLocalCandidate } = useSsmCore(spaceId);
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHashLocal();
 
@@ -63,7 +75,22 @@ function AppV2() {
         });
       },
       intentHint: options.intentHint,
+      spaceId,
     });
+  };
+
+  const handleSwitchSpace = () => {
+    const input = window.prompt('输入用户空间编号（从 0 开始）', spaceId);
+    if (input === null) return;
+    const next = normalizeSpaceId(input);
+    if (next === spaceId) return;
+    localStorage.setItem(SPACE_ID_STORAGE_KEY, next);
+    greetedRef.current = false;
+    setActivityLog([]);
+    setPendingRule(null);
+    setExitingUid(null);
+    navigate('#');
+    setSpaceId(next);
   };
 
   const handleScan = () => {
@@ -81,7 +108,7 @@ function AppV2() {
       const resp = await fetch('/api/devices/adoptions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_id: candidate.device_id }),
+        body: JSON.stringify({ device_id: candidate.device_id, space_id: spaceId }),
       });
       if (!resp.ok) throw new Error('adopt failed');
       const data = await resp.json();
@@ -163,9 +190,19 @@ function AppV2() {
               boxShadow: connected ? '0 0 8px var(--color-online-glow)' : 'none',
             }}/>
           </div>
-          <button onClick={() => setRulesOpen(true)} className="btn">
-            <Icon name="list" size={13}/> 规则
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={handleSwitchSpace}
+              className="btn"
+              title="切换用户空间"
+              style={{ maxWidth: 112, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
+              <Icon name="user" size={13}/> 用户 {spaceId}
+            </button>
+            <button onClick={() => setRulesOpen(true)} className="btn">
+              <Icon name="list" size={13}/> 规则
+            </button>
+          </div>
         </div>
 
         {/* 可滚动主体 */}

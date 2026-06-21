@@ -23,6 +23,7 @@ import paho.mqtt.client as mqtt_lib
 
 from shared_state import SharedState
 from cloud.cards.registry import CardRegistry
+from cloud.space.registry import DEFAULT_SPACE_ID
 import tools as agent_tools
 from graph import build_orchestrator
 
@@ -171,6 +172,7 @@ while True:
             try:
                 orchestrator.invoke({
                     "session_id":   session_id,
+                    "space_id":     str(event["payload"].get("space_id") or DEFAULT_SPACE_ID),
                     "user_msg":     event["payload"].get("user_msg", ""),
                     "requirements": event["payload"].get("requirements", []),
                     "route":         event["payload"].get("intent_hint", ""),

@@ -13,7 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SPACE_ID = "default"
+DEFAULT_SPACE_ID = "0"
+LEGACY_DEFAULT_SPACE_ID = "default"
 _DATA_FILE = Path(__file__).with_name("devices.json")
 _DEFAULT_PERMISSIONS = {
     "allow_control": True,
@@ -166,11 +167,18 @@ class SpaceRegistry:
         if not self._path.exists():
             self._path.write_text(json.dumps({DEFAULT_SPACE_ID: {}}, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _normalize_data(self, data: Any) -> dict[str, dict[str, dict[str, Any]]]:
+        if not isinstance(data, dict):
+            data = {}
+        if DEFAULT_SPACE_ID not in data:
+            data[DEFAULT_SPACE_ID] = data.get(LEGACY_DEFAULT_SPACE_ID, {})
+        return data
+
     def _load(self) -> dict[str, dict[str, dict[str, Any]]]:
         self._ensure_file()
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {DEFAULT_SPACE_ID: {}}
+            return self._normalize_data(data)
         except Exception:
             return {DEFAULT_SPACE_ID: {}}
 
