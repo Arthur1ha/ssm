@@ -10,6 +10,15 @@ logger = logging.getLogger(__name__)
 
 _GO2_THOUGHT_TOPIC = "ssm/agents/go2/thought"
 
+GO2_LLM_UNAVAILABLE_REPLY = (
+    "Go2 的小脑袋暂时连不上云端，刚才没法可靠理解指令。"
+    "你稍后再喊我，或者先用页面上的动作按钮。"
+)
+GO2_AGENT_UNAVAILABLE_REPLY = (
+    "Go2 这边的对话入口暂时不稳，我没把指令送进小脑袋。"
+    "你稍后再试一下。"
+)
+
 
 def _get_mqtt_client():
     """获取 API 层共享 MQTT 客户端。"""
@@ -45,6 +54,8 @@ class Go2AgentState(TypedDict):
     tool_results:   list
     response_text:  str
     early_exit:     bool
+    llm_available:  bool
+    error:          str
 
 
 _SKILL_TO_TOOL = {
@@ -73,7 +84,8 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     if not go2.is_connected:
         logger.info("[Go2/Agent] Go2 未连接，提前退出")
         return {**state, "planned_tools": [], "early_exit": True,
-                "response_text": "Go2 当前未连接，请先通过「连接」按钮建立连接。"}
+                "response_text": "Go2 当前未连接，请先通过「连接」按钮建立连接。",
+                "error": "go2_not_connected"}
 
     # 懒触发昨日摘要和性格演化（后台，不阻塞规划）
     asyncio.create_task(summary_mod.ensure_yesterday_summary())
@@ -104,12 +116,25 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
         f"示例：[{{\"tool\": \"go2_sport\", \"params\": {{\"cmd\": \"StandUp\"}}}}]\n"
         f"无需工具时输出：[]"
     )
-    llm = get_text_llm()
-    resp = await llm.ainvoke([HumanMessage(content=prompt)])
-    content = resp.content.strip()
-    logger.info("[Go2/Agent] LLM 原始输出: %s", content)
-    content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
-    idx_s, idx_e = content.find("["), content.rfind("]")
+    try:
+        llm = get_text_llm()
+        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        content = resp.content.strip()
+        logger.info("[Go2/Agent] LLM 原始输出: %s", content)
+        content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
+        idx_s, idx_e = content.find("["), content.rfind("]")
+    except Exception as exc:
+        logger.warning("[Go2/Agent] planner llm error: %s", exc)
+        return {
+            **state,
+            "memory_context": memory_context,
+            "planned_tools": [],
+            "tool_results": [],
+            "response_text": GO2_LLM_UNAVAILABLE_REPLY,
+            "early_exit": True,
+            "llm_available": False,
+            "error": "llm_unavailable",
+        }
     try:
         tools_raw = json.loads(content[idx_s:idx_e + 1]) if idx_s != -1 else []
     except Exception:
@@ -119,7 +144,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     return {**state, "memory_context": memory_context, "planned_tools": planned, "early_exit": False}
 
 
-async def _generate_response(user_msg: str, memory_context: str, results: list) -> str:
+async def _generate_response(user_msg: str, memory_context: str, results: list) -> tuple[str, bool]:
     if not results:
         prompt = (
             f"【记忆上下文】\n{memory_context}\n\n"
@@ -138,9 +163,12 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
             SystemMessage(content=get_system_prompt()),
             HumanMessage(content=prompt),
         ])
-        return resp.content.strip()
-    except Exception:
-        return "指令已执行完成。"
+        return resp.content.strip(), True
+    except Exception as exc:
+        logger.warning("[Go2/Agent] response llm error: %s", exc)
+        if results:
+            return "动作我已经做完了，不过云端大脑刚才没把结果整理成一句话。你看页面状态就能确认。", False
+        return GO2_LLM_UNAVAILABLE_REPLY, False
 
 
 async def executor_node(state: Go2AgentState) -> Go2AgentState:
@@ -164,9 +192,20 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
         logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
         results.append({"tool": tool_name, "result": result})
 
-    response_text = await _generate_response(state["user_msg"], state.get("memory_context", ""), results)
+    response_text, reply_llm_available = await _generate_response(
+        state["user_msg"], state.get("memory_context", ""), results
+    )
     logger.info("[Go2/Agent] 最终回复: %s", response_text)
-    return {**state, "tool_results": results, "response_text": response_text}
+    error = state.get("error", "")
+    if not reply_llm_available and not results:
+        error = "llm_unavailable"
+    return {
+        **state,
+        "tool_results": results,
+        "response_text": response_text,
+        "llm_available": state.get("llm_available", True) and reply_llm_available,
+        "error": error,
+    }
 
 
 def _build_agent():
@@ -208,22 +247,42 @@ async def run_agent(
     若提供 skill_id，planner_node 将跳过 LLM 规划直接路由到对应工具。
     """
     episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
-    state = await _get_agent().ainvoke({
-        "session_id":     session_id,
-        "user_msg":       message,
-        "skill_id":       skill_id or "",
-        "params":         params or {},
-        "memory_context": "",
-        "planned_tools":  [],
-        "tool_results":   [],
-        "response_text":  "",
-        "early_exit":     False,
-    })
+    try:
+        state = await _get_agent().ainvoke({
+            "session_id":     session_id,
+            "user_msg":       message,
+            "skill_id":       skill_id or "",
+            "params":         params or {},
+            "memory_context": "",
+            "planned_tools":  [],
+            "tool_results":   [],
+            "response_text":  "",
+            "early_exit":     False,
+            "llm_available":  True,
+            "error":          "",
+        })
+    except Exception as exc:
+        logger.warning("[Go2/Agent] run_agent error: %s", exc)
+        return {
+            "result": "error",
+            "response": GO2_AGENT_UNAVAILABLE_REPLY,
+            "actions_taken": [],
+            "llm_available": False,
+            "error": "agent_unavailable",
+        }
     if state["response_text"] and not state.get("early_exit"):
         _publish_thought({"type": "think", "text": state["response_text"]})
+    action_failed = any(
+        str(r.get("result", "")).startswith(("执行失败", "未知工具"))
+        for r in state["tool_results"]
+    )
+    result = "error" if state.get("error") or action_failed else "ok"
     return {
+        "result":        result,
         "response":      state["response_text"],
         "actions_taken": [r["tool"] for r in state["tool_results"]],
+        "llm_available": state.get("llm_available", True),
+        **({"error": state["error"]} if state.get("error") else {}),
     }
 
 
@@ -239,6 +298,10 @@ async def run_agent_stream(session_id: str, message: str):
         "tool_results":   [],
         "response_text":  "",
         "early_exit":     False,
+        "skill_id":       "",
+        "params":         {},
+        "llm_available":  True,
+        "error":          "",
     }
 
     yield {"type": "thinking", "text": "正在理解指令…"}
@@ -273,7 +336,7 @@ async def run_agent_stream(session_id: str, message: str):
 
     yield {"type": "thinking", "text": "整理回复…"}
 
-    response_text = await _generate_response(message, state.get("memory_context", ""), results)
+    response_text, _ = await _generate_response(message, state.get("memory_context", ""), results)
     logger.info("[Go2/Agent] 最终回复: %s", response_text)
     episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
 

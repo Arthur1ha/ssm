@@ -42,6 +42,11 @@ AGENT_PERSONA = (
     "说话简洁自然、有人情味，只负责把整体安排和结果轻轻交代一句，不啰嗦细节。"
 )
 
+LLM_UNAVAILABLE_REPLY = (
+    "我这边和云端大脑的连接有点晃，刚才没法放心替你安排。"
+    "你稍等我缓一口气，或者先点设备卡片直接控制。"
+)
+
 
 # ── 对话历史 ─────────────────────────────────────────────────────
 _conversation_history: list = []
@@ -268,9 +273,12 @@ def _make_planner_node(llm):
         try:
             resp = llm.invoke([HumanMessage(content=prompt)])
             out = _parse_planner_output(resp.content)
+            if not out:
+                raise ValueError("empty planner output")
         except Exception as e:
-            logger.error("[Planner] parse error: %s", e)
-            out = {}
+            logger.error("[Planner] llm/parse error: %s", e)
+            return {**state, "route": "chat", "response_text": LLM_UNAVAILABLE_REPLY,
+                    "planned_tasks": [], "early_exit": False}
 
         route = out.get("route", "act")
         if route not in ("act", "chat", "define_rule", "discover_devices"):
@@ -579,6 +587,20 @@ def _make_responder_node(llm):
         statuses = [r.get("result", "timeout") for r in results.values()]
         ok_count = statuses.count("ok")
         stage = "done" if ok_count == len(results) else ("partial" if ok_count > 0 else "failed")
+
+        llm_error_reply = next(
+            (
+                r.get("response") or r.get("reply")
+                for r in results.values()
+                if r.get("error") == "llm_unavailable" and (r.get("response") or r.get("reply"))
+            ),
+            "",
+        )
+        if stage == "failed" and llm_error_reply:
+            _t.do_publish_feedback(session_id, stage, llm_error_reply)
+            logger.info("[Responder] stage=%s | %s", stage, llm_error_reply)
+            _append_history(state["user_msg"], llm_error_reply)
+            return {**state, "response_text": llm_error_reply}
 
         fallbacks = {"done": "好的，指令已全部执行！", "partial": "部分指令已执行。",
                      "failed": "智能体未响应，请检查连接后重试。"}

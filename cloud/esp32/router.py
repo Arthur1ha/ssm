@@ -44,7 +44,10 @@ def esp32_chat(unit_id: str, req: ChatRequest):
     agent = _esp32_agent.get_agent()
     if agent is None:
         raise HTTPException(status_code=503, detail="ESP32 Agent 未初始化")
-    return {"reply": agent.handle_user_text(req.text)}
+    result = agent.handle_user_text(req.text)
+    if isinstance(result, dict):
+        return result
+    return {"reply": result, "llm_available": True}
 
 
 @router.get("/{unit_id}/memory")

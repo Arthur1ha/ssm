@@ -121,6 +121,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   /* ── 对话直达执行体：优先取 chat_endpoint（灯）或 endpoint（go2） ── */
   const chatEndpoint = transport?.chat_endpoint || transport?.endpoint || null;
   const sessionRef = useRef('fsm_' + unitId + '_' + Date.now());
+  const directReplyText = data => {
+    if (data?.reply || data?.response) return data.reply || data.response;
+    if (data?.llm_available === false) {
+      return '这个智能体的云端大脑暂时连不上，我没法放心替它回答。';
+    }
+    return '(无回复)';
+  };
 
   /* ── 发送对话 ── */
   const handleSend = text => {
@@ -140,10 +147,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
       })
         .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
         .then(d => setMessages(prev => [...prev, {
-          role: 'assistant', agent: unitId, text: d.reply || d.response || '(无回复)',
+          role: 'assistant', agent: unitId, text: directReplyText(d),
         }]))
         .catch(() => setMessages(prev => [...prev, {
-          role: 'assistant', agent: unitId, text: '设备没有响应~',
+          role: 'assistant', agent: unitId,
+          text: '我没能连上这个智能体的对话入口，稍后再试一下。',
         }]))
         .finally(() => setSending(false));
       return;

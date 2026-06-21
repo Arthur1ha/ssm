@@ -72,9 +72,12 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
                          proxies={"http": None, "https": None})
     resp.raise_for_status()
     try:
-        return resp.json()
+        data = resp.json()
     except ValueError:
         return {"result": "ok", "raw": resp.text}
+    if isinstance(data, dict) and "result" not in data:
+        data = {**data, "result": "error" if data.get("error") else "ok"}
+    return data if isinstance(data, dict) else {"result": "ok", "data": data}
 
 
 def do_publish(topic: str, payload: dict):

@@ -29,6 +29,11 @@ AGENT_PERSONA = """
 - 说话简洁，不超过两句话
 """
 
+LLM_UNAVAILABLE_REPLY = (
+    "灯的小脑袋暂时连不上云端，刚才没法认真听懂你的意思。"
+    "你可以稍后再和我说，或者先用上面的按钮直接调灯。"
+)
+
 _agent: Optional["ESP32Agent"] = None
 
 
@@ -118,7 +123,7 @@ class ESP32Agent:
         except Exception as e:
             logger.warning("narrate_command failed: %s", e)
 
-    def handle_user_text(self, text: str) -> str:
+    def handle_user_text(self, text: str) -> str | dict:
         """处理设备页直达的用户文本：LLM 分类『闲聊/调教』，调教则落库。
 
         本入口不执行即时命令（仍走 FSM 按钮/MQTT task）。全程 try/except，
@@ -141,7 +146,11 @@ class ESP32Agent:
             data = json.loads(content[content.find("{"):content.rfind("}") + 1])
         except Exception as e:
             logger.warning("handle_user_text parse error: %s", e)
-            return "我没太听明白，可以再说一遍吗？"
+            return {
+                "reply": LLM_UNAVAILABLE_REPLY,
+                "llm_available": False,
+                "error": "llm_unavailable",
+            }
 
         if data.get("type") == "teach" and data.get("trigger") and data.get("behavior"):
             taught.add(data["trigger"], data["behavior"])
