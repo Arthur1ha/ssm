@@ -86,19 +86,31 @@ def _make_llm():
     models = [m.strip() for m in model_list_str.split(",") if m.strip()]
     if not models:
         models = ["deepseek-chat"]
+    base_url = os.getenv("OPENAI_BASE_URL")
+    api_key = os.getenv("OPENAI_API_KEY")
+    timeout = _int_env("LLM_TIMEOUT", 30)
+    max_retries = _int_env("LLM_MAX_RETRIES", 1)
+    max_tokens = _int_env("ORCHESTRATOR_MAX_TOKENS", 900)
 
     base_kwargs = dict(
-        base_url=os.getenv("OPENAI_BASE_URL"),
-        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=base_url,
+        api_key=api_key,
         temperature=0,
-        timeout=_int_env("LLM_TIMEOUT", 30),
-        max_retries=_int_env("LLM_MAX_RETRIES", 1),
+        timeout=timeout,
+        max_retries=max_retries,
     )
-    max_tokens = _int_env("ORCHESTRATOR_MAX_TOKENS", 900)
     if max_tokens > 0:
         base_kwargs["max_tokens"] = max_tokens
     llms = [ChatOpenAI(model=m, **base_kwargs) for m in models]
-    logger.info("[Graph] LLM fallback chain: %s", " → ".join(models))
+    logger.info(
+        "[Graph] LLM config base_url=%s models=%s key_present=%s timeout=%s max_retries=%s max_tokens=%s",
+        base_url or "(empty)",
+        " → ".join(models),
+        bool(api_key),
+        timeout,
+        max_retries,
+        max_tokens if max_tokens > 0 else "disabled",
+    )
     return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
 
 
@@ -298,7 +310,7 @@ def _make_planner_node(llm):
             resp = llm.invoke([HumanMessage(content=prompt)])
             content = (resp.content or "").strip()
         except Exception as e:
-            logger.error("[Planner] llm invoke error: %s", e)
+            logger.error("[Planner] llm invoke error: %s: %s", type(e).__name__, e)
             return {**state, "route": "chat", "response_text": LLM_UNAVAILABLE_REPLY,
                     "planned_tasks": [], "early_exit": False}
 
