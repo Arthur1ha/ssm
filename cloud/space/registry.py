@@ -124,14 +124,19 @@ def build_adoption_candidates(
     cards: dict[str, dict[str, Any]],
     registry: "SpaceRegistry",
     space_id: str = DEFAULT_SPACE_ID,
+    include_offline: bool = False,
 ) -> list[dict[str, Any]]:
     adopted = set(registry.list_adoptions(space_id).keys())
     groups = group_cards_by_device(cards)
-    return [
-        build_device_candidate(device_id, items)
-        for device_id, items in sorted(groups.items())
-        if device_id not in adopted
-    ]
+    candidates = []
+    for device_id, items in sorted(groups.items()):
+        if device_id in adopted:
+            continue
+        candidate = build_device_candidate(device_id, items)
+        if not include_offline and not candidate.get("online", False):
+            continue
+        candidates.append(candidate)
+    return candidates
 
 
 def get_adopted_cards(

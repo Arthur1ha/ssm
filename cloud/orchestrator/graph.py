@@ -240,7 +240,12 @@ def _make_planner_node(llm):
             if candidates:
                 text = "我听到几个新成员在打招呼，先把它们的名片递给你。"
             else:
-                text = "我暂时没听到新设备上线。你可以先给设备通电联网，等它发出名片我就能认出来。"
+                offline_candidates = build_adoption_candidates(discovered_cards, space_registry, include_offline=True)
+                text = (
+                    "我记得有几位成员来过，但现在没在线。等它们通电联网后，我就能把名片递给你。"
+                    if offline_candidates else
+                    "我暂时没听到新设备上线。你可以先给设备通电联网，等它发出名片我就能认出来。"
+                )
             _t.do_publish_feedback(
                 session_id,
                 "discovery_candidates",
@@ -277,7 +282,12 @@ def _make_planner_node(llm):
             if candidates:
                 text = "我听到几个新成员在打招呼，先把它们的名片递给你。"
             else:
-                text = "我暂时没听到新设备上线。你可以先给设备通电联网，等它发出名片我就能认出来。"
+                offline_candidates = build_adoption_candidates(discovered_cards, space_registry, include_offline=True)
+                text = (
+                    "我记得有几位成员来过，但现在没在线。等它们通电联网后，我就能把名片递给你。"
+                    if offline_candidates else
+                    "我暂时没听到新设备上线。你可以先给设备通电联网，等它发出名片我就能认出来。"
+                )
             _t.do_publish_feedback(
                 session_id,
                 "discovery_candidates",

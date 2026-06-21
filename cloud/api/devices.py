@@ -59,10 +59,13 @@ def list_devices(
 
 
 @router.get("/candidates")
-def list_device_candidates(space_id: str = DEFAULT_SPACE_ID):
+def list_device_candidates(
+    space_id: str = DEFAULT_SPACE_ID,
+    include_offline: bool = False,
+):
     """返回当前空间尚未接入的设备候选卡。"""
     cards = get_registry().get_all_cards()
-    return build_adoption_candidates(cards, get_space_registry(), space_id)
+    return build_adoption_candidates(cards, get_space_registry(), space_id, include_offline=include_offline)
 
 
 @router.post("/adoptions")

@@ -5,6 +5,7 @@ function DiscoveryCandidateCard({ candidate, onAdopt, adopting }) {
   const sensors = (candidate.sensors || []).filter(Boolean).slice(0, 3);
   const transports = (candidate.transport_kinds || []).filter(Boolean);
   const online = candidate.online !== false;
+  const buttonText = !online ? '设备离线' : (adopting ? '接入中...' : '接入');
 
   const chip = (text, tone = 'normal') => (
     <span key={tone + text} style={{
@@ -76,9 +77,10 @@ function DiscoveryCandidateCard({ candidate, onAdopt, adopting }) {
                 color: online ? 'var(--color-bg)' : 'var(--color-text-dim)',
                 borderColor: online ? 'var(--color-accent-border)' : 'var(--color-border)',
                 opacity: adopting ? 0.7 : 1,
+                cursor: adopting || !online ? 'default' : 'pointer',
               }}>
-              <Icon name="check" size={13}/>
-              {adopting ? '接入中...' : '接入'}
+              {online && <Icon name="arrow" size={13}/>}
+              {buttonText}
             </button>
           </div>
         </div>

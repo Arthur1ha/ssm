@@ -21,8 +21,8 @@ function useHashLocal() {
 function navigate(hash) { window.location.hash = hash; }
 
 function AppV2() {
-  const { useState } = React;
-  const { connected, agents, loadingAgents, unitData, refreshAgents } = useSsmCore();
+  const { useState, useEffect, useRef } = React;
+  const { connected, agents, loadingAgents, unitData, refreshAgents, adoptLocalCandidate } = useSsmCore();
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHashLocal();
 
@@ -31,6 +31,7 @@ function AppV2() {
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
   const [adoptingDeviceId, setAdoptingDeviceId] = useState(null);
+  const greetedRef = useRef(false);
 
   /* 退出动画：保留即将消失的 uid，待动画完成后清除 */
   const [exitingUid, setExitingUid] = useState(null);
@@ -39,10 +40,13 @@ function AppV2() {
   const ready = !loadingAgents;
   const onboarding = ready && agents.length === 0;
   const hasDevices = ready && agents.length > 0;
-  const displayEntries = onboarding && activityLog.length === 0
-    ? [{ type: 'ai', agent: 'orchestrator', text: ONBOARDING_BUBBLE_V2 }]
-    : activityLog;
   const suggestions = onboarding ? ONBOARDING_SUGGESTIONS_V2 : (hasDevices ? SUGGESTIONS_V2 : []);
+
+  useEffect(() => {
+    if (!onboarding || greetedRef.current) return;
+    greetedRef.current = true;
+    appendActivity({ type: 'ai', agent: 'orchestrator', text: ONBOARDING_BUBBLE_V2 });
+  }, [onboarding]);
 
   const handleSend = (text, options = {}) => {
     const t = text.trim();
@@ -80,12 +84,21 @@ function AppV2() {
         body: JSON.stringify({ device_id: candidate.device_id }),
       });
       if (!resp.ok) throw new Error('adopt failed');
-      await refreshAgents();
+      const data = await resp.json();
+      adoptLocalCandidate(data.candidate || candidate);
+      setActivityLog(prev => prev.map(entry => {
+        if (entry.type !== 'discovery') return entry;
+        return {
+          ...entry,
+          devices: (entry.devices || []).filter(d => d.device_id !== candidate.device_id),
+        };
+      }));
       appendActivity({
         type: 'ai',
         agent: 'orchestrator',
         text: `认识啦，${candidate.name || candidate.device_id} 已经加入这个空间。`,
       });
+      refreshAgents();
     } catch {
       appendActivity({
         type: 'ai',
@@ -166,7 +179,7 @@ function AppV2() {
           )}
 
           <ActivityFeed
-            entries={displayEntries}
+            entries={activityLog}
             thinking={thinking}
             thinkingText={thinkingText}
             onAdoptDevice={handleAdoptDevice}
@@ -228,7 +241,11 @@ function AppV2() {
           <MainInputBar
             onSend={handleSend}
             thinking={thinking}
-            placeholder={onboarding ? '问我有哪些新成员可以接入…' : undefined}
+            placeholder={
+              loadingAgents
+                ? '正在整理空间成员…'
+                : (onboarding ? '问我有哪些新成员可以接入…' : '告诉我想让大家做什么…')
+            }
             leadingAction={onboarding ? { icon: 'scan', label: '扫码接入', onClick: handleScan } : null}
           />
         </div>

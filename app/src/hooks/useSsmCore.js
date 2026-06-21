@@ -35,6 +35,20 @@ function useSsmCore() {
     });
   }, [normalizeDevices]);
 
+  const adoptLocalCandidate = useCallback(candidate => {
+    const cards = normalizeDevices(candidate?.cards || []);
+    if (!cards.length) return;
+    adoptedUnitIdsRef.current = new Set([
+      ...adoptedUnitIdsRef.current,
+      ...cards.map(card => card.unit_id),
+    ]);
+    setAgents(prev => {
+      const byId = new Map(prev.map(card => [card.unit_id, card]));
+      cards.forEach(card => byId.set(card.unit_id, { ...byId.get(card.unit_id), ...card }));
+      return [...byId.values()];
+    });
+  }, [normalizeDevices]);
+
   useEffect(() => {
     const registry   = new AgentRegistry(mqttBus);
     const ismTracker = new ISMTracker(mqttBus);
@@ -96,6 +110,6 @@ function useSsmCore() {
     };
   }, []);
 
-  return { connected, agents, discoveredAgents, loadingAgents, unitData, refreshAgents };
+  return { connected, agents, discoveredAgents, loadingAgents, unitData, refreshAgents, adoptLocalCandidate };
 }
 window.useSsmCore = useSsmCore;

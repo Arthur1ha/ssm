@@ -9,7 +9,7 @@ function ButlerAvatar({ size = 36 }) {
       boxShadow: '0 0 16px rgba(200,255,62,0.10)',
       overflow: 'hidden',
     }}>
-      <img src="assets/butler-avatar.png" alt="管家" style={{
+      <img src="assets/butler-avatar.webp" alt="管家" style={{
         width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%',
         display: 'block',
       }}/>
