@@ -44,7 +44,7 @@ function AppV2() {
     : activityLog;
   const suggestions = onboarding ? ONBOARDING_SUGGESTIONS_V2 : (hasDevices ? SUGGESTIONS_V2 : []);
 
-  const handleSend = text => {
+  const handleSend = (text, options = {}) => {
     const t = text.trim();
     if (!t) return;
     appendActivity({ type: 'user', text: t });
@@ -58,6 +58,7 @@ function AppV2() {
           devices,
         });
       },
+      intentHint: options.intentHint,
     });
   };
 
@@ -214,7 +215,7 @@ function AppV2() {
           {activityLog.every(e => e.type !== 'user') && !thinking && (
             <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8, overflowX: 'auto', scrollbarWidth: 'none' }}>
               {suggestions.map(s => (
-                <button key={s} onClick={() => handleSend(s)} style={{
+                <button key={s} onClick={() => handleSend(s, onboarding ? { intentHint: 'discover_devices' } : {})} style={{
                   flexShrink: 0, padding: '8px 16px', borderRadius: 'var(--radius-card)',
                   background: 'var(--color-surface-2)', border: '1px solid var(--color-border-strong)',
                   color: 'var(--color-text-muted)', fontSize: 13, cursor: 'pointer',

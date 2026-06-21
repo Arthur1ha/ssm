@@ -202,6 +202,15 @@ def _http_timeout_for(card: dict, skill_id: str) -> float:
     return 10
 
 
+def _looks_like_discovery_request(text: str) -> bool:
+    """发现入口的可靠兜底；只决定 route，候选内容仍从 Agent Card 动态生成。"""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    discovery_terms = ("新成员", "可接入", "接入设备", "发现设备", "附近设备")
+    return any(term in t for term in discovery_terms)
+
+
 # ── 节点工厂 ──────────────────────────────────────────────────────
 
 def _make_planner_node(llm):
@@ -225,6 +234,23 @@ def _make_planner_node(llm):
         discovered_ids = [uid for uid, c in discovered_cards.items() if c.get("online", True)]
         logger.info("[Planner] 已接入在线 card：%s", online_ids or "（无）")
         logger.info("[Planner] 已发现在线 card：%s", discovered_ids or "（无）")
+
+        if state.get("route") == "discover_devices" or _looks_like_discovery_request(state.get("user_msg", "")):
+            candidates = build_adoption_candidates(discovered_cards, space_registry)
+            if candidates:
+                text = "我听到几个新成员在打招呼，先把它们的名片递给你。"
+            else:
+                text = "我暂时没听到新设备上线。你可以先给设备通电联网，等它发出名片我就能认出来。"
+            _t.do_publish_feedback(
+                session_id,
+                "discovery_candidates",
+                text,
+                devices=candidates,
+            )
+            logger.info("[Planner] route=discover_devices(pre_llm) | candidates=%d", len(candidates))
+            _append_history(state["user_msg"], text)
+            return {**state, "route": "discover_devices", "planned_tasks": [],
+                    "response_text": text, "early_exit": True}
 
         sensors   = _t._state.sensor_snapshot()   if _t._state else {}
         actuators = _t._state.actuator_snapshot() if _t._state else {}

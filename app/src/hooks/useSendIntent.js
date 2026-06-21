@@ -9,7 +9,7 @@ function useSendIntent() {
   const [thinkingText, setThinkingText] = useState('');
   const thinkingRef = useRef(false);
 
-  const send = useCallback((text, { onMessage, onPendingRule, onDiscoveryCandidates, deviceHint } = {}) => {
+  const send = useCallback((text, { onMessage, onPendingRule, onDiscoveryCandidates, deviceHint, intentHint } = {}) => {
     if (!text.trim() || thinkingRef.current) return;
     thinkingRef.current = true;
     setThinking(true);
@@ -81,6 +81,7 @@ function useSendIntent() {
 
     const payload = { session_id, user_msg: text, ts: Date.now() };
     if (deviceHint) payload.device_hint = deviceHint;
+    if (intentHint) payload.intent_hint = intentHint;
     mqttBus.publish(`ssm/intent/${session_id}`, JSON.stringify(payload));
   }, []);
 

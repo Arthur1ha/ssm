@@ -173,7 +173,7 @@ while True:
                     "session_id":   session_id,
                     "user_msg":     event["payload"].get("user_msg", ""),
                     "requirements": event["payload"].get("requirements", []),
-                    "route":         "",
+                    "route":         event["payload"].get("intent_hint", ""),
                     "planned_tasks": [],
                     "rule":          {},
                     "task_results":  {},
