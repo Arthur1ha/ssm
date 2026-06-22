@@ -1,9 +1,11 @@
 """cloud.go2.tests.test_card — 验证 _build_go2_card 返回的结构符合 AgentCard 规格。"""
 
 import json
+import importlib.util
 import sys
 import types
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import MagicMock
 
 
 def _make_go2_stub():
@@ -15,16 +17,56 @@ def _make_go2_stub():
     return stub
 
 
+def _load_fsm_module():
+    path = Path(__file__).resolve().parents[1] / "connection" / "fsm.py"
+    spec = importlib.util.spec_from_file_location("cloud.go2.connection.fsm", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+def _make_fastapi_stub():
+    fastapi = types.ModuleType("fastapi")
+    responses = types.ModuleType("fastapi.responses")
+
+    class HTTPException(Exception):
+        def __init__(self, status_code=500, detail=""):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    class APIRouter:
+        def __init__(self, *args, **kwargs):
+            self.routes = []
+
+        def _decorator(self, *args, **kwargs):
+            def wrap(fn):
+                self.routes.append(types.SimpleNamespace(path=args[0] if args else "", methods=set()))
+                return fn
+            return wrap
+
+        get = post = put = delete = _decorator
+
+    fastapi.APIRouter = APIRouter
+    fastapi.HTTPException = HTTPException
+    responses.Response = object
+    responses.StreamingResponse = object
+    return fastapi, responses
+
+
 def _load_router_with_stub():
     """用 stub 替换重量级依赖后加载 cloud.go2.router，返回模块对象。"""
-    import importlib
     go2_stub = _make_go2_stub()
 
     # cloud.go2.connection.fsm 只依赖 asyncio/logging，直接用真实模块，无需 stub
-    real_fsm = importlib.import_module("cloud.go2.connection.fsm")
+    real_fsm = _load_fsm_module()
+    fastapi_stub, responses_stub = _make_fastapi_stub()
 
     # 构造最小假包结构，避免实际 import 引入 ultralytics / WebRTC 等
     patches = {
+        "fastapi":                                  fastapi_stub,
+        "fastapi.responses":                        responses_stub,
         "cloud.go2.connection":                   types.ModuleType("cloud.go2.connection"),
         "cloud.go2.connection.fsm":               real_fsm,
         "cloud.go2.navigation.drive":              types.ModuleType("cloud.go2.navigation.drive"),
@@ -36,12 +78,11 @@ def _load_router_with_stub():
     patches["cloud.go2.agentcore.skills.reactive"].reactive_mind = MagicMock()
     patches["cloud.go2.agentcore.skills.vision"].vision_loop = MagicMock()
 
-    with patch.dict(sys.modules, patches):
-        # 强制重新加载，确保 stub 生效
-        if "cloud.go2.router" in sys.modules:
-            del sys.modules["cloud.go2.router"]
-        import cloud.go2.router as router_mod
-        return router_mod, go2_stub
+    sys.modules.update(patches)
+    if "cloud.go2.router" in sys.modules:
+        del sys.modules["cloud.go2.router"]
+    import cloud.go2.router as router_mod
+    return router_mod, go2_stub
 
 
 class TestBuildGo2Card:
@@ -95,11 +136,11 @@ class TestBuildGo2Card:
         card = self.router_mod._build_go2_card()
         assert card["state"] == {}
 
-    def test_online_reflects_api_agent(self):
-        """card online 字段表示 Go2 API 智能体在线，WebRTC 状态由 state_stream 暴露。"""
+    def test_online_reflects_webrtc_connection(self):
+        """card online 字段表示 Go2 WebRTC 真实连接状态。"""
         assert self.router_mod._build_go2_card()["online"] is True
         self.go2_stub.is_connected = False
-        assert self.router_mod._build_go2_card()["online"] is True
+        assert self.router_mod._build_go2_card()["online"] is False
 
     def test_card_is_json_serializable(self):
         """card 必须可以被 json.dumps 序列化（用于 MQTT publish）。"""
@@ -176,8 +217,8 @@ def test_parse_card_keeps_state_machine():
 
 def test_go2_card_含_autonomy_modes_与_widgets():
     """Go2 card 应带 autonomy 模式轴、telemetry 字段与 joystick/video 富控件。"""
-    from cloud.go2.router import _build_go2_card
-    card = _build_go2_card()
+    router_mod, _ = _load_router_with_stub()
+    card = router_mod._build_go2_card()
     modes = card.get("modes")
     assert modes and modes[0]["id"] == "autonomy"
     vals = [o["value"] for o in modes[0]["options"]]
@@ -195,8 +236,8 @@ def test_go2_card_含_autonomy_modes_与_widgets():
 
 def test_state_machine_has_action_states_not_executing():
     """状态机含 4 个动作态、不含 executing，且 standing--Hello-->greeting 存在。"""
-    from cloud.go2.router import _go2_state_machine
-    sm = _go2_state_machine()
+    router_mod, _ = _load_router_with_stub()
+    sm = router_mod._go2_state_machine()
     names = set(sm["states"])
     assert {"greeting", "stretching", "dancing1", "dancing2"} <= names
     assert "executing" not in names
@@ -208,8 +249,30 @@ def test_state_machine_has_action_states_not_executing():
 
 def test_video_widget_states_drop_executing():
     """video 富控件显示状态对齐动作态，不再引用已删除的 executing。"""
-    from cloud.go2.router import _build_go2_card
-    card = _build_go2_card()
+    router_mod, _ = _load_router_with_stub()
+    card = router_mod._build_go2_card()
     video = next(w for w in card["widgets"] if w["type"] == "video")
     assert "executing" not in video["states"]
     assert "greeting" in video["states"]
+
+
+def test_publish_go2_status_uses_webrtc_connection_state():
+    router_mod, go2_stub = _load_router_with_stub()
+
+    class FakeMqtt:
+        def __init__(self):
+            self.calls = []
+
+        def publish(self, topic, payload, retain=False, qos=0):
+            self.calls.append((topic, payload, retain, qos))
+
+    fake = FakeMqtt()
+    router_mod.init_mqtt(fake)
+
+    go2_stub.is_connected = False
+    router_mod._publish_go2_status()
+    assert fake.calls[-1] == (router_mod.GO2_STATUS_TOPIC, "offline", True, 1)
+
+    go2_stub.is_connected = True
+    router_mod._publish_go2_status()
+    assert fake.calls[-1] == (router_mod.GO2_STATUS_TOPIC, "online", True, 1)

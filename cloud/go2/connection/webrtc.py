@@ -42,6 +42,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             await self._conn.connect()
         except Exception as exc:
             self.is_connected = False
+            self.fsm_state = "offline"
             logger.error("[Go2/Conn] 连接失败: %s", exc)
             raise
 

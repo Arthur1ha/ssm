@@ -62,7 +62,7 @@ def _go2_state_machine() -> dict:
 def _build_go2_card() -> dict:
     """构建 Go2 Agent Card dict（静态能力描述，符合 AgentCard schema）。
 
-    card 只含能力，不含 volatile state；在线状态由 status topic 维护，
+    card 只含能力，不含 volatile state；online/status 表示真实 WebRTC 连接状态，
     FSM/动作等动态状态经 HTTP /api/go2/* 实时获取。
     """
     return {
@@ -71,8 +71,7 @@ def _build_go2_card() -> dict:
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",
-        # online 表示 Go2 API 智能体在线；真实机器狗 WebRTC 状态由 state_stream 暴露。
-        "online": True,
+        "online": bool(go2.is_connected),
         "transport": {
             "kind": "http",
             "endpoint": "/api/go2/chat",
@@ -168,11 +167,13 @@ def _publish_go2_card() -> None:
         logging.error("[Go2] 发布 card 失败: %s", exc)
 
 
-def _publish_go2_status(online: bool) -> None:
-    """发布 Go2 API 智能体在线状态（retained，含 API 进程 LWT 语义）。"""
+def _publish_go2_status(online: bool | None = None) -> None:
+    """发布 Go2 真实连接状态（retained，API 进程 LWT 会兜底置 offline）。"""
     if _mqtt_client is None:
         return
     try:
+        if online is None:
+            online = bool(go2.is_connected)
         _mqtt_client.publish(GO2_STATUS_TOPIC, "online" if online else "offline", retain=True, qos=1)
         logging.info("[Go2] status → %s", "online" if online else "offline")
     except Exception as exc:
@@ -216,10 +217,12 @@ async def go2_connect():
         global _active_rule_cb, _active_drive_cb, _autonomy_mode
         if not t.cancelled() and t.exception():
             go2._last_error = str(t.exception())
+            _publish_go2_card()
+            _publish_go2_status(False)
             return
 
         _publish_go2_card()
-        _publish_go2_status(True)
+        _publish_go2_status()
 
         if _active_rule_cb is not None:
             vision_loop.remove_callback(_active_rule_cb)
@@ -235,6 +238,7 @@ async def go2_connect():
         _sm.tag_location("home", {"x": 0.0, "y": 0.0, "heading": 0.0})
         logging.info("[Go2] 已将起点标记为 home (0, 0, 0)")
 
+    _publish_go2_status(False)
     task = asyncio.create_task(go2.connect(email, password, serial, region))
     task.add_done_callback(_on_connect_done)
     return {"status": "connecting"}
@@ -250,7 +254,7 @@ async def go2_disconnect():
     _autonomy_mode   = "manual"
     await go2.disconnect()
     _publish_go2_card()
-    _publish_go2_status(True)
+    _publish_go2_status(False)
     return {"status": "disconnected"}
 
 

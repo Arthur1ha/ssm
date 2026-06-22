@@ -52,9 +52,9 @@ def _on_esp32_connect(client, userdata, flags, rc):
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
-        # API 进程在线即可暴露 Go2 智能体 card；真实机器狗连接状态由 /api/go2/connection 给出。
+        # Retained card 暴露 Go2 能力；status 只表达真实 WebRTC 连接状态。
         go2_router_module._publish_go2_card()
-        go2_router_module._publish_go2_status(True)
+        go2_router_module._publish_go2_status()
         logger.info("[ESP32Agent MQTT] Connected and subscribed")
 
 
