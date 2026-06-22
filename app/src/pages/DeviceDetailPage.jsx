@@ -18,7 +18,7 @@ function DeviceDetailPage({ unitId, device, unitData, onBack }) {
 
   const hasUserMsg = messages.some(m => m.role === 'user');
 
-  const [autonomy, setAutonomy] = React.useState('reactive');
+  const [autonomy, setAutonomy] = React.useState('manual');
 
   React.useEffect(() => {
     if (!isLed) return;
@@ -131,8 +131,8 @@ function DeviceDetailPage({ unitId, device, unitData, onBack }) {
         {isLed && (
           <div style={{ display: 'flex', gap: 6, padding: '8px 12px 0' }}>
             {[
-              { key: 'reactive', label: '自动调光', icon: '◉' },
               { key: 'manual',   label: '仅听指令', icon: '◎' },
+              { key: 'reactive', label: '自动调光', icon: '◉' },
             ].map(({ key, label, icon }) => {
               const active = autonomy === key;
               const accent = key === 'reactive' ? '#00d4ff' : 'var(--color-accent)';

@@ -149,8 +149,8 @@ _LED_MODES: list[dict] = [{
     "id": "autonomy",
     "label": "自主性",
     "options": [
-        {"value": "reactive", "label": "自动调光", "description": "灯自发根据环境调色温与亮度"},
         {"value": "manual",   "label": "仅听指令", "description": "只执行用户/编排器命令，不自发改灯"},
+        {"value": "reactive", "label": "自动调光", "description": "灯自发根据环境调色温与亮度"},
     ],
     "get": "/api/esp32/autonomy",
     "set": "/api/esp32/autonomy",

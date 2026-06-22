@@ -270,8 +270,8 @@ class TestBeliefHistory:
 
 
 class TestAutonomyMode:
-    def test_default_mode_is_reactive(self):
-        assert make_agent().get_autonomy_mode() == "reactive"
+    def test_default_mode_is_manual(self):
+        assert make_agent().get_autonomy_mode() == "manual"
 
     def test_set_mode_manual(self):
         a = make_agent()
@@ -284,7 +284,9 @@ class TestAutonomyMode:
             a.set_autonomy_mode("bogus")
 
     def test_should_act_true_in_reactive(self):
-        assert make_agent()._should_act() is True
+        a = make_agent()
+        a.set_autonomy_mode("reactive")
+        assert a._should_act() is True
 
     def test_should_act_false_in_manual(self):
         a = make_agent()
@@ -308,6 +310,7 @@ class TestUserHold:
 
     def test_hold_expires(self):
         a = make_agent()
+        a.set_autonomy_mode("reactive")
         a.mark_user_command("esp32_desk_led")
         a._user_hold_until = time.time() - 1   # 模拟窗口已过期
         assert a._in_user_hold() is False
@@ -328,7 +331,7 @@ class TestAutonomyRouter:
     def test_get_default_mode(self):
         resp = self._client().get("/api/esp32/autonomy")
         assert resp.status_code == 200
-        assert resp.json()["mode"] == "reactive"
+        assert resp.json()["mode"] == "manual"
 
     def test_put_switches_mode(self):
         c = self._client()

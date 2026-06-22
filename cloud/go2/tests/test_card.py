@@ -181,11 +181,16 @@ def test_go2_card_含_autonomy_modes_与_widgets():
     modes = card.get("modes")
     assert modes and modes[0]["id"] == "autonomy"
     vals = [o["value"] for o in modes[0]["options"]]
-    assert "remote" in vals and "free_explore" in vals
+    assert vals[:3] == ["manual", "reactive", "free_explore"]
+    assert "manual" in vals and "reactive" in vals and "free_explore" in vals
     assert modes[0]["set"] == "/api/go2/autonomy"
     assert any(t["key"] == "fsm_state" for t in card.get("telemetry", []))
-    types = [w["type"] for w in card.get("widgets", [])]
+    widgets = card.get("widgets", [])
+    types = [w["type"] for w in widgets]
     assert "joystick" in types and "video" in types
+    conn = next(w for w in widgets if w["type"] == "connection")
+    assert conn["auto_connect"] is True
+    assert conn["visible"] is False
 
 
 def test_state_machine_has_action_states_not_executing():

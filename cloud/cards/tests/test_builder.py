@@ -328,6 +328,7 @@ def test_led_card_注入_autonomy_modes():
     modes = card.get("modes")
     assert modes and modes[0]["id"] == "autonomy"
     vals = [o["value"] for o in modes[0]["options"]]
+    assert vals[:2] == ["manual", "reactive"]
     assert "reactive" in vals and "manual" in vals
     assert modes[0]["set"] == "/api/esp32/autonomy"
     assert "set_autonomy" in [s["id"] for s in card["skills"]]
@@ -343,7 +344,8 @@ def test_parse_card_透传并展开_modes():
         "modes": [{
             "id": "autonomy", "label": "自主性",
             "options": [
-                {"value": "remote", "label": "遥控", "description": ""},
+                {"value": "manual", "label": "完全遥控", "description": ""},
+                {"value": "reactive", "label": "自主反应", "description": ""},
                 {"value": "free_explore", "label": "自由探索", "description": ""},
             ],
             "set": "/api/go2/autonomy",

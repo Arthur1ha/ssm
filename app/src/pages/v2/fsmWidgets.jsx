@@ -1,25 +1,33 @@
 /* fsmWidgets — 按 card.widgets 声明渲染态内富控件（type 枚举：connection/joystick/video/map）。 */
 function ConnectionWidget({ widget }) {
-  const { useEffect, useState, useCallback } = React;
+  const { useEffect, useState, useCallback, useRef } = React;
   const endpoint = widget.endpoint || '/api/go2/connection';
   const statusEndpoint = widget.status_endpoint || endpoint;
   const [status, setStatus] = useState({ connected: false, fsm_state: 'offline', error: '' });
   const [busy, setBusy] = useState(false);
+  const [checked, setChecked] = useState(false);
+  const connectRequestedRef = useRef(false);
 
   const refresh = useCallback(() => {
     fetch(statusEndpoint)
       .then(r => r.json())
-      .then(d => setStatus({
-        connected: d.connected === true,
-        fsm_state: d.fsm_state || (d.connected ? 'standing' : 'offline'),
-        error: d.error || '',
-      }))
-      .catch(() => setStatus(prev => ({
-        ...prev,
-        connected: false,
-        fsm_state: 'offline',
-        error: '连接入口不可达，请确认 API 服务正在运行。',
-      })));
+      .then(d => {
+        setStatus({
+          connected: d.connected === true,
+          fsm_state: d.fsm_state || (d.connected ? 'standing' : 'offline'),
+          error: d.error || '',
+        });
+        setChecked(true);
+      })
+      .catch(() => {
+        setStatus(prev => ({
+          ...prev,
+          connected: false,
+          fsm_state: 'offline',
+          error: '连接入口不可达，请确认 API 服务正在运行。',
+        }));
+        setChecked(true);
+      });
   }, [statusEndpoint]);
 
   useEffect(() => {
@@ -28,7 +36,7 @@ function ConnectionWidget({ widget }) {
     return () => clearInterval(id);
   }, [refresh]);
 
-  const connect = () => {
+  const connect = useCallback(() => {
     if (busy) return;
     setBusy(true);
     fetch(endpoint, { method: 'POST' })
@@ -43,7 +51,7 @@ function ConnectionWidget({ widget }) {
         error: err?.message || '连接请求没有送达，请检查 API 端口和 Go2 配置。',
       })))
       .finally(() => setBusy(false));
-  };
+  }, [busy, endpoint, refresh]);
 
   const disconnect = () => {
     if (busy) return;
@@ -56,6 +64,15 @@ function ConnectionWidget({ widget }) {
 
   const connected = status.connected === true;
   const connecting = status.fsm_state === 'connecting' || busy;
+
+  useEffect(() => {
+    if (!checked || !widget.auto_connect || connected || connecting || connectRequestedRef.current) return;
+    connectRequestedRef.current = true;
+    connect();
+  }, [checked, widget.auto_connect, connected, connecting, connect]);
+
+  if (widget.visible === false) return null;
+
   return (
     <div style={{
       marginTop: 12,

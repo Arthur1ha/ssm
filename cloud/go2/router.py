@@ -125,7 +125,8 @@ def _build_go2_card() -> dict:
             "id": "autonomy",
             "label": "自主性",
             "options": [
-                {"value": "remote",       "label": "遥控",     "description": "由用户/编排器遥控决定行动"},
+                {"value": "manual",       "label": "完全遥控", "description": "由用户/编排器遥控决定行动"},
+                {"value": "reactive",     "label": "自主反应", "description": "机器狗根据视觉输入自主做即时反应"},
                 {"value": "free_explore", "label": "自由探索", "description": "机器狗自主探索环境"},
             ],
             "get": "/api/go2/autonomy",
@@ -142,6 +143,8 @@ def _build_go2_card() -> dict:
                 "states": ["offline", "connecting"],
                 "endpoint": "/api/go2/connection",
                 "status_endpoint": "/api/go2/connection",
+                "auto_connect": True,
+                "visible": False,
             },
             {"type": "joystick", "states": ["moving"],                "endpoint": "/api/go2/velocity"},
             {"type": "video",    "states": ["standing", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
@@ -196,7 +199,7 @@ router = APIRouter(prefix="/api/go2", tags=["go2"])
 # 当前注册的视觉回调句柄，重连时先移除再重注册，防止重复触发
 _active_rule_cb  = None
 _active_drive_cb = None
-_autonomy_mode   = "remote"  # "remote" | "free_explore"
+_autonomy_mode   = "manual"  # "manual" | "reactive" | "free_explore"
 
 
 @router.post("/connection")
@@ -454,7 +457,7 @@ class LedRequest(BaseModel):
 
 
 class AutonomyRequest(BaseModel):
-    mode: str  # "remote" | "free_explore"
+    mode: str  # "manual" | "reactive" | "free_explore"
 
 
 class PersonalityRequest(BaseModel):
