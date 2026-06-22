@@ -130,6 +130,15 @@ class TestBuildCardFromManifestActuator:
         """builder 不填充动态状态，state 应为空 dict。"""
         assert self.card["state"] == {}
 
+    def test_widgets_含_color_swatches(self):
+        widgets = self.card.get("widgets", [])
+        widget = next(w for w in widgets if w["type"] == "color_swatches")
+        assert widget["action"] == "SET_COLOR"
+        colors = {(s["r"], s["g"], s["b"]) for s in widget["swatches"]}
+        assert (255, 0, 0) in colors
+        assert (0, 255, 0) in colors
+        assert (0, 80, 255) in colors
+
 
 # ── sensor（光线传感器）测试 ────────────────────────────────────
 
@@ -332,6 +341,7 @@ def test_led_card_注入_autonomy_modes():
     assert "reactive" in vals and "manual" in vals
     assert modes[0]["set"] == "/api/esp32/autonomy"
     assert "set_autonomy" in [s["id"] for s in card["skills"]]
+    assert "widgets" not in card
 
 
 def test_parse_card_透传并展开_modes():

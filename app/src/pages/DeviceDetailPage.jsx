@@ -1,3 +1,12 @@
+const DEVICE_DETAIL_LED_SWATCHES = [
+  { label: '暖黄', r: 255, g: 200, b: 80,  brightness: 180 },
+  { label: '白色', r: 255, g: 255, b: 255, brightness: 180 },
+  { label: '红色', r: 255, g: 0,   b: 0,   brightness: 180 },
+  { label: '绿色', r: 0,   g: 255, b: 0,   brightness: 180 },
+  { label: '蓝色', r: 0,   g: 80,  b: 255, brightness: 180 },
+  { label: '紫色', r: 180, g: 0,   b: 255, brightness: 180 },
+];
+
 function DeviceDetailPage({ unitId, device, unitData, onBack }) {
   const initialMsg = {
     role: 'assistant', agent: unitId,
@@ -46,6 +55,24 @@ function DeviceDetailPage({ unitId, device, unitData, onBack }) {
       onPendingRule: (rule) => onAppend({ role: 'assistant', agent: unitId,
         text: `收到规则「${rule.name}」，请在主界面确认保存。` }),
     });
+  };
+
+  const sendColor = (swatch) => {
+    if (!isLed || !unitId) return;
+    const task_id = 'color_' + Date.now();
+    mqttBus.publish(`ssm/task/${unitId}/${task_id}`, {
+      task_id,
+      session_id: task_id,
+      action: 'SET_COLOR',
+      params: {
+        r: swatch.r,
+        g: swatch.g,
+        b: swatch.b,
+        brightness: swatch.brightness,
+      },
+      ts: Date.now(),
+    });
+    onAppend({ role: 'user', text: `切到${swatch.label}` });
   };
 
   return (
@@ -146,6 +173,57 @@ function DeviceDetailPage({ unitId, device, unitData, onBack }) {
                   cursor: 'pointer', letterSpacing: '0.07em', fontFamily: 'inherit',
                   WebkitTapHighlightColor: 'transparent', transition: 'all 0.15s',
                 }}>{icon} {label}</button>
+              );
+            })}
+          </div>
+        )}
+        {isLed && (
+          <div style={{
+            padding: '6px 12px 0',
+            display: 'flex',
+            gap: 8,
+            overflowX: 'auto',
+            scrollbarWidth: 'none',
+          }}>
+            {DEVICE_DETAIL_LED_SWATCHES.map((swatch, idx) => {
+              const rgb = `rgb(${swatch.r}, ${swatch.g}, ${swatch.b})`;
+              const isLight = swatch.r + swatch.g + swatch.b > 690;
+              return (
+                <button
+                  key={swatch.label + idx}
+                  onClick={() => sendColor(swatch)}
+                  title={swatch.label}
+                  aria-label={swatch.label}
+                  style={{
+                    flexShrink: 0,
+                    minWidth: 64,
+                    padding: '7px 10px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    background: 'var(--color-surface-1)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-sm)',
+                    color: 'var(--color-text-muted)',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    whiteSpace: 'nowrap',
+                    WebkitTapHighlightColor: 'transparent',
+                  }}
+                >
+                  <span style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    background: rgb,
+                    border: isLight ? '1px solid var(--color-border-strong)' : '1px solid transparent',
+                    boxShadow: `0 0 8px ${rgb}`,
+                    flexShrink: 0,
+                  }}/>
+                  <span>{swatch.label}</span>
+                </button>
               );
             })}
           </div>

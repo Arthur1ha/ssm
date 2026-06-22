@@ -94,9 +94,14 @@ class TelemetryField(TypedDict):
 class Widget(TypedDict):
     """态内富控件声明，type 为 PWA 内置实现的有限集合。"""
 
-    type: Literal["joystick", "video", "map"]
+    type: Literal["connection", "joystick", "video", "map", "color_swatches"]
     states: list[str]            # 在哪些状态下显示（空=全程）
     endpoint: NotRequired[str]   # 绑定的 transport 端点
+    status_endpoint: NotRequired[str]
+    auto_connect: NotRequired[bool]
+    visible: NotRequired[bool]
+    action: NotRequired[str]
+    swatches: NotRequired[list[dict]]
 
 
 class AgentCard(TypedDict):

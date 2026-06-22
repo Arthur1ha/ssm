@@ -169,6 +169,34 @@ _LED_SUGGESTIONS: list[str] = [
 
 SUGGESTION_DEFS: dict[str, list[str]] = {"led": _LED_SUGGESTIONS}
 
+_LED_COLOR_SWATCHES: list[dict] = [
+    {"label": "暖黄", "r": 255, "g": 200, "b": 80,  "brightness": 180},
+    {"label": "白色", "r": 255, "g": 255, "b": 255, "brightness": 180},
+    {"label": "红色", "r": 255, "g": 0,   "b": 0,   "brightness": 180},
+    {"label": "绿色", "r": 0,   "g": 255, "b": 0,   "brightness": 180},
+    {"label": "蓝色", "r": 0,   "g": 80,  "b": 255, "brightness": 180},
+    {"label": "紫色", "r": 180, "g": 0,   "b": 255, "brightness": 180},
+]
+
+_LED_WIDGETS: list[dict] = [{
+    "type": "color_swatches",
+    "states": [],
+    "action": "SET_COLOR",
+    "swatches": _LED_COLOR_SWATCHES,
+}]
+
+WIDGET_DEFS: dict[str, list[dict]] = {"led": _LED_WIDGETS}
+
+
+def _copy_widgets(widgets: list[dict]) -> list[dict]:
+    copied: list[dict] = []
+    for widget in widgets:
+        item = dict(widget)
+        if "swatches" in item:
+            item["swatches"] = [dict(swatch) for swatch in item["swatches"]]
+        copied.append(item)
+    return copied
+
 
 def _fsm_key(manifest: dict) -> str:
     """选用哪张 FSM：优先 manifest['fsm'] 提示，否则按 name/unit_id 猜。"""
@@ -201,6 +229,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     }
 
     capabilities: list[dict] = manifest.get("capabilities", [])
+    capability_actions = {cap.get("action", "") for cap in capabilities}
     skills: list[SkillDef] = []
     for cap in capabilities:
         action = cap.get("action", "")
@@ -233,6 +262,9 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         suggestions = SUGGESTION_DEFS.get(fsm_key)
         if suggestions:
             card["suggestions"] = suggestions
+        widgets = WIDGET_DEFS.get(fsm_key)
+        if widgets and "SET_COLOR" in capability_actions:
+            card["widgets"] = _copy_widgets(widgets)
     return card
 
 

@@ -126,6 +126,82 @@ function ConnectionWidget({ widget }) {
   );
 }
 
+function publishMqttTask(unitId, action, params) {
+  const task_id = 'widget_' + Date.now();
+  mqttBus.publish(`ssm/task/${unitId}/${task_id}`, {
+    task_id,
+    session_id: task_id,
+    action,
+    params,
+    ts: Date.now(),
+  });
+}
+
+function ColorSwatchesWidget({ unitId, widget }) {
+  const swatches = widget.swatches || [];
+  if (!swatches.length) return null;
+
+  const sendColor = (swatch) => {
+    publishMqttTask(unitId, widget.action || 'SET_COLOR', {
+      r: Number(swatch.r) || 0,
+      g: Number(swatch.g) || 0,
+      b: Number(swatch.b) || 0,
+      brightness: Number(swatch.brightness ?? 180),
+    });
+  };
+
+  return (
+    <div style={{
+      padding: '8px 12px 0',
+      display: 'flex',
+      gap: 8,
+      overflowX: 'auto',
+      scrollbarWidth: 'none',
+    }}>
+      {swatches.map((swatch, idx) => {
+        const rgb = `rgb(${swatch.r}, ${swatch.g}, ${swatch.b})`;
+        const isLight = Number(swatch.r) + Number(swatch.g) + Number(swatch.b) > 690;
+        return (
+          <button
+            key={(swatch.label || 'color') + idx}
+            className="btn"
+            onClick={() => sendColor(swatch)}
+            title={swatch.label}
+            aria-label={swatch.label}
+            style={{
+              flexShrink: 0,
+              minWidth: 64,
+              padding: '7px 10px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              background: 'var(--color-surface-1)',
+              color: 'var(--color-text-muted)',
+              borderColor: 'var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 11,
+              whiteSpace: 'nowrap',
+              cursor: 'pointer',
+            }}
+          >
+            <span style={{
+              width: 12,
+              height: 12,
+              borderRadius: '50%',
+              background: rgb,
+              border: isLight ? '1px solid var(--color-border-strong)' : '1px solid transparent',
+              boxShadow: `0 0 8px ${rgb}`,
+              flexShrink: 0,
+            }}/>
+            <span>{swatch.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function fsmWidget(unitId, state, widgets) {
   if (!widgets || !widgets.length) return null;
 
@@ -142,6 +218,9 @@ function fsmWidget(unitId, state, widgets) {
   }).catch(e => console.error('[fsmWidget] velocity failed:', e));
 
   const nodes = active.map((w, idx) => {
+    if (w.type === 'color_swatches') {
+      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w}/>;
+    }
     if (w.type === 'connection') {
       return <ConnectionWidget key={'conn' + idx} widget={w}/>;
     }
