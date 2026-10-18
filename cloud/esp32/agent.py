@@ -343,8 +343,6 @@ class ESP32Agent:
             if now - self._cooldown.get(key, 0) < 300:
                 logger.debug("cooldown skip: %s", key)
                 return False
-            self._cooldown[key] = now
-            self._last_act_ts = now
 
         if tool_name not in _tools_mod.TOOL_FN_MAP:
             logger.warning("unknown tool: %s", tool_name)
@@ -354,7 +352,17 @@ class ESP32Agent:
             logger.warning("unknown tool: %s", tool_name)
             return False
         try:
-            fn(**params)
+            task_id = fn(**params)
+            if tool_name in ("set_led_state", "set_led_color"):
+                # Real tools return an auto_* task id and must await the edge result.
+                # A synchronous adapter may return a completion marker directly.
+                if isinstance(task_id, str) and task_id.startswith("auto_"):
+                    result = self._state.wait_task_result(task_id)
+                    if result.get("result") != "ok":
+                        logger.warning("command %s did not complete: %s", task_id, result)
+                        return False
+                self._cooldown[key] = time.time()
+                self._last_act_ts = time.time()
             logger.info("execute %s %s", tool_name, params)
             return True
         except Exception as e:
@@ -367,10 +375,15 @@ class ESP32Agent:
         若某调用带 taught_id 且执行成功，记一次调教命中。
         """
         from cloud.esp32.memory import taught as _taught
+        completed = []
         for call in tool_calls:
             ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
+            if not ok:
+                break  # do not narrate success or run dependent actions after a failed command
+            completed.append(call.get("tool", ""))
             if ok and call.get("taught_id"):
                 _taught.touch(call["taught_id"])
+        return completed
 
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
@@ -466,10 +479,11 @@ class ESP32Agent:
 
                 logger.info("tool_calls (%d): %s", len(tool_calls), json.dumps(tool_calls, ensure_ascii=False))
 
+                completed = self._execute(tool_calls, self._find_led_device()) if tool_calls else []
                 self._belief_history.append({
                     "ts": time.time(),
                     "context": f"light={sense['light_level']} sound={sense['sound_detected']} led={sense['led_state']}",
-                    "actions": [c["tool"] for c in tool_calls],
+                    "actions": completed,
                 })
                 if len(self._belief_history) > 10:
                     self._belief_history.pop(0)
@@ -478,10 +492,6 @@ class ESP32Agent:
                 if self._beliefs_since_summary >= 5:
                     self._belief_summary = self._summarize_beliefs()
                     self._beliefs_since_summary = 0
-
-                if tool_calls:
-                    led_device = self._find_led_device()
-                    self._execute(tool_calls, led_device)
 
             except Exception as e:
                 logger.error("loop error: %s", e, exc_info=True)

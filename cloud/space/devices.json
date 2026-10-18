@@ -1,3 +1,241 @@
 {
-  "default": {}
+  "default": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_light",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 3 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782012041
+    }
+  },
+  "0": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_light",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 3 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782012041
+    }
+  },
+  "1": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782019818
+    }
+  },
+  "2": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782036020
+    },
+    "go2": {
+      "device_id": "go2",
+      "unit_ids": [
+        "go2"
+      ],
+      "display_name": "Go2 机器狗",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782036021
+    }
+  },
+  "3": {
+    "go2": {
+      "device_id": "go2",
+      "unit_ids": [
+        "go2"
+      ],
+      "display_name": "Go2 机器狗",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782039499
+    },
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782039521
+    }
+  },
+  "4": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782039845
+    },
+    "go2": {
+      "device_id": "go2",
+      "unit_ids": [
+        "go2"
+      ],
+      "display_name": "Go2 机器狗",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782039848
+    }
+  },
+  "5": {
+    "go2": {
+      "device_id": "go2",
+      "unit_ids": [
+        "go2"
+      ],
+      "display_name": "Go2 机器狗",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782048105
+    },
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782048118
+    }
+  },
+  "6": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782130616
+    },
+    "go2": {
+      "device_id": "go2",
+      "unit_ids": [
+        "go2"
+      ],
+      "display_name": "Go2 机器狗",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782130622
+    }
+  },
+  "7": {
+    "esp32_desk": {
+      "device_id": "esp32_desk",
+      "unit_ids": [
+        "esp32_desk_led",
+        "esp32_desk_sound"
+      ],
+      "display_name": "智能灯 等 2 个成员",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782182780
+    },
+    "go2": {
+      "device_id": "go2",
+      "unit_ids": [
+        "go2"
+      ],
+      "display_name": "Go2 机器狗",
+      "location": "",
+      "permissions": {
+        "allow_control": true,
+        "allow_autonomy": true,
+        "allow_rules": true
+      },
+      "created_at": 1782182781
+    }
+  }
 }

@@ -164,7 +164,7 @@ ssm/
 
 **避免**：在 `probe.py`、`agent_manifest.py`、`bsm.py` 里硬编码具体 unit 名称或引脚号。
 
-### 4. LangGraph Planner→Dispatcher→Evaluator→Responder（V2 编排）
+### 4. LangGraph Planner→Dispatcher→Evaluator→Responder（意图编排）
 
 **决策**：用有向图而不是单一 LLM 调用处理用户意图；每个节点职责单一。
 

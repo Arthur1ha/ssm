@@ -93,6 +93,10 @@ class Navigator:
                 logger.warning("[Go2/Nav] 体素地图 10 秒内未就绪，降级直线导航")
             return await self._navigate_to(loc)
         finally:
+            try:
+                go2.move_velocity(0, 0, 0)
+            except (RuntimeError, ValueError):
+                logger.warning("navigation cleanup: stop could not be sent")
             self.mode             = NavMode.IDLE
             self.target           = None
             self.current_path     = None

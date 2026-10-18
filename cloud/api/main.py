@@ -101,11 +101,17 @@ def _on_esp32_message(client, userdata, msg):
                 action = payload.get("action")
                 params = payload.get("params", {})
                 threading.Thread(
-                    target=agent.narrate_command,
-                    args=(action, params),
+                    target=_narrate_completed_command,
+                    args=(agent, parts[3], action, params),
                     daemon=True,
                     name="ESP32Narrate",
                 ).start()
+
+
+def _narrate_completed_command(agent, task_id, action, params):
+    result = _esp32_state.wait_task_result(task_id, timeout=20.0)
+    if result.get("result") == "ok":
+        agent.narrate_command(action, params)
 
 
 @asynccontextmanager

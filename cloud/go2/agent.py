@@ -145,6 +145,16 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
 
 
 async def _generate_response(user_msg: str, memory_context: str, results: list) -> tuple[str, bool]:
+    # Physical outcomes are authoritative; a language model cannot upgrade acceptance to completion.
+    status = _execution_status(results)
+    if status != "ok":
+        replies = {
+            "accepted": "指令已发送，尚未确认动作完成。",
+            "timeout": "等待动作完成反馈超时，当前结果还不能确认。",
+            "cancelled": "动作已被后续指令打断。",
+            "blocked": "当前状态不允许这个动作，设备没有执行。",
+        }
+        return replies.get(status, "动作未能完成，请查看设备状态后重试。"), True
     if not results:
         prompt = (
             f"【记忆上下文】\n{memory_context}\n\n"
@@ -188,9 +198,11 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
         try:
             result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
         except Exception as exc:
-            result = f"执行失败: {exc}"
+            result = {"result": "blocked" if isinstance(exc, ValueError) else "error", "error": str(exc)}
         logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
         results.append({"tool": tool_name, "result": result})
+        if _execution_status([results[-1]]) not in ("ok", "accepted"):
+            break
 
     response_text, reply_llm_available = await _generate_response(
         state["user_msg"], state.get("memory_context", ""), results
@@ -272,15 +284,12 @@ async def run_agent(
         }
     if state["response_text"] and not state.get("early_exit"):
         _publish_thought({"type": "think", "text": state["response_text"]})
-    action_failed = any(
-        str(r.get("result", "")).startswith(("执行失败", "未知工具"))
-        for r in state["tool_results"]
-    )
-    result = "error" if state.get("error") or action_failed else "ok"
+    result = "error" if state.get("error") else _execution_status(state["tool_results"])
     return {
         "result":        result,
         "response":      state["response_text"],
-        "actions_taken": [r["tool"] for r in state["tool_results"]],
+        "actions_taken": [r["tool"] for r in state["tool_results"] if _execution_status([r]) == "ok"],
+        "tool_results": state["tool_results"],
         "llm_available": state.get("llm_available", True),
         **({"error": state["error"]} if state.get("error") else {}),
     }
@@ -328,11 +337,13 @@ async def run_agent_stream(session_id: str, message: str):
             try:
                 result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
             except Exception as exc:
-                result = f"执行失败: {exc}"
+                result = {"result": "blocked" if isinstance(exc, ValueError) else "error", "error": str(exc)}
             logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
 
         results.append({"tool": tool_name, "result": result})
         yield {"type": "tool_done", "tool": tool_name, "result": str(result)}
+        if _execution_status([results[-1]]) not in ("ok", "accepted"):
+            break
 
     yield {"type": "thinking", "text": "整理回复…"}
 
@@ -341,4 +352,21 @@ async def run_agent_stream(session_id: str, message: str):
     episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
 
     yield {"type": "response", "text": response_text}
-    yield {"type": "done"}
+    yield {"type": "done", "result": _execution_status(results)}
+
+
+def _execution_status(results: list) -> str:
+    statuses = []
+    for item in results:
+        result = item.get("result")
+        if isinstance(result, dict):
+            statuses.append(result.get("result", "error"))
+        elif isinstance(result, str):
+            failed = result.startswith(("执行失败", "未知工具", "Go2 未连接", "无法", "无可用", "暂无", "不支持", "未找到"))
+            statuses.append("error" if failed else "ok")
+        else:
+            statuses.append("error")
+    for status in ("error", "blocked", "timeout", "cancelled", "accepted", "executing"):
+        if status in statuses:
+            return status
+    return "ok"

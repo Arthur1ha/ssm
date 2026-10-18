@@ -211,7 +211,7 @@ class BSM:
         self._blink_r     = r
         self._blink_g     = g
         self._blink_b     = b
-        self._blink_count = count * 2
+        self._blink_count = count
         self._blink_last  = 0
         self._blink_on    = False
         self._blinking    = True

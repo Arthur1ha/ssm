@@ -1,4 +1,4 @@
-/* FsmDevicePage — 通用状态机设备页（V2）。
+/* FsmDevicePage — 通用状态机设备页。
  * 布局：头部（固定）→ 状态图（固定高）→ ChatPanel（撑满剩余）
  * 完全由 Agent Card 的 transport / state_machine 驱动，无设备特判。
  */
@@ -21,6 +21,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   };
   const [messages, setMessages] = useState([initialMsg]);
   const [sending, setSending] = useState(false);
+  const [execution, setExecution] = useState('');
+  const reportExecution = result => setExecution(commandBus.describe(result));
   const { thinking, thinkingText, send } = useSendIntent();
 
   /* ── 模式轴 / 富控件 / 快捷指令（通用，由 card 驱动） ── */
@@ -49,12 +51,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
 
   const switchMode = (axis, value) => {
     if (offline) return;
-    setModeVals(prev => ({ ...prev, [axis.id]: value }));
     if (!axis.set) return;
-    fetch(axis.set, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: value }),
-    }).catch(() => {});
+    commandBus.http(axis.set, { mode: value }, 'PUT').then(result => {
+      if (result.mode === value) {
+        setModeVals(prev => ({ ...prev, [axis.id]: value }));
+        setExecution('模式已更新');
+      } else reportExecution(result);
+    });
   };
 
   /* ── 后台刷新 Agent Card（prop 已提供初始值，fetch 仅作热更新） ── */
@@ -94,27 +97,21 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
     : (liveState?.state?.ism || sm?.initial || '');
 
   /* ── 派发 FSM 转移 ── */
-  const fire = trigger => {
+  const fire = async trigger => {
     if (offline) return;
     const t = (sm?.transitions || []).find(
       tr => tr.src === current && tr.trigger === trigger
     );
     if (!t?.action) {
-      console.warn('[V2] transition missing action:', { unitId, trigger, t });
+      setExecution('当前状态不允许这个动作');
       return;
     }
+    setExecution('正在等待设备执行反馈…');
     if (isHttp) {
       const endpoint = transport.command_endpoint || transport.endpoint;
-      fetch(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: t.action, params: t.params || {} }),
-      }).catch(e => console.error('[V2] HTTP command failed:', e));
+      reportExecution(await commandBus.http(endpoint, { action: t.action, params: t.params || {} }));
     } else {
-      const task_id = 'v2_' + Date.now();
-      mqttBus.publish(
-        `ssm/task/${unitId}/${task_id}`,
-        { task_id, session_id: task_id, action: t.action, params: t.params || {}, ts: Date.now() },
-      );
+      reportExecution(await commandBus.mqtt(unitId, t.action, t.params || {}));
     }
   };
 
@@ -244,6 +241,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         </div>
       </div>
 
+      {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
       {/* ── 状态图区（固定，不随对话滚动）；离线置灰并禁用交互 ── */}
       {cardLoaded && (
         <div style={{
@@ -290,7 +288,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
           )}
 
           {/* 态内富控件（由 card.widgets 驱动） */}
-          {window.fsmWidget && window.fsmWidget(unitId, current, widgets)}
+          {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution)}
         </div>
       )}
 

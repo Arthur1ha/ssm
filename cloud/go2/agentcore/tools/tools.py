@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+import math
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
@@ -48,8 +49,8 @@ def _is_negated(trigger: str, text: str) -> bool:
     return False
 
 
-def check_rules(observation: str) -> list[str]:
-    """对视觉观测做确定性匹配，返回命中的 action 列表，并记一次命中。"""
+def check_rules(observation: str, *, include_rules: bool = False) -> list:
+    """Match and reserve cooldown; successful execution is recorded separately."""
     rules = [_migrate_rule(r) for r in load_rules()]
     now = time.time()
     triggered: list[str] = []
@@ -61,13 +62,21 @@ def check_rules(observation: str) -> list[str]:
         if trigger in observation and not _is_negated(trigger, observation):
             if now - rule.get("last_triggered", 0) >= rule["cooldown_s"]:
                 rule["last_triggered"] = now
-                rule["last_fired_ts"] = now
-                rule["hit_count"] = rule.get("hit_count", 0) + 1
-                triggered.append(rule["action"])
+                triggered.append(dict(rule) if include_rules else rule["action"])
                 changed = True
     if changed:
         save_rules(rules)
     return triggered
+
+
+def record_rule_completion(rule_id: str) -> None:
+    rules = load_rules()
+    for rule in rules:
+        if rule.get("id") == rule_id:
+            rule["hit_count"] = rule.get("hit_count", 0) + 1
+            rule["last_fired_ts"] = time.time()
+            save_rules(rules)
+            return
 
 
 # ── LLM 单例 ──────────────────────────────────────────────────────
@@ -134,8 +143,15 @@ async def go2_sport(cmd: str) -> str:
     canonical = _normalize_sport_action(cmd)
     if canonical is None:
         return f"未知动作 {cmd}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
-    await go2.send_command(canonical)
-    return f"已执行 {canonical}"
+    result = await go2.send_command(canonical)
+    if not isinstance(result, dict):
+        return f"已执行 {canonical}"
+    status = result.get("result", "error")
+    if status == "ok":
+        return f"已执行 {canonical}"
+    if status == "accepted":
+        return f"指令已发送 {canonical}，尚未确认完成"
+    raise RuntimeError(result.get("error") or f"{canonical} 执行未完成（{status}）")
 
 
 async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) -> str:
@@ -143,11 +159,16 @@ async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) ->
         return "Go2 未连接，请先建立连接"
     if direction not in _DIRECTION_MAP:
         return f"未知方向 {direction}，支持: {', '.join(_DIRECTION_MAP)}"
+    if not math.isfinite(duration) or not 0 < duration <= 10:
+        raise ValueError("duration must be in (0, 10] seconds")
     params = _DIRECTION_MAP[direction](speed)
     await go2.send_command("Move", params)
-    await asyncio.sleep(duration)
-    await go2.send_command("StopMove")
-    return f"已向 {direction} 移动 {duration}s"
+    try:
+        await asyncio.sleep(duration)
+    finally:
+        stopped = await go2.send_command("StopMove")
+    return {"result": "accepted", "action": "Move", "stop": stopped,
+            "message": "定时移动和停止指令已发送，实际位移未确认"}
 
 
 _OBSERVE_SYSTEM_PROMPT = (
@@ -229,9 +250,13 @@ async def go2_tag_location(name: str) -> str:
 
 async def go2_navigate_to(name: str) -> str:
     if not go2.is_connected:
-        return "Go2 未连接"
+        raise RuntimeError("Go2 未连接")
     from cloud.go2.navigation.navigator import navigator
-    return await navigator.go_to(name)
+    try:
+        result = await asyncio.wait_for(navigator.go_to(name), timeout=25.0)
+        return {"result": "ok" if result.startswith("已到达") else "error", "message": result}
+    except asyncio.TimeoutError:
+        return {"result": "timeout", "error": "navigation_timeout"}
 
 
 def go2_list_locations() -> str:
@@ -246,12 +271,9 @@ def go2_list_locations() -> str:
 
 async def go2_set_led(color: str = "white", duration: int = 60) -> str:
     if not go2.is_connected:
-        return "Go2 未连接"
-    try:
-        await go2.set_led(color, duration)
-        return f"LED 已设为 {color}，持续 {duration}s"
-    except ValueError as e:
-        return str(e)
+        raise RuntimeError("Go2 未连接")
+    await go2.set_led(color, duration)
+    return {"result": "accepted", "message": "机身灯指令已发送，未确认物理灯状态"}
 
 
 # ── 工具分发表 ────────────────────────────────────────────────────

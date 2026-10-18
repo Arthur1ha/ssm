@@ -80,7 +80,7 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
                 "r":     {"type": "integer", "minimum": 0, "maximum": 255, "description": "红色通道"},
                 "g":     {"type": "integer", "minimum": 0, "maximum": 255, "description": "绿色通道"},
                 "b":     {"type": "integer", "minimum": 0, "maximum": 255, "description": "蓝色通道"},
-                "count": {"type": "integer", "minimum": 1, "description": "闪烁次数"},
+                "count": {"type": "integer", "minimum": 1, "maximum": 20, "description": "闪烁次数"},
             },
         },
         "invoke": {"action": "BLINK"},
@@ -101,35 +101,25 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
 }
 
 # ── 声明式状态机表 ────────────────────────────────────────────────
-# 镜像 edge/ism.py 的 LED_TABLE/SENSOR_TABLE（设备侧是真行为，此表给 UI 画图）。
-# 新增状态：先改 ism.py（真行为），再在此表加对应转移。
+# 状态转移直接取自 edge/ism.py；这里仅补充显示文案与命令参数。
 _LED_LABELS = {
     "CMD_OFF": "关灯", "CMD_BRIGHT": "亮", "CMD_DIM": "调暗",
     "CMD_COLOR": "彩色", "CMD_BLINK": "闪烁",
 }
 
-# (src, trigger, dst, action, params) — action/params 供前端直接发 MQTT task
+# Generate UI transitions from the same pure contract imported by the edge runtime.
+from edge.ism import LED_TABLE
+
+_LED_COMMANDS = {
+    "CMD_OFF": ("SET_STATE", {"state": "OFF"}),
+    "CMD_BRIGHT": ("SET_STATE", {"state": "BRIGHT"}),
+    "CMD_DIM": ("SET_STATE", {"state": "DIM"}),
+    "CMD_COLOR": ("SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
+    "CMD_BLINK": ("BLINK", {"r": 255, "g": 255, "b": 255, "count": 3}),
+}
 _LED_EDGES = [
-    ("OFF",    "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
-    ("OFF",    "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
-    ("OFF",    "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
-    ("OFF",    "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
-    ("BRIGHT", "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
-    ("BRIGHT", "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
-    ("BRIGHT", "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
-    ("BRIGHT", "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
-    ("DIM",    "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
-    ("DIM",    "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
-    ("DIM",    "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
-    ("DIM",    "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
-    ("COLOR",  "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
-    ("COLOR",  "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
-    ("COLOR",  "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
-    ("COLOR",  "CMD_BLINK",  "BLINK",  "BLINK",     {"r": 255, "g": 255, "b": 255, "count": 3}),
-    ("BLINK",  "CMD_OFF",    "OFF",    "SET_STATE", {"state": "OFF"}),
-    ("BLINK",  "CMD_BRIGHT", "BRIGHT", "SET_STATE", {"state": "BRIGHT"}),
-    ("BLINK",  "CMD_DIM",    "DIM",    "SET_STATE", {"state": "DIM"}),
-    ("BLINK",  "CMD_COLOR",  "COLOR",  "SET_COLOR", {"r": 255, "g": 200, "b": 80,  "brightness": 180}),
+    (src, trigger, dst, *_LED_COMMANDS[trigger])
+    for (src, trigger), dst in LED_TABLE.items() if trigger in _LED_COMMANDS
 ]
 
 FSM_DEFS: dict[str, StateMachine] = {

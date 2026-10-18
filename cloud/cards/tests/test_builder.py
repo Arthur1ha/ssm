@@ -249,26 +249,26 @@ def test_第二次_manifest_覆盖第一次():
     from cloud.cards.registry import CardRegistry
     registry = CardRegistry()
 
-    manifest_v1 = {
+    first_manifest = {
         "unit_id": "esp32_desk_led",
         "slug": "desk-lamp",
         "agent_type": "actuator",
-        "name": "ws2812_ring_v1",
+        "name": "ws2812_ring_first",
         "capabilities": [{"action": "SET_STATE", "params": ["state"]}],
     }
-    manifest_v2 = {
+    updated_manifest = {
         "unit_id": "esp32_desk_led",
         "slug": "desk-lamp",
         "agent_type": "actuator",
-        "name": "ws2812_ring_v2",
+        "name": "ws2812_ring_updated",
         "capabilities": [{"action": "SET_STATE", "params": ["state"]}, {"action": "BLINK", "params": ["count"]}],
     }
 
-    registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(manifest_v1))
-    registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(manifest_v2))
+    registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(first_manifest))
+    registry.handle_message("ssm/agents/esp32_desk_led/manifest", __import__("json").dumps(updated_manifest))
 
     card = registry.get_card("esp32_desk_led")
-    assert card["name"] == "ws2812_ring_v2"
+    assert card["name"] == "ws2812_ring_updated"
     # 2 条 capabilities skill + 1 条 set_autonomy 模式 skill
     assert len(card["skills"]) == 3
 

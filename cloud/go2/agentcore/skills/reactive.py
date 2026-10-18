@@ -8,7 +8,7 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from cloud.go2.agentcore.skills.vision import VisionFrame
-from cloud.go2.agentcore.tools.tools import check_rules, go2_sport, go2_move, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.tools.tools import check_rules, record_rule_completion, go2_sport, go2_move, get_text_llm, _VALID_SPORT_CMDS
 from cloud.go2.agentcore.soul import get_system_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 
@@ -66,7 +66,7 @@ class ReactiveMind:
 
     # ── 单一执行口，规则层与自主层共用 ────────────────────────────
 
-    async def _dispatch_action(self, action: str, reason: str, source: str) -> None:
+    async def _dispatch_action(self, action: str, reason: str, source: str, rule_id: str = "") -> None:
         """真正下发一个动作：校验 → 共享冷却 → 执行 → 记忆 → 日志。"""
         if action not in _ALL_ACTIONS:
             logger.info("[ReactiveMind] 未知动作 %s，跳过", action)
@@ -76,14 +76,20 @@ class ReactiveMind:
             return
         try:
             if action in _VALID_SPORT_CMDS:
-                await go2_sport(action)
+                result = await go2_sport(action)
             else:
-                await go2_move(**_TURN_ACTIONS[action])
+                result = await go2_move(**_TURN_ACTIONS[action])
+            if not (isinstance(result, str) and result.startswith("已执行")):
+                _publish_thought({"type": "act", "text": f"{action} 尚未确认完成", "execution": result})
+                self._action_cooldowns[action] = time.time()
+                return
         except Exception as exc:
             logger.warning("[ReactiveMind] 执行失败: %s", exc)
             _publish_thought({"type": "act", "text": f"尝试执行{action}，但失败了：{exc}"})
             return
         self._action_cooldowns[action] = time.time()
+        if rule_id:
+            record_rule_completion(rule_id)
         episode_memory.add(EventType.ACTION_TAKEN, f"{source}：执行了 {action}（{reason}）")
         logger.info("[ReactiveMind] %s 执行 %s：%s", source, action, reason)
         _publish_thought({"type": "act", "text": f"执行了{action}"})
@@ -92,7 +98,7 @@ class ReactiveMind:
 
     def on_vision_frame(self, frame: VisionFrame) -> None:
         observation = _frame_to_observation(frame)
-        rule_actions = check_rules(observation) if observation else []
+        rule_actions = check_rules(observation, include_rules=True) if observation else []
 
         # 人数或脸数发生跨帧变化即视为"画面有变化"（首帧建立基线不算）
         person_count = frame["persons"]["count"]
@@ -111,8 +117,8 @@ class ReactiveMind:
 
         # 规则层（快速反射）优先：命中即执行，不再走 LLM 推理
         if rule_actions:
-            for action in rule_actions:
-                loop.create_task(self._dispatch_action(action, "规则命中", "规则响应"))
+            for rule in rule_actions:
+                loop.create_task(self._dispatch_action(rule["action"], "规则命中", "规则响应", rule["id"]))
             return
 
         # 规则未命中且画面变化 → 自主推理（LLM 兜底）

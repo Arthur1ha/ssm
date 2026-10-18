@@ -5,7 +5,7 @@ import math
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
 
-from cloud.go2.connection.fsm import Go2FSM
+from cloud.go2.connection.fsm import Go2FSM, CommandBlocked, _TRANSIENT_STATES
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
 
@@ -21,6 +21,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._conn: UnitreeWebRTCConnection | None = None
         self.is_connected: bool = False
         self._status_task: asyncio.Task | None = None
+        self._command_lock = asyncio.Lock()
+        self._completion = None
+        self._motion_epoch = 0
+        self._velocity_timer = None
 
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
@@ -83,6 +87,9 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             pass
 
     async def disconnect(self) -> None:
+        if self._velocity_timer:
+            self._velocity_timer.cancel()
+        self._finish_pending("error", "disconnected")
         self.is_connected = False
         self.fsm_state = "offline"
         if self._status_task and not self._status_task.done():
@@ -124,26 +131,82 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
     # ── 命令发送 ──────────────────────────────────────────────────────────
 
-    async def send_command(self, cmd: str, params: dict | None = None) -> None:
+    def _finish_pending(self, result: str, error: str) -> None:
+        if self._completion is not None and not self._completion.done():
+            self._completion.set_result({"result": result, "error": error})
+        self._completion = None
+
+    def _validate_motion(self, cmd: str, params: dict | None = None) -> str:
+        target = self.fsm_next(cmd)
+        # Continuous movement updates and emergency stop are idempotent.
+        if cmd == "Move" and self.fsm_state == "moving":
+            target = "moving"
+        if cmd == "Move" and self.fsm_state == "offline" and self.is_connected:
+            target = "moving"
+        if cmd == "StopMove" and self.fsm_state not in ("offline", "connecting"):
+            target = "lying" if self.fsm_state == "lying" else "standing"
+        if cmd == "BalanceStand" and self.fsm_state == "standing":
+            target = "standing"
+        if target is None:
+            raise CommandBlocked(f"{cmd} blocked in {self.fsm_state}")
+        if cmd == "Move":
+            self._validate_velocity(**{k: (params or {}).get(k, 0.0) for k in ("x", "y", "z")})
+        return target
+
+    @staticmethod
+    def _validate_velocity(x=0.0, y=0.0, z=0.0):
+        for value, limit in ((x, 0.5), (y, 0.5), (z, 0.8)):
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > limit:
+                raise ValueError("velocity outside supported range (0.5 m/s, 0.8 rad/s)")
+
+    async def send_command(self, cmd: str, params: dict | None = None, *, completion_timeout: float = 20.0) -> dict:
+        async with self._command_lock:
+            waiter = await self._send_command(cmd, params)
+        if waiter is None:
+            return {"result": "accepted", "confirmation": "transport", "fsm_state": self.fsm_state}
+        try:
+            return await asyncio.wait_for(asyncio.shield(waiter), timeout=completion_timeout)
+        except asyncio.TimeoutError:
+            return {"result": "timeout", "error": "completion_not_observed", "fsm_state": self.fsm_state}
+        finally:
+            if self._completion is waiter:
+                self._completion = None
+            if not waiter.done():
+                waiter.cancel()
+
+    async def _send_command(self, cmd: str, params: dict | None):
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
         api_id = SPORT_CMD.get(cmd)
         if api_id is None:
             raise ValueError(f"Unknown command: {cmd}")
+        next_state = self._validate_motion(cmd, params)
+        epoch = self._motion_epoch
         options: dict = {"api_id": api_id}
         if params:
             options["parameter"] = params
         try:
-            await self._conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options)
+            await asyncio.wait_for(
+                self._conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options), timeout=5.0)
         except Exception as exc:
             self.is_connected = False
             self.fsm_state = "offline"
+            self._finish_pending("error", "disconnected")
             raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
         logger.info("[Go2/Conn] 发送命令: %s params=%s", cmd, params)
 
-        next_state = self.fsm_next(cmd)
-        if next_state is not None:
-            self.fsm_state = next_state
+        if epoch != self._motion_epoch or not self.is_connected:
+            waiter = asyncio.get_running_loop().create_future()
+            waiter.set_result({"result": "cancelled", "error": "superseded_during_send"})
+            return waiter
+
+        self._finish_pending("cancelled", "superseded")
+        self._last_progress = 0.0
+        self.fsm_state = next_state
+        if next_state in _TRANSIENT_STATES:
+            self._completion = asyncio.get_running_loop().create_future()
+            return self._completion
+        return None
 
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
@@ -153,7 +216,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             {"api_id": 1002, "parameter": {"name": mode}},
         )
 
-    def move_velocity(self, vx: float, vy: float, vyaw: float) -> None:
+    def move_velocity(self, vx: float, vy: float, vyaw: float, *, deadman_s: float | None = None) -> dict:
         """发送速度指令，通过 WIRELESS_CONTROLLER 模拟摇杆输入。
 
         fire-and-forget（不等 ACK），适合摇杆高频实时输入，不阻塞导航循环。
@@ -162,6 +225,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         """
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
+        self._validate_velocity(vx, vy, vyaw)
+        target = self._validate_motion("Move" if any((vx, vy, vyaw)) else "StopMove")
+        if self._command_lock.locked() and any((vx, vy, vyaw)):
+            raise CommandBlocked("command_in_flight")
         try:
             self._conn.datachannel.pub_sub.publish_without_callback(
                 RTC_TOPIC["WIRELESS_CONTROLLER"],
@@ -171,15 +238,25 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             self.is_connected = False
             self.fsm_state = "offline"
             raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
+        self._finish_pending("cancelled", "velocity_override")
+        self._motion_epoch += 1
+        self.fsm_state = target
+        if self._velocity_timer:
+            self._velocity_timer.cancel()
+            self._velocity_timer = None
+        if deadman_s and any((vx, vy, vyaw)):
+            self._velocity_timer = asyncio.get_running_loop().call_later(deadman_s, self._expire_velocity)
+        return {"result": "accepted", "confirmation": "transport", "fsm_state": target}
+
+    def _expire_velocity(self):
+        self._velocity_timer = None
+        try:
+            self.move_velocity(0, 0, 0)
+        except (RuntimeError, ValueError):
+            logger.warning("velocity stop could not be sent")
 
     async def balance_stand(self) -> None:
-        if not self.is_connected or not self._conn:
-            raise RuntimeError("Go2 not connected")
-        await self._conn.datachannel.pub_sub.publish_request_new(
-            RTC_TOPIC["SPORT_MOD"],
-            {"api_id": SPORT_CMD["BalanceStand"]},
-        )
-        self.fsm_state = "standing"
+        return await self.send_command("BalanceStand")
 
     async def set_led(self, color: str = "white", duration: int = 60) -> None:
         if color not in _VALID_LED_COLORS:

@@ -339,12 +339,12 @@ async def go2_command(req: CommandRequest):
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
     try:
-        await go2.send_command(cmd, req.params or None)
+        result = await go2.send_command(cmd, req.params or None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    return {"ok": True}
+    return result
 
 
 @router.post("/velocity")
@@ -353,11 +353,13 @@ async def go2_velocity(req: VelocityRequest):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     try:
-        go2.move_velocity(req.vx, req.vy, req.vyaw)
+        result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=0.6)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logging.error("[Go2/Velocity] move_velocity 异常: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc))
-    return {"ok": True}
+    return result
 
 
 class ChatRequest(BaseModel):

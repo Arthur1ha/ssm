@@ -43,6 +43,10 @@ class MqttBus extends EventTarget {
             this._connected = false;
             this._dispatch('disconnect', null);
         });
+        this._client.on('close', () => {
+            this._connected = false;
+            this._dispatch('disconnect', null);
+        });
 
         this._client.on('error', (err) => {
             console.error('[MqttBus] Error:', err);
@@ -74,6 +78,17 @@ class MqttBus extends EventTarget {
         if (this._connected) {
             this._client.unsubscribe(topicPattern);
         }
+    }
+
+    subscribeReady(topic) {
+        return new Promise((resolve, reject) => {
+            if (!this._connected) return reject(new Error('设备总线未连接'));
+            this._subscriptions.add(topic);
+            this._client.subscribe(topic, { qos: 1 }, (error, granted) => {
+                if (error || granted?.some(g => g.qos === 128)) reject(error || new Error('结果订阅被拒绝'));
+                else resolve();
+            });
+        });
     }
 
     publish(topic, payload, opts = {}) {

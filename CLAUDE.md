@@ -24,7 +24,7 @@
 | 边缘库 | `umqtt.robust`、`neopixel`、`machine`、`ujson` | 内置于 MicroPython |
 | 消息代理 | Mosquitto | 运行于云服务器 `47.116.137.202`，TCP 1883 / WS 9001 |
 | 云端 AI | LangGraph + LangChain + ChatOpenAI（兼容接口） | langgraph≥0.2、langchain≥0.3 |
-| LLM（编排/Go2/ESP32 智能体） | 火山方舟 Ark `deepseek-v4-flash` / `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
+| LLM（编排/Go2/ESP32 智能体） | `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
 | Go2 机器狗 | `unitree-webrtc-connect`（WebRTC）+ YOLO（ultralytics）视觉 | HTTP REST，非 MQTT |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
 | 手机 PWA | React 18（无构建，Babel standalone） + MQTT.js | React 18.3.1、mqtt.js 5.3.4 |
@@ -164,7 +164,7 @@ ssm/
 
 **避免**：在 `probe.py`、`agent_manifest.py`、`bsm.py` 里硬编码具体 unit 名称或引脚号。
 
-### 4. LangGraph Planner→Dispatcher→Evaluator→Responder（V2 编排）
+### 4. LangGraph Planner→Dispatcher→Evaluator→Responder（意图编排）
 
 **决策**：用有向图而不是单一 LLM 调用处理用户意图；每个节点职责单一。
 

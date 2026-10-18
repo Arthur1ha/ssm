@@ -2,6 +2,7 @@ broker/data/
 broker/logs/
 logs/
 server/.env
+cloud/.env
 broker/mosquitto.conf
 *.log
 .DS_Store
@@ -26,3 +27,4 @@ cloudflared
 
 # Go2 运行期状态（记忆/性格/规则）
 cloud/go2/data/
+cloud/esp32/data/

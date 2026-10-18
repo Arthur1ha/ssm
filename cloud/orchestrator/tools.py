@@ -74,10 +74,10 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     try:
         data = resp.json()
     except ValueError:
-        return {"result": "ok", "raw": resp.text}
+        return {"result": "error", "error": "invalid_response"}
     if isinstance(data, dict) and "result" not in data:
-        data = {**data, "result": "error" if data.get("error") else "ok"}
-    return data if isinstance(data, dict) else {"result": "ok", "data": data}
+        data = {**data, "result": "error", "error": data.get("error") or "missing_execution_result"}
+    return data if isinstance(data, dict) else {"result": "error", "error": "invalid_response"}
 
 
 def do_publish(topic: str, payload: dict):

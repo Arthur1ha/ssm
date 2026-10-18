@@ -1,4 +1,4 @@
-/* useSsmCore — V2 复用的通信层：连接 + 设备注册表 + ISM 实时快照 */
+/* useSsmCore — 通信层：连接 + 设备注册表 + ISM 实时快照 */
 const _EXCL_TYPES = new Set(['decision']);
 const _EXCL_PLAT  = new Set(['cloud']);
 
@@ -8,6 +8,7 @@ function useSsmCore(spaceId = '0') {
   const [agents, setAgents]       = useState([]);
   const [discoveredAgents, setDiscoveredAgents] = useState([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
+  const [agentsError, setAgentsError] = useState('');
   const [unitData, setUnitData]   = useState({});
   const trackerRef = useRef(null);
   const adoptedUnitIdsRef = useRef(new Set());
@@ -17,28 +18,35 @@ function useSsmCore(spaceId = '0') {
     .filter(d => d.agent_type && !_EXCL_TYPES.has(d.agent_type) && !_EXCL_PLAT.has(d.hw_platform))
     .map(d => ({ ...d, _online: d.online ?? d._online ?? false })), []);
 
-  const refreshAgents = useCallback(() => {
+  const refreshAgents = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     setLoadingAgents(true);
+    setAgentsError('');
     adoptedUnitIdsRef.current = new Set();
-    setAgents([]);
-    return fetch(`/api/devices?scope=adopted&space_id=${encodeURIComponent(spaceId || '0')}`)
-    .then(r => r.json())
-    .then(ds => {
+    try {
+      const response = await fetch(
+        `/api/devices?scope=adopted&space_id=${encodeURIComponent(spaceId || '0')}`,
+        { signal: controller.signal, headers: { Accept: 'application/json' } },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const ds = await response.json();
       if (seq !== refreshSeqRef.current) return [];
       const list = normalizeDevices(ds);
       adoptedUnitIdsRef.current = new Set(list.map(d => d.unit_id));
       setAgents(list);
-      setLoadingAgents(false);
       return list;
-    })
-    .catch(() => {
+    } catch (error) {
       if (seq !== refreshSeqRef.current) return [];
-      adoptedUnitIdsRef.current = new Set();
-      setAgents([]);
-      setLoadingAgents(false);
+      setAgentsError(error?.name === 'AbortError'
+        ? '设备服务响应超时，请重试'
+        : '设备服务暂时不可用，请重试');
       return [];
-    });
+    } finally {
+      clearTimeout(timeoutId);
+      if (seq === refreshSeqRef.current) setLoadingAgents(false);
+    }
   }, [normalizeDevices, spaceId]);
 
   const adoptLocalCandidate = useCallback(candidate => {
@@ -118,6 +126,9 @@ function useSsmCore(spaceId = '0') {
     refreshAgents();
   }, [refreshAgents]);
 
-  return { connected, agents, discoveredAgents, loadingAgents, unitData, refreshAgents, adoptLocalCandidate };
+  return {
+    connected, agents, discoveredAgents, loadingAgents, agentsError,
+    unitData, refreshAgents, adoptLocalCandidate,
+  };
 }
 window.useSsmCore = useSsmCore;

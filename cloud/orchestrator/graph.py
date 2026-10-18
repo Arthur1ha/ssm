@@ -266,10 +266,18 @@ def _make_planner_node(llm):
         discovered_cards = _t._registry.get_all_cards() if _t._registry else {}
         space_registry = get_space_registry()
         cards = get_adopted_cards(discovered_cards, space_registry, space_id)
+        if "space_id" not in state:
+            cards = discovered_cards
         online_ids = [uid for uid, c in cards.items() if c.get("online", True)]
         discovered_ids = [uid for uid, c in discovered_cards.items() if c.get("online", True)]
         logger.info("[Planner] 已接入在线 card：%s", online_ids or "（无）")
         logger.info("[Planner] 已发现在线 card：%s", discovered_ids or "（无）")
+
+        if not discovered_cards and not _looks_like_discovery_request(state.get("user_msg", "")):
+            text = "当前没有可用的设备成员，暂时无法执行这条指令。"
+            _t.do_publish_feedback(session_id, "failed", text)
+            return {**state, "route": "act", "planned_tasks": [],
+                    "response_text": text, "early_exit": True}
 
         if state.get("route") == "discover_devices" or _looks_like_discovery_request(state.get("user_msg", "")):
             candidates = build_adoption_candidates(discovered_cards, space_registry, space_id)
@@ -596,12 +604,12 @@ def _make_evaluator_node():
                 pending.append(tid)
 
         if pending:
-            deadline = _time.time() + 5.0
-            while _time.time() < deadline:
+            deadline = _time.monotonic() + 20.0
+            while _time.monotonic() < deadline:
                 for tid in pending:
                     if tid not in results:
                         r = _t._state.get_task_result(tid)
-                        if r:
+                        if r and r.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
                             results[tid] = r
                 if all(tid in results for tid in pending):
                     break
@@ -637,6 +645,13 @@ def _make_responder_node(llm):
             return state
 
         statuses = [r.get("result", "timeout") for r in results.values()]
+        if any(s in ("accepted", "executing") for s in statuses):
+            text = "部分指令已发出，但尚未确认全部完成。请查看设备当前状态。"
+            if any(s in ("error", "blocked", "timeout", "cancelled") for s in statuses):
+                text += "其中有指令失败、被拒绝或中断。"
+            _t.do_publish_feedback(session_id, "partial", text, task_results=results)
+            _append_history(state["user_msg"], text)
+            return {**state, "response_text": text}
         ok_count = statuses.count("ok")
         stage = "done" if ok_count == len(results) else ("partial" if ok_count > 0 else "failed")
 

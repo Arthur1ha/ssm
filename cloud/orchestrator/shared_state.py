@@ -47,7 +47,11 @@ class SharedState:
 
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:
+            if self._task_results.get(task_id, {}).get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+                return
             self._task_results[task_id] = result
+            if len(self._task_results) > 256:
+                self._task_results.pop(next(iter(self._task_results)))
 
     def get_task_result(self, task_id: str) -> Optional[dict]:
         with self._lock:

@@ -71,3 +71,6 @@ class ISM:
             return True
         print("[ISM:{}] BLOCKED: {} + {}".format(self.agent_id, self.state, trigger))
         return False
+
+    def allows(self, trigger):
+        return (self.state, trigger) in self._table

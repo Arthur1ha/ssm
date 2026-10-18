@@ -360,8 +360,10 @@ class Drive:
             logger.info("[Drive] explore_direction 无地图/方向受阻，降级前进 2s")
             import asyncio as _aio
             go2.move_velocity(0.3, 0.0, 0.0)
-            await _aio.sleep(2.0)
-            go2.move_velocity(0.0, 0.0, 0.0)
+            try:
+                await _aio.sleep(2.0)
+            finally:
+                go2.move_velocity(0.0, 0.0, 0.0)
             new_odom = go2.odom
             pos = f"({new_odom['x']:.2f}, {new_odom['y']:.2f})" if new_odom else "未知"
             nav_summary = f"地图不可用，短距前进完成，当前位置 {pos}"
@@ -449,7 +451,10 @@ class Drive:
         _publish_thought({"type": "think", "text": reason})
         if action:
             try:
-                await go2_sport(action)
+                result = await go2_sport(action)
+                if not (isinstance(result, str) and result.startswith("已执行")):
+                    _publish_thought({"type": "act", "text": f"{action} 尚未确认完成", "execution": result})
+                    return
                 self._last_action_ts = time.time()
                 episode_memory.add(EventType.ACTION_TAKEN, f"社交互动：执行了 {action}（{reason}）")
                 logger.info("[Drive] SOCIAL 执行 %s：%s", action, reason)

@@ -2,6 +2,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class CommandBlocked(ValueError):
+    """A valid command is not allowed in the current device state."""
+
 _GESTURES = ["Hello", "Stretch", "Dance1", "Dance2"]
 _GESTURE_NEXT = {"Hello": "greeting", "Stretch": "stretching",
                  "Dance1": "dancing1", "Dance2": "dancing2"}
@@ -65,4 +69,7 @@ class Go2FSM:
                 and self._last_progress > 0.05
                 and progress < 0.05):
             self.fsm_state = "standing"
+            waiter = getattr(self, "_completion", None)
+            if waiter is not None and not waiter.done():
+                waiter.set_result({"result": "ok", "confirmation": "progress", "fsm_state": "standing"})
         self._last_progress = progress

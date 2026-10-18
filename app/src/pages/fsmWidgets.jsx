@@ -126,28 +126,18 @@ function ConnectionWidget({ widget }) {
   );
 }
 
-function publishMqttTask(unitId, action, params) {
-  const task_id = 'widget_' + Date.now();
-  mqttBus.publish(`ssm/task/${unitId}/${task_id}`, {
-    task_id,
-    session_id: task_id,
-    action,
-    params,
-    ts: Date.now(),
-  });
-}
-
-function ColorSwatchesWidget({ unitId, widget }) {
+function ColorSwatchesWidget({ unitId, widget, report }) {
   const swatches = widget.swatches || [];
   if (!swatches.length) return null;
 
   const sendColor = (swatch) => {
-    publishMqttTask(unitId, widget.action || 'SET_COLOR', {
+    report({ result: 'executing' });
+    commandBus.mqtt(unitId, widget.action || 'SET_COLOR', {
       r: Number(swatch.r) || 0,
       g: Number(swatch.g) || 0,
       b: Number(swatch.b) || 0,
       brightness: Number(swatch.brightness ?? 180),
-    });
+    }).then(report);
   };
 
   return (
@@ -202,7 +192,7 @@ function ColorSwatchesWidget({ unitId, widget }) {
   );
 }
 
-function fsmWidget(unitId, state, widgets) {
+function fsmWidget(unitId, state, widgets, report = () => {}) {
   if (!widgets || !widgets.length) return null;
 
   const VirtualJoystick = window.VirtualJoystick;
@@ -212,14 +202,11 @@ function fsmWidget(unitId, state, widgets) {
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
   if (!active.length) return null;
 
-  const sendVelocity = (endpoint, vx, vy, vyaw) => fetch(endpoint, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ vx, vy, vyaw }),
-  }).catch(e => console.error('[fsmWidget] velocity failed:', e));
+  const sendVelocity = (endpoint, vx, vy, vyaw) => commandBus.velocity(endpoint, { vx, vy, vyaw }, report);
 
   const nodes = active.map((w, idx) => {
     if (w.type === 'color_swatches') {
-      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w}/>;
+      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report}/>;
     }
     if (w.type === 'connection') {
       return <ConnectionWidget key={'conn' + idx} widget={w}/>;
@@ -238,13 +225,11 @@ function fsmWidget(unitId, state, widgets) {
       );
     }
     if (w.type === 'video' && VideoCanvas) {
-      // w.endpoint 字段（如 /api/go2/video）暂未消费：
-      // VideoCanvas 内部硬编码抓帧路径（/api/go2/video/snapshot），不接受外部 url prop。
       return (
         <div key={'cam' + idx} style={{ marginTop: 14, aspectRatio: '16/9', background: '#0a0c14',
           border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
           overflow: 'hidden' }}>
-          <VideoCanvas connected={true}/>
+          <VideoCanvas connected={true} endpoint={w.endpoint}/>
         </div>
       );
     }

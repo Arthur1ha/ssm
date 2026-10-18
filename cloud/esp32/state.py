@@ -1,11 +1,13 @@
 import threading
 import json
+import time
 from typing import Optional
 
 
 class ESP32State:
     def __init__(self):
         self._lock = threading.Lock()
+        self._result_ready = threading.Condition(self._lock)
         self._sensors             = {}
         self._actuators           = {}
         self._manifests           = {}
@@ -28,7 +30,25 @@ class ESP32State:
 
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:
+            previous = self._task_results.get(task_id, {})
+            if previous.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+                return
             self._task_results[task_id] = result
+            if len(self._task_results) > 256:
+                self._task_results.pop(next(iter(self._task_results)))
+            self._result_ready.notify_all()
+
+    def wait_task_result(self, task_id: str, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        with self._result_ready:
+            while True:
+                result = self._task_results.get(task_id, {})
+                if result.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+                    return result
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {"task_id": task_id, "result": "timeout"}
+                self._result_ready.wait(remaining)
 
     def get_task_result(self, task_id: str) -> Optional[dict]:
         with self._lock:

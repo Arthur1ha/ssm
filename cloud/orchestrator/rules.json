@@ -1,11 +1,11 @@
 [
   {
-    "rule_id": "r_1781427056_799fce",
-    "name": "声音开灯",
+    "rule_id": "r_1782183412_29fa1c",
+    "name": "有人亮灯",
     "enabled": true,
     "trigger": {
-      "tag": "sound",
-      "event": "detected"
+      "tag": "presence",
+      "event": "检测到有人"
     },
     "action": {
       "tag": "lighting",
@@ -14,6 +14,6 @@
         "state": "BRIGHT"
       }
     },
-    "created_at": 1781427056
+    "created_at": 1782183412
   }
 ]

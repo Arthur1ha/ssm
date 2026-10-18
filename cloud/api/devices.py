@@ -47,8 +47,8 @@ def list_devices(
 ):
     """返回设备列表。
 
-    scope=discovered：所有已收到 manifest/card 的设备（兼容旧版默认行为）。
-    scope=adopted：当前空间已接入设备，供 V2 主页使用。
+    scope=discovered：所有已收到 manifest/card 的设备。
+    scope=adopted：当前空间已接入设备，供主页使用。
     """
     if scope not in ("discovered", "adopted"):
         raise HTTPException(status_code=400, detail="scope must be discovered or adopted")

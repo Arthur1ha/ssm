@@ -19,6 +19,7 @@ class Go2Sensors:
         data = msg.get("data", {})
         inner = data.get("data", data) if isinstance(data, dict) else {}
         progress = float(inner.get("progress") or 0.0)
+        self._fsm_on_progress(progress)
         self._robot_state = {
             "mode":        inner.get("mode"),
             "progress":    progress,
@@ -26,7 +27,6 @@ class Go2Sensors:
             "velocity":    inner.get("velocity"),
             "fsm_state":   self.fsm_state,
         }
-        self._fsm_on_progress(progress)
         for q in self._state_queues:
             try:
                 q.put_nowait(self._robot_state.copy())

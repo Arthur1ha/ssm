@@ -1,5 +1,6 @@
 import json
 import time
+import uuid
 
 _mqtt = None
 
@@ -45,17 +46,17 @@ TOOL_DESCRIPTIONS = """可用工具（系统自动注入目标设备 ID）：
 
 def set_led_state(device_id: str, state: str) -> str:
     """设置 LED 开关/亮度状态。"""
-    task_id = f"auto_{int(time.time())}"
+    task_id = f"auto_{uuid.uuid4().hex}"
     publish_task(device_id, task_id, "SET_STATE", {"state": state}, "agent_auto")
-    return f"SET_STATE={state}"
+    return task_id
 
 
 def set_led_color(device_id: str, r: int, g: int, b: int, brightness: int) -> str:
     """设置 LED 颜色。"""
-    task_id = f"auto_{int(time.time())}"
+    task_id = f"auto_{uuid.uuid4().hex}"
     params = {"r": r, "g": g, "b": b, "brightness": brightness}
     publish_task(device_id, task_id, "SET_COLOR", params, "agent_auto")
-    return f"SET_COLOR r={r} g={g} b={b} brightness={brightness}"
+    return task_id
 
 
 def speak(text: str) -> str:

@@ -1,5 +1,5 @@
 // Service Worker — network-first for app files, cache for offline fallback
-const CACHE = 'ssm-v12';
+const CACHE = 'ssm-execution-20260908';
 
 // 只预缓存真正稳定的外壳资源
 const PRECACHE = [
@@ -27,7 +27,9 @@ self.addEventListener('fetch', e => {
     // CDN 资源（外部域名）直接透传，不干预
     if (!e.request.url.startsWith(self.location.origin)) return;
 
-    // 所有同源请求：先网络，失败再用缓存
+    if (e.request.method !== 'GET' || new URL(e.request.url).pathname.startsWith('/api/')) return;
+
+    // 静态资源：先网络，失败再用缓存
     e.respondWith(
         fetch(new Request(e.request, { cache: 'no-store' }))
             .then(res => {
