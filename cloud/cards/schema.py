@@ -18,12 +18,27 @@ class FsmTransition(TypedDict):
     params: NotRequired[dict]  # 该转移的默认 params（颜色/亮度等）
 
 
+class StateView(TypedDict):
+    """一个状态的用户可见说明与声明式预览画面。"""
+
+    label: str
+    description: str
+    type: Literal["light_ring", "robot_pose", "generic"]
+    color: NotRequired[str]
+    intensity: NotRequired[float]
+    palette: NotRequired[list[str]]
+    motion: NotRequired[str]
+    pose: NotRequired[str]
+    symbol: NotRequired[str]
+
+
 class StateMachine(TypedDict):
     """智能体静态状态机拓扑。不含当前态——当前态由实时通道提供。"""
 
     states: list[str]
     transitions: list[FsmTransition]
     initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
+    views: NotRequired[dict[str, StateView]]  # 状态语义与预览；前端不按设备类型硬编码
 
 
 class SkillInvoke(TypedDict):

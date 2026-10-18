@@ -293,6 +293,8 @@ def test_led_manifest_carries_state_machine():
              if x["src"] == "OFF" and x["trigger"] == "CMD_BRIGHT")
     assert t["dst"] == "BRIGHT"
     assert t["label"]
+    assert sm["views"]["BRIGHT"]["type"] == "light_ring"
+    assert sm["views"]["DIM"]["label"] == "柔和亮起"
 
 
 # ── 模式轴展开测试 ──────────────────────────────────────────────

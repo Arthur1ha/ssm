@@ -5,6 +5,7 @@ server/.env
 cloud/.env
 broker/mosquitto.conf
 *.log
+*.swp
 .DS_Store
 Thumbs.db
 __pycache__/

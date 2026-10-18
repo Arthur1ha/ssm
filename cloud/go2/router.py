@@ -56,6 +56,17 @@ def _go2_state_machine() -> dict:
         "states": list(_FSM_AVAILABLE.keys()),
         "transitions": transitions,
         "initial": "offline",
+        "views": {
+            "offline": {"label": "未连接", "description": "机器狗尚未建立控制连接。", "type": "robot_pose", "pose": "offline"},
+            "connecting": {"label": "正在连接", "description": "正在与机器狗建立实时控制通道。", "type": "robot_pose", "pose": "offline"},
+            "lying": {"label": "趴下休息", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
+            "standing": {"label": "站立待命", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
+            "moving": {"label": "正在移动", "description": "机器狗正在按指定方向和速度行走。", "type": "robot_pose", "pose": "moving"},
+            "greeting": {"label": "挥手问候", "description": "抬起前腿执行问候动作。", "type": "robot_pose", "pose": "greeting"},
+            "stretching": {"label": "正在伸展", "description": "降低身体前部并完成伸展动作。", "type": "robot_pose", "pose": "stretching"},
+            "dancing1": {"label": "舞蹈动作一", "description": "正在执行第一组节奏动作。", "type": "robot_pose", "pose": "dance-left"},
+            "dancing2": {"label": "舞蹈动作二", "description": "正在执行第二组节奏动作。", "type": "robot_pose", "pose": "dance-right"},
+        },
     }
 
 

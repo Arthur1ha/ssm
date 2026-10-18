@@ -255,18 +255,19 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
             <div style={{
               borderBottom: '1px solid var(--color-border)',
               background: 'var(--color-surface-1)',
-              padding: '6px 4px 4px',
+              padding: '10px 0 8px',
             }}>
               <div style={{
-                fontSize: 7, color: 'var(--color-text-dim)',
-                letterSpacing: '0.22em', textAlign: 'center', marginBottom: 2,
-              }}>STATE GRAPH</div>
+                fontSize: 8, color: 'var(--color-text-dim)',
+                letterSpacing: '0.16em', padding: '0 16px', marginBottom: 8,
+              }}>设备状态 · 点击预览，确认后执行</div>
               <FsmGraph
                 states={sm.states}
                 transitions={sm.transitions}
                 current={current}
                 onFire={fire}
                 color={ACCENT}
+                views={sm.views || {}}
               />
             </div>
           ) : (

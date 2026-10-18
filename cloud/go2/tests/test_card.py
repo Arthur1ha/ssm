@@ -200,6 +200,8 @@ def test_go2_card_has_state_machine():
              if x["src"] == "standing" and x["trigger"] == "Move")
     assert t["dst"] == "moving"
     assert t["label"]
+    assert sm["views"]["standing"]["type"] == "robot_pose"
+    assert sm["views"]["greeting"]["pose"] == "greeting"
 
 
 def test_parse_card_keeps_state_machine():

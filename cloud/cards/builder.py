@@ -130,6 +130,33 @@ FSM_DEFS: dict[str, StateMachine] = {
             for (s, t, d, a, p) in _LED_EDGES
         ],
         "initial": "OFF",
+        "views": {
+            "OFF": {
+                "label": "已关闭", "description": "灯环熄灭，等待下一条照明指令。",
+                "type": "light_ring", "color": "#505363", "intensity": 0.08,
+            },
+            "DIM": {
+                "label": "柔和亮起", "description": "低亮暖光，适合休息和夜间环境。",
+                "type": "light_ring", "color": "#FFD08A", "intensity": 0.34,
+            },
+            "BRIGHT": {
+                "label": "明亮照明", "description": "高亮度照明，适合工作和阅读。",
+                "type": "light_ring", "color": "#FFF4D6", "intensity": 1.0,
+            },
+            "COLOR": {
+                "label": "彩色照明", "description": "以设定的颜色和亮度营造空间氛围。",
+                "type": "light_ring", "color": "#FFB45C", "intensity": 0.78,
+                "palette": ["#FF8A5C", "#FFD05C", "#7EE8A2", "#6B8CFF", "#D76BFF"],
+            },
+            "BLINK": {
+                "label": "闪烁提醒", "description": "灯环间歇闪烁，用于提醒或引起注意。",
+                "type": "light_ring", "color": "#FFFFFF", "intensity": 0.9, "motion": "pulse",
+            },
+            "ERROR": {
+                "label": "需要检查", "description": "灯光执行异常，请检查设备连接与供电。",
+                "type": "light_ring", "color": "#FF5252", "intensity": 0.65, "motion": "alert",
+            },
+        },
     },
 }
 
