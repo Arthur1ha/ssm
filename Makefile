@@ -29,9 +29,8 @@ broker:
 	@pkill -f "[m]osquitto" || true
 	@sleep 1
 	@SSM_DIR=$(SSM_DIR) envsubst < infra/broker/mosquitto.conf.tmpl > $(BROKER_CONF)
-	mosquitto -c $(BROKER_CONF) -d
-	@echo "Broker started: TCP :1883  WS :9001"
-	@tail -f $(LOG_DIR)/mosquitto.log
+	@echo "Broker starting in foreground: TCP :1883  WS :9001"
+	mosquitto -c $(BROKER_CONF)
 
 broker-bg:
 	@mkdir -p $(LOG_DIR)/broker

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -17,6 +18,9 @@ from cloud.go2.connection import go2
 from cloud.go2.navigation.drive import drive
 from cloud.go2.agentcore.skills.reactive import reactive_mind
 from cloud.go2.agentcore.skills.vision import vision_loop
+from cloud.go2.agentcore.skills.identity import IdentityEvent, identity_skill
+from cloud.go2.agentcore.identity.provider import FaceProviderError
+from cloud.go2.agentcore.memory.episode import EventType, episode_memory
 
 # MQTT 客户端，由 api/main.py 通过 init_mqtt() 注入
 _mqtt_client = None
@@ -127,6 +131,13 @@ def _build_go2_card() -> dict:
                 },
                 "invoke": {"action": "NAVIGATE"},
             },
+            {
+                "id": "go2_recognize_person",
+                "name": "识别面前的人",
+                "tags": ["vision", "identity", "robot"],
+                "params_schema": {"type": "object", "properties": {}},
+                "invoke": {"action": "RECOGNIZE_PERSON"},
+            },
         ],
         # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
         "state": {},
@@ -211,7 +222,78 @@ router = APIRouter(prefix="/api/go2", tags=["go2"])
 # 当前注册的视觉回调句柄，重连时先移除再重注册，防止重复触发
 _active_rule_cb  = None
 _active_drive_cb = None
+_active_identity_cb = None
 _autonomy_mode   = "manual"  # "manual" | "reactive" | "free_explore"
+
+
+def _on_identity_event(event: IdentityEvent) -> None:
+    current = event.current
+    previous = event.previous
+    identity_changed = (
+        current.status == "recognized"
+        and (previous.status != "recognized" or previous.person_id != current.person_id)
+    )
+    identity_absent = previous.status == "recognized" and current.status == "idle"
+    if identity_changed:
+        episode_memory.add(
+            EventType.IDENTITY_CHANGE,
+            f"识别到{current.name}（{current.role}，置信分 {current.score:.1f}）",
+        )
+    elif identity_absent:
+        episode_memory.add(EventType.IDENTITY_CHANGE, f"{previous.name}已离开画面")
+
+    if current.status in {"recognized", "unknown"} and _mqtt_client is not None:
+        payload = {
+            "type": "identity", "agent_id": "go2", "ts": current.ts,
+            "status": current.status, "person_id": current.person_id,
+            "name": current.name, "role": current.role, "score": current.score,
+        }
+        try:
+            _mqtt_client.publish("ssm/agents/go2/thought", json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:
+            logging.warning("[Go2/Identity] 发布识别事件失败: %s", exc)
+
+    reactive_mind.on_identity_event(event)
+    drive.on_identity_event(event)
+
+
+identity_skill.add_callback(_on_identity_event)
+
+
+async def _initialize_identity_vision() -> None:
+    """连接后先验证人员库，再决定是否启动身份视觉消费者。"""
+    await identity_skill.check_provider()
+    _configure_vision_consumers(_autonomy_mode)
+
+
+def _configure_vision_consumers(mode: str) -> None:
+    """统一重配视觉消费者；身份在三种 autonomy 模式下都可保持运行。"""
+    global _active_rule_cb, _active_drive_cb, _active_identity_cb
+    drive.stop()
+    for callback in (_active_rule_cb, _active_drive_cb, _active_identity_cb):
+        if callback is not None:
+            vision_loop.remove_callback(callback)
+    _active_rule_cb = _active_drive_cb = _active_identity_cb = None
+
+    if not go2.is_connected:
+        vision_loop.stop()
+        identity_skill.clear_transient()
+        return
+    if identity_skill.enabled:
+        _active_identity_cb = identity_skill.on_vision_frame
+        vision_loop.add_callback(_active_identity_cb)
+    if mode == "reactive":
+        _active_rule_cb = reactive_mind.on_vision_frame
+        vision_loop.add_callback(_active_rule_cb)
+    elif mode == "free_explore":
+        _active_drive_cb = drive.on_vision_frame
+        vision_loop.add_callback(_active_drive_cb)
+        drive.start()
+
+    if any((_active_identity_cb, _active_rule_cb, _active_drive_cb)):
+        vision_loop.start(lambda: go2._latest_frame)
+    else:
+        vision_loop.stop()
 
 
 @router.post("/connection")
@@ -225,7 +307,7 @@ async def go2_connect():
     go2._last_error = None
 
     def _on_connect_done(t: asyncio.Task) -> None:
-        global _active_rule_cb, _active_drive_cb, _autonomy_mode
+        global _autonomy_mode
         if not t.cancelled() and t.exception():
             go2._last_error = str(t.exception())
             _publish_go2_card()
@@ -235,15 +317,12 @@ async def go2_connect():
         _publish_go2_card()
         _publish_go2_status()
 
-        if _active_rule_cb is not None:
-            vision_loop.remove_callback(_active_rule_cb)
-            _active_rule_cb = None
-        if _active_drive_cb is not None:
-            vision_loop.remove_callback(_active_drive_cb)
-            _active_drive_cb = None
-
-        # 默认完全遥控：不启动 VisionLoop，不注册任何回调
+        # 默认完全遥控，但已启用的身份消费者仍保持视觉检测。
         _autonomy_mode = "manual"
+        if identity_skill.enabled:
+            asyncio.create_task(_initialize_identity_vision())
+        else:
+            _configure_vision_consumers(_autonomy_mode)
 
         from cloud.go2.agentcore.memory import spatial as _sm
         _sm.tag_location("home", {"x": 0.0, "y": 0.0, "heading": 0.0})
@@ -257,13 +336,10 @@ async def go2_connect():
 
 @router.delete("/connection")
 async def go2_disconnect():
-    global _active_rule_cb, _active_drive_cb, _autonomy_mode
-    vision_loop.stop()
-    drive.stop()
-    _active_rule_cb  = None
-    _active_drive_cb = None
-    _autonomy_mode   = "manual"
+    global _autonomy_mode
     await go2.disconnect()
+    _configure_vision_consumers("manual")
+    _autonomy_mode   = "manual"
     _publish_go2_card()
     _publish_go2_status(False)
     return {"status": "disconnected"}
@@ -481,6 +557,11 @@ class PersonalityRequest(BaseModel):
     prompt: str
 
 
+class PersonCreateRequest(BaseModel):
+    name: str
+    role: str = "known"
+
+
 @router.post("/navigation/locations")
 async def nav_tag_location(req: TagLocationRequest):
     if not go2.is_connected:
@@ -537,18 +618,11 @@ def nav_stop():
 
 @router.post("/stop")
 async def emergency_stop():
-    global _active_rule_cb, _active_drive_cb, _autonomy_mode
+    global _autonomy_mode
     from cloud.go2.navigation.navigator import navigator
     navigator.stop()
-    drive.stop()
-    if _active_drive_cb is not None:
-        vision_loop.remove_callback(_active_drive_cb)
-        _active_drive_cb = None
-    if _active_rule_cb is not None:
-        vision_loop.remove_callback(_active_rule_cb)
-        _active_rule_cb = None
-    vision_loop.stop()
     _autonomy_mode = "manual"
+    _configure_vision_consumers(_autonomy_mode)
     if go2.is_connected:
         go2.move_velocity(0, 0, 0)
     return {"ok": True, "mode": "manual"}
@@ -592,7 +666,7 @@ def go2_autonomy_get():
 
 @router.put("/autonomy")
 async def go2_autonomy_set(req: AutonomyRequest):
-    global _active_rule_cb, _active_drive_cb, _autonomy_mode
+    global _autonomy_mode
     if req.mode not in ("manual", "reactive", "free_explore"):
         raise HTTPException(status_code=400, detail=f"未知自主模式: {req.mode}")
     if not go2.is_connected:
@@ -600,32 +674,69 @@ async def go2_autonomy_set(req: AutonomyRequest):
     if req.mode == _autonomy_mode:
         return {"ok": True, "mode": _autonomy_mode}
 
-    # 先清理所有现有回调和服务
-    drive.stop()
-    if _active_drive_cb is not None:
-        vision_loop.remove_callback(_active_drive_cb)
-        _active_drive_cb = None
-    if _active_rule_cb is not None:
-        vision_loop.remove_callback(_active_rule_cb)
-        _active_rule_cb = None
-    vision_loop.stop()
-
     if req.mode == "manual":
         logging.info("[Go2] 自主模式 → 完全遥控")
     elif req.mode == "reactive":
-        _active_rule_cb = reactive_mind.on_vision_frame
-        vision_loop.start(lambda: go2._latest_frame)
-        vision_loop.add_callback(reactive_mind.on_vision_frame)
         logging.info("[Go2] 自主模式 → 自主反应")
     else:  # free_explore
-        _active_drive_cb = drive.on_vision_frame
-        vision_loop.start(lambda: go2._latest_frame)
-        vision_loop.add_callback(drive.on_vision_frame)
-        drive.start()
         logging.info("[Go2] 自主模式 → 自由探索")
 
     _autonomy_mode = req.mode
+    _configure_vision_consumers(_autonomy_mode)
     return {"ok": True, "mode": _autonomy_mode}
+
+
+# ── 身份端点 ──────────────────────────────────────────────────────
+
+@router.get("/identity")
+def go2_identity_get():
+    return asdict(identity_skill.current)
+
+
+@router.post("/identity/recognize")
+async def go2_identity_recognize():
+    snapshot = await identity_skill.recognize_now()
+    return asdict(snapshot)
+
+
+@router.get("/people")
+def go2_people_list():
+    return [
+        {"person_id": p.person_id, "name": p.name, "role": p.role, "face_count": p.face_count}
+        for p in identity_skill.list_people()
+    ]
+
+
+@router.post("/people")
+async def go2_people_create(req: PersonCreateRequest):
+    snapshot = await identity_skill.remember_person(req.name, req.role)
+    if snapshot.status in {"rejected", "disabled"}:
+        raise HTTPException(status_code=409, detail=snapshot.error_code)
+    if snapshot.status == "error":
+        raise HTTPException(status_code=503, detail=snapshot.error_code)
+    return asdict(snapshot)
+
+
+@router.post("/people/{person_id}/faces")
+async def go2_people_add_face(person_id: str):
+    snapshot = await identity_skill.add_person_face(person_id)
+    if snapshot.status in {"rejected", "disabled"}:
+        raise HTTPException(status_code=409, detail=snapshot.error_code)
+    if snapshot.status == "error":
+        raise HTTPException(status_code=503, detail=snapshot.error_code)
+    return asdict(snapshot)
+
+
+@router.delete("/people/{person_id}")
+async def go2_people_delete(person_id: str):
+    try:
+        await identity_skill.forget_person(person_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except FaceProviderError as exc:
+        status = 409 if exc.code == "enrollment_disabled" else 503
+        raise HTTPException(status_code=status, detail=exc.code)
+    return {"ok": True, "person_id": person_id}
 
 
 @router.get("/personality")

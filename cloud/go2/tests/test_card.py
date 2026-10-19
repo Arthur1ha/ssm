@@ -72,16 +72,27 @@ def _load_router_with_stub():
         "cloud.go2.navigation.drive":              types.ModuleType("cloud.go2.navigation.drive"),
         "cloud.go2.agentcore.skills.reactive":     types.ModuleType("cloud.go2.agentcore.skills.reactive"),
         "cloud.go2.agentcore.skills.vision":       types.ModuleType("cloud.go2.agentcore.skills.vision"),
+        "cloud.go2.agentcore.skills.identity":     types.ModuleType("cloud.go2.agentcore.skills.identity"),
     }
     patches["cloud.go2.connection"].go2 = go2_stub
     patches["cloud.go2.navigation.drive"].drive = MagicMock()
     patches["cloud.go2.agentcore.skills.reactive"].reactive_mind = MagicMock()
     patches["cloud.go2.agentcore.skills.vision"].vision_loop = MagicMock()
+    patches["cloud.go2.agentcore.skills.identity"].IdentityEvent = object
+    patches["cloud.go2.agentcore.skills.identity"].identity_skill = MagicMock(enabled=False)
 
+    module_names = tuple(patches) + ("cloud.go2.router",)
+    previous = {name: sys.modules.get(name) for name in module_names}
     sys.modules.update(patches)
-    if "cloud.go2.router" in sys.modules:
-        del sys.modules["cloud.go2.router"]
-    import cloud.go2.router as router_mod
+    sys.modules.pop("cloud.go2.router", None)
+    try:
+        import cloud.go2.router as router_mod
+    finally:
+        for name, module in previous.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
     return router_mod, go2_stub
 
 
@@ -110,10 +121,15 @@ class TestBuildGo2Card:
         assert card["transport"]["endpoint"] == "/api/go2/chat"
 
     def test_skills_count_and_ids(self):
-        """必须包含 go2_chat、go2_sport、go2_navigate 三个 skill。"""
+        """必须包含原有三项和只读人脸识别 skill。"""
         card = self.router_mod._build_go2_card()
         skill_ids = {s["id"] for s in card["skills"]}
-        assert skill_ids == {"go2_chat", "go2_sport", "go2_navigate"}
+        assert skill_ids == {"go2_chat", "go2_sport", "go2_navigate", "go2_recognize_person"}
+
+    def test_identity_card_exposes_only_read_capability(self):
+        card = self.router_mod._build_go2_card()
+        identity_ids = {s["id"] for s in card["skills"] if "identity" in s["tags"]}
+        assert identity_ids == {"go2_recognize_person"}
 
     def test_skills_have_required_fields(self):
         """每个 skill 必须有 id / name / tags / params_schema / invoke 字段。"""

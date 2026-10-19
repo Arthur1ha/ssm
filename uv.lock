@@ -1880,6 +1880,7 @@ dependencies = [
     { name = "paho-mqtt" },
     { name = "pillow" },
     { name = "python-dotenv" },
+    { name = "tencentcloud-sdk-python" },
     { name = "unitree-webrtc-connect" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1902,6 +1903,7 @@ requires-dist = [
     { name = "paho-mqtt", specifier = ">=1.6.1,<2.0" },
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "tencentcloud-sdk-python", specifier = ">=3.1.188" },
     { name = "unitree-webrtc-connect", specifier = ">=2.1.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46.0" },
 ]
@@ -1940,6 +1942,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
+]
+
+[[package]]
+name = "tencentcloud-sdk-python"
+version = "3.1.188"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/fd/7eccbbf1ee422dd6beb66d8e4af6069bf10cffc7d36d361adad830557045/tencentcloud_sdk_python-3.1.188.tar.gz", hash = "sha256:aae0da305e693e5d7427c05edf69b3d35b9dd40db64a350b4d3fc3d57be70094", size = 17488654, upload-time = "2026-10-11T20:02:05.11Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/ef/12506ca627b9d02f8254e096c87a9bf9aeeda9e1f940a022a97bb79745f5/tencentcloud_sdk_python-3.1.188-py2.py3-none-any.whl", hash = "sha256:12935c82417152052aac28be780b27c73d8ab50fdf9e63d2e7d7bba8d2959140", size = 18422348, upload-time = "2026-10-11T20:01:58.206Z" },
 ]
 
 [[package]]

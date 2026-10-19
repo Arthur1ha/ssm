@@ -56,6 +56,7 @@ class ReactiveMind:
         # 人脸（Haar 正脸）在近距离更可靠，必须纳入触发。-1 表示尚无基线。
         self._prev_person_count: int = -1
         self._prev_face_count: int = -1
+        self._identity = None
 
     @property
     def last_decision(self) -> Optional[dict]:
@@ -63,6 +64,18 @@ class ReactiveMind:
 
     def _in_action_cooldown(self, action: str) -> bool:
         return time.time() - self._action_cooldowns.get(action, 0) < _ACTION_COOLDOWN_S
+
+    def on_identity_event(self, event) -> None:
+        """只更新推理上下文；身份本身不直接触发动作。"""
+        self._identity = event.current
+
+    def _identity_context(self) -> str:
+        current = self._identity
+        if current and current.status == "recognized":
+            return f"当前人物：{current.name}（{current.role}，置信分 {current.score:.1f}）"
+        if current and current.status == "unknown":
+            return "当前人物：陌生人"
+        return "当前人物：未确认"
 
     # ── 单一执行口，规则层与自主层共用 ────────────────────────────
 
@@ -155,6 +168,7 @@ class ReactiveMind:
         memory_ctx = episode_memory.format_context()
         prompt = (
             f"{memory_ctx}\n\n"
+            f"{self._identity_context()}\n"
             f"当前画面变化：{frame['change_type']}，场景：{scene}。\n"
             f"规则层没有触发任何动作。\n"
             f"上次自主动作：{last_str}\n"

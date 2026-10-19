@@ -292,9 +292,44 @@ def test_chat_default_session_id(chat_client, monkeypatch):
 def test_new_tools_in_fn_map():
     from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS
     for name in ("go2_tag_location", "go2_navigate_to", "go2_list_locations",
-                 "go2_set_led"):
+                 "go2_set_led", "go2_remember_person", "go2_add_person_face",
+                 "go2_recognize_person", "go2_list_people", "go2_forget_person"):
         assert name in TOOL_FN_MAP, f"{name} missing from TOOL_FN_MAP"
         assert name in TOOL_DESCRIPTIONS, f"{name} missing from TOOL_DESCRIPTIONS"
+
+
+def test_structured_identity_skill_routes_without_llm():
+    import cloud.go2.agent as agent_mod
+
+    state = {
+        "session_id": "face", "user_msg": "看看面前是谁",
+        "skill_id": "go2_recognize_person", "params": {},
+        "memory_context": "", "planned_tools": [], "tool_results": [],
+        "response_text": "", "early_exit": False, "llm_available": True, "error": "",
+    }
+    planned = asyncio.run(agent_mod.planner_node(state))
+    assert planned["planned_tools"] == [{"tool": "go2_recognize_person", "params": {}}]
+
+
+def test_cached_identity_answers_without_cloud_call(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    import cloud.go2.agentcore.skills.identity as identity_mod
+    from cloud.go2.agentcore.skills.identity import IdentitySnapshot
+
+    monkeypatch.setattr(
+        identity_mod.identity_skill,
+        "_current",
+        IdentitySnapshot("recognized", "go2_owner", "主人", "owner", 96.2, time.time(), ""),
+    )
+    state = {
+        "session_id": "face", "user_msg": "你知道我是谁吗",
+        "skill_id": "", "params": {}, "memory_context": "",
+        "planned_tools": [], "tool_results": [], "response_text": "",
+        "early_exit": False, "llm_available": True, "error": "",
+    }
+    planned = asyncio.run(agent_mod.planner_node(state))
+    assert planned["early_exit"] is True
+    assert "主人" in planned["response_text"]
 
 
 # ── ReactiveMind 性格与记忆集成测试 ──────────────────────────────────

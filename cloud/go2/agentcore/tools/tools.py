@@ -3,6 +3,7 @@ import json
 import os
 import time
 import math
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
@@ -276,6 +277,68 @@ async def go2_set_led(color: str = "white", duration: int = 60) -> str:
     return {"result": "accepted", "message": "机身灯指令已发送，未确认物理灯状态"}
 
 
+# ── 身份工具 ──────────────────────────────────────────────────────
+
+async def go2_remember_person(name: str, role: str) -> dict:
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    snapshot = await identity_skill.remember_person(name, role)
+    return _identity_result(snapshot)
+
+
+async def go2_add_person_face(person_id: str = "") -> dict:
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    if not person_id and identity_skill.current.status == "recognized":
+        person_id = identity_skill.current.person_id
+    if not person_id:
+        owner = identity_skill.people.get_owner()
+        person_id = owner.person_id if owner else ""
+    if not person_id:
+        return {"result": "rejected", "error_code": "person_id_required"}
+    snapshot = await identity_skill.add_person_face(person_id)
+    return _identity_result(snapshot)
+
+
+async def go2_recognize_person() -> dict:
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    snapshot = await identity_skill.recognize_now()
+    return _identity_result(snapshot)
+
+
+def go2_list_people() -> dict:
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    people = [
+        {"person_id": p.person_id, "name": p.name, "role": p.role, "face_count": p.face_count}
+        for p in identity_skill.list_people()
+    ]
+    return {"result": "ok", "people": people}
+
+
+async def go2_forget_person(person_id: str) -> dict:
+    from cloud.go2.agentcore.identity.provider import FaceProviderError
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    try:
+        await identity_skill.forget_person(person_id)
+    except ValueError as exc:
+        return {"result": "rejected", "error": str(exc)}
+    except FaceProviderError as exc:
+        return {"result": "disabled" if exc.code == "enrollment_disabled" else "error", "error_code": exc.code}
+    return {"result": "ok", "person_id": person_id}
+
+
+def _identity_result(snapshot) -> dict:
+    payload = asdict(snapshot) if is_dataclass(snapshot) else dict(vars(snapshot))
+    payload["result"] = {
+        "recognized": "ok",
+        "unknown": "ok",
+        "candidate": "ok",
+        "idle": "ok",
+        "rejected": "rejected",
+        "disabled": "disabled",
+        "error": "error",
+    }.get(snapshot.status, snapshot.status)
+    return payload
+
+
 # ── 工具分发表 ────────────────────────────────────────────────────
 
 TOOL_FN_MAP = {
@@ -289,6 +352,11 @@ TOOL_FN_MAP = {
     "go2_navigate_to":            go2_navigate_to,
     "go2_list_locations":         go2_list_locations,
     "go2_set_led":                go2_set_led,
+    "go2_remember_person":        go2_remember_person,
+    "go2_add_person_face":        go2_add_person_face,
+    "go2_recognize_person":       go2_recognize_person,
+    "go2_list_people":            go2_list_people,
+    "go2_forget_person":          go2_forget_person,
 }
 
 TOOL_DESCRIPTIONS = """\
@@ -302,4 +370,9 @@ TOOL_DESCRIPTIONS = """\
 - go2_tag_location(name): 将当前位置保存为命名地点，供导航使用
 - go2_navigate_to(name): 导航到已保存的命名地点，支持模糊描述
 - go2_list_locations(): 列出所有已保存的命名地点
-- go2_set_led(color="white", duration=60): 设置 LED 颜色，支持 white/red/yellow/blue/green/cyan/purple"""
+- go2_set_led(color="white", duration=60): 设置 LED 颜色，支持 white/red/yellow/blue/green/cyan/purple
+- go2_remember_person(name, role): 用当前唯一清晰人脸登记人员；“我是你主人”固定传 name="主人", role="owner"
+- go2_add_person_face(person_id=""): 给已登记人员补录当前角度；说“再记住我现在这个样子”时可省略 person_id，工具会从当前身份或唯一主人解析
+- go2_recognize_person(): 立即识别面前的人；“面前是谁/你认识我吗”只能识别，不能隐式登记
+- go2_list_people(): 列出本地已知人员和关系
+- go2_forget_person(person_id): 仅在用户明确给出 person_id 并要求删除时调用，不得含糊删除"""

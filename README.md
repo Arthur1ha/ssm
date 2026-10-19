@@ -70,6 +70,17 @@
 
 环境变量统一存放在 `cloud/.env`（见 `cloud/.env.example`）。编排器 / Go2 / ESP32 智能体均用火山方舟 Ark `deepseek-v4-*`（`MODEL_LIST`）。
 
+Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` 配置
+`TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY`、`TENCENTCLOUD_REGION` 与
+`TENCENT_FACE_GROUP_ID`；人员库必须已存在且 `FaceModelVersion=3.0`。识别由
+`GO2_FACE_RECOGNITION_ENABLED` 控制，登记/补脸/删除另受默认关闭的
+`GO2_FACE_ENROLLMENT_ENABLED` 保护。登记完成后应重新关闭该写开关。
+
+本地只保存 `PersonId`、姓名、关系和人脸数量到
+`cloud/go2/data/memory/people.json`，不会保存原始照片或 embedding。可用
+`RUN_TENCENT_FACE_LIVE=1 uv run pytest cloud/go2/tests/test_tencent_face_live.py -q`
+检查人员库版本；该测试默认跳过，也不会创建或删除人员。
+
 #### API（`cloud/api/`，FastAPI，端口 8082）
 
 | 接口 | 说明 |

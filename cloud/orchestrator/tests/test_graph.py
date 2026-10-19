@@ -69,6 +69,20 @@ GO2_CARD = {
             "params_schema": {"type": "object", "properties": {"cmd": {"type": "string"}}},
             "invoke": {"action": "SPORT"},
         },
+        {
+            "id": "go2_recognize_person",
+            "name": "识别面前的人",
+            "tags": ["vision", "identity", "robot"],
+            "params_schema": {"type": "object", "properties": {}},
+            "invoke": {"action": "RECOGNIZE_PERSON"},
+        },
+        {
+            "id": "go2_chat",
+            "name": "对话 / 自然语言控制",
+            "tags": ["conversation", "robot"],
+            "params_schema": {"type": "object", "properties": {"message": {"type": "string"}}},
+            "invoke": {"action": "CHAT"},
+        },
     ],
     "state": {},
 }
@@ -154,6 +168,23 @@ def test_planner_filters_invalid_slug_and_skill(monkeypatch):
     assert len(out["planned_tasks"]) == 1
     assert out["planned_tasks"][0]["unit_id"] == "go2"
     assert out["planned_tasks"][0]["skill_id"] == "go2_navigate"
+
+
+def test_planner_routes_identity_read_but_enrollment_via_chat(monkeypatch):
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([GO2_CARD]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+
+    recognize = graph_mod._make_planner_node(_stub_llm(
+        '{"route":"act","tasks":[{"unit_id":"go2",'
+        '"skill_id":"go2_recognize_person","params":{}}]}'
+    ))(_planner_state("face-read", "看看机器狗面前是谁"))
+    assert recognize["planned_tasks"][0]["skill_id"] == "go2_recognize_person"
+
+    enroll = graph_mod._make_planner_node(_stub_llm(
+        '{"route":"act","tasks":[{"unit_id":"go2","skill_id":"go2_chat",'
+        '"params":{"message":"我是你主人，你记住了"}}]}'
+    ))(_planner_state("face-write", "我是你主人，你记住了"))
+    assert enroll["planned_tasks"][0]["skill_id"] == "go2_chat"
 
 
 def test_planner_early_exit_when_no_cards(monkeypatch):

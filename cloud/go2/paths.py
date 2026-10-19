@@ -13,3 +13,4 @@ DATA_DIR = Path(
 MEMORY_DIR = DATA_DIR / "memory"
 SOUL_DIR = DATA_DIR / "soul"
 RULES_FILE = DATA_DIR / "rules.json"
+PEOPLE_FILE = MEMORY_DIR / "people.json"

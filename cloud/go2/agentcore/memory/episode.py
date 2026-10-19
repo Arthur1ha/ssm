@@ -23,6 +23,7 @@ class EventType(str, Enum):
     USER_COMMAND   = "USER_COMMAND"
     OBSERVATION    = "OBSERVATION"
     AGENT_RESPONSE = "AGENT_RESPONSE"
+    IDENTITY_CHANGE = "IDENTITY_CHANGE"
 
 
 class MemoryEntry(TypedDict):

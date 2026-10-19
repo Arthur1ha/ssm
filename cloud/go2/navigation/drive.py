@@ -59,6 +59,7 @@ class Drive:
         self._social_tick      = 0
         self.user_interrupt    = False
         self._task: Optional[asyncio.Task] = None
+        self._identity = None
 
     @property
     def state_snapshot(self) -> dict:
@@ -107,6 +108,18 @@ class Drive:
 
         if frame["changed"] and frame["change_type"] != "none" and not currently_present and not self._person_present:
             episode_memory.add(EventType.VISION_CHANGE, f"视觉变化：{frame['change_type']}")
+
+    def on_identity_event(self, event) -> None:
+        """身份仅作为语言/社交上下文，不直接切换状态或触发运动。"""
+        self._identity = event.current
+
+    def _identity_context(self) -> str:
+        current = self._identity
+        if current and current.status == "recognized":
+            return f"当前人物：{current.name}（{current.role}，置信分 {current.score:.1f}）"
+        if current and current.status == "unknown":
+            return "当前人物：陌生人"
+        return "当前人物：未确认"
 
     # ── 主循环 ─────────────────────────────────────────────────────
 
@@ -227,6 +240,7 @@ class Drive:
 
             prompt = (
                 f"{episode_memory.format_context()}\n\n"
+                f"{self._identity_context()}\n"
                 f"你正在自主探索环境，当前第 {step + 1} 步（最多 {_MAX_STEPS} 步）。\n"
                 f"当前位置：{odom_str}\n"
                 f"已知地点：{loc_str}\n"
@@ -430,6 +444,7 @@ class Drive:
         memory_ctx = episode_memory.format_context()
         prompt = (
             f"{memory_ctx}\n\n"
+            f"{self._identity_context()}\n"
             f"最新观察：{observation}\n"
             f"可用姿态动作：{', '.join(sorted(_VALID_SPORT_CMDS))}\n\n"
             f"决定是否对这个人做出互动（或什么都不做）。\n"

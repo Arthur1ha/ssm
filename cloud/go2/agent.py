@@ -60,8 +60,34 @@ class Go2AgentState(TypedDict):
 
 _SKILL_TO_TOOL = {
     "go2_navigate": "go2_navigate_to",
+    "go2_recognize_person": "go2_recognize_person",
     "go2_chat":     None,   # chat 走 LLM，无对应工具函数
 }
+
+
+def _identity_context() -> str:
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    current = identity_skill.current
+    if current.status == "recognized":
+        return f"当前人物：{current.name}（{current.role}，置信分 {current.score:.1f}）"
+    if current.status == "candidate":
+        return "当前人物：候选身份尚未连续确认"
+    if current.status == "unknown":
+        return "当前人物：陌生人"
+    return "当前人物：未识别"
+
+
+def _cached_identity_reply(user_msg: str) -> str:
+    """身份缓存有效时直接回答，避免为了同一人重复调用云端。"""
+    identity_queries = ("我是谁", "认识我", "知道我是谁")
+    if not any(phrase in user_msg for phrase in identity_queries):
+        return ""
+    from cloud.go2.agentcore.skills.identity import identity_skill
+    current = identity_skill.current
+    if current.status != "recognized":
+        return ""
+    relation = "，你是我的主人" if current.role == "owner" else f"，我们的关系是 {current.role}"
+    return f"我认识你，你是{current.name}{relation}。"
 
 
 async def planner_node(state: Go2AgentState) -> Go2AgentState:
@@ -81,6 +107,13 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
                 "early_exit":    False,
             }
 
+    cached_reply = _cached_identity_reply(state["user_msg"])
+    if cached_reply:
+        return {
+            **state, "planned_tools": [], "response_text": cached_reply,
+            "early_exit": True, "memory_context": _identity_context(),
+        }
+
     if not go2.is_connected:
         logger.info("[Go2/Agent] Go2 未连接，提前退出")
         return {**state, "planned_tools": [], "early_exit": True,
@@ -99,6 +132,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
         lines = "\n".join(f"- {s['date']}：{s['summary']}" for s in recent_summaries)
         memory_parts.append(f"过去几天摘要：\n{lines}")
     memory_parts.append(today_ctx)
+    memory_parts.append(_identity_context())
     memory_context = "\n\n".join(memory_parts)
 
     logger.info("[Go2/Agent] 用户指令: %s", state["user_msg"])
@@ -111,8 +145,11 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
         f"1. 涉及视觉问题（看到什么/有没有人/描述场景）必须调用 go2_observe\n"
         f"2. 涉及历史记忆问题（今天去哪了/发生了什么/做了什么/最近几天）"
         f"直接从记忆上下文回答，输出 []\n"
-        f"3. 最多生成 3 个工具调用\n"
-        f"4. 直接输出 JSON 数组，不含解释或代码块\n"
+        f"3. “我是你主人，你记住了”调用 go2_remember_person，参数固定为 name=主人, role=owner\n"
+        f"4. “再记住我现在这个样子”先用当前身份；若当前未确认但只有一个主人，可用 go2_list_people 后再 go2_add_person_face\n"
+        f"5. 当前身份未确认时，“面前是谁/你认识我吗”调用 go2_recognize_person；普通询问绝不能登记\n"
+        f"6. 删除必须有明确 person_id；不得根据含糊描述调用 go2_forget_person\n"
+        f"7. 最多生成 3 个工具调用，直接输出 JSON 数组，不含解释或代码块\n"
         f"示例：[{{\"tool\": \"go2_sport\", \"params\": {{\"cmd\": \"StandUp\"}}}}]\n"
         f"无需工具时输出：[]"
     )
@@ -153,6 +190,8 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
             "timeout": "等待动作完成反馈超时，当前结果还不能确认。",
             "cancelled": "动作已被后续指令打断。",
             "blocked": "当前状态不允许这个动作，设备没有执行。",
+            "rejected": "这个请求没有执行：当前画面或人员信息不符合要求。",
+            "disabled": "人脸登记或识别功能当前没有开启。",
         }
         return replies.get(status, "动作未能完成，请查看设备状态后重试。"), True
     if not results:
@@ -366,7 +405,7 @@ def _execution_status(results: list) -> str:
             statuses.append("error" if failed else "ok")
         else:
             statuses.append("error")
-    for status in ("error", "blocked", "timeout", "cancelled", "accepted", "executing"):
+    for status in ("error", "rejected", "disabled", "blocked", "timeout", "cancelled", "accepted", "executing"):
         if status in statuses:
             return status
     return "ok"
