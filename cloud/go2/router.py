@@ -41,7 +41,7 @@ def init_mqtt(client) -> None:
 
 
 _GO2_FSM_LABELS = {
-    "StandUp": "起立", "StandDown": "趴下", "Move": "前进", "StopMove": "停止",
+    "StandUp": "起立", "StandDown": "趴下休息", "EnterMoveControl": "移动控制", "Move": "移动", "StopMove": "退出移动控制",
     "Hello": "挥手", "Stretch": "伸展", "Dance1": "舞蹈1", "Dance2": "舞蹈2",
 }
 
@@ -51,18 +51,20 @@ def _go2_state_machine() -> dict:
 
     延迟导入以避免在测试 stub 环境中与 cloud.go2.connection 补丁冲突。
     """
-    from cloud.go2.connection.fsm import _FSM_AVAILABLE, _FSM_NEXT  # noqa: PLC0415
+    from cloud.go2.connection.fsm import _FSM_AVAILABLE, _FSM_NEXT, _TRANSIENT_STATES  # noqa: PLC0415
     transitions = []
     for src, edges in _FSM_NEXT.items():
         for trigger, dst in edges.items():
+            if trigger == "Move":
+                continue  # 有速度的 Move 属于数据面；图上只显示控制状态入口。
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
-                "label": _GO2_FSM_LABELS.get(trigger, trigger),
-                "action": trigger,  # HTTP command_endpoint 接收 {action, params}
+                "label": "结束动作" if src in _TRANSIENT_STATES else _GO2_FSM_LABELS.get(trigger, trigger),
+                "action": trigger,
                 "params": {},
             })
     return {
-        "states": list(_FSM_AVAILABLE.keys()),
+        "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
         "transitions": transitions,
         "initial": "offline",
         "views": {
@@ -70,7 +72,7 @@ def _go2_state_machine() -> dict:
             "connecting": {"label": "正在连接", "description": "正在与机器狗建立实时控制通道。", "type": "robot_pose", "pose": "offline"},
             "lying": {"label": "趴下休息", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
             "standing": {"label": "站立待命", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
-            "moving": {"label": "正在移动", "description": "机器狗正在按指定方向和速度行走。", "type": "robot_pose", "pose": "moving"},
+            "moving": {"label": "移动控制", "description": "拖动摇杆行走；松开后停下，退出控制才回到站立。", "type": "robot_pose", "pose": "moving"},
             "greeting": {"label": "挥手问候", "description": "抬起前腿执行问候动作。", "type": "robot_pose", "pose": "greeting"},
             "stretching": {"label": "正在伸展", "description": "降低身体前部并完成伸展动作。", "type": "robot_pose", "pose": "stretching"},
             "dancing1": {"label": "舞蹈动作一", "description": "正在执行第一组节奏动作。", "type": "robot_pose", "pose": "dance-left"},
@@ -172,8 +174,8 @@ def _build_go2_card() -> dict:
                 "auto_connect": True,
                 "visible": False,
             },
-            {"type": "joystick", "states": ["moving"],                "endpoint": "/api/go2/velocity"},
-            {"type": "video",    "states": ["standing", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
+            {"type": "video",    "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
+            {"type": "joystick", "states": ["moving"],    "endpoint": "/api/go2/velocity"},
         ],
     }
 
@@ -229,6 +231,7 @@ _active_rule_cb  = None
 _active_drive_cb = None
 _active_identity_cb = None
 _autonomy_mode   = "manual"  # "manual" | "reactive" | "free_explore"
+_connect_task: asyncio.Task | None = None
 
 # Continuous identity vision is global device activity, not an administrator
 # request. It must inherit a non-persistent context. Explicit admin-triggered
@@ -367,6 +370,12 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system") -> 
 
 @router.post("/connection")
 async def go2_connect(context: ExecutionContext = Depends(require_service_context)):
+    global _connect_task
+    if go2.is_connected:
+        return {"status": "connected"}
+    if _connect_task is not None and not _connect_task.done():
+        return {"status": "connecting"}
+
     email    = os.getenv("GO2_EMAIL", "")
     password = os.getenv("GO2_PASSWORD", "")
     serial   = os.getenv("GO2_SERIAL", "")
@@ -376,8 +385,12 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
     go2._last_error = None
 
     def _on_connect_done(t: asyncio.Task) -> None:
-        global _autonomy_mode
-        if not t.cancelled() and t.exception():
+        global _autonomy_mode, _connect_task
+        _connect_task = None
+        if t.cancelled():
+            _publish_go2_status(False)
+            return
+        if t.exception():
             go2._last_error = str(t.exception())
             _publish_go2_card()
             _publish_go2_status(False)
@@ -396,8 +409,8 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
         # Connection is operational state, not permission to overwrite Home.
 
     _publish_go2_status(False)
-    task = asyncio.create_task(go2.connect(email, password, serial, region))
-    task.add_done_callback(_on_connect_done)
+    _connect_task = asyncio.create_task(go2.connect(email, password, serial, region))
+    _connect_task.add_done_callback(_on_connect_done)
     return {"status": "connecting"}
 
 
@@ -467,7 +480,7 @@ async def go2_state(context=Depends(require_authenticated_read)):
                 }
                 if isinstance(state, dict):
                     payload.update(state)
-                    payload["fsm_state"] = state.get("fsm_state") or go2.fsm_state
+                payload["fsm_state"] = go2.fsm_state
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             go2.remove_state_queue(q)
@@ -513,7 +526,7 @@ async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends
     if any((req.vx, req.vy, req.vyaw)):
         _acquire_motion(context)
     try:
-        result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=0.6)
+        result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=2.0)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -729,7 +742,7 @@ async def emergency_stop(context: ExecutionContext = Depends(require_service_con
     _autonomy_mode = "manual"
     _configure_vision_consumers(_autonomy_mode)
     if go2.is_connected:
-        go2.move_velocity(0, 0, 0)
+        go2.stop_velocity()
     logging.warning("[Go2/Safety] emergency stop by %s (%s)", context.session_id, context.actor)
     return {"ok": True, "mode": "manual"}
 
@@ -989,7 +1002,7 @@ def cleanup_session_resources(session_id: str) -> dict:
             # Cancellation of a timed chat move also reaches its StopMove
             # finally block.  Send a synchronous zero-velocity packet here as
             # the immediate safety boundary, without waiting for task teardown.
-            go2.move_velocity(0, 0, 0)
+            go2.stop_velocity()
             motion_stopped = True
         except Exception:
             logging.warning("[Go2/Safety] failed to stop motion for session %s", session_id)

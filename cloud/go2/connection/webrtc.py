@@ -25,10 +25,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._completion = None
         self._motion_epoch = 0
         self._velocity_timer = None
+        self._move_control_active = False
 
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
+        self._move_control_active = False
         self.fsm_state = "connecting"
         if self._conn:
             await self._conn.disconnect()
@@ -87,6 +89,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             pass
 
     async def disconnect(self) -> None:
+        self._move_control_active = False
         if self._velocity_timer:
             self._velocity_timer.cancel()
         self._finish_pending("error", "disconnected")
@@ -141,8 +144,6 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         # Continuous movement updates and emergency stop are idempotent.
         if cmd == "Move" and self.fsm_state == "moving":
             target = "moving"
-        if cmd == "Move" and self.fsm_state == "offline" and self.is_connected:
-            target = "moving"
         if cmd == "StopMove" and self.fsm_state not in ("offline", "connecting"):
             target = "lying" if self.fsm_state == "lying" else "standing"
         if cmd == "BalanceStand" and self.fsm_state == "standing":
@@ -150,7 +151,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if target is None:
             raise CommandBlocked(f"{cmd} blocked in {self.fsm_state}")
         if cmd == "Move":
-            self._validate_velocity(**{k: (params or {}).get(k, 0.0) for k in ("x", "y", "z")})
+            velocity = {k: (params or {}).get(k, 0.0) for k in ("x", "y", "z")}
+            self._validate_velocity(**velocity)
+            if not any(velocity.values()):
+                raise ValueError("Move requires nonzero velocity; use the joystick to move")
         return target
 
     @staticmethod
@@ -167,6 +171,15 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         try:
             return await asyncio.wait_for(asyncio.shield(waiter), timeout=completion_timeout)
         except asyncio.TimeoutError:
+            # Some firmware actions do not publish a complete progress cycle.
+            # Stop the action before leaving its transient state; do not claim completion.
+            if self._completion is waiter and self.fsm_state in _TRANSIENT_STATES and self.is_connected:
+                async with self._command_lock:
+                    if self._completion is waiter and self.fsm_state in _TRANSIENT_STATES:
+                        try:
+                            await self._send_command("StopMove", None)
+                        except Exception as exc:
+                            logger.warning("[Go2/Conn] 动作超时后停止失败: %s", exc)
             return {"result": "timeout", "error": "completion_not_observed", "fsm_state": self.fsm_state}
         finally:
             if self._completion is waiter:
@@ -177,6 +190,11 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     async def _send_command(self, cmd: str, params: dict | None):
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
+        if cmd == "EnterMoveControl":
+            target = self._validate_motion(cmd, params)
+            self._move_control_active = True
+            self.fsm_state = target
+            return None
         api_id = SPORT_CMD.get(cmd)
         if api_id is None:
             raise ValueError(f"Unknown command: {cmd}")
@@ -202,6 +220,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
         self._finish_pending("cancelled", "superseded")
         self._last_progress = 0.0
+        self._move_control_active = False
         self.fsm_state = next_state
         if next_state in _TRANSIENT_STATES:
             self._completion = asyncio.get_running_loop().create_future()
@@ -226,7 +245,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
         self._validate_velocity(vx, vy, vyaw)
-        target = self._validate_motion("Move" if any((vx, vy, vyaw)) else "StopMove")
+        active = any((vx, vy, vyaw))
+        target = self._validate_motion(
+            "Move" if active else "StopMove", {"x": vx, "y": vy, "z": vyaw},
+        )
+        if not active and self._move_control_active and self.fsm_state == "moving":
+            target = "moving"  # 摇杆归零只停运动；由 StopMove 退出控制状态。
         if self._command_lock.locked() and any((vx, vy, vyaw)):
             raise CommandBlocked("command_in_flight")
         try:
@@ -247,6 +271,15 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if deadman_s and any((vx, vy, vyaw)):
             self._velocity_timer = asyncio.get_running_loop().call_later(deadman_s, self._expire_velocity)
         return {"result": "accepted", "confirmation": "transport", "fsm_state": target}
+
+    def stop_velocity(self) -> dict:
+        """紧急停止和会话清理同时退出遥控状态。"""
+        stopped_state = "lying" if self.fsm_state == "lying" else "standing"
+        result = self.move_velocity(0, 0, 0)
+        self._move_control_active = False
+        self.fsm_state = stopped_state
+        result["fsm_state"] = stopped_state
+        return result
 
     def _expire_velocity(self):
         self._velocity_timer = None

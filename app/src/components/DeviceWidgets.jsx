@@ -39,11 +39,11 @@ function VideoCanvas({ connected, endpoint = '/api/go2/video' }) {
   });
 }
 
-function VirtualJoystick({ onMove, onStop, disabled, label }) {
+function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
   const { useRef, useState, useEffect, useCallback } = React;
 
-  const R  = 62;  // pad radius px
-  const KR = 22;  // knob radius px
+  const R  = radius;
+  const KR = Math.round(radius * 0.35);
 
   const padRef    = useRef(null);
   const activeRef = useRef(false);
@@ -83,7 +83,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label }) {
     onMove(deltaRef.current.dx, deltaRef.current.dy);
     timerRef.current = setInterval(() => {
       if (activeRef.current) onMove(deltaRef.current.dx, deltaRef.current.dy);
-    }, 80);
+    }, 120);
   }, [disabled, onMove, applyPos]);
 
   const onMove_ = useCallback((e) => {

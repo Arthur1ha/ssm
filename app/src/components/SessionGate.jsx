@@ -248,12 +248,12 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
           <div className="session-entry__choices">
             <button className="entry-choice entry-choice--create" onClick={createMain} disabled={busy}>
               <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
-              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong><small>进入 main，添加设备并生成访客码</small></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong><small>进入 main，添加设备并分享给其他人</small></span>
               <Icon name="arrow" size={17}/>
             </button>
             <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>
               <span className="entry-choice__icon"><Icon name="scan" size={20}/></span>
-              <span className="entry-choice__copy"><strong>扫码加入</strong><small>使用管理员邀请，开始临时体验</small></span>
+              <span className="entry-choice__copy"><strong>扫码加入</strong><small>使用空间分享链接，加入体验</small></span>
               <Icon name="arrow" size={17}/>
             </button>
           </div>
@@ -271,14 +271,14 @@ function SessionBadge({ session }) {
     return () => clearInterval(timer);
   }, [session.actor]);
   if (session.actor === 'admin') {
-    return <span className="session-badge session-badge--admin"><i/> 管理员</span>;
+    return <span className="session-badge session-badge--admin"><i/> 空间管理者</span>;
   }
   const left = Math.max(0, Math.ceil(session.expires_at - now / 1000));
   const minutes = Math.floor(left / 60);
   const seconds = left % 60;
   return (
-    <span className="session-badge session-badge--visitor" title="临时会话剩余时间">
-      <i/> 临时体验 · {minutes}:{String(seconds).padStart(2, '0')}
+    <span className="session-badge session-badge--visitor" title="空间参与会话剩余时间">
+      <i/> 空间参与者 · {minutes}:{String(seconds).padStart(2, '0')}
     </span>
   );
 }
@@ -333,7 +333,7 @@ function AdminInviteDrawer({ open, onClose }) {
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
       <aside className={`invite-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
         <div className="invite-drawer__handle"/>
-        <header><div><small>ACCESS PASS</small><h2>访客邀请</h2></div>
+        <header><div><small>SPACE SHARE</small><h2>分享空间</h2></div>
           <button className="btn" onClick={onClose} aria-label="关闭"><Icon name="x" size={14}/></button></header>
         <div className="invite-drawer__body">
           <div className={`invite-state ${invite?.enabled ? 'is-enabled' : ''}`}>
@@ -343,7 +343,7 @@ function AdminInviteDrawer({ open, onClose }) {
           {inviteUrl ? (
             <div className="invite-pass">
               <div className="invite-pass__qr" ref={qrRef}/>
-              <p>体验者扫码后会获得临时会话。刷新邀请会立即使这张码失效。</p>
+            <p>加入者扫码后会获得临时体验会话。刷新分享链接会让旧链接失效。</p>
               <button className="btn" onClick={copy}><Icon name="link" size={13}/> 复制邀请链接</button>
               <code>{inviteUrl}</code>
             </div>

@@ -11,6 +11,7 @@ from typing import Callable
 
 from cloud.go2.agentcore.identity.provider import (
     DuplicateFaceCandidate,
+    FaceImageRejected,
     FaceProvider,
     FaceProviderError,
     FaceProviderNotConfigured,
@@ -239,6 +240,8 @@ class IdentitySkill:
             return self._set_current(self._snapshot(
                 "rejected", person_id=exc.person_id, error_code=exc.code,
             ))
+        except FaceImageRejected as exc:
+            return self._set_current(self._snapshot("rejected", error_code=exc.code))
         except FaceProviderError as exc:
             return self._set_current(self._snapshot("error", error_code=exc.code))
 

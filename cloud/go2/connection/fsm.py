@@ -6,30 +6,22 @@ logger = logging.getLogger(__name__)
 class CommandBlocked(ValueError):
     """A valid command is not allowed in the current device state."""
 
-_GESTURES = ["Hello", "Stretch", "Dance1", "Dance2"]
 _GESTURE_NEXT = {"Hello": "greeting", "Stretch": "stretching",
                  "Dance1": "dancing1", "Dance2": "dancing2"}
 
-_FSM_AVAILABLE: dict[str, list[str]] = {
-    "offline":    [],
-    "connecting": [],
-    "lying":      ["StandUp"],
-    "standing":   ["StandDown", "Move"] + _GESTURES,
-    "moving":     ["StopMove"] + _GESTURES,
-    "greeting":   ["Move", "StopMove"] + _GESTURES,
-    "stretching": ["Move", "StopMove"] + _GESTURES,
-    "dancing1":   ["Move", "StopMove"] + _GESTURES,
-    "dancing2":   ["Move", "StopMove"] + _GESTURES,
-}
-
+# 站立是动作枢纽；移动须先停止，动作完成后回到站立。
 _FSM_NEXT: dict[str, dict[str, str]] = {
     "lying":      {"StandUp": "standing"},
-    "standing":   {"StandDown": "lying", "Move": "moving", **_GESTURE_NEXT},
-    "moving":     {"StopMove": "standing", **_GESTURE_NEXT},
-    "greeting":   {"StopMove": "standing", "Move": "moving", **_GESTURE_NEXT},
-    "stretching": {"StopMove": "standing", "Move": "moving", **_GESTURE_NEXT},
-    "dancing1":   {"StopMove": "standing", "Move": "moving", **_GESTURE_NEXT},
-    "dancing2":   {"StopMove": "standing", "Move": "moving", **_GESTURE_NEXT},
+    "standing":   {"StandDown": "lying", "EnterMoveControl": "moving", "Move": "moving", **_GESTURE_NEXT},
+    "moving":     {"StopMove": "standing"},
+    "greeting":   {"StopMove": "standing"},
+    "stretching": {"StopMove": "standing"},
+    "dancing1":   {"StopMove": "standing"},
+    "dancing2":   {"StopMove": "standing"},
+}
+_FSM_AVAILABLE: dict[str, list[str]] = {
+    "offline": [], "connecting": [],
+    **{state: list(edges) for state, edges in _FSM_NEXT.items()},
 }
 
 # 瞬时动作态：做完（进度事件）自动回 standing

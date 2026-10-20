@@ -1,5 +1,5 @@
 /* FsmDevicePage — 通用状态机设备页。
- * 布局：头部（固定）→ 状态图（固定高）→ ChatPanel（撑满剩余）
+ * 布局：头部 → 左侧状态图 / 右侧按 Card 组合的当前状态视图 → 对话。
  * 完全由 Agent Card 的 transport / state_machine 驱动，无设备特判。
  */
 function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
@@ -23,6 +23,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const [sending, setSending] = useState(false);
   const [execution, setExecution] = useState('');
   const reportExecution = result => setExecution(commandBus.describe(result));
+
+  // 命令反馈是短暂提示；设备的当前状态由下方实时状态图呈现。
+  useEffect(() => {
+    if (!execution || execution.startsWith('正在')) return;
+    const timer = setTimeout(() => setExecution(''), 4500);
+    return () => clearTimeout(timer);
+  }, [execution]);
 
   /* ── 模式轴 / 富控件 / 快捷指令（通用，由 card 驱动） ── */
   const [modes, setModes]       = useState(device?.modes || []);
@@ -102,11 +109,16 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       tr => tr.src === current && tr.trigger === trigger
     );
     if (!t?.action) {
-      setExecution('当前状态不允许这个动作');
+      setExecution(t?.hint || '当前状态不允许这个动作');
       return;
     }
     setExecution('正在等待设备执行反馈…');
-    reportExecution(await commandBus.command(unitId, t.action, t.params || {}));
+    const result = await commandBus.command(unitId, t.action, t.params || {});
+    if (result?.result === 'accepted' && result.fsm_state === t.dst) {
+      setExecution('');
+    } else {
+      reportExecution(result);
+    }
   };
 
   /* ── 发送对话 ── */
@@ -211,25 +223,17 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       </div>
 
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
-      {/* ── 状态图区（固定，不随对话滚动）；离线置灰并禁用交互 ── */}
+      {/* ── Card 驱动的状态工作区：图是导航，右侧按当前态组合视图和控件。 ── */}
       {cardLoaded && (
-        <div style={{
-          flexShrink: 0, overflowX: 'hidden',
+        <div className="device-state-workspace" style={{
           filter: offline ? 'grayscale(1)' : 'none',
           opacity: offline ? 0.45 : 1,
           pointerEvents: offline ? 'none' : 'auto',
           transition: 'filter 0.2s, opacity 0.2s',
         }}>
-          {sm ? (
-            <div style={{
-              borderBottom: '1px solid var(--color-border)',
-              background: 'var(--color-surface-1)',
-              padding: '10px 0 8px',
-            }}>
-              <div style={{
-                fontSize: 8, color: 'var(--color-text-dim)',
-                letterSpacing: '0.16em', padding: '0 16px', marginBottom: 8,
-              }}>设备状态 · 点击预览，确认后执行</div>
+          <div className="device-state-workspace__graph">
+            <div className="device-state-workspace__heading">状态 · 点击连线切换</div>
+            {sm ? (
               <FsmGraph
                 states={sm.states}
                 transitions={sm.transitions}
@@ -238,27 +242,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
                 color={ACCENT}
                 views={sm.views || {}}
               />
-            </div>
-          ) : (
-            <div style={{
-              textAlign: 'center', padding: '16px 0',
-              borderBottom: '1px solid var(--color-border)',
-              background: 'var(--color-accent-dim)',
-            }}>
-              <div style={{ fontSize: 8, color: 'var(--color-text-dim)', letterSpacing: '0.25em' }}>
-                CURRENT STATE
-              </div>
-              <div style={{
-                fontSize: 24, fontWeight: 700, color: ACCENT, marginTop: 4,
-                textShadow: '0 0 18px var(--color-accent)', fontFamily: 'var(--font-mono)',
-              }}>
-                {(current || '—').toUpperCase()}
-              </div>
-            </div>
-          )}
-
-          {/* 态内富控件（由 card.widgets 驱动） */}
-          {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution, actor)}
+            ) : <div className="device-state-workspace__fallback">{current || '—'}</div>}
+          </div>
+          <div className="device-state-workspace__content">
+            <StateVisual view={sm?.views?.[current]} state={current} color={ACCENT}/>
+            {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution, actor)}
+          </div>
         </div>
       )}
 

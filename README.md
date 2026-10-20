@@ -184,7 +184,7 @@ mpremote connect <端口> reset
 
 ### 3. 打开手机 PWA
 
-按现有部署需要配置 MQTT 凭据。浏览器访问 `https://ssm.eliottxu.top`：点击“创建空间”可进入 `main` 管理页并生成访客二维码；新浏览器扫码即可进入临时体验。未配置 `SSM_SESSION_SECRET` 时，服务使用进程内临时密钥，重启服务后现有会话会失效。
+部署时配置 MQTT 凭据，并在 API 与编排器共用的 `cloud/.env` 中填写一次 `SSM_INTERNAL_SERVICE_TOKEN`；无需单独设置 `SSM_MQTT_SIGNING_SECRET`。浏览器访问 `https://ssm.eliottxu.top`：点击“创建空间”成为 `main` 空间管理者，添加设备后分享二维码；其他人扫码作为空间参与者加入体验。未配置 `SSM_SESSION_SECRET` 时，服务使用进程内临时密钥，重启服务后现有会话会失效。
 
 公开部署前必须拆分 `ssm_api`、`ssm_orchestrator`、`esp32_desk` 三个 MQTT 账号并启用 ACL。用 `mosquitto_passwd` 配置账号，复制 `infra/broker/acl.example` 为 `infra/broker/acl`，启用 `mosquitto.conf.tmpl` 中的 `acl_file`；云端分别填写 `MQTT_API_*` / `MQTT_ORCHESTRATOR_*`，ESP32 使用设备账号。ACL 使只有 API/编排器能发布 task，避免在资源受限的 MicroPython 固件中分发云端 HMAC 密钥。旧版本曾将 broker 凭据随 PWA 发布过，部署时应轮换旧凭据；ACL 尚未启用前，不要把 broker 暴露给不可信网络。
 

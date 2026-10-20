@@ -107,7 +107,11 @@ def _sync_internal_request(
         method=method,
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - fixed internal base
+        # The API callback must stay on the internal route even when the host
+        # exports HTTP_PROXY for outbound traffic. Go2 may need up to 20 s to
+        # confirm a motion command, so allow that response to complete.
+        direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with direct_opener.open(request, timeout=25) as response:  # noqa: S310 - configured internal base
             raw = response.read()
             return json.loads(raw) if raw else {"ok": True}
     except urllib.error.HTTPError as exc:

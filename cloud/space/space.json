@@ -7,10 +7,10 @@
     "go2"
   ],
   "invite": {
-    "enabled": false,
-    "token_hash": "",
-    "version": 0,
-    "updated_at": 0
+    "enabled": true,
+    "token_hash": "72cca1aa0f1220a015dc421c847b4be0ab3832b053c2d6980a8c833eae4576b8",
+    "version": 1,
+    "updated_at": 1792490262
   },
-  "updated_at": 1792396800
+  "updated_at": 1792490262
 }

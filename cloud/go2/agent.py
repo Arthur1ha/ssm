@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _GO2_THOUGHT_TOPIC = "ssm/agents/go2/thought"
 
 GO2_LLM_UNAVAILABLE_REPLY = (
-    "Go2 的小脑袋暂时连不上云端，刚才没法可靠理解指令。"
+    "Go2 的对话服务暂时不可用，刚才没法可靠理解指令。"
     "你稍后再喊我，或者先用页面上的动作按钮。"
 )
 GO2_AGENT_UNAVAILABLE_REPLY = (
@@ -276,6 +276,21 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
     # Physical outcomes are authoritative; a language model cannot upgrade acceptance to completion.
     status = _execution_status(results)
     if status != "ok":
+        failed = next((r for r in results if _execution_status([r]) not in ("ok", "accepted")), None)
+        if failed and failed.get("tool") in {"go2_remember_person", "go2_add_person_face"}:
+            detail = failed.get("result")
+            code = str(detail.get("error_code", "")) if isinstance(detail, dict) else ""
+            action = "补录" if failed["tool"] == "go2_add_person_face" else "登记"
+            if "NoFace" in code or code in {"no_face", "empty_image"}:
+                return f"这次人脸{action}没成功：画面里没有识别到有效人脸。请正对我的摄像头、靠近一点再试。", True
+            if code == "multiple_faces":
+                return f"这次人脸{action}没成功：画面里有多张人脸。请单独面对摄像头再试。", True
+            if code == "face_too_small" or "FaceSize" in code:
+                return f"这次人脸{action}没成功：人脸太小。请靠近摄像头再试。", True
+            if status == "rejected":
+                return f"这次人脸{action}没成功，请调整角度或光线后再试。", True
+            if status == "error":
+                return f"这次人脸{action}没成功，人脸服务暂时无法完成处理。请稍后再试。", True
         replies = {
             "accepted": "指令已发送，尚未确认动作完成。",
             "timeout": "等待动作完成反馈超时，当前结果还不能确认。",

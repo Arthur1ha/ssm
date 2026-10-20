@@ -1,4 +1,4 @@
-/* fsmWidgets — 按 card.widgets 声明渲染态内富控件（type 枚举：connection/joystick/video/map）。 */
+/* fsmWidgets — 按 card.widgets 声明组合当前状态的富控件。 */
 function ConnectionWidget({ widget, unitId, actor }) {
   const { useEffect, useState, useCallback, useRef } = React;
   const endpoint = widget.endpoint || '/api/go2/connection';
@@ -201,7 +201,11 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor')
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
   if (!active.length) return null;
 
-  const sendVelocity = (_endpoint, vx, vy, vyaw) => commandBus.velocity(unitId, { vx, vy, vyaw }, report);
+  const sendVelocity = (_endpoint, vx, vy, vyaw) => commandBus.velocity(
+    unitId, { vx, vy, vyaw }, result => {
+      if (result?.result !== 'accepted' && result?.result !== 'ok') report(result);
+    },
+  );
 
   const nodes = active.map((w, idx) => {
     if (w.type === 'color_swatches') {
@@ -213,11 +217,11 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor')
     if (w.type === 'joystick' && VirtualJoystick) {
       const ep = w.endpoint || '/api/go2/velocity';
       return (
-        <div key={'joy' + idx} style={{ marginTop: 14, display: 'flex', justifyContent: 'space-between' }}>
-          <VirtualJoystick label="MOVE" disabled={false}
+        <div key={'joy' + idx} className="device-joysticks">
+          <VirtualJoystick label="移动" radius={42} disabled={false}
             onMove={(dx, dy) => sendVelocity(ep, +(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
             onStop={() => sendVelocity(ep, 0, 0, 0)}/>
-          <VirtualJoystick label="ROTATE" disabled={false}
+          <VirtualJoystick label="转向" radius={42} disabled={false}
             onMove={(dx) => sendVelocity(ep, 0, 0, +(-dx * 0.8).toFixed(2))}
             onStop={() => sendVelocity(ep, 0, 0, 0)}/>
         </div>
@@ -225,7 +229,7 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor')
     }
     if (w.type === 'video' && VideoCanvas) {
       return (
-        <div key={'cam' + idx} style={{ marginTop: 14, aspectRatio: '16/9', background: '#0a0c14',
+        <div key={'cam' + idx} className="device-state-video" style={{ aspectRatio: '16/9', background: '#0a0c14',
           border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
           overflow: 'hidden' }}>
           <VideoCanvas connected={true} endpoint={w.endpoint}/>

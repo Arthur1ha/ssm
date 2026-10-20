@@ -23,7 +23,7 @@ PERSISTENT_ACTIONS = {
 
 GO2_IMMEDIATE_ACTIONS = {
     "SPORT", "NAVIGATE", "RECOGNIZE_PERSON", "VELOCITY", "STOP",
-    "StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2", "Move", "StopMove",
+    "StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2", "Move", "StopMove", "EnterMoveControl",
 }
 
 
