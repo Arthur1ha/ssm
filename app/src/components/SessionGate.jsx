@@ -158,6 +158,7 @@ function SessionLoading() {
 
 function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
   const [showJoin, setShowJoin] = React.useState(false);
+  const [showPaste, setShowPaste] = React.useState(false);
   const [inviteValue, setInviteValue] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState(error || '');
@@ -183,8 +184,28 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
     finally { setBusy(false); }
   };
 
+  const joinFromScan = async value => {
+    if (busy) return;
+    const token = extractInviteToken(value);
+    let validOrigin = true;
+    if (value.includes('://')) {
+      try { validOrigin = new URL(value).origin === window.location.origin; }
+      catch (_) { validOrigin = false; }
+    }
+    if (!token || !validOrigin) {
+      setMessage('这不是当前空间的分享二维码，请重新扫码');
+      return;
+    }
+    setBusy(true);
+    setMessage('');
+    try { await onVisitorJoin(value); }
+    catch (joinError) { setMessage(apiErrorText(joinError, '邀请无效或已过期')); }
+    finally { setBusy(false); }
+  };
+
   const backToChoices = () => {
     setShowJoin(false);
+    setShowPaste(false);
     setMessage('');
   };
 
@@ -207,19 +228,21 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
         {showJoin ? (
           <section className="entry-subflow">
             <div className="entry-subflow__heading"><span className="entry-flow-mark entry-flow-mark--join"><Icon name="scan" size={16}/></span><div><small>JOIN A SPACE</small><h2>扫码加入</h2></div></div>
-            <p>用手机相机扫描管理员生成的二维码。也可以粘贴邀请链接。</p>
-            <form className="session-entry__form" onSubmit={join}>
-              <label htmlFor="invite-link">访客邀请链接或邀请码</label>
+            <p>扫描空间分享二维码即可加入。</p>
+            {!showPaste && <QrScanner onScan={joinFromScan} hint="将空间二维码放入框内，识别后自动加入"/>}
+            <button type="button" className="entry-subflow__paste" onClick={() => setShowPaste(value => !value)}>
+              {showPaste ? '收起链接输入' : '粘贴分享链接或邀请码'}
+            </button>
+            {showPaste && <form className="session-entry__form" onSubmit={join}>
+              <label htmlFor="invite-link">空间分享链接或邀请码</label>
               <input id="invite-link" type="text" inputMode="url" autoComplete="off"
-                value={inviteValue} onChange={event => setInviteValue(event.target.value)} autoFocus
-                placeholder="粘贴邀请链接或邀请码"/>
-              <div className="session-entry__actions">
-                <button type="button" className="btn" onClick={backToChoices}>返回</button>
-                <button type="submit" className="btn btn--accent" disabled={busy || !inviteValue.trim()}>
-                  {busy ? '正在验证…' : '进入体验空间'}
-                </button>
-              </div>
-            </form>
+                value={inviteValue} onChange={event => setInviteValue(event.target.value)}
+                placeholder="粘贴分享链接或邀请码"/>
+              <button type="submit" className="btn btn--accent" disabled={busy || !inviteValue.trim()}>
+                {busy ? '正在验证…' : '进入体验空间'}
+              </button>
+            </form>}
+            <button type="button" className="btn entry-subflow__back" onClick={backToChoices}>返回</button>
           </section>
         ) : (
           <div className="session-entry__choices">

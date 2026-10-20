@@ -18,6 +18,7 @@
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" crossorigin="anonymous"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #root { height: 100%; overflow: hidden; }
@@ -57,6 +58,7 @@
 
   <!-- JSX components (dependency order) -->
   <script type="text/babel" src="src/components/Icon.jsx"></script>
+  <script type="text/babel" src="src/components/QrScanner.jsx"></script>
   <script type="text/babel" src="src/components/SessionGate.jsx"></script>
   <script type="text/babel" src="src/components/AdminSpaceDrawer.jsx"></script>
   <script type="text/babel" src="src/hooks/useSendIntent.js"></script>
