@@ -8,9 +8,9 @@
   ],
   "invite": {
     "enabled": true,
-    "token_hash": "72cca1aa0f1220a015dc421c847b4be0ab3832b053c2d6980a8c833eae4576b8",
-    "version": 1,
-    "updated_at": 1792490262
+    "token_hash": "d37931b5881ef8e0b0e5b9b19af9da2a5de86ef14296ff531aa6b8eabde39697",
+    "version": 2,
+    "updated_at": 1792508592
   },
-  "updated_at": 1792490262
+  "updated_at": 1792508592
 }

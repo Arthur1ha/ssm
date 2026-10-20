@@ -298,9 +298,16 @@ function AdminInviteDrawer({ open, onClose }) {
   useEffect(() => { if (open) load(); }, [open]);
   useEffect(() => {
     if (!open || !inviteUrl || !qrRef.current) return;
+    let active = true;
     qrRef.current.innerHTML = '';
-    if (window.QRCode) new QRCode(qrRef.current, { text: inviteUrl, width: 176, height: 176,
-      colorDark: '#0c0c15', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+    loadQrLibrary('generate').then(QRCode => {
+      if (!active || !qrRef.current) return;
+      new QRCode(qrRef.current, { text: inviteUrl, width: 176, height: 176,
+        colorDark: '#0c0c15', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+    }).catch(() => {
+      if (active) setMessage('二维码加载失败，请重试或复制邀请链接');
+    });
+    return () => { active = false; };
   }, [open, inviteUrl]);
 
   const rotate = async () => {

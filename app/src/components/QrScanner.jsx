@@ -30,13 +30,9 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
         setStatus('error');
         return;
       }
-      if (typeof window.jsQR !== 'function') {
-        setError('扫码组件未加载，请刷新页面');
-        setStatus('error');
-        return;
-      }
-
       try {
+        const decodeQr = await loadQrLibrary('scan');
+        if (stopped) return;
         const acquired = await navigator.mediaDevices.getUserMedia({
           audio: false, video: { facingMode: 'environment' },
         });
@@ -62,7 +58,7 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
             canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
             const frame = context.getImageData(0, 0, canvas.width, canvas.height);
-            const code = window.jsQR(frame.data, frame.width, frame.height, {
+            const code = decodeQr(frame.data, frame.width, frame.height, {
               inversionAttempts: 'dontInvert',
             });
             if (code?.data) {
@@ -82,6 +78,8 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
           setError('摄像头权限未开启，请允许访问');
         } else if (cameraError.name === 'NotFoundError' || cameraError.name === 'OverconstrainedError') {
           setError('没有找到可用摄像头');
+        } else if (cameraError.message?.startsWith('QR library')) {
+          setError('扫码组件加载失败，请重试');
         } else {
           setError('摄像头启动失败，请重试');
         }

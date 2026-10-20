@@ -191,7 +191,6 @@ function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
         {/* 输入栏 */}
         <div style={{
           flexShrink: 0, background: 'var(--color-bar)',
-          backdropFilter: 'var(--glass-blur)', WebkitBackdropFilter: 'var(--glass-blur)',
           borderTop: '1px solid var(--color-border)',
         }}>
           {activityLog.every(e => e.type !== 'user') && !thinking && (

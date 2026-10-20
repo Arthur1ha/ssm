@@ -31,7 +31,7 @@ self.addEventListener('fetch', e => {
 
     // 静态资源：先网络，失败再用缓存
     e.respondWith(
-        fetch(new Request(e.request, { cache: 'no-store' }))
+        fetch(e.request)
             .then(res => {
                 // 成功拿到网络响应，顺手更新缓存（离线兜底用）
                 if (res && res.status === 200 && res.type === 'basic') {
