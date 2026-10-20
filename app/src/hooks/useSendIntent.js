@@ -1,90 +1,89 @@
-/* useSendIntent — 统一 intent 发布 + feedback 监听 hook */
+/* useSendIntent — intents enter FastAPI; feedback returns on session-scoped SSE. */
 const PLANNING_TEXTS  = ['思考中…', '理解你的意思…', '让我想想…', '感知中…', '解析指令…', '脑子转起来了…'];
 const EXECUTING_TEXTS = ['行动中…', '指令下发…', '启动了…', '开始执行…', '动起来了…'];
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 
 function useSendIntent() {
-  const { useState, useCallback, useRef } = React;
-  const [thinking, setThinking]         = useState(false);
+  const { useState, useCallback, useEffect, useRef } = React;
+  const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState('');
-  const thinkingRef = useRef(false);
+  const activeRef = useRef(null);
 
-  const send = useCallback((text, { onMessage, onPendingRule, onDiscoveryCandidates, deviceHint, intentHint, spaceId } = {}) => {
-    if (!text.trim() || thinkingRef.current) return;
-    thinkingRef.current = true;
-    setThinking(true);
-    setThinkingText(pick(PLANNING_TEXTS));
+  const finish = useCallback(() => {
+    const active = activeRef.current;
+    if (!active) return;
+    clearTimeout(active.timeoutId);
+    activeRef.current = null;
+    setThinking(false);
+    setThinkingText('');
+  }, []);
 
-    const session_id    = 'sid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-    const feedbackTopic = `ssm/feedback/${session_id}`;
-    mqttBus.subscribe(feedbackTopic);
+  const resetTimeout = useCallback((milliseconds = 40000) => {
+    const active = activeRef.current;
+    if (!active) return;
+    clearTimeout(active.timeoutId);
+    active.timeoutId = setTimeout(() => {
+      const callback = activeRef.current?.callbacks?.onMessage;
+      finish();
+      callback?.('操作超时，设备可能无响应');
+    }, milliseconds);
+  }, [finish]);
 
-    const cleanup = () => {
-      mqttBus.removeEventListener('topic:' + feedbackTopic, handleFeedback);
-      mqttBus.unsubscribe(feedbackTopic);
-    };
-
-    let finished = false;
-    let timeoutId;
-
-    const done = () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeoutId);
-      cleanup();
-      thinkingRef.current = false;
-      setThinking(false);
-      setThinkingText('');
-    };
-
-    timeoutId = setTimeout(() => {
-      done();
-      onMessage?.('操作超时，设备可能无响应');
-    }, 60000);
-
-    function handleFeedback(e) {
-      const { stage, text: msg, rule } = e.detail || {};
+  useEffect(() => {
+    const onEvent = event => {
+      const active = activeRef.current;
+      if (!active) return;
+      const outer = event.detail || {};
+      const payload = outer.payload || outer.data || outer;
+      const stage = payload.stage;
       if (!stage) return;
-
+      const callbacks = active.callbacks;
       if (stage === 'planning' || stage === 'executing') {
-        clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-          done();
-          onMessage?.('操作超时，设备可能无响应');
-        }, 40000);
+        resetTimeout();
         setThinkingText(stage === 'planning' ? pick(PLANNING_TEXTS) : pick(EXECUTING_TEXTS));
       } else if (stage === 'ack') {
-        // Planner 的即时开场白：先上屏一句气泡，本轮还没结束，thinking 继续
-        clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-          done();
-          onMessage?.('操作超时，设备可能无响应');
-        }, 40000);
-        onMessage?.(msg);
+        resetTimeout();
+        callbacks.onMessage?.(payload.text);
         setThinkingText(pick(EXECUTING_TEXTS));
-      } else if (stage === 'pending_rule' && rule) {
-        clearTimeout(timeoutId);
-        done();
-        onPendingRule?.(rule);
+      } else if (stage === 'pending_rule' && payload.rule) {
+        finish();
+        callbacks.onPendingRule?.(payload.rule);
       } else if (stage === 'discovery_candidates') {
-        clearTimeout(timeoutId);
-        done();
-        onDiscoveryCandidates?.(e.detail?.devices || [], msg || '');
-      } else if (stage === 'done' || stage === 'partial' || stage === 'failed') {
-        clearTimeout(timeoutId);
-        done();
-        onMessage?.(msg || '已处理');
+        finish();
+        // The product has one fixed space: discovery is informational only,
+        // never an adoption workflow in the browser.
+        callbacks.onMessage?.(payload.text || '当前空间成员已经显示在设备列表中。');
+      } else if (['done', 'partial', 'failed', 'denied'].includes(stage)) {
+        finish();
+        callbacks.onMessage?.(payload.text || (['failed', 'denied'].includes(stage) ? '这次操作没有完成' : '已处理'));
       }
+    };
+    apiClient.addEventListener('server-event', onEvent);
+    return () => apiClient.removeEventListener('server-event', onEvent);
+  }, [finish, resetTimeout]);
+
+  const send = useCallback(async (text, callbacks = {}) => {
+    if (!text.trim() || activeRef.current) return;
+    setThinking(true);
+    setThinkingText(pick(PLANNING_TEXTS));
+    activeRef.current = { callbacks, timeoutId: null };
+    resetTimeout(60000);
+    const body = { text: text.trim() };
+    if (callbacks.deviceHint) body.device_hint = callbacks.deviceHint;
+    if (callbacks.intentHint) body.intent_hint = callbacks.intentHint;
+    try {
+      const accepted = await apiClient.request('/api/intents', { method: 'POST', body });
+      if (activeRef.current) {
+        if (accepted.stage && ['done', 'partial', 'failed'].includes(accepted.stage)) {
+          finish();
+          callbacks.onMessage?.(accepted.text || '已处理');
+        }
+      }
+    } catch (error) {
+      finish();
+      callbacks.onMessage?.(apiErrorText(error, '命令没有送达，请稍后再试'));
     }
-
-    mqttBus.addEventListener('topic:' + feedbackTopic, handleFeedback);
-
-    const payload = { session_id, user_msg: text, ts: Date.now() };
-    if (deviceHint) payload.device_hint = deviceHint;
-    if (intentHint) payload.intent_hint = intentHint;
-    if (spaceId) payload.space_id = spaceId;
-    mqttBus.publish(`ssm/intent/${session_id}`, JSON.stringify(payload));
-  }, []);
+  }, [finish, resetTimeout]);
 
   return { thinking, thinkingText, send };
 }

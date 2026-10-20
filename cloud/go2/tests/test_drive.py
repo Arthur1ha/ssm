@@ -5,7 +5,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import time
 import asyncio
+import httpx
 import pytest
+import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -144,27 +146,39 @@ def test_stop_cancels_task(monkeypatch, tmp_path):
 # ── Router endpoint tests ────────────────────────────────────────────
 
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from cloud.go2.router import router as go2_router
 
 
-@pytest.fixture
-def client():
+@pytest_asyncio.fixture
+async def client(monkeypatch):
+    monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "test-service-token")
     app = FastAPI()
     app.include_router(go2_router)
-    return TestClient(app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={
+            "X-SSM-Service-Token": "test-service-token",
+            "X-SSM-Session-Id": "test-admin",
+            "X-SSM-Actor": "admin",
+            "X-SSM-Persist": "true",
+        },
+    ) as value:
+        yield value
 
 
-def test_drive_state_endpoint_returns_expected_shape(client):
-    r = client.get("/api/go2/drive/state")
+@pytest.mark.asyncio
+async def test_drive_state_endpoint_returns_expected_shape(client):
+    r = await client.get("/api/go2/drive/state")
     assert r.status_code == 200
     data = r.json()
     for key in ("state", "curiosity", "person_present", "last_action_ts"):
         assert key in data
 
 
-def test_memory_endpoint_returns_taught_and_today(client):
-    r = client.get("/api/go2/memory")
+@pytest.mark.asyncio
+async def test_memory_endpoint_returns_taught_and_today(client):
+    r = await client.get("/api/go2/memory")
     assert r.status_code == 200
     data = r.json()
     assert "taught" in data
@@ -173,16 +187,18 @@ def test_memory_endpoint_returns_taught_and_today(client):
     assert isinstance(data["today"], str)
 
 
-def test_personality_get_returns_prompt(client):
-    r = client.get("/api/go2/personality")
+@pytest.mark.asyncio
+async def test_personality_get_returns_prompt(client):
+    r = await client.get("/api/go2/personality")
     assert r.status_code == 200
     assert "prompt" in r.json()
 
 
-def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
     import cloud.go2.agentcore.soul as pers_mod
     monkeypatch.setattr(pers_mod, "_PERSONALITY_FILE", tmp_path / "p.json")
-    r = client.post("/api/go2/personality", json={"prompt": "严肃、话少的机器狗"})
+    r = await client.post("/api/go2/personality", json={"prompt": "严肃、话少的机器狗"})
     assert r.status_code == 200
     assert pers_mod.get_system_prompt() == "严肃、话少的机器狗"
 

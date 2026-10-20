@@ -53,5 +53,18 @@ def test_llm_parse_error_degrades_gracefully(tmp_path, monkeypatch):
 
     agent = ESP32Agent(ESP32State(), llm=_BrokenLLM())
     reply = agent.handle_user_text("随便说点什么")
-    assert "没太听明白" in reply
+    assert reply["llm_available"] is False
+    assert reply["error"] == "llm_unavailable"
+    assert taught.list_all() == []
+
+
+def test_visitor_teach_message_never_persists(tmp_path, monkeypatch):
+    monkeypatch.setattr(taught, "TAUGHT_FILE", tmp_path / "taught.json")
+    agent = ESP32Agent(ESP32State(), llm=_StubLLM({
+        "type": "teach", "trigger": "天黑了", "behavior": "调亮一点",
+        "reply": "学会了：天黑就调亮"}))
+
+    reply = agent.handle_user_text("以后天黑了你就调亮一点", persist=False)
+
+    assert reply["persisted"] is False
     assert taught.list_all() == []

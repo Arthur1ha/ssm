@@ -26,3 +26,35 @@ def test_sensor_without_manifest_defaults_to_sensor():
     s.on_agent_msg("esp32_desk_light", "event", {"level": "DIM"})
     assert "esp32_desk_light" in s.sensor_snapshot()
     assert "esp32_desk_light" not in s.actuator_snapshot()
+
+
+def test_task_result_is_scoped_to_registered_session():
+    s = SharedState()
+    s.register_task("task-a", "ses-a")
+
+    assert s.store_task_result("unknown", {"result": "ok"}) is False
+    assert s.store_task_result("task-a", {"result": "ok", "session_id": "ses-b"}) is False
+    assert s.store_task_result("task-a", {"result": "ok"}) is True
+    assert s.get_task_result("task-a", "ses-b") is None
+    assert s.get_task_result("task-a", "ses-a")["session_id"] == "ses-a"
+
+
+def test_clear_session_removes_only_its_tasks_and_expiry_is_reported():
+    s = SharedState()
+    s.register_session({
+        "session_id": "ses-a", "actor": "visitor", "persist": False,
+        "space_id": "main", "expires_at": 100,
+    })
+    s.register_session({
+        "session_id": "ses-b", "actor": "admin", "persist": True,
+        "space_id": "main", "expires_at": 200,
+    })
+    s.register_task("task-a", "ses-a")
+    s.register_task("task-b", "ses-b")
+    s.store_task_result("task-a", {"result": "ok"})
+    s.store_task_result("task-b", {"result": "ok"})
+
+    assert s.expired_session_ids(now=150) == ["ses-a"]
+    s.clear_session("ses-a")
+    assert s.get_task_result("task-a") is None
+    assert s.get_task_result("task-b", "ses-b")["result"] == "ok"

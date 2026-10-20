@@ -1,134 +1,92 @@
-/* useSsmCore — 通信层：连接 + 设备注册表 + ISM 实时快照 */
+/* useSsmCore — read-only device snapshot + authenticated server events. */
 const _EXCL_TYPES = new Set(['decision']);
-const _EXCL_PLAT  = new Set(['cloud']);
+const _EXCL_PLAT = new Set(['cloud']);
 
-function useSsmCore(spaceId = '0') {
+function useSsmCore() {
   const { useState, useEffect, useRef, useCallback } = React;
-  const [connected, setConnected] = useState(false);
-  const [agents, setAgents]       = useState([]);
-  const [discoveredAgents, setDiscoveredAgents] = useState([]);
+  const [connected, setConnected] = useState(apiClient.eventsConnected);
+  const [agents, setAgents] = useState([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [agentsError, setAgentsError] = useState('');
-  const [unitData, setUnitData]   = useState({});
-  const trackerRef = useRef(null);
-  const adoptedUnitIdsRef = useRef(new Set());
+  const [unitData, setUnitData] = useState({});
   const refreshSeqRef = useRef(0);
 
-  const normalizeDevices = useCallback(ds => ds
-    .filter(d => d.agent_type && !_EXCL_TYPES.has(d.agent_type) && !_EXCL_PLAT.has(d.hw_platform))
-    .map(d => ({ ...d, _online: d.online ?? d._online ?? false })), []);
+  const normalizeDevices = useCallback(devices => (Array.isArray(devices) ? devices : [])
+    .filter(device => device.agent_type && !_EXCL_TYPES.has(device.agent_type) && !_EXCL_PLAT.has(device.hw_platform))
+    .map(device => ({ ...device, _online: device.online ?? device._online ?? false })), []);
 
   const refreshAgents = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
     setLoadingAgents(true);
     setAgentsError('');
-    adoptedUnitIdsRef.current = new Set();
     try {
-      const response = await fetch(
-        `/api/devices?scope=adopted&space_id=${encodeURIComponent(spaceId || '0')}`,
-        { signal: controller.signal, headers: { Accept: 'application/json' } },
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const ds = await response.json();
+      const devices = await apiClient.request('/api/devices');
       if (seq !== refreshSeqRef.current) return [];
-      const list = normalizeDevices(ds);
-      adoptedUnitIdsRef.current = new Set(list.map(d => d.unit_id));
+      const list = normalizeDevices(devices);
       setAgents(list);
       return list;
     } catch (error) {
       if (seq !== refreshSeqRef.current) return [];
-      setAgentsError(error?.name === 'AbortError'
-        ? '设备服务响应超时，请重试'
-        : '设备服务暂时不可用，请重试');
+      setAgentsError(apiErrorText(error, '设备服务暂时不可用，请重试'));
       return [];
     } finally {
-      clearTimeout(timeoutId);
       if (seq === refreshSeqRef.current) setLoadingAgents(false);
     }
-  }, [normalizeDevices, spaceId]);
-
-  const adoptLocalCandidate = useCallback(candidate => {
-    const cards = normalizeDevices(candidate?.cards || []);
-    if (!cards.length) return;
-    adoptedUnitIdsRef.current = new Set([
-      ...adoptedUnitIdsRef.current,
-      ...cards.map(card => card.unit_id),
-    ]);
-    setAgents(prev => {
-      const byId = new Map(prev.map(card => [card.unit_id, card]));
-      cards.forEach(card => byId.set(card.unit_id, { ...byId.get(card.unit_id), ...card }));
-      return [...byId.values()];
-    });
   }, [normalizeDevices]);
 
+  useEffect(() => { refreshAgents(); }, [refreshAgents]);
+
   useEffect(() => {
-    const registry   = new AgentRegistry(mqttBus);
-    const ismTracker = new ISMTracker(mqttBus);
-    trackerRef.current = ismTracker;
-
-    const onReg = () => {
-      const all = registry.getAll();
-      const byId = new Map();
-      const discovered = [];
-      for (const a of all) {
-        if (a.agent_type && !_EXCL_TYPES.has(a.agent_type) && !_EXCL_PLAT.has(a.hw_platform)) {
-          discovered.push(a);
-          if (adoptedUnitIdsRef.current.has(a.unit_id)) byId.set(a.unit_id, a);
+    const connectedHandler = () => setConnected(true);
+    const disconnectedHandler = () => setConnected(false);
+    const serverEventHandler = event => {
+      const outer = event.detail || {};
+      const payload = outer.payload || outer.data || outer;
+      const kind = outer.type || payload.type || outer.event;
+      if (!['device', 'card', 'status', 'state', 'event'].includes(kind)) return;
+      const unitId = payload.unit_id || payload.agent_id;
+      if (!unitId) return;
+      setAgents(previous => {
+        const card = payload.card && typeof payload.card === 'object' ? payload.card : null;
+        let found = false;
+        const merged = previous
+          .filter(device => !(card && device.unit_id === card.device_id && card.unit_id !== card.device_id))
+          .map(device => {
+            if (device.unit_id !== unitId) return device;
+            found = true;
+            return {
+              ...device,
+              ...(card || {}),
+              _online: payload.online ?? card?.online ?? device._online,
+            };
+          });
+        if (!found && card?.unit_id) {
+          merged.push({ ...card, _online: payload.online ?? card.online ?? false });
         }
+        return merged;
+      });
+      if (payload.state || payload.event) {
+        setUnitData(previous => ({
+          ...previous,
+          [unitId]: {
+            ...(previous[unitId] || {}),
+            ...(payload.state ? { state: payload.state } : {}),
+            ...(payload.event ? { event: payload.event } : {}),
+          },
+        }));
       }
-      setDiscoveredAgents(discovered);
-      setAgents(prev => {
-        const merged = prev.map(d => {
-          const mqtt = byId.get(d.unit_id);
-          if (mqtt) { byId.delete(d.unit_id); return { ...d, ...mqtt }; }
-          // go2 只发 card 不发 manifest，在线状态从 registry 直接同步
-          const reg = registry.get(d.unit_id);
-          if (reg && reg._online !== undefined) return { ...d, _online: reg._online === true };
-          return d;
-        });
-        for (const a of byId.values()) merged.push(a);
-        return merged.filter(d => adoptedUnitIdsRef.current.has(d.unit_id));
-      });
     };
-    registry.addEventListener('change', onReg);
-
-    let pending = false;
-    const onIsm = () => {
-      if (pending) return; pending = true;
-      requestAnimationFrame(() => {
-        pending = false;
-        const snap = {};
-        ismTracker.unitIds().forEach(uid => {
-          snap[uid] = { state: ismTracker.get(uid, 'state'), event: ismTracker.get(uid, 'event') };
-        });
-        setUnitData(snap);
-      });
-    };
-    ismTracker.addEventListener('update', onIsm);
-
-    const onConn = () => { setConnected(true); mqttBus.subscribe('ssm/agents/+/thought'); };
-    const onDisc = () => setConnected(false);
-    mqttBus.addEventListener('connect', onConn);
-    mqttBus.addEventListener('disconnect', onDisc);
-    if (!mqttBus._client) mqttBus.connect(BROKER_URL, null, { username: BROKER_USER, password: BROKER_PASS });
-
+    apiClient.addEventListener('events-open', connectedHandler);
+    apiClient.addEventListener('events-error', disconnectedHandler);
+    apiClient.addEventListener('server-event', serverEventHandler);
+    apiClient.openEvents();
     return () => {
-      registry.removeEventListener('change', onReg);
-      ismTracker.removeEventListener('update', onIsm);
-      mqttBus.removeEventListener('connect', onConn);
-      mqttBus.removeEventListener('disconnect', onDisc);
+      apiClient.removeEventListener('events-open', connectedHandler);
+      apiClient.removeEventListener('events-error', disconnectedHandler);
+      apiClient.removeEventListener('server-event', serverEventHandler);
     };
   }, []);
 
-  useEffect(() => {
-    refreshAgents();
-  }, [refreshAgents]);
-
-  return {
-    connected, agents, discoveredAgents, loadingAgents, agentsError,
-    unitData, refreshAgents, adoptLocalCandidate,
-  };
+  return { connected, agents, loadingAgents, agentsError, unitData, refreshAgents };
 }
 window.useSsmCore = useSsmCore;

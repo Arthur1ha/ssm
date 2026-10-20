@@ -1,9 +1,10 @@
 """cloud.esp32.router — ESP32 桌面智能体 HTTP 端点。"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from cloud.esp32 import agent as _esp32_agent
+from cloud.api.auth import require_admin, require_admin_csrf, require_session
 
 router = APIRouter(prefix="/api/esp32", tags=["esp32"])
 
@@ -17,7 +18,7 @@ class ChatRequest(BaseModel):
 
 
 @router.get("/autonomy")
-def esp32_autonomy_get():
+async def esp32_autonomy_get(_session: dict = Depends(require_session)):
     """返回灯智能体当前自主模式（manual / reactive）。"""
     agent = _esp32_agent.get_agent()
     if agent is None:
@@ -26,7 +27,7 @@ def esp32_autonomy_get():
 
 
 @router.put("/autonomy")
-def esp32_autonomy_set(req: AutonomyRequest):
+async def esp32_autonomy_set(req: AutonomyRequest, _session: dict = Depends(require_admin_csrf)):
     """切换灯智能体自主模式；manual 仅停自发行动，富命令照常可控。"""
     agent = _esp32_agent.get_agent()
     if agent is None:
@@ -39,7 +40,7 @@ def esp32_autonomy_set(req: AutonomyRequest):
 
 
 @router.post("/{unit_id}/chat")
-def esp32_chat(unit_id: str, req: ChatRequest):
+async def esp32_chat(unit_id: str, req: ChatRequest, _session: dict = Depends(require_admin_csrf)):
     """设备页对话直达灯智能体：分类闲聊/调教并回复。"""
     agent = _esp32_agent.get_agent()
     if agent is None:
@@ -51,7 +52,7 @@ def esp32_chat(unit_id: str, req: ChatRequest):
 
 
 @router.get("/{unit_id}/memory")
-def esp32_memory(unit_id: str):
+async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
     """返回灯智能体的成长资产：调教记录 + 历史规律摘要。"""
     from cloud.esp32.memory import taught
     agent = _esp32_agent.get_agent()

@@ -1,19 +1,22 @@
 # config.py — All constants for SSM ESP32 agent
-# Edit WIFI_SSID, WIFI_PASSWORD, MQTT_BROKER_IP before uploading
+# Copy local_config.example.py to local_config.py before uploading.
 
 # ── WiFi ─────────────────────────────────────────────────────
-WIFI_SSID     = "Arthur"
-WIFI_PASSWORD = "66666666"
+try:
+    from local_config import WIFI_SSID, WIFI_PASSWORD, MQTT_BROKER_IP, MQTT_USER, MQTT_PASSWORD
+except ImportError:
+    WIFI_SSID = "CHANGE_ME"
+    WIFI_PASSWORD = "CHANGE_ME"
+    MQTT_BROKER_IP = "127.0.0.1"
+    MQTT_USER = ""
+    MQTT_PASSWORD = ""
                                                                                                             
 # ── Location (fixed coordinates, GCJ-02) ─────────────────────
 LOCATION_LNG = 121.4275
 LOCATION_LAT  = 31.0316
 
 # ── MQTT ─────────────────────────────────────────────────────
-MQTT_BROKER_IP = "47.116.137.202"  # cloud server public IP
 MQTT_PORT      = 1883
-MQTT_USER      = "ssm_user"        # broker auth username
-MQTT_PASSWORD  = "Wl4sErQrlrpEbm7r"
 DEVICE_ID       = "esp32_desk"
 FIRMWARE_VER   = "0.2.0"
 

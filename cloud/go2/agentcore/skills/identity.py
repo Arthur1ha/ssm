@@ -16,6 +16,7 @@ from cloud.go2.agentcore.identity.provider import (
     FaceProviderNotConfigured,
 )
 from cloud.go2.agentcore.memory.people import KnownPerson, PeopleMemory
+from cloud.go2.execution import require_persist
 from cloud.go2.agentcore.skills.vision import VisionFaceRejected, VisionFrame, select_enrollment_face
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,7 @@ class IdentitySkill:
         return name, role
 
     async def remember_person(self, name: str, role: str) -> IdentitySnapshot:
+        require_persist("remember a person")
         try:
             name, role = self._validate_enrollment(name, role)
             crop = self._get_face_crop()
@@ -257,6 +259,7 @@ class IdentitySkill:
         return self._set_current(self._recognized(person, 100.0))
 
     async def add_person_face(self, person_id: str) -> IdentitySnapshot:
+        require_persist("add a person's face")
         if not self.enrollment_enabled or self.provider is None:
             return self._set_current(self._snapshot("disabled", error_code="enrollment_disabled"))
         person = self.people.get(person_id)
@@ -273,6 +276,7 @@ class IdentitySkill:
         return self._set_current(self._recognized(updated, self._current.score or 100.0))
 
     async def forget_person(self, person_id: str) -> None:
+        require_persist("forget a person")
         if not self.enrollment_enabled or self.provider is None:
             raise FaceProviderNotConfigured("enrollment_disabled", "人员删除功能未开启")
         if not person_id or self.people.get(person_id) is None:

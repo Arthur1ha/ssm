@@ -5,6 +5,7 @@ import time
 from typing import Optional
 
 from cloud.go2.paths import MEMORY_DIR
+from cloud.go2.execution import require_persist
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ def _load() -> dict:
 
 def _save(data: dict) -> None:
     """全量回写地点字典。"""
+    require_persist("modify spatial memory")
     SPATIAL_FILE.parent.mkdir(parents=True, exist_ok=True)
     SPATIAL_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -29,6 +31,7 @@ def _save(data: dict) -> None:
 
 def tag_location(name: str, odom: dict) -> str:
     """把当前位置保存为命名地点，同名覆盖。"""
+    require_persist("save a location")
     data = _load()
     data[name] = {
         "x":           odom["x"],
@@ -89,6 +92,7 @@ def list_locations() -> list[dict]:
 
 def delete_location(name: str) -> bool:
     """删除命名地点，存在则返回 True。"""
+    require_persist("delete a location")
     data = _load()
     if name in data:
         del data[name]

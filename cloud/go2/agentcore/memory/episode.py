@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, TypedDict
 
 from cloud.go2.paths import MEMORY_DIR
+from cloud.go2.execution import can_persist
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +102,12 @@ class EpisodeMemory:
             self._buffer.append(e)
         logger.info("[EpisodeMemory] 加载历史记录 %d 条", len(self._buffer))
 
-    def add(self, event_type: EventType, content: str) -> None:
+    def add(self, event_type: EventType, content: str) -> bool:
         """写入一条事件，同时追加到当天 JSONL 文件。"""
+        # Visitor dialogue is held by agent.py's per-session memory.  Do not
+        # even mix it into this process-global buffer, otherwise sessions leak.
+        if not can_persist():
+            return False
         entry: MemoryEntry = {
             "ts":         time.time(),
             "event_type": event_type.value,
@@ -113,6 +118,7 @@ class EpisodeMemory:
         with _day_file(today, self._dir).open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
         logger.debug("[EpisodeMemory] +%s %s", event_type.value, content)
+        return True
 
     def entries(self) -> list[MemoryEntry]:
         """返回内存缓冲中的最近事件列表。"""

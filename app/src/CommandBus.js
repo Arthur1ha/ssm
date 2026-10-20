@@ -1,15 +1,16 @@
 /* Device controls share result handling; transport acceptance is never completion. */
 const commandBus = {
-  async http(endpoint, body, method = 'POST') {
+  async command(unitId, action, params = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30000);
     try {
-      const response = await fetch(endpoint, {
-        method, headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body), signal: controller.signal,
+      const data = await apiClient.request(`/api/commands/${encodeURIComponent(unitId)}`, {
+        method: 'POST', body: { action, params }, signal: controller.signal,
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `请求失败 (${response.status})`);
+      if (data?.result && typeof data.result === 'object') return data.result;
+      if (data?.status === 'dispatched' || data?.accepted === true || data?.ok === true && !data?.result) {
+        return { ...data, result: 'accepted' };
+      }
       return data;
     } catch (error) {
       return { result: error.name === 'AbortError' ? 'timeout' : 'error', error: error.message };
@@ -17,37 +18,18 @@ const commandBus = {
   },
 
   mqtt(unitId, action, params) {
-    const task_id = 'ui_' + (globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(16).slice(2)}`);
-    const topic = `ssm/result/${unitId}/${task_id}`;
-    return new Promise(resolve => {
-      let finished = false;
-      const finish = result => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        mqttBus.removeEventListener('message', receive);
-        mqttBus.removeEventListener('disconnect', disconnected);
-        mqttBus.unsubscribe(topic);
-        resolve(result);
-      };
-      const receive = e => {
-        if (e.detail.topic !== topic || e.detail.msg?.task_id !== task_id) return;
-        if (['ok', 'blocked', 'error', 'cancelled', 'timeout'].includes(e.detail.msg.result)) finish(e.detail.msg);
-      };
-      const disconnected = () => finish({ result: 'error', error: '连接已断开，执行结果未知' });
-      const timer = setTimeout(() => finish({ result: 'timeout' }), 20000);
-      mqttBus.addEventListener('message', receive);
-      mqttBus.addEventListener('disconnect', disconnected);
-      mqttBus.subscribeReady(topic).then(() => {
-        if (!finished) mqttBus.publish(`ssm/task/${unitId}/${task_id}`, {
-          task_id, session_id: task_id, unit_id: unitId, agent_id: 'pwa',
-          action, params, ts: Math.floor(Date.now() / 1000),
-        });
-      }).catch(error => finish({ result: 'error', error: error.message }));
-    });
+    return this.command(unitId, action, params);
   },
 
   describe(result) {
+    if (result?.error) {
+      try {
+        const detail = JSON.parse(result.error);
+        return detail?.message || detail?.detail?.message || result.error;
+      } catch (_) {
+        return result.error;
+      }
+    }
     const messages = {
       ok: '执行完成', accepted: '指令已发送，尚未确认完成', executing: '正在执行',
       blocked: '当前状态或参数不允许执行', cancelled: '动作已被后续指令打断',
@@ -58,11 +40,11 @@ const commandBus = {
 
   // Serialize joystick writes, coalescing movement samples. A release always follows the in-flight sample.
   _velocities: new Map(),
-  velocity(endpoint, params, report) {
-    let entry = this._velocities.get(endpoint);
+  velocity(unitId, params, report) {
+    let entry = this._velocities.get(unitId);
     if (!entry) {
       entry = { next: null, running: false };
-      this._velocities.set(endpoint, entry);
+      this._velocities.set(unitId, entry);
     }
     entry.next = { params, report };
     if (entry.running) return;
@@ -72,7 +54,7 @@ const commandBus = {
         while (entry.next) {
           const item = entry.next;
           entry.next = null;
-          const result = await this.http(endpoint, item.params);
+          const result = await this.command(unitId, 'velocity', item.params);
           item.report(result);
         }
       } finally { entry.running = false; }

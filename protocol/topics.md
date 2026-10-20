@@ -49,8 +49,8 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/task/{unit_id}/{task_id}` | Cloud | `{"action":"SET_STATE","params":{"state":"..."},"session_id":"..."}` |
-| `ssm/result/{unit_id}/{task_id}` | ESP32 | `{"task_id":"...","result":"ok\|blocked","ism_state":"...","ts":...}` |
+| `ssm/task/{unit_id}/{task_id}` | Cloud | `{"action":"SET_STATE","params":{"state":"..."},"session_id":"...","actor":"admin\|visitor","persist":false,"space_id":"main"}`；不携带云端 service token，发布者由 broker ACL 限制为 API/编排器账号 |
+| `ssm/result/{unit_id}/{task_id}` | ESP32 | `{"task_id":"...","session_id":"...","result":"ok\|blocked","ism_state":"...","ts":...}`；旧固件可省略 `session_id`，编排器按已登记任务归属补齐 |
 
 > 注：ESP32 云端离线时由 `local_rules` 直接调用 `TriggerMap.exec_command` 执行兜底动作（设备内函数调用，不经 MQTT）。
 
@@ -58,7 +58,9 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/feedback/{session_id}` | Cloud | `{"stage":"planner\|dispatcher\|evaluator\|responder","text":"...","status":"ok"}` |
+| `ssm/intent/{session_id}` | FastAPI（内部） | `{"text":"...","context":{...},"_mqtt_auth":{"alg":"HMAC-SHA256","timestamp":...,"nonce":"...","signature":"..."}}`；签名绑定完整 topic 与规范化 payload，编排器校验时间窗并拒绝 nonce 重放 |
+| `ssm/session/{session_id}/ended` | FastAPI（内部） | `{"context":{...},"reason":"logout\|expired\|revoked","_mqtt_auth":{...}}`；与 intent 使用相同 HMAC 验证，触发会话历史、任务结果与 Go2 资源清理 |
+| `ssm/feedback/{session_id}` | Cloud | `{"session_id":"...","stage":"planning\|ack\|executing\|done\|partial\|failed\|denied","text":"...","status":"ok\|denied","ts":...}`；API/SSE 只向同一会话转发 |
 | `ssm/decision/active` | Cloud | `"true"` 或 `"false"` |
 | `ssm/rules/{device_id}` | Cloud（retained）| `[{"id":"...","en":true,"trig":{...},"act":{...}}]` |
 

@@ -31,6 +31,9 @@ from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
 from cloud.api.rules import router as rules_router
 from cloud.api.devices import router as devices_router
+from cloud.api.sessions import router as sessions_router
+from cloud.api import intents as intents_module
+from cloud.api.intents import router as intents_router
 from cloud.cards.registry import get_registry
 
 _esp32_state: ESP32State = ESP32State()
@@ -49,6 +52,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
             ("ssm/agents/+/event",  0),
             ("ssm/result/+/+",      0),
             ("ssm/task/+/+",        0),
+            ("ssm/feedback/+",      0),
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
@@ -68,6 +72,7 @@ def _on_esp32_message(client, userdata, msg):
 
     # CardRegistry 处理 card 和 manifest topic（更新设备注册表）
     get_registry().handle_message(topic, raw)
+    intents_module.handle_mqtt_message(topic, raw)
 
     parts = topic.split("/")
     if len(parts) == 4 and parts[0] == "ssm" and parts[1] == "agents":
@@ -147,13 +152,14 @@ async def lifespan(app):
 
     _esp32_mqtt_client = _mqtt_lib.Client(client_id="esp32_agent", clean_session=True)
     _esp32_mqtt_client.username_pw_set(
-        os.getenv("MQTT_USER", "ssm_user"),
-        os.getenv("MQTT_PASSWORD", "Wl4sErQrlrpEbm7r"),
+        os.getenv("MQTT_API_USER") or os.getenv("MQTT_USER", ""),
+        os.getenv("MQTT_API_PASSWORD") or os.getenv("MQTT_PASSWORD", ""),
     )
     _esp32_mqtt_client.on_connect = _on_esp32_connect
     _esp32_mqtt_client.on_message = _on_esp32_message
     _esp32_mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)
     go2_router_module.init_mqtt(_esp32_mqtt_client)
+    intents_module.init_mqtt(_esp32_mqtt_client)
 
     # LWT：api 进程意外崩溃时把 Go2 标记离线（能力卡 retained 保留，靠 online=false 表达失活，
     # 与 ESP32 的 status/LWT 模型一致）。paho 单客户端仅一个 will，故选 status 离线。
@@ -174,6 +180,7 @@ async def lifespan(app):
 
     _esp32_mqtt_client.loop_stop()
     _esp32_mqtt_client.disconnect()
+    intents_module.init_mqtt(None)
     logger.info("[ESP32Agent MQTT] Disconnected")
 
 
@@ -182,4 +189,25 @@ app.include_router(go2_router)
 app.include_router(esp32_router)
 app.include_router(rules_router)
 app.include_router(devices_router)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(sessions_router)
+app.include_router(intents_router)
+
+_allowed_origins = [
+    origin.strip() for origin in os.getenv("SSM_ALLOWED_ORIGINS", "").split(",") if origin.strip()
+]
+if _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Content-Type", "X-CSRF-Token"],
+    )
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response

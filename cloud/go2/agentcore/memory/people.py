@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from cloud.go2.paths import PEOPLE_FILE
+from cloud.go2.execution import require_persist
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class PeopleMemory:
             raise
 
     def _write_unlocked(self, people: dict[str, KnownPerson]) -> None:
+        require_persist("modify people memory")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         payload = {"version": 1, "people": {key: asdict(value) for key, value in sorted(people.items())}}
@@ -88,6 +90,7 @@ class PeopleMemory:
             return tuple(self._read_unlocked().values())
 
     def upsert(self, person: KnownPerson) -> KnownPerson:
+        require_persist("remember a person")
         self._validate(person)
         with self._lock:
             people = self._read_unlocked()
@@ -107,6 +110,7 @@ class PeopleMemory:
             return normalized
 
     def increment_face_count(self, person_id: str) -> KnownPerson:
+        require_persist("add a person's face")
         with self._lock:
             people = self._read_unlocked()
             person = people.get(person_id)
@@ -120,6 +124,7 @@ class PeopleMemory:
             return person
 
     def remove(self, person_id: str) -> bool:
+        require_persist("forget a person")
         with self._lock:
             people = self._read_unlocked()
             if person_id not in people:

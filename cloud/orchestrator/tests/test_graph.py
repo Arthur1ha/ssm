@@ -360,7 +360,63 @@ def test_dispatcher_http_uses_thread_pool(monkeypatch):
     # navigation tag → 30s 超时
     assert timeout == 30
     # http 结果直接进 task_results
-    assert out["task_results"]["sess_t0"] == {"result": "ok", "message": "已到达"}
+    assert out["task_results"]["sess_t0"] == {
+        "result": "ok", "message": "已到达",
+        "session_id": "sess", "task_id": "sess_t0",
+    }
+
+
+def test_visitor_define_rule_is_denied_before_rule_builder(monkeypatch):
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([LED_CARD]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+    state = _planner_state("visitor-rule", "以后变暗就开灯")
+    state.update({"actor": "visitor", "persist": False, "space_id": "main"})
+    node = graph_mod._make_planner_node(_stub_llm(
+        '{"route":"define_rule","rule":{"name":"变暗开灯"}}'
+    ))
+
+    out = node(state)
+    assert out["route"] == "chat"
+    assert out["rule"] == {}
+    assert "不能" in out["response_text"]
+
+
+def test_dispatcher_blocks_visitor_persistent_skill(monkeypatch):
+    card = {
+        **GO2_CARD,
+        "skills": [{
+            "id": "save_location", "name": "保存地点", "tags": ["navigation"],
+            "params_schema": {"type": "object"}, "invoke": {"action": "SAVE_LOCATION"},
+        }],
+    }
+    monkeypatch.setattr(_t, "_registry", FakeRegistry([card]))
+    monkeypatch.setattr(_t, "do_publish_feedback", MagicMock())
+    http = MagicMock(return_value={"result": "ok"})
+    monkeypatch.setattr(_t, "do_http_dispatch", http)
+    state = {
+        "session_id": "visitor-save", "actor": "visitor", "persist": False,
+        "space_id": "main", "planned_tasks": [{
+            "unit_id": "go2", "skill_id": "save_location",
+            "task_id": "visitor-save_t0", "params": {"name": "客厅"},
+        }],
+        "task_results": {}, "early_exit": False,
+    }
+
+    out = graph_mod._make_dispatcher_node()(state)
+    http.assert_not_called()
+    assert out["task_results"]["visitor-save_t0"]["error"] == "permission_denied"
+
+
+def test_conversation_history_isolated_and_clearable():
+    graph_mod._conversation_history.clear()
+    graph_mod._append_history("ses-a", "A asks", "A answer")
+    graph_mod._append_history("ses-b", "B asks", "B answer")
+
+    assert graph_mod._conversation_history["ses-a"][0]["user"] == "A asks"
+    assert graph_mod._conversation_history["ses-b"][0]["user"] == "B asks"
+    graph_mod.clear_session_context("ses-a")
+    assert "ses-a" not in graph_mod._conversation_history
+    assert "ses-b" in graph_mod._conversation_history
 
 
 def test_dispatcher_http_timeout_recorded(monkeypatch):

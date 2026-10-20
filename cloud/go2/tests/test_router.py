@@ -2,39 +2,55 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
+import httpx
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from cloud.go2.router import router
 from cloud.go2 import connection as conn_module
 
 
-@pytest.fixture
-def client():
+@pytest_asyncio.fixture
+async def client(monkeypatch):
+    monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "test-service-token")
     app = FastAPI()
     app.include_router(router)
-    return TestClient(app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={
+            "X-SSM-Service-Token": "test-service-token",
+            "X-SSM-Session-Id": "test-admin",
+            "X-SSM-Actor": "admin",
+            "X-SSM-Persist": "true",
+            "X-SSM-Space-Id": "main",
+        },
+    ) as value:
+        yield value
 
 
-def test_status_disconnected(client):
-    r = client.get("/api/go2/connection")
+@pytest.mark.asyncio
+async def test_status_disconnected(client):
+    r = await client.get("/api/go2/connection")
     assert r.status_code == 200
     data = r.json()
     assert data["connected"] is False
     assert "state" in data
 
 
-def test_command_503_when_not_connected(client):
-    r = client.post("/api/go2/commands", json={"cmd": "StandUp", "params": {}})
+@pytest.mark.asyncio
+async def test_command_503_when_not_connected(client):
+    r = await client.post("/api/go2/commands", json={"cmd": "StandUp", "params": {}})
     assert r.status_code == 503
 
 
-def test_command_400_for_unknown_cmd(client):
+@pytest.mark.asyncio
+async def test_command_400_for_unknown_cmd(client):
     conn_module.go2.is_connected = True
     conn_module.go2._conn = object()  # fake — ValueError raised before _conn is used
     try:
-        r = client.post("/api/go2/commands", json={"cmd": "FlyToMoon", "params": {}})
+        r = await client.post("/api/go2/commands", json={"cmd": "FlyToMoon", "params": {}})
         assert r.status_code == 400
         assert "Unknown command" in r.json()["detail"]
     finally:
@@ -42,42 +58,48 @@ def test_command_400_for_unknown_cmd(client):
         conn_module.go2._conn = None
 
 
-def test_video_503_when_not_connected(client):
-    r = client.get("/api/go2/video")
+@pytest.mark.asyncio
+async def test_video_503_when_not_connected(client):
+    r = await client.get("/api/go2/video")
     assert r.status_code == 503
 
 
-def test_connect_500_when_env_missing(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_connect_500_when_env_missing(client, monkeypatch):
     monkeypatch.delenv("GO2_EMAIL", raising=False)
     monkeypatch.delenv("GO2_PASSWORD", raising=False)
     monkeypatch.delenv("GO2_SERIAL", raising=False)
-    r = client.post("/api/go2/connection")
+    r = await client.post("/api/go2/connection")
     assert r.status_code == 500
     assert "未配置" in r.json()["detail"]
 
 
-def test_tag_location_503_when_not_connected(client):
-    r = client.post("/api/go2/navigation/locations", json={"name": "门口"})
+@pytest.mark.asyncio
+async def test_tag_location_503_when_not_connected(client):
+    r = await client.post("/api/go2/navigation/locations", json={"name": "门口"})
     assert r.status_code == 503
 
 
-def test_list_locations_returns_list(client):
-    r = client.get("/api/go2/navigation/locations")
+@pytest.mark.asyncio
+async def test_list_locations_returns_list(client):
+    r = await client.get("/api/go2/navigation/locations")
     assert r.status_code == 200
     assert isinstance(r.json(), list)
 
 
-def test_nav_state_returns_mode(client):
-    r = client.get("/api/go2/navigation/state")
+@pytest.mark.asyncio
+async def test_nav_state_returns_mode(client):
+    r = await client.get("/api/go2/navigation/state")
     assert r.status_code == 200
     assert "mode" in r.json()
 
 
-def test_led_400_unknown_color(client):
+@pytest.mark.asyncio
+async def test_led_400_unknown_color(client):
     import cloud.go2.connection as conn_module
     conn_module.go2.is_connected = True
     try:
-        r = client.put("/api/go2/led", json={"color": "pink", "duration": 30})
+        r = await client.put("/api/go2/led", json={"color": "pink", "duration": 30})
         assert r.status_code == 400
     finally:
         conn_module.go2.is_connected = False

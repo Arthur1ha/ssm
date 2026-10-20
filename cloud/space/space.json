@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "main",
+  "name": "SSM 体验空间",
+  "device_ids": [
+    "esp32_desk",
+    "go2"
+  ],
+  "invite": {
+    "enabled": false,
+    "token_hash": "",
+    "version": 0,
+    "updated_at": 0
+  },
+  "updated_at": 1792396800
+}

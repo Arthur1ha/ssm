@@ -49,6 +49,7 @@ class Navigator:
         self._task: Optional[asyncio.Task] = None
         self.current_path: list[tuple[int, int]] | None = None
         self.current_grid_obj = None
+        self.owner_session_id: str | None = None
 
     @property
     def state(self) -> dict:
@@ -57,11 +58,12 @@ class Navigator:
             "target":       self.target,
             "patrol_stops": self.patrol_stops,
             "odom":         go2.odom,
+            "owner_session_id": self.owner_session_id,
         }
 
     # ── 公开接口 ──────────────────────────────────────────────────────────
 
-    async def go_to(self, name: str) -> str:
+    async def go_to(self, name: str, owner_session_id: str = "system") -> str:
         """导航到空间记忆中的指定地点，有地图走 A*，否则降级直线。"""
         loc = await spatial_memory.find_location(name)
         if loc is None:
@@ -70,6 +72,7 @@ class Navigator:
         self.mode   = NavMode.GOING_TO
         self.target = name
         self._task  = asyncio.current_task()
+        self.owner_session_id = owner_session_id
         odom = go2.odom
         logger.info(
             "[Go2/Nav] 开始导航 → 「%s」(%.2f, %.2f)  当前位置=(%.2f, %.2f)",
@@ -101,25 +104,33 @@ class Navigator:
             self.target           = None
             self.current_path     = None
             self.current_grid_obj = None
+            if self._task is asyncio.current_task():
+                self._task = None
+                self.owner_session_id = None
 
-    async def start_patrol(self, stops: list[str]) -> None:
+    async def start_patrol(self, stops: list[str], owner_session_id: str = "system") -> None:
         """启动巡逻任务，按顺序循环访问多个地点。"""
         self.stop()
         self.patrol_stops = stops
         self.mode = NavMode.PATROLLING
         self._task = asyncio.create_task(self._patrol_loop(stops))
+        self.owner_session_id = owner_session_id
 
-    def stop(self) -> None:
+    def stop(self, owner_session_id: str | None = None) -> bool:
         """立即取消当前导航/巡逻任务并停止机器人。"""
+        if owner_session_id is not None and self.owner_session_id != owner_session_id:
+            return False
         if self._task and not self._task.done():
             self._task.cancel()
         self.mode         = NavMode.IDLE
         self.target       = None
         self.patrol_stops = []
+        self.owner_session_id = None
         try:
             go2.move_velocity(0, 0, 0)
         except RuntimeError:
             pass
+        return True
 
     # ── 直线导航（无地图降级）────────────────────────────────────────────
 

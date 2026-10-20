@@ -50,6 +50,9 @@ def _make_fastapi_stub():
 
     fastapi.APIRouter = APIRouter
     fastapi.HTTPException = HTTPException
+    fastapi.Depends = lambda dependency=None: dependency
+    fastapi.Header = lambda default=None, **kwargs: default
+    fastapi.Request = object
     responses.Response = object
     responses.StreamingResponse = object
     return fastapi, responses

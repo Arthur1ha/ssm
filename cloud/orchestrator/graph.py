@@ -50,8 +50,19 @@ LLM_UNAVAILABLE_REPLY = (
 
 
 # ── 对话历史 ─────────────────────────────────────────────────────
-_conversation_history: list = []
+_conversation_history: dict[str, list] = {}
 _MAX_HISTORY = 10
+
+# Explicit card metadata is preferred.  The id/action list is a defensive
+# fallback for older cards which do not yet advertise ``persistent: true``.
+_PERSISTENT_SKILL_MARKERS = (
+    "define_rule", "create_rule", "update_rule", "delete_rule",
+    "save_location", "tag_location", "delete_location", "set_home",
+    "personality", "soul", "training", "train_", "tune_",
+    "write_memory", "save_memory", "add_episode", "daily_summary",
+    "enroll_face", "create_person", "update_person", "delete_person",
+    "list_people",
+)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -73,11 +84,28 @@ def _format_env_state(sensors: dict, actuators: dict) -> str:
     return "\n".join(lines) if lines else "暂无环境数据"
 
 
-def _append_history(user_msg: str, response: str):
-    """追加一轮对话记录，超出 _MAX_HISTORY 时移除最旧一条。"""
-    _conversation_history.append({"user": user_msg, "assistant": response})
-    while len(_conversation_history) > _MAX_HISTORY:
-        _conversation_history.pop(0)
+def _append_history(session_id: str, user_msg: str, response: str):
+    """Append to one session only; histories are never shared globally."""
+    history = _conversation_history.setdefault(session_id, [])
+    history.append({"user": user_msg, "assistant": response})
+    while len(history) > _MAX_HISTORY:
+        history.pop(0)
+
+
+def clear_session_context(session_id: str) -> None:
+    """Forget the graph's ephemeral conversation state for one session."""
+    _conversation_history.pop(session_id, None)
+
+
+def _skill_requires_persistence(skill: dict) -> bool:
+    if skill.get("persistent") is True or skill.get("access") == "admin":
+        return True
+    tags = set(skill.get("tags", []))
+    if tags.intersection({"persistent", "admin", "write", "configuration"}):
+        return True
+    invoke = skill.get("invoke", {})
+    value = " ".join((str(skill.get("id", "")), str(invoke.get("action", "")))).lower()
+    return any(marker in value for marker in _PERSISTENT_SKILL_MARKERS)
 
 
 def _make_llm():
@@ -122,7 +150,11 @@ class OrchestratorState(TypedDict):
     """
 
     session_id:    str
+    actor:         str    # "admin" / "visitor"，来自已验证服务端上下文
+    persist:       bool   # 是否允许产生长期写入
     space_id:      str
+    issued_at:     float
+    expires_at:    float | None
     user_msg:      str
     requirements:  list   # NLU 结果，可选，默认 []
     route:         str    # "act" / "chat" / "define_rule" / "discover_devices"，由 Planner 分类，默认 ""
@@ -136,7 +168,8 @@ class OrchestratorState(TypedDict):
 # ── prompt 构建 ──────────────────────────────────────────────────
 
 def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
-                        env_state: str = "", history: list = None) -> str:
+                        env_state: str = "", history: list = None,
+                        actor: str = "admin", persist: bool = True) -> str:
     """把在线 card skills、环境状态、对话历史注入 prompt，一次 LLM 完成分类 + 规划。
 
     Planner 输出带 route 字段的 JSON：act / chat / define_rule / discover_devices。
@@ -170,6 +203,8 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"{history_str}"
         f"{env_str}"
         f"用户原话：{user_msg}\n"
+        f"当前会话角色：{actor}；允许长期写入：{'是' if persist else '否'}。"
+        f"不允许长期写入时，不得规划规则、地点/Home、人格、训练、长期记忆或人脸身份库变更。\n"
         f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
         f"已接入可调用智能体（未接入设备不在此列表中，不能用于 act 任务）：\n{agents_str}\n\n"
         f"分类规则：\n"
@@ -302,7 +337,7 @@ def _make_planner_node(llm):
                 devices=candidates,
             )
             logger.info("[Planner] route=discover_devices(pre_llm) | candidates=%d", len(candidates))
-            _append_history(state["user_msg"], text)
+            _append_history(session_id, state["user_msg"], text)
             return {**state, "route": "discover_devices", "planned_tasks": [],
                     "response_text": text, "early_exit": True}
 
@@ -311,7 +346,10 @@ def _make_planner_node(llm):
         env_state = _format_env_state(sensors, actuators)
         prompt = _build_card_prompt(
             cards, state["user_msg"], state.get("requirements", []),
-            env_state=env_state, history=list(_conversation_history),
+            env_state=env_state,
+            history=list(_conversation_history.get(session_id, [])),
+            actor=state.get("actor", "admin"),
+            persist=state.get("persist", True),
         )
 
         try:
@@ -363,7 +401,7 @@ def _make_planner_node(llm):
                 devices=candidates,
             )
             logger.info("[Planner] route=discover_devices | candidates=%d", len(candidates))
-            _append_history(state["user_msg"], text)
+            _append_history(session_id, state["user_msg"], text)
             return {**state, "route": "discover_devices", "planned_tasks": [],
                     "response_text": text, "early_exit": True}
 
@@ -376,6 +414,11 @@ def _make_planner_node(llm):
 
         # ── define_rule：把规则交给 RuleBuilderNode ──
         if route == "define_rule":
+            if not state.get("persist", True):
+                answer = "临时体验可以使用已有能力，但不能创建或修改长期规则。"
+                logger.warning("[Planner] visitor session=%s attempted define_rule", session_id)
+                return {**state, "route": "chat", "response_text": answer,
+                        "planned_tasks": [], "rule": {}, "early_exit": False}
             rule = out.get("rule", {}) or {}
             logger.info("[Planner] route=define_rule | 规则名: %s", rule.get("name", ""))
             return {**state, "route": "define_rule", "rule": rule,
@@ -448,7 +491,7 @@ def _make_chat_node(llm):
         answer = state.get("response_text", "") or "抱歉，我没太理解你的意思。"
         _t.do_publish_feedback(session_id, "done", answer)
         logger.info("[Chat] → %s", answer)
-        _append_history(state["user_msg"], answer)
+        _append_history(session_id, state["user_msg"], answer)
         return state
 
     return chat_node
@@ -459,6 +502,11 @@ def _make_rule_builder_node():
 
     def rule_builder_node(state: OrchestratorState) -> OrchestratorState:
         session_id = state["session_id"]
+        if not state.get("persist", True):
+            text = "临时体验不能创建或修改长期规则。"
+            _t.do_publish_feedback(session_id, "denied", text, status="denied")
+            logger.warning("[RuleBuilder] denied session=%s actor=%s", session_id, state.get("actor"))
+            return {**state, "response_text": text, "early_exit": True}
         rule = state.get("rule", {}) or {}
         # 管家口吻的规则确认语（静态文案，不调 LLM，保持轻快温暖）。
         _t.do_publish_feedback(
@@ -510,20 +558,41 @@ def _make_dispatcher_node():
             card = _t._registry.get_card(unit_id) if _t._registry else None
             if not card:
                 results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
+                                            "session_id": session_id,
                                             "error": "card_not_found"}
                 continue
 
             skill = next((s for s in card.get("skills", []) if s.get("id") == task["skill_id"]), None)
             if not skill:
                 results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
+                                            "session_id": session_id,
                                             "error": "skill_not_found"}
+                continue
+
+            if not state.get("persist", True) and _skill_requires_persistence(skill):
+                results[task["task_id"]] = {
+                    "result": "blocked",
+                    "task_id": task["task_id"],
+                    "session_id": session_id,
+                    "error": "permission_denied",
+                    "response": "临时体验不能修改长期资产。",
+                }
+                logger.warning("[Dispatcher] denied persistent skill session=%s skill=%s",
+                               session_id, task["skill_id"])
                 continue
 
             kind = card.get("transport", {}).get("kind")
 
             if kind == "mqtt":
                 action = skill.get("invoke", {}).get("action", "")
-                _t.do_publish_task(unit_id, task["task_id"], action, task["params"], session_id)
+                _t.do_publish_task(
+                    unit_id, task["task_id"], action, task["params"], session_id,
+                    context={
+                        "actor": state.get("actor", "admin"),
+                        "persist": state.get("persist", True),
+                        "space_id": state.get("space_id", DEFAULT_SPACE_ID),
+                    },
+                )
                 logger.info("[Dispatcher] ➤ mqtt  %s  %s  params=%s  task_id=%s",
                             unit_id, action,
                             json.dumps(task["params"], ensure_ascii=False), task["task_id"])
@@ -539,6 +608,9 @@ def _make_dispatcher_node():
                                + json.dumps(task["params"], ensure_ascii=False)))
                 body = {
                     "session_id": session_id,
+                    "actor":     state.get("actor", "admin"),
+                    "persist":   state.get("persist", True),
+                    "space_id":  state.get("space_id", DEFAULT_SPACE_ID),
                     "message":    message,
                     "skill_id":   task["skill_id"],
                     "params":     task["params"],
@@ -554,6 +626,7 @@ def _make_dispatcher_node():
 
             else:
                 results[task["task_id"]] = {"result": "error", "task_id": task["task_id"],
+                                            "session_id": session_id,
                                             "error": f"unknown_transport:{kind}"}
 
         # 统一收口：最大超时 = 所有 http task 中最大超时（+1s 余量）
@@ -562,13 +635,16 @@ def _make_dispatcher_node():
             wait([f for _, f, _ in http_jobs], timeout=max_timeout)
             for task_id, fut, _ in http_jobs:
                 try:
-                    results[task_id] = fut.result(timeout=0)
+                    result = fut.result(timeout=0)
+                    results[task_id] = {**result, "session_id": session_id, "task_id": task_id}
                 except concurrent.futures.TimeoutError:
                     logger.warning("[Dispatcher] http task %s timed out", task_id)
-                    results[task_id] = {"result": "timeout", "task_id": task_id}
+                    results[task_id] = {"result": "timeout", "task_id": task_id,
+                                        "session_id": session_id}
                 except Exception as e:
                     logger.warning("[Dispatcher] http task %s error: %s", task_id, e)
-                    results[task_id] = {"result": "error", "task_id": task_id}
+                    results[task_id] = {"result": "error", "task_id": task_id,
+                                        "session_id": session_id}
             executor.shutdown(wait=False)
 
         return {**state, "task_results": results}
@@ -608,7 +684,10 @@ def _make_evaluator_node():
             while _time.monotonic() < deadline:
                 for tid in pending:
                     if tid not in results:
-                        r = _t._state.get_task_result(tid)
+                        if state.get("session_id"):
+                            r = _t._state.get_task_result(tid, state["session_id"])
+                        else:
+                            r = _t._state.get_task_result(tid)
                         if r and r.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
                             results[tid] = r
                 if all(tid in results for tid in pending):
@@ -619,7 +698,8 @@ def _make_evaluator_node():
         for task in tasks:
             tid = task["task_id"]
             if tid not in results:
-                results[tid] = {"result": "timeout", "task_id": tid}
+                results[tid] = {"result": "timeout", "task_id": tid,
+                                "session_id": state.get("session_id")}
 
         for task in tasks:
             tid = task["task_id"]
@@ -644,13 +724,26 @@ def _make_responder_node(llm):
         if not results:
             return state
 
+        permission_reply = next(
+            (r.get("response") for r in results.values()
+             if r.get("error") == "permission_denied" and r.get("response")),
+            "",
+        )
+        if permission_reply:
+            _t.do_publish_feedback(
+                session_id, "denied", permission_reply,
+                status="denied", task_results=results,
+            )
+            _append_history(session_id, state["user_msg"], permission_reply)
+            return {**state, "response_text": permission_reply}
+
         statuses = [r.get("result", "timeout") for r in results.values()]
         if any(s in ("accepted", "executing") for s in statuses):
             text = "部分指令已发出，但尚未确认全部完成。请查看设备当前状态。"
             if any(s in ("error", "blocked", "timeout", "cancelled") for s in statuses):
                 text += "其中有指令失败、被拒绝或中断。"
             _t.do_publish_feedback(session_id, "partial", text, task_results=results)
-            _append_history(state["user_msg"], text)
+            _append_history(session_id, state["user_msg"], text)
             return {**state, "response_text": text}
         ok_count = statuses.count("ok")
         stage = "done" if ok_count == len(results) else ("partial" if ok_count > 0 else "failed")
@@ -666,7 +759,7 @@ def _make_responder_node(llm):
         if stage == "failed" and llm_error_reply:
             _t.do_publish_feedback(session_id, stage, llm_error_reply)
             logger.info("[Responder] stage=%s | %s", stage, llm_error_reply)
-            _append_history(state["user_msg"], llm_error_reply)
+            _append_history(session_id, state["user_msg"], llm_error_reply)
             return {**state, "response_text": llm_error_reply}
 
         fallbacks = {"done": "好的，指令已全部执行！", "partial": "部分指令已执行。",
@@ -698,7 +791,7 @@ def _make_responder_node(llm):
 
         _t.do_publish_feedback(session_id, stage, text)
         logger.info("[Responder] stage=%s | %s", stage, text)
-        _append_history(state["user_msg"], text)
+        _append_history(session_id, state["user_msg"], text)
         return {**state, "response_text": text}
 
     return responder_node

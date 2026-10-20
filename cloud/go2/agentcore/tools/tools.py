@@ -11,6 +11,8 @@ from langchain_openai import ChatOpenAI
 
 from cloud.go2.connection import go2
 from cloud.go2.paths import RULES_FILE
+from cloud.go2.control import control_lease
+from cloud.go2.execution import current_context, require_admin, require_persist
 
 # ── 规则存储 ──────────────────────────────────────────────────────
 
@@ -22,6 +24,7 @@ def load_rules() -> list:
 
 
 def save_rules(rules: list) -> None:
+    require_persist("modify trained rules")
     RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
     RULES_FILE.write_text(
         json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -144,6 +147,8 @@ async def go2_sport(cmd: str) -> str:
     canonical = _normalize_sport_action(cmd)
     if canonical is None:
         return f"未知动作 {cmd}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
+    if canonical != "StopMove":
+        control_lease.acquire(current_context())
     result = await go2.send_command(canonical)
     if not isinstance(result, dict):
         return f"已执行 {canonical}"
@@ -162,6 +167,7 @@ async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) ->
         return f"未知方向 {direction}，支持: {', '.join(_DIRECTION_MAP)}"
     if not math.isfinite(duration) or not 0 < duration <= 10:
         raise ValueError("duration must be in (0, 10] seconds")
+    control_lease.acquire(current_context())
     params = _DIRECTION_MAP[direction](speed)
     await go2.send_command("Move", params)
     try:
@@ -204,6 +210,7 @@ def go2_status() -> str:
 def go2_add_rule(trigger: str, action: str, cooldown_s: int = 30,
                  behavior: str = "") -> str:
     """添加视觉触发调教：检测到 trigger 时执行 action（go2_sport 的 cmd 取值）。"""
+    require_persist("add a trained rule")
     canonical = _normalize_sport_action(action)
     if canonical is None:
         return f"不支持的动作 {action}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
@@ -240,6 +247,7 @@ def go2_list_rules() -> str:
 # ── 导航工具 ─────────────────────────────────────────────────────
 
 async def go2_tag_location(name: str) -> str:
+    require_persist("save a location")
     if not go2.is_connected:
         return "Go2 未连接"
     odom = go2.odom
@@ -252,9 +260,13 @@ async def go2_tag_location(name: str) -> str:
 async def go2_navigate_to(name: str) -> str:
     if not go2.is_connected:
         raise RuntimeError("Go2 未连接")
+    context = current_context()
+    control_lease.acquire(context)
     from cloud.go2.navigation.navigator import navigator
     try:
-        result = await asyncio.wait_for(navigator.go_to(name), timeout=25.0)
+        result = await asyncio.wait_for(
+            navigator.go_to(name, owner_session_id=context.session_id), timeout=25.0
+        )
         return {"result": "ok" if result.startswith("已到达") else "error", "message": result}
     except asyncio.TimeoutError:
         return {"result": "timeout", "error": "navigation_timeout"}
@@ -280,12 +292,14 @@ async def go2_set_led(color: str = "white", duration: int = 60) -> str:
 # ── 身份工具 ──────────────────────────────────────────────────────
 
 async def go2_remember_person(name: str, role: str) -> dict:
+    require_persist("remember a person")
     from cloud.go2.agentcore.skills.identity import identity_skill
     snapshot = await identity_skill.remember_person(name, role)
     return _identity_result(snapshot)
 
 
 async def go2_add_person_face(person_id: str = "") -> dict:
+    require_persist("add a person's face")
     from cloud.go2.agentcore.skills.identity import identity_skill
     if not person_id and identity_skill.current.status == "recognized":
         person_id = identity_skill.current.person_id
@@ -305,6 +319,7 @@ async def go2_recognize_person() -> dict:
 
 
 def go2_list_people() -> dict:
+    require_admin("read known people")
     from cloud.go2.agentcore.skills.identity import identity_skill
     people = [
         {"person_id": p.person_id, "name": p.name, "role": p.role, "face_count": p.face_count}
@@ -314,6 +329,7 @@ def go2_list_people() -> dict:
 
 
 async def go2_forget_person(person_id: str) -> dict:
+    require_persist("forget a person")
     from cloud.go2.agentcore.identity.provider import FaceProviderError
     from cloud.go2.agentcore.skills.identity import identity_skill
     try:

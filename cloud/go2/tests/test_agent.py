@@ -250,43 +250,58 @@ def test_run_agent_executes_sport_command(monkeypatch):
 # ── /api/go2/chat 路由测试 ────────────────────────────────────────
 
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import httpx
+import pytest_asyncio
 from cloud.go2.router import router as go2_router
 
 
-@pytest.fixture
-def chat_client():
+@pytest_asyncio.fixture
+async def chat_client(monkeypatch):
+    monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "test-service-token")
     app = FastAPI()
     app.include_router(go2_router)
-    return TestClient(app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={
+            "X-SSM-Service-Token": "test-service-token",
+            "X-SSM-Session-Id": "test-admin",
+            "X-SSM-Actor": "admin",
+            "X-SSM-Persist": "true",
+        },
+    ) as value:
+        yield value
 
 
-def test_chat_returns_response(chat_client, monkeypatch):
+@pytest.mark.asyncio
+async def test_chat_returns_response(chat_client, monkeypatch):
     import cloud.go2.agent as agent_mod
-    async def fake_run_agent(session_id, message, skill_id=None, params=None):
+    async def fake_run_agent(session_id, message, skill_id=None, params=None, context=None):
         return {"response": "好的，已站起来", "actions_taken": ["go2_sport"]}
     monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)
-    r = chat_client.post("/api/go2/chat", json={"session_id": "test", "message": "站起来"})
+    r = await chat_client.post("/api/go2/chat", json={"session_id": "test", "message": "站起来"})
     assert r.status_code == 200
     data = r.json()
     assert data["response"] == "好的，已站起来"
     assert data["actions_taken"] == ["go2_sport"]
 
 
-def test_chat_missing_message_returns_422(chat_client):
-    r = chat_client.post("/api/go2/chat", json={"session_id": "test"})
+@pytest.mark.asyncio
+async def test_chat_missing_message_returns_422(chat_client):
+    r = await chat_client.post("/api/go2/chat", json={"session_id": "test"})
     assert r.status_code == 422
 
 
-def test_chat_default_session_id(chat_client, monkeypatch):
+@pytest.mark.asyncio
+async def test_chat_default_session_id(chat_client, monkeypatch):
     import cloud.go2.agent as agent_mod
     received = {}
-    async def fake_run_agent(session_id, message, skill_id=None, params=None):
+    async def fake_run_agent(session_id, message, skill_id=None, params=None, context=None):
         received["session_id"] = session_id
         return {"response": "ok", "actions_taken": []}
     monkeypatch.setattr(agent_mod, "run_agent", fake_run_agent)
-    chat_client.post("/api/go2/chat", json={"message": "你好"})
-    assert received["session_id"] == "default"
+    await chat_client.post("/api/go2/chat", json={"message": "你好"})
+    assert received["session_id"] == "test-admin"
 
 
 def test_new_tools_in_fn_map():
@@ -309,6 +324,62 @@ def test_structured_identity_skill_routes_without_llm():
     }
     planned = asyncio.run(agent_mod.planner_node(state))
     assert planned["planned_tools"] == [{"tool": "go2_recognize_person", "params": {}}]
+
+
+def test_visitor_planner_denies_people_list_but_allows_current_recognition(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    from cloud.api import policy
+
+    audited = []
+    monkeypatch.setattr(
+        policy, "audit_event",
+        lambda event, session=None, **fields: audited.append((event, session, fields)),
+    )
+
+    base = {
+        "session_id": "visitor-face", "user_msg": "列出所有认识的人",
+        "skill_id": "go2_list_people", "params": {},
+        "memory_context": "", "planned_tools": [], "tool_results": [],
+        "response_text": "", "early_exit": False, "llm_available": True,
+        "error": "", "actor": "visitor", "persist": False,
+    }
+    denied = asyncio.run(agent_mod.planner_node(base))
+    assert denied["planned_tools"] == []
+    assert denied["error"] == "admin_only_tool_denied"
+    assert "访客会话不能访问" in denied["response_text"]
+    assert audited == [(
+        "go2_natural_language_permission_denied",
+        {"session_id": "visitor-face", "actor": "visitor"},
+        {"tool": "go2_list_people", "reason": "admin_only_tool_denied"},
+    )]
+
+    allowed = asyncio.run(agent_mod.planner_node({
+        **base, "skill_id": "go2_recognize_person", "user_msg": "面前是谁",
+    }))
+    assert allowed["planned_tools"] == [
+        {"tool": "go2_recognize_person", "params": {}}
+    ]
+
+
+def test_visitor_executor_denies_forged_people_list(monkeypatch):
+    import cloud.go2.agent as agent_mod
+    from cloud.api import policy
+
+    called = []
+    monkeypatch.setattr(policy, "audit_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setitem(agent_mod.TOOL_FN_MAP, "go2_list_people", lambda: called.append(True))
+    state = {
+        "session_id": "visitor-face", "user_msg": "列出所有认识的人",
+        "skill_id": "", "params": {}, "memory_context": "",
+        "planned_tools": [{"tool": "go2_list_people", "params": {}}],
+        "tool_results": [], "response_text": "", "early_exit": False,
+        "llm_available": True, "error": "", "actor": "visitor", "persist": False,
+    }
+    result = asyncio.run(agent_mod.executor_node(state))
+    assert called == []
+    assert result["tool_results"][0]["result"] == {
+        "result": "rejected", "error": "admin_only_tool_denied",
+    }
 
 
 def test_cached_identity_answers_without_cloud_call(monkeypatch):
@@ -428,7 +499,7 @@ async def _drain_tasks():
 def test_on_vision_frame_triggers_on_face_change(monkeypatch):
     """人数不变、只有人脸出现时，也应触发自主推理。"""
     from cloud.go2.agentcore.skills import reactive as rm_mod
-    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: [])   # 隔离规则层
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs, **kwargs: [])   # 隔离规则层
     mind = rm_mod.ReactiveMind()
 
     called = []
@@ -448,7 +519,7 @@ def test_on_vision_frame_triggers_on_face_change(monkeypatch):
 def test_on_vision_frame_triggers_on_person_change(monkeypatch):
     """人数跨帧变化仍应触发（保持原有行为）。"""
     from cloud.go2.agentcore.skills import reactive as rm_mod
-    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: [])   # 隔离规则层
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs, **kwargs: [])   # 隔离规则层
     mind = rm_mod.ReactiveMind()
 
     called = []
@@ -468,7 +539,7 @@ def test_on_vision_frame_triggers_on_person_change(monkeypatch):
 def test_on_vision_frame_no_trigger_when_steady(monkeypatch):
     """画面无变化时不应触发。"""
     from cloud.go2.agentcore.skills import reactive as rm_mod
-    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: [])   # 隔离规则层
+    monkeypatch.setattr(rm_mod, "check_rules", lambda obs, **kwargs: [])   # 隔离规则层
     mind = rm_mod.ReactiveMind()
 
     called = []
@@ -488,7 +559,10 @@ def test_on_vision_frame_no_trigger_when_steady(monkeypatch):
 def test_on_vision_frame_executes_rule_action(monkeypatch):
     """规则命中时应真正下发动作，而不只是写冷却。"""
     from cloud.go2.agentcore.skills import reactive as rm_mod
-    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: ["Hello"])
+    monkeypatch.setattr(
+        rm_mod, "check_rules",
+        lambda obs, **kwargs: [{"id": "rule-test", "action": "Hello"}],
+    )
     dispatched = []
     async def fake_sport(cmd):
         dispatched.append(cmd)
@@ -506,7 +580,10 @@ def test_on_vision_frame_executes_rule_action(monkeypatch):
 def test_rule_match_takes_priority_over_autonomous(monkeypatch):
     """规则命中时跳过 LLM 自主推理，避免双重动作。"""
     from cloud.go2.agentcore.skills import reactive as rm_mod
-    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: ["Hello"])
+    monkeypatch.setattr(
+        rm_mod, "check_rules",
+        lambda obs, **kwargs: [{"id": "rule-test", "action": "Hello"}],
+    )
     async def fake_sport(cmd):
         pass
     monkeypatch.setattr(rm_mod, "go2_sport", fake_sport)
@@ -561,7 +638,10 @@ def test_go2_add_rule_rejects_truly_unknown(tmp_path, monkeypatch):
 def test_dispatch_action_respects_cooldown(monkeypatch):
     """同一动作处于冷却中时不重复下发（规则层与自主层共用冷却）。"""
     from cloud.go2.agentcore.skills import reactive as rm_mod
-    monkeypatch.setattr(rm_mod, "check_rules", lambda obs: ["Hello"])
+    monkeypatch.setattr(
+        rm_mod, "check_rules",
+        lambda obs, **kwargs: [{"id": "rule-test", "action": "Hello"}],
+    )
     dispatched = []
     async def fake_sport(cmd):
         dispatched.append(cmd)

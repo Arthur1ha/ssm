@@ -2,7 +2,7 @@
  * 布局：头部（固定）→ 状态图（固定高）→ ChatPanel（撑满剩余）
  * 完全由 Agent Card 的 transport / state_machine 驱动，无设备特判。
  */
-function FsmDevicePage({ unitId, device, liveState, onBack }) {
+function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const { useState, useEffect, useRef } = React;
 
   /* ── Card 拓扑：优先用 device prop（来自 registry，无需等待 fetch） ── */
@@ -23,7 +23,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   const [sending, setSending] = useState(false);
   const [execution, setExecution] = useState('');
   const reportExecution = result => setExecution(commandBus.describe(result));
-  const { thinking, thinkingText, send } = useSendIntent();
 
   /* ── 模式轴 / 富控件 / 快捷指令（通用，由 card 驱动） ── */
   const [modes, setModes]       = useState(device?.modes || []);
@@ -52,7 +51,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
   const switchMode = (axis, value) => {
     if (offline) return;
     if (!axis.set) return;
-    commandBus.http(axis.set, { mode: value }, 'PUT').then(result => {
+    commandBus.command(unitId, 'set_mode', { axis: axis.id, value }).then(result => {
       if (result.mode === value) {
         setModeVals(prev => ({ ...prev, [axis.id]: value }));
         setExecution('模式已更新');
@@ -107,69 +106,38 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
       return;
     }
     setExecution('正在等待设备执行反馈…');
-    if (isHttp) {
-      const endpoint = transport.command_endpoint || transport.endpoint;
-      reportExecution(await commandBus.http(endpoint, { action: t.action, params: t.params || {} }));
-    } else {
-      reportExecution(await commandBus.mqtt(unitId, t.action, t.params || {}));
-    }
-  };
-
-  /* ── 对话直达执行体：优先取 chat_endpoint（灯）或 endpoint（go2） ── */
-  const chatEndpoint = transport?.chat_endpoint || transport?.endpoint || null;
-  const sessionRef = useRef('fsm_' + unitId + '_' + Date.now());
-  const directReplyText = data => {
-    if (data?.reply || data?.response) return data.reply || data.response;
-    if (data?.llm_available === false) {
-      return '这个智能体的云端大脑暂时连不上，我没法放心替它回答。';
-    }
-    return '(无回复)';
+    reportExecution(await commandBus.command(unitId, t.action, t.params || {}));
   };
 
   /* ── 发送对话 ── */
   const handleSend = text => {
-    if (!text || thinking || sending) return;
+    if (!text || sending) return;
     setMessages(prev => [...prev, { role: 'user', text }]);
-
-    // 有 chat 端点 → 直达执行体（两类执行体的请求/响应字段不同）
-    if (chatEndpoint) {
-      const isEsp32 = !!transport?.chat_endpoint;        // 灯：{text}->{reply}
-      const body = isEsp32
-        ? { text }
-        : { session_id: sessionRef.current, message: text };  // go2：{message}->{response}
-      setSending(true);
-      fetch(chatEndpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+    setSending(true);
+    commandBus.command(unitId, 'chat', { message: text })
+      .then(result => {
+        const reply = result?.reply || result?.response || result?.text || result?.error || commandBus.describe(result);
+        setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: reply }]);
       })
-        .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-        .then(d => setMessages(prev => [...prev, {
-          role: 'assistant', agent: unitId, text: directReplyText(d),
-        }]))
-        .catch(() => setMessages(prev => [...prev, {
-          role: 'assistant', agent: unitId,
-          text: '我没能连上这个智能体的对话入口，稍后再试一下。',
-        }]))
-        .finally(() => setSending(false));
-      return;
-    }
-
-    // 否则回退编排器（保持原有逻辑）
-    send(text, {
-      deviceHint: unitId,
-      onMessage: msg => setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: msg }]),
-      onPendingRule: rule => setMessages(prev => [...prev, {
-        role: 'assistant', agent: unitId,
-        text: `收到规则「${rule.name}」，请在主界面确认保存。`,
-      }]),
-    });
+      .finally(() => setSending(false));
   };
 
   const meta    = getAgentMeta(device || { unit_id: unitId, name: unitId });
   const ACCENT  = meta.color;
   const offline = !device?._online;   // 离线：控制面板置灰、禁用交互
+  const isRobot = device?.agent_type === 'robot' || unitId === 'go2';
   const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
   const hasUserMsg = messages.some(m => m.role === 'user');
+
+  const emergencyStop = async () => {
+    setExecution('正在发送紧急停止…');
+    try {
+      const result = await apiClient.request('/api/emergency-stop', {
+        method: 'POST', body: { reason: 'device_page' },
+      });
+      setExecution(commandBus.describe(result?.result && typeof result.result === 'object' ? result.result : { result: 'ok' }));
+    } catch (error) { setExecution(apiErrorText(error, '紧急停止没有送达')); }
+  };
 
   return (
     <div style={{
@@ -238,6 +206,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
             <Icon name="zap" size={10} color={ACCENT}/>
             AGENT
           </a>
+          {isRobot && <button className="emergency-stop" onClick={emergencyStop} title="紧急停止">STOP</button>}
         </div>
       </div>
 
@@ -289,7 +258,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
           )}
 
           {/* 态内富控件（由 card.widgets 驱动） */}
-          {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution)}
+          {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution, actor)}
         </div>
       )}
 
@@ -302,8 +271,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
       }}>
       <ChatPanel
         messages={messages}
-        thinking={thinking || sending}
-        thinkingText={thinkingText}
+        thinking={sending}
+        thinkingText={sending ? '正在回应…' : ''}
         thinkingAgent={unitId}
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : '告诉设备要做什么…'}
@@ -311,7 +280,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         variant="inline"
       >
         {/* 模式轴切换（通用，零设备特判） */}
-        {modes.map(axis => (
+        {actor === 'admin' && modes.map(axis => (
           <div key={axis.id} style={{
             display: 'flex', gap: 6, padding: '8px 12px 0',
             pointerEvents: offline ? 'none' : 'auto',
@@ -335,7 +304,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack }) {
         ))}
 
         {/* 快捷指令（card.suggestions 驱动）：无用户消息时显示，位置与主屏建议一致 */}
-        {suggestions.length > 0 && !hasUserMsg && !thinking && !offline && (
+        {suggestions.length > 0 && !hasUserMsg && !sending && !offline && (
           <div style={{
             padding: '6px 12px 0', display: 'flex', gap: 6,
             overflowX: 'auto', scrollbarWidth: 'none',

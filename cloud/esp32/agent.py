@@ -123,7 +123,7 @@ class ESP32Agent:
         except Exception as e:
             logger.warning("narrate_command failed: %s", e)
 
-    def handle_user_text(self, text: str) -> str | dict:
+    def handle_user_text(self, text: str, *, persist: bool = True) -> str | dict:
         """处理设备页直达的用户文本：LLM 分类『闲聊/调教』，调教则落库。
 
         本入口不执行即时命令（仍走 FSM 按钮/MQTT task）。全程 try/except，
@@ -153,6 +153,11 @@ class ESP32Agent:
             }
 
         if data.get("type") == "teach" and data.get("trigger") and data.get("behavior"):
+            if not persist:
+                return {
+                    "reply": "这是临时体验，我可以照做当前指令，但不会保存长期调教。",
+                    "persisted": False,
+                }
             taught.add(data["trigger"], data["behavior"])
             return data.get("reply") or f"学会了：{data['trigger']}就{data['behavior']}"
         return data.get("reply") or "好的~"

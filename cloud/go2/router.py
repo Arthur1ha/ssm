@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -21,6 +21,11 @@ from cloud.go2.agentcore.skills.vision import vision_loop
 from cloud.go2.agentcore.skills.identity import IdentityEvent, identity_skill
 from cloud.go2.agentcore.identity.provider import FaceProviderError
 from cloud.go2.agentcore.memory.episode import EventType, episode_memory
+from cloud.go2.control import LeaseConflict, control_lease, session_tasks
+from cloud.go2.execution import (
+    ExecutionContext, SYSTEM_CONTEXT, current_context, require_admin_read,
+    require_authenticated_read, require_service_context, use_context,
+)
 
 # MQTT 客户端，由 api/main.py 通过 init_mqtt() 注入
 _mqtt_client = None
@@ -225,21 +230,75 @@ _active_drive_cb = None
 _active_identity_cb = None
 _autonomy_mode   = "manual"  # "manual" | "reactive" | "free_explore"
 
+# Continuous identity vision is global device activity, not an administrator
+# request. It must inherit a non-persistent context. Explicit admin-triggered
+# recognition still uses that request's trusted context and may be remembered.
+_IDENTITY_VISION_CONTEXT = ExecutionContext(
+    "go2-identity-vision", "visitor", False,
+)
+
+
+def _normalize_context(context) -> ExecutionContext:
+    """Direct Python calls are already trusted; HTTP always supplies a verified context."""
+    return context if isinstance(context, ExecutionContext) else SYSTEM_CONTEXT
+
+
+def _require_admin_persist(context: ExecutionContext) -> None:
+    if context.actor != "admin" or not context.persist:
+        raise HTTPException(status_code=403, detail="administrator persistence required")
+
+
+def _acquire_motion(context: ExecutionContext) -> None:
+    previous = control_lease.snapshot()
+    try:
+        control_lease.acquire(context)
+    except LeaseConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "go2_control_busy",
+                "message": "机器狗正在被其他体验者使用",
+                "owner_session_id": exc.owner_session_id,
+                "expires_at": exc.expires_at,
+            },
+        ) from exc
+    if (
+        previous is not None
+        and previous.owner_session_id != context.session_id
+        and context.actor == "admin"
+    ):
+        from cloud.go2.navigation.navigator import navigator
+        navigator.stop(owner_session_id=previous.owner_session_id)
+        session_tasks.cancel(previous.owner_session_id)
+        logging.info(
+            "[Go2/Lease] admin %s preempted %s",
+            context.session_id, previous.owner_session_id,
+        )
+
 
 def _on_identity_event(event: IdentityEvent) -> None:
     current = event.current
     previous = event.previous
+    execution = current_context()
+    # Fail closed for process-global callbacks. SYSTEM_CONTEXT is a convenient
+    # default for trusted maintenance code, but it is not proof that an admin
+    # request caused this visual event.
+    may_record_episode = (
+        execution.actor == "admin"
+        and execution.persist
+        and execution.session_id != SYSTEM_CONTEXT.session_id
+    )
     identity_changed = (
         current.status == "recognized"
         and (previous.status != "recognized" or previous.person_id != current.person_id)
     )
     identity_absent = previous.status == "recognized" and current.status == "idle"
-    if identity_changed:
+    if identity_changed and may_record_episode:
         episode_memory.add(
             EventType.IDENTITY_CHANGE,
             f"识别到{current.name}（{current.role}，置信分 {current.score:.1f}）",
         )
-    elif identity_absent:
+    elif identity_absent and may_record_episode:
         episode_memory.add(EventType.IDENTITY_CHANGE, f"{previous.name}已离开画面")
 
     if current.status in {"recognized", "unknown"} and _mqtt_client is not None:
@@ -257,6 +316,16 @@ def _on_identity_event(event: IdentityEvent) -> None:
     drive.on_identity_event(event)
 
 
+def _on_identity_vision_frame(frame) -> None:
+    """Run the global identity frame consumer with persistence disabled.
+
+    The identity skill creates an async task here. Context variables are copied
+    into that task, so the later identity-event callback remains non-persistent.
+    """
+    with use_context(_IDENTITY_VISION_CONTEXT):
+        identity_skill.on_vision_frame(frame)
+
+
 identity_skill.add_callback(_on_identity_event)
 
 
@@ -266,7 +335,7 @@ async def _initialize_identity_vision() -> None:
     _configure_vision_consumers(_autonomy_mode)
 
 
-def _configure_vision_consumers(mode: str) -> None:
+def _configure_vision_consumers(mode: str, owner_session_id: str = "system") -> None:
     """统一重配视觉消费者；身份在三种 autonomy 模式下都可保持运行。"""
     global _active_rule_cb, _active_drive_cb, _active_identity_cb
     drive.stop()
@@ -280,7 +349,7 @@ def _configure_vision_consumers(mode: str) -> None:
         identity_skill.clear_transient()
         return
     if identity_skill.enabled:
-        _active_identity_cb = identity_skill.on_vision_frame
+        _active_identity_cb = _on_identity_vision_frame
         vision_loop.add_callback(_active_identity_cb)
     if mode == "reactive":
         _active_rule_cb = reactive_mind.on_vision_frame
@@ -288,7 +357,7 @@ def _configure_vision_consumers(mode: str) -> None:
     elif mode == "free_explore":
         _active_drive_cb = drive.on_vision_frame
         vision_loop.add_callback(_active_drive_cb)
-        drive.start()
+        drive.start(owner_session_id=owner_session_id)
 
     if any((_active_identity_cb, _active_rule_cb, _active_drive_cb)):
         vision_loop.start(lambda: go2._latest_frame)
@@ -297,7 +366,7 @@ def _configure_vision_consumers(mode: str) -> None:
 
 
 @router.post("/connection")
-async def go2_connect():
+async def go2_connect(context: ExecutionContext = Depends(require_service_context)):
     email    = os.getenv("GO2_EMAIL", "")
     password = os.getenv("GO2_PASSWORD", "")
     serial   = os.getenv("GO2_SERIAL", "")
@@ -324,9 +393,7 @@ async def go2_connect():
         else:
             _configure_vision_consumers(_autonomy_mode)
 
-        from cloud.go2.agentcore.memory import spatial as _sm
-        _sm.tag_location("home", {"x": 0.0, "y": 0.0, "heading": 0.0})
-        logging.info("[Go2] 已将起点标记为 home (0, 0, 0)")
+        # Connection is operational state, not permission to overwrite Home.
 
     _publish_go2_status(False)
     task = asyncio.create_task(go2.connect(email, password, serial, region))
@@ -335,7 +402,7 @@ async def go2_connect():
 
 
 @router.delete("/connection")
-async def go2_disconnect():
+async def go2_disconnect(context: ExecutionContext = Depends(require_service_context)):
     global _autonomy_mode
     await go2.disconnect()
     _configure_vision_consumers("manual")
@@ -346,7 +413,7 @@ async def go2_disconnect():
 
 
 @router.get("/connection")
-def go2_status():
+async def go2_status(context=Depends(require_authenticated_read)):
     return {
         "connected":        go2.is_connected,
         "fsm_state":        go2.fsm_state,
@@ -357,7 +424,7 @@ def go2_status():
 
 
 @router.get("/video")
-async def go2_video():
+async def go2_video(context=Depends(require_authenticated_read)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 not connected")
     return StreamingResponse(
@@ -367,7 +434,7 @@ async def go2_video():
 
 
 @router.get("/video/snapshot")
-async def go2_video_snapshot():
+async def go2_video_snapshot(context=Depends(require_authenticated_read)):
     """单帧 JPEG，供不支持 MJPEG 的浏览器（iOS Safari）轮询使用。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -382,7 +449,7 @@ async def go2_video_snapshot():
 
 
 @router.get("/connection/stream")
-async def go2_state():
+async def go2_state(context=Depends(require_authenticated_read)):
     async def sse_gen():
         q = go2.new_state_queue()
         try:
@@ -421,10 +488,13 @@ class VelocityRequest(BaseModel):
 
 
 @router.post("/commands")
-async def go2_command(req: CommandRequest):
+async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(require_service_context)):
     cmd = req.action or req.cmd
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
+    context = _normalize_context(context)
+    if cmd != "StopMove":
+        _acquire_motion(context)
     try:
         result = await go2.send_command(cmd, req.params or None)
     except ValueError as exc:
@@ -435,10 +505,13 @@ async def go2_command(req: CommandRequest):
 
 
 @router.post("/velocity")
-async def go2_velocity(req: VelocityRequest):
+async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends(require_service_context)):
     """WIRELESS_CONTROLLER 速度控制，无 ack，适合摇杆实时输入。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
+    context = _normalize_context(context)
+    if any((req.vx, req.vy, req.vyaw)):
+        _acquire_motion(context)
     try:
         result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=0.6)
     except ValueError as exc:
@@ -450,31 +523,45 @@ async def go2_velocity(req: VelocityRequest):
 
 
 class ChatRequest(BaseModel):
-    session_id: str = "default"
+    session_id: str | None = None  # untrusted compatibility field; ignored
     message: str
     skill_id: str | None = None
     params: dict | None = None
 
 
 @router.post("/chat")
-async def go2_chat(req: ChatRequest):
+async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.agent import run_agent
+    context = _normalize_context(context)
     drive.user_interrupt = True
+    task = asyncio.create_task(
+        run_agent(
+            context.session_id, req.message, skill_id=req.skill_id,
+            params=req.params, context=context,
+        ),
+        name=f"go2-chat-{context.session_id}",
+    )
+    session_tasks.track(context.session_id, task)
     try:
-        return await run_agent(req.session_id, req.message, skill_id=req.skill_id, params=req.params)
+        return await task
     finally:
         drive.user_interrupt = False
 
 
 @router.post("/chat/stream")
-async def go2_chat_stream(req: ChatRequest):
+async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
     from cloud.go2.agent import run_agent_stream
 
+    context = _normalize_context(context)
+
     async def sse_gen():
         drive.user_interrupt = True
+        stream_task = asyncio.current_task()
+        if stream_task is not None:
+            session_tasks.track(context.session_id, stream_task)
         try:
-            async for event in run_agent_stream(req.session_id, req.message):
+            async for event in run_agent_stream(context.session_id, req.message, context=context):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             drive.user_interrupt = False
@@ -487,7 +574,7 @@ async def go2_chat_stream(req: ChatRequest):
 
 
 @router.get("/mind/last_decision")
-def go2_mind_last_decision():
+async def go2_mind_last_decision(context=Depends(require_authenticated_read)):
     """返回 ReactiveMind 上次 LLM 推理的决策结果。"""
     d = reactive_mind.last_decision
     if d is None:
@@ -496,7 +583,7 @@ def go2_mind_last_decision():
 
 
 @router.get("/vision")
-def go2_vision_latest():
+async def go2_vision_latest(context=Depends(require_authenticated_read)):
     """返回最近一次 OpenCV 检测的结构化结果。"""
     if vision_loop.latest is None:
         raise HTTPException(status_code=503, detail="暂无检测数据，请确认 Go2 已连接")
@@ -504,7 +591,7 @@ def go2_vision_latest():
 
 
 @router.get("/vision/stream")
-async def go2_vision_stream():
+async def go2_vision_stream(context=Depends(require_authenticated_read)):
     """SSE 流：每次检测完成后推送一条 VisionFrame JSON。"""
     q: asyncio.Queue = asyncio.Queue(maxsize=10)
 
@@ -563,61 +650,79 @@ class PersonCreateRequest(BaseModel):
 
 
 @router.post("/navigation/locations")
-async def nav_tag_location(req: TagLocationRequest):
+async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     odom = go2.odom
     if not odom:
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
     from cloud.go2.agentcore.memory import spatial as spatial_memory
-    result = spatial_memory.tag_location(req.name, odom)
+    with use_context(context):
+        result = spatial_memory.tag_location(req.name, odom)
     return {"ok": True, "message": result}
 
 
 @router.get("/navigation/locations")
-def nav_list_locations():
+async def nav_list_locations(context=Depends(require_authenticated_read)):
     from cloud.go2.agentcore.memory import spatial as spatial_memory
     return spatial_memory.list_locations()
 
 
 @router.delete("/navigation/locations/{name}")
-def nav_delete_location(name: str):
+async def nav_delete_location(name: str, context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     from cloud.go2.agentcore.memory import spatial as spatial_memory
-    deleted = spatial_memory.delete_location(name)
+    with use_context(context):
+        deleted = spatial_memory.delete_location(name)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"地点「{name}」不存在")
     return {"ok": True}
 
 
 @router.post("/navigation/go")
-async def nav_go(req: NavigateRequest):
+async def nav_go(req: NavigateRequest, context: ExecutionContext = Depends(require_service_context)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
+    context = _normalize_context(context)
+    _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
-    asyncio.create_task(navigator.go_to(req.name))
+    task = asyncio.create_task(navigator.go_to(req.name, owner_session_id=context.session_id))
+    session_tasks.track(context.session_id, task)
     return {"ok": True, "message": f"开始导航到「{req.name}」"}
 
 
 @router.post("/navigation/patrol")
-async def nav_start_patrol(req: PatrolRequest):
+async def nav_start_patrol(req: PatrolRequest, context: ExecutionContext = Depends(require_service_context)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     if not req.stops:
         raise HTTPException(status_code=400, detail="stops 不能为空")
+    context = _normalize_context(context)
+    _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
-    await navigator.start_patrol(req.stops)
+    await navigator.start_patrol(req.stops, owner_session_id=context.session_id)
+    if navigator._task is not None:
+        session_tasks.track(context.session_id, navigator._task)
     return {"ok": True, "stops": req.stops}
 
 
 @router.delete("/navigation/patrol")
-def nav_stop():
+async def nav_stop(context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
     from cloud.go2.navigation.navigator import navigator
-    navigator.stop()
-    return {"ok": True}
+    stopped = navigator.stop(owner_session_id=context.session_id)
+    if not stopped and context.actor == "admin":
+        navigator.stop()
+        stopped = True
+    return {"ok": True, "stopped": stopped}
 
 
 @router.post("/stop")
-async def emergency_stop():
+async def emergency_stop(context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
     global _autonomy_mode
     from cloud.go2.navigation.navigator import navigator
     navigator.stop()
@@ -625,18 +730,37 @@ async def emergency_stop():
     _configure_vision_consumers(_autonomy_mode)
     if go2.is_connected:
         go2.move_velocity(0, 0, 0)
+    logging.warning("[Go2/Safety] emergency stop by %s (%s)", context.session_id, context.actor)
     return {"ok": True, "mode": "manual"}
 
 
+@router.get("/control/lease")
+async def go2_control_lease(context=Depends(require_authenticated_read)):
+    lease = control_lease.snapshot()
+    return asdict(lease) if lease is not None else None
+
+
+@router.post("/control/lease/heartbeat")
+async def go2_control_lease_heartbeat(context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    try:
+        return asdict(control_lease.heartbeat(context))
+    except LeaseConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "go2_lease_not_owned", "owner_session_id": exc.owner_session_id},
+        ) from exc
+
+
 @router.get("/navigation/state")
-def nav_state():
+async def nav_state(context=Depends(require_authenticated_read)):
     from cloud.go2.navigation.navigator import navigator
     s = navigator.state
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
 
 
 @router.put("/led")
-async def set_led(req: LedRequest):
+async def set_led(req: LedRequest, context: ExecutionContext = Depends(require_service_context)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     try:
@@ -647,26 +771,30 @@ async def set_led(req: LedRequest):
 
 
 @router.get("/drive/state")
-def go2_drive_state():
+async def go2_drive_state(context=Depends(require_authenticated_read)):
     return drive.state_snapshot
 
 
 @router.get("/memory")
-def go2_memory():
+async def go2_memory(context=Depends(require_admin_read)):
     """返回 Go2 的成长资产：调教记录 + 今天的事件流。"""
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     from cloud.go2.agentcore.tools.tools import load_rules
     from cloud.go2.agentcore.memory.episode import episode_memory
     return {"taught": load_rules(), "today": episode_memory.format_today()}
 
 
 @router.get("/autonomy")
-def go2_autonomy_get():
+async def go2_autonomy_get(context=Depends(require_authenticated_read)):
     return {"mode": _autonomy_mode}
 
 
 @router.put("/autonomy")
-async def go2_autonomy_set(req: AutonomyRequest):
+async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Depends(require_service_context)):
     global _autonomy_mode
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     if req.mode not in ("manual", "reactive", "free_explore"):
         raise HTTPException(status_code=400, detail=f"未知自主模式: {req.mode}")
     if not go2.is_connected:
@@ -682,25 +810,29 @@ async def go2_autonomy_set(req: AutonomyRequest):
         logging.info("[Go2] 自主模式 → 自由探索")
 
     _autonomy_mode = req.mode
-    _configure_vision_consumers(_autonomy_mode)
+    _configure_vision_consumers(_autonomy_mode, owner_session_id=context.session_id)
     return {"ok": True, "mode": _autonomy_mode}
 
 
 # ── 身份端点 ──────────────────────────────────────────────────────
 
 @router.get("/identity")
-def go2_identity_get():
+async def go2_identity_get(context=Depends(require_authenticated_read)):
     return asdict(identity_skill.current)
 
 
 @router.post("/identity/recognize")
-async def go2_identity_recognize():
-    snapshot = await identity_skill.recognize_now()
+async def go2_identity_recognize(context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    with use_context(context):
+        snapshot = await identity_skill.recognize_now()
     return asdict(snapshot)
 
 
 @router.get("/people")
-def go2_people_list():
+async def go2_people_list(context=Depends(require_admin_read)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     return [
         {"person_id": p.person_id, "name": p.name, "role": p.role, "face_count": p.face_count}
         for p in identity_skill.list_people()
@@ -708,8 +840,11 @@ def go2_people_list():
 
 
 @router.post("/people")
-async def go2_people_create(req: PersonCreateRequest):
-    snapshot = await identity_skill.remember_person(req.name, req.role)
+async def go2_people_create(req: PersonCreateRequest, context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
+    with use_context(context):
+        snapshot = await identity_skill.remember_person(req.name, req.role)
     if snapshot.status in {"rejected", "disabled"}:
         raise HTTPException(status_code=409, detail=snapshot.error_code)
     if snapshot.status == "error":
@@ -718,8 +853,11 @@ async def go2_people_create(req: PersonCreateRequest):
 
 
 @router.post("/people/{person_id}/faces")
-async def go2_people_add_face(person_id: str):
-    snapshot = await identity_skill.add_person_face(person_id)
+async def go2_people_add_face(person_id: str, context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
+    with use_context(context):
+        snapshot = await identity_skill.add_person_face(person_id)
     if snapshot.status in {"rejected", "disabled"}:
         raise HTTPException(status_code=409, detail=snapshot.error_code)
     if snapshot.status == "error":
@@ -728,9 +866,12 @@ async def go2_people_add_face(person_id: str):
 
 
 @router.delete("/people/{person_id}")
-async def go2_people_delete(person_id: str):
+async def go2_people_delete(person_id: str, context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     try:
-        await identity_skill.forget_person(person_id)
+        with use_context(context):
+            await identity_skill.forget_person(person_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except FaceProviderError as exc:
@@ -740,20 +881,27 @@ async def go2_people_delete(person_id: str):
 
 
 @router.get("/personality")
-def go2_personality_get():
+async def go2_personality_get(context=Depends(require_admin_read)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     from cloud.go2.agentcore.soul import get_system_prompt
     return {"prompt": get_system_prompt()}
 
 
 @router.post("/personality")
-def go2_personality_set(req: PersonalityRequest):
+async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_service_context)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     from cloud.go2.agentcore.soul import set_personality
-    set_personality(req.prompt)
+    with use_context(context):
+        set_personality(req.prompt)
     return {"ok": True, "prompt": req.prompt}
 
 
 @router.get("/debug/voxel_map")
-def go2_debug_voxel_map():
+async def go2_debug_voxel_map(context=Depends(require_admin_read)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     """返回最近一帧体素地图原始消息，用于格式调研。"""
     import json
 
@@ -784,30 +932,84 @@ def go2_debug_voxel_map():
 
 
 @router.put("/navigation/home")
-async def nav_set_home():
+async def nav_set_home(context: ExecutionContext = Depends(require_service_context)):
     """把当前位置重新标记为 home。"""
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     odom = go2.odom
     if not odom:
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
     from cloud.go2.agentcore.memory import spatial as spatial_memory
-    result = spatial_memory.tag_location("home", odom)
+    with use_context(context):
+        result = spatial_memory.tag_location("home", odom)
     return {"ok": True, "message": result}
 
 
 @router.post("/navigation/home/go")
-async def nav_go_home():
+async def nav_go_home(context: ExecutionContext = Depends(require_service_context)):
     """归位：导航回 home 点。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
+    context = _normalize_context(context)
+    _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
-    asyncio.create_task(navigator.go_to("home"))
+    task = asyncio.create_task(navigator.go_to("home", owner_session_id=context.session_id))
+    session_tasks.track(context.session_id, task)
     return {"ok": True, "message": "开始归位"}
 
 
+@router.post("/sessions/{session_id}/cleanup")
+async def cleanup_go2_session(
+    session_id: str,
+    context: ExecutionContext = Depends(require_service_context),
+):
+    """Release only resources owned by one expired/logged-out session."""
+    context = _normalize_context(context)
+    if context.actor != "admin" and context.session_id != session_id:
+        raise HTTPException(status_code=403, detail="cannot clean another session")
+    return cleanup_session_resources(session_id)
+
+
+def cleanup_session_resources(session_id: str) -> dict:
+    """Idempotently release only resources owned by one trusted session."""
+    from cloud.go2.agent import cleanup_session
+    from cloud.go2.navigation.navigator import navigator
+
+    lease = control_lease.snapshot()
+    owns_motion = lease is not None and lease.owner_session_id == session_id
+    history_removed = cleanup_session(session_id)
+    tasks_cancelled = session_tasks.cancel(session_id)
+    navigation_stopped = navigator.stop(owner_session_id=session_id)
+    drive_stopped = drive.stop(owner_session_id=session_id)
+    motion_stopped = False
+    if owns_motion and go2.is_connected:
+        try:
+            # Cancellation of a timed chat move also reaches its StopMove
+            # finally block.  Send a synchronous zero-velocity packet here as
+            # the immediate safety boundary, without waiting for task teardown.
+            go2.move_velocity(0, 0, 0)
+            motion_stopped = True
+        except Exception:
+            logging.warning("[Go2/Safety] failed to stop motion for session %s", session_id)
+    lease_released = control_lease.release(session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "history_removed": history_removed,
+        "tasks_cancelled": tasks_cancelled,
+        "navigation_stopped": navigation_stopped,
+        "drive_stopped": drive_stopped,
+        "motion_stopped": motion_stopped,
+        "lease_released": lease_released,
+    }
+
+
 @router.get("/map/debug")
-def go2_map_debug():
+async def go2_map_debug(context=Depends(require_admin_read)):
+    context = _normalize_context(context)
+    _require_admin_persist(context)
     """返回原始体素消息的结构，用于诊断数据格式。"""
     raw = go2.voxel_raw
     if raw is None:
@@ -830,7 +1032,7 @@ def go2_map_debug():
 
 
 @router.get("/map.png")
-def go2_map_image():
+async def go2_map_image(context=Depends(require_authenticated_read)):
     import io, math as _math
     import numpy as np
     from PIL import Image, ImageDraw

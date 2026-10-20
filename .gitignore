@@ -3,6 +3,7 @@ broker/logs/
 logs/
 server/.env
 cloud/.env
+edge/local_config.py
 broker/mosquitto.conf
 *.log
 *.swp
@@ -29,3 +30,4 @@ cloudflared
 # Go2 运行期状态（记忆/性格/规则）
 cloud/go2/data/
 cloud/esp32/data/
+cloud/space/audit.jsonl

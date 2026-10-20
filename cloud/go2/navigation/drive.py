@@ -60,6 +60,7 @@ class Drive:
         self.user_interrupt    = False
         self._task: Optional[asyncio.Task] = None
         self._identity = None
+        self.owner_session_id: str | None = None
 
     @property
     def state_snapshot(self) -> dict:
@@ -68,6 +69,7 @@ class Drive:
             "curiosity":      self._curiosity,
             "person_present": self._person_present,
             "last_action_ts": self._last_action_ts,
+            "owner_session_id": self.owner_session_id,
         }
 
     # ── Vision 回调 ────────────────────────────────────────────────
@@ -481,7 +483,7 @@ class Drive:
 
     # ── 生命周期 ───────────────────────────────────────────────────
 
-    def start(self) -> None:
+    def start(self, owner_session_id: str = "system") -> None:
         """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
@@ -491,16 +493,21 @@ class Drive:
         self._person_engaging  = False
         self._last_engaging_ts = time.time()
         self._task             = asyncio.create_task(self._run_loop())
+        self.owner_session_id  = owner_session_id
         logger.info("[Drive] 内驱动循环已启动")
 
-    def stop(self) -> None:
+    def stop(self, owner_session_id: str | None = None) -> bool:
         """停止内驱动循环，取消后台任务，同时停止 navigator 避免孤儿导航 task。"""
+        if owner_session_id is not None and self.owner_session_id != owner_session_id:
+            return False
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        self.owner_session_id = None
         from cloud.go2.navigation.navigator import navigator
         navigator.stop()
         logger.info("[Drive] 内驱动循环已停止")
+        return True
 
 
 drive = Drive()

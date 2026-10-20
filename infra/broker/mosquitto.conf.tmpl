@@ -6,12 +6,13 @@
 password_file ${SSM_DIR}/infra/broker/passwd
 allow_anonymous false
 
+# Production hardening: provision the dedicated users documented in
+# acl.example, copy it to `infra/broker/acl`, then uncomment this line.
+# Keeping it opt-in preserves existing single-account developer installs.
+# acl_file ${SSM_DIR}/infra/broker/acl
+
 # TCP listener for ESP32 (port 1883)
 listener 1883
-
-# WebSocket listener for PWA (port 9001)
-listener 9001
-protocol websockets
 
 # Persistence (retain messages survive restarts)
 persistence true

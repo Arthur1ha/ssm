@@ -1,13 +1,16 @@
 """Go2 成长资产只读端点。"""
 import json
+import httpx
+import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from cloud.go2 import router as go2_router
 from cloud.go2.agentcore.tools import tools
 
 
-def test_memory_endpoint(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_memory_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "test-service-token")
     f = tmp_path / "rules.json"
     f.write_text(json.dumps([{"id": "tb_1", "trigger": "人", "action": "Hello",
                               "behavior": "打招呼", "cooldown_s": 30,
@@ -18,7 +21,15 @@ def test_memory_endpoint(monkeypatch, tmp_path):
 
     app = FastAPI()
     app.include_router(go2_router.router)
-    r = TestClient(app).get("/api/go2/memory")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/go2/memory", headers={
+            "X-SSM-Service-Token": "test-service-token",
+            "X-SSM-Session-Id": "test-admin",
+            "X-SSM-Actor": "admin",
+            "X-SSM-Persist": "true",
+        })
     assert r.status_code == 200
     body = r.json()
     assert len(body["taught"]) == 1

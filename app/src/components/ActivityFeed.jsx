@@ -17,7 +17,7 @@ function ButlerAvatar({ size = 36 }) {
   );
 }
 
-function ActivityFeed({ entries, thinking, thinkingText, onAdoptDevice, adoptingDeviceId }) {
+function ActivityFeed({ entries, thinking, thinkingText }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
 
@@ -61,36 +61,6 @@ function ActivityFeed({ entries, thinking, thinkingText, onAdoptDevice, adopting
                     border: `1px solid ${oc}25`,
                     color: 'var(--color-text)',
                   }}>{e.text}</div>
-                </div>
-              </div>
-            </div>
-          );
-        }
-        if (e.type === 'discovery') {
-          const oc = getAgentBubbleColor('orchestrator');
-          return (
-            <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
-              <div style={{ maxWidth: '92%', display: 'flex', gap: 9, alignItems: 'flex-start' }}>
-                <ButlerAvatar/>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
-                    fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', marginBottom: 4 }}>
-                    {getAgentDisplayName('orchestrator')}
-                  </div>
-                  <div style={{
-                    padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
-                    borderRadius: 'var(--radius-card)',
-                    background: `${oc}10`, border: `1px solid ${oc}25`,
-                    color: 'var(--color-text)',
-                  }}>{e.text}</div>
-                  {(e.devices || []).map(candidate => (
-                    <DiscoveryCandidateCard
-                      key={candidate.device_id}
-                      candidate={candidate}
-                      onAdopt={onAdoptDevice}
-                      adopting={adoptingDeviceId === candidate.device_id}
-                    />
-                  ))}
                 </div>
               </div>
             </div>

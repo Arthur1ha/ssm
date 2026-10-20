@@ -1,5 +1,5 @@
 // Service Worker — network-first for app files, cache for offline fallback
-const CACHE = 'ssm-execution-20260908';
+const CACHE = 'ssm-session-gateway-20261019';
 
 // 只预缓存真正稳定的外壳资源
 const PRECACHE = [

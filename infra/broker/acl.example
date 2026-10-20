@@ -1,0 +1,53 @@
+# SSM Mosquitto least-privilege ACL example.
+#
+# Provision these users in infra/broker/passwd, copy this file to
+# infra/broker/acl, then enable the acl_file line in mosquitto.conf.tmpl.
+# Keep each ESP32 deployment on its own user and enumerate its unit topics.
+
+user ssm_api
+topic read ssm/agents/#
+topic read ssm/result/#
+topic read ssm/task/#
+topic read ssm/feedback/#
+topic write ssm/intent/#
+topic write ssm/session/#
+topic write ssm/task/#
+topic write ssm/rules/#
+topic write ssm/agents/go2/card
+topic write ssm/agents/go2/status
+topic write ssm/agents/go2/thought
+topic write ssm/agents/esp32_desk_led/speech
+topic write ssm/agents/esp32_desk_led/thought
+
+user ssm_orchestrator
+topic read ssm/agents/#
+topic read ssm/decision/active
+topic read ssm/intent/#
+topic read ssm/result/#
+topic read ssm/session/#
+topic write ssm/decision/active
+topic write ssm/agents/cloud_orchestrator/manifest
+topic write ssm/agents/cloud_orchestrator/state
+topic write ssm/feedback/#
+topic write ssm/task/#
+
+user esp32_desk
+topic read ssm/decision/active
+topic read ssm/rules/esp32_desk
+topic read ssm/task/esp32_desk_led/#
+topic read ssm/task/esp32_desk_light/#
+topic read ssm/task/esp32_desk_ir/#
+topic read ssm/task/esp32_desk_sound/#
+topic write ssm/agents/esp32_desk/#
+topic write ssm/agents/esp32_desk_led/#
+topic write ssm/agents/esp32_desk_light/#
+topic write ssm/agents/esp32_desk_ir/#
+topic write ssm/agents/esp32_desk_sound/#
+topic write ssm/result/esp32_desk_led/#
+topic write ssm/result/esp32_desk_light/#
+topic write ssm/result/esp32_desk_ir/#
+topic write ssm/result/esp32_desk_sound/#
+
+# Optional read-only account used by `make trace`.
+user ssm_observer
+topic read ssm/#

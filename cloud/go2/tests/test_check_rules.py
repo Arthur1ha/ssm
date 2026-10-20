@@ -8,7 +8,7 @@ def _seed(path, rules):
     path.write_text(json.dumps(rules, ensure_ascii=False), encoding="utf-8")
 
 
-def test_check_rules_counts_hit(monkeypatch, tmp_path):
+def test_check_rules_counts_hit_only_after_execution_completes(monkeypatch, tmp_path):
     f = tmp_path / "rules.json"
     monkeypatch.setattr(tools, "RULES_FILE", f)
     _seed(f, [{"id": "tb_1", "trigger": "人", "action": "Hello", "behavior": "打招呼",
@@ -17,6 +17,11 @@ def test_check_rules_counts_hit(monkeypatch, tmp_path):
 
     actions = tools.check_rules("人")
     assert actions == ["Hello"]
+    r = tools.load_rules()[0]
+    assert r["hit_count"] == 0
+    assert r["last_fired_ts"] is None
+
+    tools.record_rule_completion("tb_1")
     r = tools.load_rules()[0]
     assert r["hit_count"] == 1
     assert isinstance(r["last_fired_ts"], float)

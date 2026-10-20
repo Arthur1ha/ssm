@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sys as _sys
+from collections import deque
 from typing import TypedDict
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ from cloud.go2.agentcore.memory import daily_summary as summary_mod
 
 from cloud.go2.connection import go2
 from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm
+from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT, use_context
 
 
 class Go2AgentState(TypedDict):
@@ -56,6 +58,70 @@ class Go2AgentState(TypedDict):
     early_exit:     bool
     llm_available:  bool
     error:          str
+    actor:          str
+    persist:        bool
+
+
+_session_history: dict[str, deque[dict[str, str]]] = {}
+_PERSISTENT_TOOLS = {
+    "go2_add_rule", "go2_tag_location", "go2_remember_person",
+    "go2_add_person_face", "go2_forget_person",
+}
+_ADMIN_ONLY_TOOLS = {
+    # The full identity library is private. Visitors may only recognize the
+    # person currently in view; saved locations remain usable for navigation.
+    "go2_list_people",
+}
+
+
+def _tool_denial(state: Go2AgentState, tool_name: str) -> str:
+    if state.get("actor", "admin") != "admin" and tool_name in _ADMIN_ONLY_TOOLS:
+        return "admin_only_tool_denied"
+    if not state.get("persist", True) and tool_name in _PERSISTENT_TOOLS:
+        return "visitor_persistence_denied"
+    return ""
+
+
+def _permission_reply(reason: str) -> str:
+    if reason == "admin_only_tool_denied":
+        return "这个请求会读取空间的长期人员或资产信息，访客会话不能访问；我只能帮你识别当前面前的人。"
+    return "这个请求会修改空间的长期记忆，访客会话不能执行。"
+
+
+def _audit_tool_denial(state: Go2AgentState, tool_name: str, reason: str) -> None:
+    """Record policy denials without including the user's natural-language text."""
+    try:
+        from cloud.api.policy import audit_event
+        audit_event(
+            "go2_natural_language_permission_denied",
+            {
+                "session_id": state.get("session_id"),
+                "actor": state.get("actor"),
+            },
+            tool=tool_name,
+            reason=reason,
+        )
+    except Exception as exc:
+        # Auditing must not turn a safe rejection into an agent outage.
+        logger.error("[Go2/Security] failed to audit tool denial: %s", exc)
+
+
+def _history_context(session_id: str) -> str:
+    rows = _session_history.get(session_id, ())
+    if not rows:
+        return "（本次临时会话暂无历史）"
+    return "本次临时会话：\n" + "\n".join(
+        f"{row['role']}：{row['content']}" for row in rows
+    )
+
+
+def _remember_turn(session_id: str, role: str, content: str) -> None:
+    history = _session_history.setdefault(session_id, deque(maxlen=20))
+    history.append({"role": role, "content": content})
+
+
+def cleanup_session(session_id: str) -> bool:
+    return _session_history.pop(session_id, None) is not None
 
 
 _SKILL_TO_TOOL = {
@@ -100,6 +166,17 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
             # go2_chat 等无对应工具的 skill 退回 LLM 规划
             pass
         else:
+            denial = _tool_denial(state, tool_name)
+            if denial:
+                _audit_tool_denial(state, tool_name, denial)
+                logger.warning(
+                    "[Go2/Security] planner denied tool=%s actor=%s session=%s reason=%s",
+                    tool_name, state.get("actor"), state.get("session_id"), denial,
+                )
+                return {
+                    **state, "planned_tools": [], "response_text": _permission_reply(denial),
+                    "early_exit": True, "error": denial,
+                }
             logger.info("[Go2/Agent] skill_id=%s → tool=%s 直接路由，跳过规划", skill_id, tool_name)
             return {
                 **state,
@@ -120,18 +197,19 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
                 "response_text": "Go2 当前未连接，请先通过「连接」按钮建立连接。",
                 "error": "go2_not_connected"}
 
-    # 懒触发昨日摘要和性格演化（后台，不阻塞规划）
-    asyncio.create_task(summary_mod.ensure_yesterday_summary())
-    asyncio.create_task(ensure_yesterday_evolved())
-
-    # 构建记忆上下文：今天原始记录 + 最近 6 天摘要
-    recent_summaries = summary_mod.get_recent_summaries(6)
-    today_ctx = episode_memory.format_today()
     memory_parts = []
-    if recent_summaries:
-        lines = "\n".join(f"- {s['date']}：{s['summary']}" for s in recent_summaries)
-        memory_parts.append(f"过去几天摘要：\n{lines}")
-    memory_parts.append(today_ctx)
+    if state.get("persist", False):
+        # These background jobs write files and therefore only run for an
+        # administrator context.
+        asyncio.create_task(summary_mod.ensure_yesterday_summary())
+        asyncio.create_task(ensure_yesterday_evolved())
+        recent_summaries = summary_mod.get_recent_summaries(6)
+        if recent_summaries:
+            lines = "\n".join(f"- {s['date']}：{s['summary']}" for s in recent_summaries)
+            memory_parts.append(f"过去几天摘要：\n{lines}")
+        memory_parts.append(episode_memory.format_today())
+    else:
+        memory_parts.append(_history_context(state["session_id"]))
     memory_parts.append(_identity_context())
     memory_context = "\n\n".join(memory_parts)
 
@@ -177,6 +255,19 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     except Exception:
         tools_raw = []
     planned = [t for t in tools_raw if isinstance(t, dict) and "tool" in t]
+    for call in planned:
+        denial = _tool_denial(state, call.get("tool", ""))
+        if denial:
+            _audit_tool_denial(state, call.get("tool", ""), denial)
+            logger.warning(
+                "[Go2/Security] planner denied tool=%s actor=%s session=%s reason=%s",
+                call.get("tool"), state.get("actor"), state.get("session_id"), denial,
+            )
+            return {
+                **state, "memory_context": memory_context, "planned_tools": [],
+                "tool_results": [], "response_text": _permission_reply(denial),
+                "early_exit": True, "error": denial,
+            }
     logger.info("[Go2/Agent] 规划工具调用 (%d 个): %s", len(planned), json.dumps(planned, ensure_ascii=False))
     return {**state, "memory_context": memory_context, "planned_tools": planned, "early_exit": False}
 
@@ -233,6 +324,15 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
             logger.warning("[Go2/Agent] 未知工具: %s", tool_name)
             results.append({"tool": tool_name, "result": f"未知工具: {tool_name}"})
             continue
+        denial = _tool_denial(state, tool_name)
+        if denial:
+            _audit_tool_denial(state, tool_name, denial)
+            logger.warning(
+                "[Go2/Security] executor denied tool=%s actor=%s session=%s reason=%s",
+                tool_name, state.get("actor"), state.get("session_id"), denial,
+            )
+            results.append({"tool": tool_name, "result": {"result": "rejected", "error": denial}})
+            break
         logger.info("[Go2/Agent] 调用 %s 参数=%s", tool_name, json.dumps(params, ensure_ascii=False))
         try:
             result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
@@ -292,14 +392,17 @@ async def run_agent(
     message: str,
     skill_id: str | None = None,
     params: dict | None = None,
+    context: ExecutionContext | None = None,
 ) -> dict:
     """执行 Go2 智能体。
 
     若提供 skill_id，planner_node 将跳过 LLM 规划直接路由到对应工具。
     """
-    episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
-    try:
-        state = await _get_agent().ainvoke({
+    context = context or ExecutionContext(session_id, SYSTEM_CONTEXT.actor, True)
+    with use_context(context):
+        episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
+        try:
+            state = await _get_agent().ainvoke({
             "session_id":     session_id,
             "user_msg":       message,
             "skill_id":       skill_id or "",
@@ -311,16 +414,22 @@ async def run_agent(
             "early_exit":     False,
             "llm_available":  True,
             "error":          "",
+            "actor":          context.actor,
+            "persist":        context.persist,
         })
-    except Exception as exc:
-        logger.warning("[Go2/Agent] run_agent error: %s", exc)
-        return {
-            "result": "error",
-            "response": GO2_AGENT_UNAVAILABLE_REPLY,
-            "actions_taken": [],
-            "llm_available": False,
-            "error": "agent_unavailable",
-        }
+        except Exception as exc:
+            logger.warning("[Go2/Agent] run_agent error: %s", exc)
+            return {
+                "result": "error",
+                "response": GO2_AGENT_UNAVAILABLE_REPLY,
+                "actions_taken": [],
+                "llm_available": False,
+                "error": "agent_unavailable",
+            }
+        episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{state['response_text']}")
+    if not context.persist:
+        _remember_turn(context.session_id, "用户", message)
+        _remember_turn(context.session_id, "Go2", state["response_text"])
     if state["response_text"] and not state.get("early_exit"):
         _publish_thought({"type": "think", "text": state["response_text"]})
     result = "error" if state.get("error") else _execution_status(state["tool_results"])
@@ -334,9 +443,11 @@ async def run_agent(
     }
 
 
-async def run_agent_stream(session_id: str, message: str):
+async def run_agent_stream(session_id: str, message: str, context: ExecutionContext | None = None):
     """逐步执行并 yield 事件 dict，供 SSE 流式端点使用。"""
-    episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
+    context = context or ExecutionContext(session_id, SYSTEM_CONTEXT.actor, True)
+    with use_context(context):
+        episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
 
     base_state = {
         "session_id":     session_id,
@@ -350,6 +461,8 @@ async def run_agent_stream(session_id: str, message: str):
         "params":         {},
         "llm_available":  True,
         "error":          "",
+        "actor":          context.actor,
+        "persist":        context.persist,
     }
 
     yield {"type": "thinking", "text": "正在理解指令…"}
@@ -368,13 +481,22 @@ async def run_agent_stream(session_id: str, message: str):
 
         yield {"type": "thinking", "text": f"执行 {tool_name}…"}
 
-        if fn is None:
+        denial = _tool_denial(state, tool_name)
+        if denial:
+            _audit_tool_denial(state, tool_name, denial)
+            logger.warning(
+                "[Go2/Security] stream executor denied tool=%s actor=%s session=%s reason=%s",
+                tool_name, context.actor, context.session_id, denial,
+            )
+            result = {"result": "rejected", "error": denial}
+        elif fn is None:
             logger.warning("[Go2/Agent] 未知工具: %s", tool_name)
             result = f"未知工具: {tool_name}"
         else:
             logger.info("[Go2/Agent] 调用 %s 参数=%s", tool_name, json.dumps(params, ensure_ascii=False))
             try:
-                result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
+                with use_context(context):
+                    result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
             except Exception as exc:
                 result = {"result": "blocked" if isinstance(exc, ValueError) else "error", "error": str(exc)}
             logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
@@ -388,7 +510,11 @@ async def run_agent_stream(session_id: str, message: str):
 
     response_text, _ = await _generate_response(message, state.get("memory_context", ""), results)
     logger.info("[Go2/Agent] 最终回复: %s", response_text)
-    episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
+    with use_context(context):
+        episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
+    if not context.persist:
+        _remember_turn(context.session_id, "用户", message)
+        _remember_turn(context.session_id, "Go2", response_text)
 
     yield {"type": "response", "text": response_text}
     yield {"type": "done", "result": _execution_status(results)}

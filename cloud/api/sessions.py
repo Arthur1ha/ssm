@@ -1,0 +1,159 @@
+"""Administrator login, visitor invite exchange and fixed-space administration."""
+
+from __future__ import annotations
+
+import hmac
+import os
+import secrets
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
+
+from cloud.api.auth import (
+    check_rate_limit,
+    clear_session_cookies,
+    hash_invite_token,
+    new_session,
+    public_session,
+    require_admin,
+    require_admin_csrf,
+    require_csrf,
+    require_session,
+    set_session_cookies,
+)
+from cloud.api.policy import audit_event
+from cloud.space.registry import get_space_registry
+
+router = APIRouter(tags=["sessions"])
+
+
+class AdminSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    access_code: str = Field(..., min_length=1, max_length=512)
+
+
+class VisitorSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(..., min_length=16, max_length=512)
+
+
+class SpacePatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(None, min_length=1, max_length=80)
+    device_ids: list[str] | None = None
+
+
+@router.post("/api/admin/session")
+async def create_admin_session(req: AdminSessionRequest, request: Request, response: Response):
+    check_rate_limit(request, "admin-session")
+    configured = os.getenv("ADMIN_ACCESS_CODE", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="ADMIN_ACCESS_CODE is not configured")
+    if not hmac.compare_digest(req.access_code.encode(), configured.encode()):
+        audit_event("admin_login_rejected")
+        raise HTTPException(status_code=401, detail="invalid administrator access code")
+    session = new_session("admin")
+    set_session_cookies(response, session)
+    from cloud.api.intents import schedule_session_cleanup
+    schedule_session_cleanup(session)
+    audit_event("admin_login", session)
+    return public_session(session)
+
+
+@router.post("/api/visitor/session")
+async def create_visitor_session(req: VisitorSessionRequest, request: Request, response: Response):
+    check_rate_limit(request, "visitor-session")
+    invite = get_space_registry().get_space()["invite"]
+    supplied = hash_invite_token(req.token)
+    valid = bool(invite["enabled"] and invite["token_hash"])
+    valid = valid and hmac.compare_digest(supplied, str(invite["token_hash"]))
+    if not valid:
+        audit_event("visitor_exchange_rejected")
+        raise HTTPException(status_code=401, detail="invalid or disabled invitation")
+    session = new_session("visitor", invite_version=int(invite["version"]))
+    set_session_cookies(response, session)
+    from cloud.api.intents import schedule_session_cleanup
+    schedule_session_cleanup(session)
+    audit_event("visitor_session_created", session, invite_version=invite["version"])
+    return public_session(session)
+
+
+@router.get("/api/me")
+async def get_me(session: dict[str, Any] = Depends(require_session)):
+    return public_session(session)
+
+
+@router.delete("/api/session")
+async def delete_session(
+    response: Response,
+    session: dict[str, Any] = Depends(require_csrf),
+):
+    # Lazy import avoids a router import cycle.
+    from cloud.api.intents import end_session
+
+    await end_session(session, reason="logout")
+    clear_session_cookies(response)
+    return {"ok": True}
+
+
+def _public_space() -> dict[str, Any]:
+    data = get_space_registry().get_space()
+    data["invite"] = {
+        "enabled": data["invite"]["enabled"],
+        "version": data["invite"]["version"],
+        "updated_at": data["invite"]["updated_at"],
+    }
+    return data
+
+
+@router.get("/api/admin/space")
+async def get_admin_space(_session: dict[str, Any] = Depends(require_admin)):
+    return _public_space()
+
+
+@router.patch("/api/admin/space")
+async def patch_admin_space(
+    req: SpacePatchRequest,
+    session: dict[str, Any] = Depends(require_admin_csrf),
+):
+    if req.name is None and req.device_ids is None:
+        raise HTTPException(status_code=400, detail="no changes supplied")
+    try:
+        get_space_registry().update_space(name=req.name, device_ids=req.device_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_event("space_updated", session, changed=[
+        key for key, value in (("name", req.name), ("device_ids", req.device_ids)) if value is not None
+    ])
+    return _public_space()
+
+
+@router.get("/api/admin/invite")
+async def get_admin_invite(_session: dict[str, Any] = Depends(require_admin)):
+    return _public_space()["invite"]
+
+
+@router.post("/api/admin/invite/rotate")
+async def rotate_admin_invite(session: dict[str, Any] = Depends(require_admin_csrf)):
+    # 192 bits: comfortably above the plan's 128-bit minimum.
+    token = secrets.token_urlsafe(24)
+    invite = get_space_registry().rotate_invite(hash_invite_token(token))
+    audit_event("invite_rotated", session, invite_version=invite["version"])
+    return {
+        "enabled": True,
+        "version": invite["version"],
+        "updated_at": invite["updated_at"],
+        "token": token,  # Returned exactly once; never stored or logged.
+    }
+
+
+@router.post("/api/admin/invite/disable")
+async def disable_admin_invite(session: dict[str, Any] = Depends(require_admin_csrf)):
+    invite = get_space_registry().disable_invite()
+    audit_event("invite_disabled", session, invite_version=invite["version"])
+    return {
+        "enabled": False,
+        "version": invite["version"],
+        "updated_at": invite["updated_at"],
+    }

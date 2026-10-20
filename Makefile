@@ -29,7 +29,7 @@ broker:
 	@pkill -f "[m]osquitto" || true
 	@sleep 1
 	@SSM_DIR=$(SSM_DIR) envsubst < infra/broker/mosquitto.conf.tmpl > $(BROKER_CONF)
-	@echo "Broker starting in foreground: TCP :1883  WS :9001"
+	@echo "Broker starting in foreground: internal/device TCP :1883"
 	mosquitto -c $(BROKER_CONF)
 
 broker-bg:
@@ -100,8 +100,8 @@ tunnel-url:
 	@echo "$(PUBLIC_URL)"
 
 trace:
-	@while true; do \
-		mosquitto_sub -h 127.0.0.1 -p 1883 -u ssm_user -P Wl4sErQrlrpEbm7r -t "ssm/#" -v \
+	@set -a; . cloud/.env; set +a; while true; do \
+		mosquitto_sub -h 127.0.0.1 -p 1883 -u "$$MQTT_USER" -P "$$MQTT_PASSWORD" -t "ssm/#" -v \
 			| awk '{ print strftime("%Y-%m-%d %H:%M:%S"), $$0; fflush() }'; \
 		echo "[`date '+%Y-%m-%d %H:%M:%S'`] MQTT 连接断开，2 秒后重连..."; \
 		sleep 2; \

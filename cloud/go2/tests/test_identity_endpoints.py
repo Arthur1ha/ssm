@@ -38,8 +38,9 @@ def fake_identity(monkeypatch):
     return fake
 
 
-def test_identity_status(fake_identity):
-    assert router_mod.go2_identity_get()["role"] == "owner"
+@pytest.mark.asyncio
+async def test_identity_status(fake_identity):
+    assert (await router_mod.go2_identity_get())["role"] == "owner"
 
 
 @pytest.mark.asyncio
@@ -50,7 +51,7 @@ async def test_identity_recognize(fake_identity):
 
 @pytest.mark.asyncio
 async def test_people_crud_does_not_expose_cloud_face_ids(fake_identity):
-    listed = router_mod.go2_people_list()
+    listed = await router_mod.go2_people_list()
     assert set(listed[0]) == {"person_id", "name", "role", "face_count"}
     request = router_mod.PersonCreateRequest(name="主人", role="owner")
     assert (await router_mod.go2_people_create(request))["status"] == "recognized"

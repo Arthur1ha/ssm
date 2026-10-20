@@ -7,6 +7,7 @@ from typing import Optional
 from cloud.go2.paths import MEMORY_DIR
 from cloud.go2.agentcore.memory.episode import read_day
 from cloud.go2.agentcore.tools.tools import get_text_llm
+from cloud.go2.execution import can_persist, require_persist
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ async def generate_and_save(
     base_dir: Optional[Path] = None,
 ) -> Optional[str]:
     """调用 LLM 生成指定日期的摘要并写入 Markdown，无记录则返回 None。"""
+    require_persist("write a daily summary")
     episodes = _get_episodes_for_date(date_str, episodes_dir)
     if not episodes:
         return None
@@ -97,6 +99,8 @@ async def ensure_yesterday_summary(
     episodes_dir: Optional[Path] = None, base_dir: Optional[Path] = None
 ) -> None:
     """懒触发：若昨天有 episode 记录但无摘要，则自动生成，不阻塞调用方。"""
+    if not can_persist():
+        return
     yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     if get_summary(yesterday, base_dir) is not None:
         return

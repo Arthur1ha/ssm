@@ -6,8 +6,8 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       MQTT 消息代理                          │
-│                   Mosquitto :1883 / :9001                    │
+│                    MQTT 内部控制总线                         │
+│                       Mosquitto :1883                        │
 └──────────┬────────────────────────────┬─────────────────────┘
            │                            │
   ┌────────▼─────────┐        ┌─────────▼──────────────────────┐
@@ -23,7 +23,7 @@
            │                  │  └──────────────────────────┘  │
   ┌────────▼──────────────────────────────────────────────────┤
   │              手机 PWA（发现 + 监控 + 对话）                  │
-  │        WebSocket MQTT + REST，自然语言控制                  │
+  │          HTTPS REST + 会话隔离 SSE，不持有 MQTT 凭据         │
   └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,6 +52,7 @@
 |------|------|
 | `boot.py` | 启动时连接 WiFi |
 | `config.py` | 引脚、MQTT 地址、时序常量、**UNIT_CONFIGS**（unit 注册表） |
+| `local_config.py` | 本机 WiFi/MQTT 密钥（从 example 复制，git 忽略） |
 | `probe.py` | 启动时自动探测各引脚是否有传感器接线 |
 | `bsm.py` | 行为状态机——GPIO/PWM/ADC 驱动，事件回调 |
 | `ism.py` | 接口状态机——仅处理状态转换，不涉及硬件 |
@@ -85,11 +86,16 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 
 | 接口 | 说明 |
 |------|------|
-| `GET  /api/devices` | 列出所有在线设备（`devices.py`） |
+| `POST /api/admin/session`、`POST /api/visitor/session` | 管理员访问码与访客邀请兑换 |
+| `GET /api/me`、`DELETE /api/session` | 当前会话与退出清理 |
+| `GET  /api/devices` | 固定 `main` 空间设备；已配置的离线设备仍返回 |
 | `GET  /api/devices/{unit_id}/agent` | **A2A Agent Card**：机器可读的能力描述（数据取自 `cloud/cards/`） |
-| `GET/POST/DELETE /api/rules` | 自动化规则 CRUD（`rules.py`） |
-| `/api/go2/*` | Go2 连接 / 运动 / 导航 / 视觉 / 对话（`cloud/go2/router.py`） |
-| `GET/PUT /api/esp32/autonomy` | ESP32 灯智能体自主模式（manual/reactive，`cloud/esp32/router.py`） |
+| `POST /api/intents`、`POST /api/commands/{unit_id}` | 认证后的统一手机命令入口 |
+| `GET /api/events` | 按会话过滤的反馈与设备状态 SSE |
+| `POST /api/emergency-stop` | 管理员和体验者均可用的全局安全停止 |
+| `GET/POST/DELETE /api/rules` | 管理员自动化规则 CRUD（`rules.py`） |
+| `/api/admin/*` | 固定空间和访客邀请管理 |
+| `/api/go2/*` | 内部 Go2 数据面；写接口要求内部服务身份与可信执行上下文 |
 
 `api/main.py` 同时承载一个 ESP32 MQTT 桥，订阅 `manifest/state/event/result` 并喂给 ESP32 桌面智能体。
 
@@ -110,9 +116,9 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 
 ### 手机 PWA（`app/`）
 
-无构建步骤的 React 应用（Babel standalone），通过 WebSocket 连接 MQTT 代理（端口 9001）。自动订阅 `ssm/agents/#`，实时接收所有设备状态。
+无构建步骤的 React 应用（Babel standalone）。浏览器只连接 FastAPI：REST 负责登录、命令与管理，认证 SSE 负责实时设备状态和编排反馈；浏览器不加载 MQTT.js，也不持有 broker 写凭据。
 
-界面形态：**单屏聊天中心 + hash 子页**——主屏自上而下为「设备卡片列表（`DevicesScreen`/`DeviceCard`）→ 活动流气泡（`ActivityFeed`）→ 底部输入栏」，子页经 hash 路由（`#go2` / `#<unit_id>`）。功能：设备自动发现、传感器实时数据、执行器控制、自然语言对话、自动化规则管理（`RulesDrawer`）、Go2 专属控制页。源码分层：`pages/`、`components/`、`hooks/`、`utils/`（agentMeta/audio），MQTT 统一经 `MqttBus` 单例。
+系统只有一个固定空间 `main`。管理员通过访问码进入并管理规则、邀请与长期资产；体验者扫描邀请二维码获得短期 Cookie 会话，只能使用已有能力。界面形态为**单屏聊天中心 + hash 设备子页**，访客界面不会显示长期配置入口。
 
 ## MQTT 消息协议
 
@@ -128,7 +134,7 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 | `location` | `ssm/agents/{device_id}/location` | 是 | ESP32 | 设备地理坐标（GCJ-02） |
 
 **控制 / 编排 / 表达 topic**：
-- `ssm/intent/{session_id}` —— 手机意图（PWA 发布，编排器订阅）
+- `ssm/intent/{session_id}` —— FastAPI 验证会话后发布的内部意图（HMAC + 时间窗 + nonce，编排器拒绝篡改与重放）
 - `ssm/task/{unit_id}/{task_id}` —— 任务下发（云端 → 设备）
 - `ssm/result/{unit_id}/{task_id}` —— 任务结果（设备 → 云端，`ok`/`blocked`）
 - `ssm/feedback/{session_id}` —— 编排器渐进式执行反馈
@@ -165,11 +171,11 @@ make ps / logs     # 查看进程 / 日志
 
 ### 2. 配置并上传 ESP32
 
-编辑 `edge/config.py`，填入 WiFi 账号和 Broker 地址，通过 [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html) 上传：
+复制 `edge/local_config.example.py` 为 git 忽略的 `edge/local_config.py`，填入 WiFi 与 Broker 凭据，再通过 [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html) 上传：
 
 ```bash
 cd edge
-mpremote connect <端口> cp boot.py config.py probe.py ism.py bsm.py \
+mpremote connect <端口> cp boot.py config.py local_config.py probe.py ism.py bsm.py \
   mqtt_client.py trigger_map.py local_rules.py agent_manifest.py main.py :
 mpremote connect <端口> reset
 ```
@@ -178,7 +184,9 @@ mpremote connect <端口> reset
 
 ### 3. 打开手机 PWA
 
-浏览器访问 `https://ssm.eliottxu.top`，即可看到自动发现的设备卡片列表,并通过底部输入栏自然语言操作。
+先在 `cloud/.env` 配置 `ADMIN_ACCESS_CODE`、`SSM_SESSION_SECRET`、`SSM_INTERNAL_SERVICE_TOKEN` 和 MQTT 凭据。可另设 `SSM_MQTT_SIGNING_SECRET`；留空时系统从 internal token 做域隔离派生，但不会把可复用 token 放进 MQTT payload。浏览器访问 `https://ssm.eliottxu.top`：管理员可生成访客二维码；新浏览器扫码即可进入临时体验。
+
+公开部署前必须拆分 `ssm_api`、`ssm_orchestrator`、`esp32_desk` 三个 MQTT 账号并启用 ACL。用 `mosquitto_passwd` 配置账号，复制 `infra/broker/acl.example` 为 `infra/broker/acl`，启用 `mosquitto.conf.tmpl` 中的 `acl_file`；云端分别填写 `MQTT_API_*` / `MQTT_ORCHESTRATOR_*`，ESP32 使用设备账号。ACL 使只有 API/编排器能发布 task，避免在资源受限的 MicroPython 固件中分发云端 HMAC 密钥。旧版本曾将 broker 凭据随 PWA 发布过，部署时应轮换旧凭据；ACL 尚未启用前，不要把 broker 暴露给不可信网络。
 
 ## 网络拓扑
 
@@ -186,19 +194,18 @@ mpremote connect <端口> reset
 手机浏览器（HTTPS）
     │
     ▼
-Cloudflare Tunnel（https://ssm.eliottxu.top）  ← 提供 HTTPS/WSS
+Cloudflare Tunnel（https://ssm.eliottxu.top）  ← 提供 HTTPS
     │
     ▼ HTTP（端口 8080）
 nginx
     ├── /        → PWA 静态文件（端口 8081）
-    ├── /api     → FastAPI（端口 8082）
-    └── /mqtt    → Mosquitto WebSocket（端口 9001）
+    └── /api     → FastAPI（端口 8082，REST + SSE）
 
 ESP32
     └── TCP 1883 → Mosquitto（直连，无需 TLS）
 ```
 
-PWA 内 MQTT 地址自动切换：HTTPS 访问时用 `wss://ssm.eliottxu.top/mqtt`，HTTP 访问时直连 `ws://47.116.137.202:9001`。
+Mosquitto 只服务 ESP32、FastAPI 与编排器等内部节点；PWA 不连接 broker。
 
 ## 数据流示例
 
@@ -215,7 +222,8 @@ PWA 内 MQTT 地址自动切换：HTTPS 访问时用 `wss://ssm.eliottxu.top/mqt
 **手机自然语言控制：**
 ```
 用户说"把灯调暗一点"
-  → 手机发布 ssm/intent/{session_id}
+  → 手机 POST /api/intents（安全 Cookie + CSRF）
+  → FastAPI 生成 actor/persist/session_id 可信上下文并发布内部 ssm/intent/{session_id}
   → 编排器 Planner 生成任务 → Dispatcher 下发（ESP32 走 MQTT / Go2 走 HTTP）
-  → 设备执行 → Evaluator 确认 → 手机收到 ssm/feedback/{session_id}
+  → 设备执行 → Evaluator 确认 → FastAPI 按 session_id 过滤反馈 → 手机 SSE 收到结果
 ```

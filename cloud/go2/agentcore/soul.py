@@ -8,6 +8,7 @@ from typing import Optional
 from cloud.go2.agentcore.tools.tools import get_text_llm
 from cloud.go2.agentcore.memory.daily_summary import get_summary
 from cloud.go2.paths import SOUL_DIR
+from cloud.go2.execution import can_persist, require_persist
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def get_system_prompt() -> str:
 
 
 def set_personality(prompt: str) -> None:
+    require_persist("change personality")
     _PERSONALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
     _PERSONALITY_FILE.write_text(
         json.dumps({"prompt": prompt}, ensure_ascii=False, indent=2),
@@ -59,6 +61,7 @@ def _load_traits(traits_path: Optional[Path] = None) -> dict:
 
 
 def _save_traits(traits: dict, traits_path: Optional[Path] = None) -> None:
+    require_persist("change soul traits")
     path = traits_path or _TRAITS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(traits, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -136,6 +139,8 @@ async def evolve_from_summary(
 
 async def ensure_yesterday_evolved(traits_path: Optional[Path] = None) -> None:
     """懒触发：若昨天有日摘要但尚未演化，则执行演化。"""
+    if not can_persist():
+        return
     yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     traits = _load_traits(traits_path)
     if (traits.get("last_evolved") or "") >= yesterday:

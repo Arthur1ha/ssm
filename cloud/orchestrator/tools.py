@@ -7,6 +7,7 @@
 import json
 import os
 import time as _time
+from urllib.parse import urlparse
 
 import requests
 
@@ -45,14 +46,27 @@ def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "o
     )
 
 
-def do_publish_task(unit_id: str, task_id: str, action: str, params: dict, session_id: str):
+def do_publish_task(
+    unit_id: str,
+    task_id: str,
+    action: str,
+    params: dict,
+    session_id: str,
+    context: dict | None = None,
+):
     """向 MQTT 设备（ESP32）发布任务消息（ssm/task/{unit_id}/{task_id}）。
 
     topic 一律用 unit_id（传输层唯一标识），不用 slug。见 protocol/identifiers.md。
     """
+    if _state:
+        _state.register_task(task_id, session_id)
+    execution_context = context or {}
     _mqtt.publish(
         f"ssm/task/{unit_id}/{task_id}",
         json.dumps({"task_id": task_id, "session_id": session_id,
+                    "actor": execution_context.get("actor"),
+                    "persist": execution_context.get("persist"),
+                    "space_id": execution_context.get("space_id"),
                     "action": action, "params": params, "ts": int(_time.time())}),
         qos=1,
     )
@@ -65,11 +79,33 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     与 GO2_API_BASE 拼接成完整 URL。超时由调用方按 skill tag 决定。
     抛出的异常由调用方（Dispatcher）捕获并记为 timeout/error。
     """
-    url = endpoint if endpoint.startswith("http") else f"{GO2_API_BASE}{endpoint}"
+    if endpoint.startswith("http"):
+        target = urlparse(endpoint)
+        trusted = urlparse(GO2_API_BASE)
+        if (target.scheme, target.netloc) != (trusted.scheme, trusted.netloc):
+            raise RuntimeError("refusing to send service token to an untrusted HTTP origin")
+        url = endpoint
+    else:
+        url = f"{GO2_API_BASE}{endpoint}"
     # HTTP 设备走本地 API（127.0.0.1），显式绕过系统代理，
     # 否则 HTTP_PROXY 会把 localhost 请求塞进代理回环失败 → 502 Bad Gateway。
-    resp = requests.post(url, json=body, timeout=timeout,
+    token = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
+    if len(token) < 16:
+        raise RuntimeError("SSM_INTERNAL_SERVICE_TOKEN is not configured")
+    actor = body.get("actor", "")
+    persist = body.get("persist")
+    headers = {
+        "X-SSM-Service-Token": token,
+        "X-SSM-Session-Id": str(body.get("session_id", "")),
+        "X-SSM-Actor": str(actor),
+        "X-SSM-Persist": "true" if persist is True else "false",
+        "X-SSM-Space-Id": str(body.get("space_id", "main")),
+    }
+    resp = requests.post(url, json=body, headers=headers, timeout=timeout,
+                         allow_redirects=False,
                          proxies={"http": None, "https": None})
+    if resp.is_redirect:
+        raise RuntimeError("refusing redirected internal HTTP request")
     resp.raise_for_status()
     try:
         data = resp.json()
@@ -78,6 +114,18 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     if isinstance(data, dict) and "result" not in data:
         data = {**data, "result": "error", "error": data.get("error") or "missing_execution_result"}
     return data if isinstance(data, dict) else {"result": "error", "error": "invalid_response"}
+
+
+def do_cleanup_go2_session(session_id: str, actor: str = "visitor") -> dict:
+    """Tell Go2 to release only resources owned by one ended session."""
+    endpoint = f"/api/go2/sessions/{session_id}/cleanup"
+    body = {
+        "session_id": session_id,
+        "actor": actor,
+        "persist": False,
+        "space_id": "main",
+    }
+    return do_http_dispatch(endpoint, body, timeout=5)
 
 
 def do_publish(topic: str, payload: dict):

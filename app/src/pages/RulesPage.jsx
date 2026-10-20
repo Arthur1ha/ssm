@@ -22,8 +22,7 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
 
   const load = async () => {
     try {
-      const r = await fetch('/api/rules');
-      const data = await r.json();
+      const data = await apiClient.request('/api/rules');
       setRules(data);
       onRulesChange?.(data);
     } catch {}
@@ -33,15 +32,14 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
   useEffectR(() => { if (open) load(); }, [open]);
 
   const handleDelete = async (rule_id) => {
-    await fetch(`/api/rules/${rule_id}`, { method: 'DELETE' });
+    await apiClient.request(`/api/rules/${rule_id}`, { method: 'DELETE' });
     load();
   };
 
   const handleToggle = async (rule_id, enabled) => {
-    await fetch(`/api/rules/${rule_id}`, {
+    await apiClient.request(`/api/rules/${rule_id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !enabled }),
+      body: { enabled: !enabled },
     });
     load();
   };

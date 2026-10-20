@@ -1,5 +1,5 @@
 /* fsmWidgets — 按 card.widgets 声明渲染态内富控件（type 枚举：connection/joystick/video/map）。 */
-function ConnectionWidget({ widget }) {
+function ConnectionWidget({ widget, unitId, actor }) {
   const { useEffect, useState, useCallback, useRef } = React;
   const endpoint = widget.endpoint || '/api/go2/connection';
   const statusEndpoint = widget.status_endpoint || endpoint;
@@ -39,10 +39,9 @@ function ConnectionWidget({ widget }) {
   const connect = useCallback(() => {
     if (busy) return;
     setBusy(true);
-    fetch(endpoint, { method: 'POST' })
-      .then(async r => {
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data.detail || String(r.status));
+    commandBus.command(unitId, 'connect', {})
+      .then(data => {
+        if (data.result === 'error') throw new Error(data.error || '连接失败');
         setStatus(prev => ({ ...prev, fsm_state: 'connecting', error: '' }));
         setTimeout(refresh, 700);
       })
@@ -56,7 +55,7 @@ function ConnectionWidget({ widget }) {
   const disconnect = () => {
     if (busy) return;
     setBusy(true);
-    fetch(endpoint, { method: 'DELETE' })
+    commandBus.command(unitId, 'disconnect', {})
       .then(() => setTimeout(refresh, 400))
       .catch(() => setStatus(prev => ({ ...prev, error: '断开请求失败。' })))
       .finally(() => setBusy(false));
@@ -100,16 +99,16 @@ function ConnectionWidget({ widget }) {
         <button
           className="btn"
           onClick={connected ? disconnect : connect}
-          disabled={connecting}
+          disabled={connecting || (connected && actor !== 'admin')}
           style={{
             padding: '7px 12px',
             background: connected ? 'var(--color-surface-2)' : 'var(--color-accent)',
             color: connected ? 'var(--color-text-muted)' : 'var(--color-bg)',
             borderColor: connected ? 'var(--color-border)' : 'var(--color-accent-border)',
-            cursor: connecting ? 'default' : 'pointer',
+            cursor: connecting || (connected && actor !== 'admin') ? 'default' : 'pointer',
           }}
         >
-          {connecting ? '连接中...' : (connected ? '断开' : '连接机器狗')}
+          {connecting ? '连接中...' : (connected ? (actor === 'admin' ? '断开' : '已连接') : '连接机器狗')}
         </button>
       </div>
       {status.error && (
@@ -192,7 +191,7 @@ function ColorSwatchesWidget({ unitId, widget, report }) {
   );
 }
 
-function fsmWidget(unitId, state, widgets, report = () => {}) {
+function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor') {
   if (!widgets || !widgets.length) return null;
 
   const VirtualJoystick = window.VirtualJoystick;
@@ -202,14 +201,14 @@ function fsmWidget(unitId, state, widgets, report = () => {}) {
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
   if (!active.length) return null;
 
-  const sendVelocity = (endpoint, vx, vy, vyaw) => commandBus.velocity(endpoint, { vx, vy, vyaw }, report);
+  const sendVelocity = (_endpoint, vx, vy, vyaw) => commandBus.velocity(unitId, { vx, vy, vyaw }, report);
 
   const nodes = active.map((w, idx) => {
     if (w.type === 'color_swatches') {
       return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report}/>;
     }
     if (w.type === 'connection') {
-      return <ConnectionWidget key={'conn' + idx} widget={w}/>;
+      return <ConnectionWidget key={'conn' + idx} widget={w} unitId={unitId} actor={actor}/>;
     }
     if (w.type === 'joystick' && VirtualJoystick) {
       const ep = w.endpoint || '/api/go2/velocity';

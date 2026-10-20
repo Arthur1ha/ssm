@@ -3,19 +3,6 @@
  * 进入时右滑入，返回时右滑出，避免整棵树切换导致的闪烁。
  */
 const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
-const ONBOARDING_SUGGESTIONS = ['帮我看看有什么新成员？'];
-const ONBOARDING_BUBBLE = '我刚醒来，还没认识这个空间里的新成员。要不要让我先四处听一听，看看谁在等着加入？';
-const SPACE_ID_STORAGE_KEY = 'ssm_space_id';
-
-function normalizeSpaceId(value) {
-  const text = String(value ?? '').trim();
-  if (!/^\d+$/.test(text)) return '0';
-  return String(Number(text));
-}
-
-function loadSpaceId() {
-  return normalizeSpaceId(localStorage.getItem(SPACE_ID_STORAGE_KEY) || '0');
-}
 
 function useHashLocal() {
   const { useState, useEffect } = React;
@@ -31,37 +18,28 @@ function useHashLocal() {
 /* 路由跳转 */
 function navigate(hash) { window.location.hash = hash; }
 
-function App() {
+function App({ session, logout }) {
   const { useState, useEffect, useRef } = React;
-  const [spaceId, setSpaceId] = useState(loadSpaceId);
   const {
-    connected, agents, loadingAgents, agentsError,
-    unitData, refreshAgents, adoptLocalCandidate,
-  } = useSsmCore(spaceId);
+    connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
+  } = useSsmCore();
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHashLocal();
 
   const [activityLog, setActivityLog] = useState([]);
   const [rulesOpen,   setRulesOpen]   = useState(false);
+  const [inviteOpen,  setInviteOpen]  = useState(false);
+  const [spaceOpen,   setSpaceOpen]   = useState(false);
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
-  const [adoptingDeviceId, setAdoptingDeviceId] = useState(null);
-  const greetedRef = useRef(false);
 
   /* 退出动画：保留即将消失的 uid，待动画完成后清除 */
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
   const ready = !loadingAgents;
-  const onboarding = ready && agents.length === 0;
   const hasDevices = ready && agents.length > 0;
-  const suggestions = onboarding ? ONBOARDING_SUGGESTIONS : (hasDevices ? SUGGESTIONS : []);
-
-  useEffect(() => {
-    if (!onboarding || greetedRef.current) return;
-    greetedRef.current = true;
-    appendActivity({ type: 'ai', agent: 'orchestrator', text: ONBOARDING_BUBBLE });
-  }, [onboarding]);
+  const suggestions = hasDevices ? SUGGESTIONS : [];
 
   const handleSend = (text, options = {}) => {
     const t = text.trim();
@@ -69,85 +47,23 @@ function App() {
     appendActivity({ type: 'user', text: t });
     send(t, {
       onMessage:     msg  => appendActivity({ type: 'ai', agent: 'orchestrator', text: msg }),
-      onPendingRule: rule => setPendingRule(rule),
-      onDiscoveryCandidates: (devices, msg) => {
-        appendActivity({
-          type: 'discovery',
-          text: msg || '我听到几个新成员在打招呼，先把它们的名片递给你。',
-          devices,
-        });
+      onPendingRule: rule => {
+        if (session.actor === 'admin') setPendingRule(rule);
+        else appendActivity({ type: 'ai', agent: 'orchestrator', text: '临时体验不会保存长期规则。你仍可以直接控制现有设备。' });
       },
       intentHint: options.intentHint,
-      spaceId,
     });
-  };
-
-  const handleSwitchSpace = () => {
-    const input = window.prompt('输入用户空间编号（从 0 开始）', spaceId);
-    if (input === null) return;
-    const next = normalizeSpaceId(input);
-    if (next === spaceId) return;
-    localStorage.setItem(SPACE_ID_STORAGE_KEY, next);
-    greetedRef.current = false;
-    setActivityLog([]);
-    setPendingRule(null);
-    setExitingUid(null);
-    navigate('#');
-    setSpaceId(next);
-  };
-
-  const handleScan = () => {
-    appendActivity({
-      type: 'ai',
-      agent: 'orchestrator',
-      text: '扫码接入还在准备中。先让我用能力名片听一圈，也能找到正在等你的新成员。',
-    });
-  };
-
-  const handleAdoptDevice = async candidate => {
-    if (!candidate?.device_id || adoptingDeviceId) return;
-    setAdoptingDeviceId(candidate.device_id);
-    try {
-      const resp = await fetch('/api/devices/adoptions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_id: candidate.device_id, space_id: spaceId }),
-      });
-      if (!resp.ok) throw new Error('adopt failed');
-      const data = await resp.json();
-      adoptLocalCandidate(data.candidate || candidate);
-      setActivityLog(prev => prev.map(entry => {
-        if (entry.type !== 'discovery') return entry;
-        return {
-          ...entry,
-          devices: (entry.devices || []).filter(d => d.device_id !== candidate.device_id),
-        };
-      }));
-      appendActivity({
-        type: 'ai',
-        agent: 'orchestrator',
-        text: `认识啦，${candidate.name || candidate.device_id} 已经加入这个空间。`,
-      });
-      refreshAgents();
-    } catch {
-      appendActivity({
-        type: 'ai',
-        agent: 'orchestrator',
-        text: '这张名片暂时接不进来，等设备在线稳定后我们再试一次。',
-      });
-    } finally {
-      setAdoptingDeviceId(null);
-    }
   };
 
   const handleConfirmRule = () => {
     if (!pendingRule) return;
     setSavingRule(true);
-    fetch('/api/rules', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pendingRule),
-    }).then(() => { setPendingRule(null); setSavingRule(false); })
-      .catch(() => setSavingRule(false));
+    apiClient.request('/api/rules', { method: 'POST', body: pendingRule })
+      .then(() => { setPendingRule(null); setSavingRule(false); })
+      .catch(error => {
+        appendActivity({ type: 'ai', agent: 'orchestrator', text: apiErrorText(error) });
+        setSavingRule(false);
+      });
   };
 
   /* 返回主屏：先播退出动画再实际跳转 */
@@ -193,17 +109,11 @@ function App() {
             }}/>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button
-              onClick={handleSwitchSpace}
-              className="btn"
-              title="切换用户空间"
-              style={{ maxWidth: 112, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-            >
-              <Icon name="user" size={13}/> 用户 {spaceId}
-            </button>
-            <button onClick={() => setRulesOpen(true)} className="btn">
-              <Icon name="list" size={13}/> 规则
-            </button>
+            <SessionBadge session={session}/>
+            {session.actor === 'admin' && <button onClick={() => setSpaceOpen(true)} className="btn header-icon-btn" title="空间建设" aria-label="空间建设"><Icon name="settings" size={13}/></button>}
+            {session.actor === 'admin' && <button onClick={() => setInviteOpen(true)} className="btn header-icon-btn" title="访客邀请" aria-label="访客邀请"><Icon name="scan" size={13}/></button>}
+            {session.actor === 'admin' && <button onClick={() => setRulesOpen(true)} className="btn header-icon-btn" title="自动化规则" aria-label="自动化规则"><Icon name="list" size={13}/></button>}
+            <button onClick={logout} className="btn header-icon-btn" title={session.actor === 'visitor' ? '结束体验' : '退出管理'} aria-label="退出"><Icon name="x" size={13}/></button>
           </div>
         </div>
 
@@ -236,11 +146,9 @@ function App() {
             entries={activityLog}
             thinking={thinking}
             thinkingText={thinkingText}
-            onAdoptDevice={handleAdoptDevice}
-            adoptingDeviceId={adoptingDeviceId}
           />
 
-          {pendingRule && (
+          {pendingRule && session.actor === 'admin' && (
             <div style={{ padding: '0 16px 10px' }}>
               <div style={{
                 background: 'var(--color-accent-dim)',
@@ -282,7 +190,7 @@ function App() {
           {activityLog.every(e => e.type !== 'user') && !thinking && (
             <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8, overflowX: 'auto', scrollbarWidth: 'none' }}>
               {suggestions.map(s => (
-                <button key={s} onClick={() => handleSend(s, onboarding ? { intentHint: 'discover_devices' } : {})} style={{
+                <button key={s} onClick={() => handleSend(s)} style={{
                   flexShrink: 0, padding: '8px 16px', borderRadius: 'var(--radius-card)',
                   background: 'var(--color-surface-2)', border: '1px solid var(--color-border-strong)',
                   color: 'var(--color-text-muted)', fontSize: 13, cursor: 'pointer',
@@ -298,13 +206,14 @@ function App() {
             placeholder={
               loadingAgents
                 ? '正在整理空间成员…'
-                : (onboarding ? '问我有哪些新成员可以接入…' : '告诉我想让大家做什么…')
+                : '告诉我想让大家做什么…'
             }
-            leadingAction={onboarding ? { icon: 'scan', label: '扫码接入', onClick: handleScan } : null}
           />
         </div>
 
-        <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>
+        {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
+        {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
+        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)}/>}
       </div>
 
       {/* ── 设备页：叠在主屏之上，CSS 滑入/滑出 ── */}
@@ -323,6 +232,7 @@ function App() {
             device={displayDevice}
             liveState={unitData[displayUid]}
             onBack={() => handleBack(displayUid)}
+            actor={session.actor}
           />
         </div>
       )}
