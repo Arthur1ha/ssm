@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import os
 import secrets
 from typing import Any
 
@@ -23,14 +22,10 @@ from cloud.api.auth import (
     set_session_cookies,
 )
 from cloud.api.policy import audit_event
-from cloud.space.registry import get_space_registry
+from cloud.cards.registry import get_registry
+from cloud.space.registry import get_space_registry, group_cards_by_device
 
 router = APIRouter(tags=["sessions"])
-
-
-class AdminSessionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    access_code: str = Field(..., min_length=1, max_length=512)
 
 
 class VisitorSessionRequest(BaseModel):
@@ -45,19 +40,13 @@ class SpacePatchRequest(BaseModel):
 
 
 @router.post("/api/admin/session")
-async def create_admin_session(req: AdminSessionRequest, request: Request, response: Response):
+async def create_admin_session(request: Request, response: Response):
     check_rate_limit(request, "admin-session")
-    configured = os.getenv("ADMIN_ACCESS_CODE", "")
-    if not configured:
-        raise HTTPException(status_code=503, detail="ADMIN_ACCESS_CODE is not configured")
-    if not hmac.compare_digest(req.access_code.encode(), configured.encode()):
-        audit_event("admin_login_rejected")
-        raise HTTPException(status_code=401, detail="invalid administrator access code")
     session = new_session("admin")
     set_session_cookies(response, session)
     from cloud.api.intents import schedule_session_cleanup
     schedule_session_cleanup(session)
-    audit_event("admin_login", session)
+    audit_event("admin_session_created", session)
     return public_session(session)
 
 
@@ -127,6 +116,27 @@ async def patch_admin_space(
         key for key, value in (("name", req.name), ("device_ids", req.device_ids)) if value is not None
     ])
     return _public_space()
+
+
+@router.get("/api/admin/device-candidates")
+async def get_admin_device_candidates(_session: dict[str, Any] = Depends(require_admin)):
+    """Show the two supported device groups available to add to main."""
+    configured = set(get_space_registry().get_space()["device_ids"])
+    groups = group_cards_by_device(get_registry().get_all_cards())
+    labels = {
+        "esp32_desk": ("桌面智能灯", "ESP32 控制器 · 灯光与传感器"),
+        "go2": ("Go2 机器狗", "四足机器人与移动能力"),
+    }
+    return [
+        {
+            "device_id": device_id,
+            "name": labels[device_id][0],
+            "description": labels[device_id][1],
+            "online": any(card.get("online", False) for card in groups.get(device_id, [])),
+            "added": device_id in configured,
+        }
+        for device_id in ("esp32_desk", "go2")
+    ]
 
 
 @router.get("/api/admin/invite")

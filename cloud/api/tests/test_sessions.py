@@ -7,7 +7,7 @@ from .conftest import login_admin
 
 @pytest.mark.asyncio
 async def test_admin_cookie_is_signed_httponly_and_csrf_protected(client):
-    response = await client.post("/api/admin/session", json={"access_code": "correct horse battery staple"})
+    response = await client.post("/api/admin/session")
     assert response.status_code == 200
     cookies = response.headers.get_list("set-cookie")
     assert any("ssm_session=" in value and "HttpOnly" in value and "SameSite=lax" in value for value in cookies)
@@ -56,19 +56,55 @@ async def test_admin_only_space_and_fixed_id(client):
     )).status_code == 422
     assert (await client.patch(
         "/api/admin/space", json={"device_ids": ["go2"]}, headers=csrf,
-    )).status_code == 400
+    )).status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_bad_login_and_missing_session(client):
-    assert (await client.post("/api/admin/session", json={"access_code": "wrong"})).status_code == 401
-    assert (await client.get("/api/me")).status_code == 401
+async def test_admin_can_manage_devices_in_main_space(client):
+    csrf = await login_admin(client)
+    candidates = await client.get("/api/admin/device-candidates")
+    assert candidates.status_code == 200
+    assert {row["device_id"] for row in candidates.json()} == {"esp32_desk", "go2"}
+
+    response = await client.patch(
+        "/api/admin/space", json={"device_ids": ["go2"]}, headers=csrf,
+    )
+    assert response.status_code == 200
+    assert response.json()["device_ids"] == ["go2"]
+    assert (await client.get("/api/devices")).json()[0]["device_id"] == "go2"
+
+    empty = await client.patch(
+        "/api/admin/space", json={"device_ids": []}, headers=csrf,
+    )
+    assert empty.status_code == 200
+    assert empty.json()["device_ids"] == []
+
+    unsupported = await client.patch(
+        "/api/admin/space", json={"device_ids": ["other"]}, headers=csrf,
+    )
+    assert unsupported.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_create_admin_session_from_homepage(client):
+    created = await client.post("/api/admin/session")
+    assert created.status_code == 200
+    assert created.json()["actor"] == "admin"
+    assert (await client.get("/api/me")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_session_works_without_configured_session_secret(client, monkeypatch):
+    monkeypatch.delenv("SSM_SESSION_SECRET", raising=False)
+    response = await client.post("/api/admin/session")
+    assert response.status_code == 200
+    assert (await client.get("/api/me")).status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_valid_cookie_restores_cleanup_watcher_after_process_restart(client, monkeypatch):
     response = await client.post(
-        "/api/admin/session", json={"access_code": "correct horse battery staple"},
+        "/api/admin/session",
     )
     assert response.status_code == 200
     session_id = response.json()["session_id"]

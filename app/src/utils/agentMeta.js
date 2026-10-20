@@ -1,4 +1,6 @@
 // 设备类别：tags 优先（来自 manifest），name 仅兜底。决定图标/状态文案/活跃判定。
+const LIME = '#C8FF3E';
+
 function agentKind(agent) {
   const tags = agent.tags || [];
   if (agent.agent_type === 'robot') return 'robot';
@@ -26,6 +28,27 @@ function getAgentMeta(agent) {
     case 'actuator': return { icon: 'settings', color: '#FF9A5A', label: '执行器' };
     default:       return { icon: 'wifi',     color: '#7EE8A2', label: agent.agent_type === 'sensor' ? '传感器' : '设备' };
   }
+}
+
+function getAgentBubbleColor(agent) {
+  const id = typeof agent === 'string' ? agent : (agent?.agent_id || agent?.unit_id || '');
+  if (id === 'orchestrator' || id === 'cloud_orchestrator') return LIME;
+  if (id === 'go2' || id.startsWith('go2_')) return '#4BD4FF';
+  if (id.startsWith('esp32_')) return '#FF9A5A';
+  return '#7EE8A2';
+}
+
+function getAgentDisplayName(agent) {
+  const id = typeof agent === 'string' ? agent : (agent?.agent_id || agent?.unit_id || '');
+  const names = {
+    orchestrator: 'SSM 管家',
+    cloud_orchestrator: 'SSM 管家',
+    go2: '机器狗',
+  };
+  if (names[id]) return names[id];
+  if (id.startsWith('esp32_')) return '桌面智能体';
+  if (id.startsWith('go2_')) return '机器狗';
+  return id || '智能体';
 }
 
 function getStateLabel(agent, unitData) {

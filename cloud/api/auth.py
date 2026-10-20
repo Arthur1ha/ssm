@@ -23,6 +23,10 @@ CSRF_HEADER = "X-CSRF-Token"
 
 _rate_lock = threading.Lock()
 _rate_attempts: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+# Keep the MVP usable without extra deployment setup. When no explicit secret
+# is supplied, cookies are signed with a process-local key; restarting the API
+# invalidates existing sessions, which is acceptable for this single-space MVP.
+_EPHEMERAL_SESSION_SECRET = secrets.token_bytes(32)
 
 
 def _b64encode(raw: bytes) -> str:
@@ -36,7 +40,7 @@ def _b64decode(value: str) -> bytes:
 def _session_secret() -> bytes:
     value = os.getenv("SSM_SESSION_SECRET", "")
     if len(value) < 32:
-        raise HTTPException(status_code=503, detail="SSM_SESSION_SECRET is not configured securely")
+        return _EPHEMERAL_SESSION_SECRET
     return value.encode("utf-8")
 
 

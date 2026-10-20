@@ -18,7 +18,6 @@ class _FakeAgent:
 
 @pytest_asyncio.fixture
 async def client(monkeypatch):
-    monkeypatch.setenv("ADMIN_ACCESS_CODE", "test-admin-code")
     monkeypatch.setenv("SSM_SESSION_SECRET", "s" * 48)
     monkeypatch.setenv("SSM_COOKIE_SECURE", "false")
     app = FastAPI()
@@ -31,9 +30,7 @@ async def client(monkeypatch):
 
 
 async def _login_admin(client):
-    response = await client.post(
-        "/api/admin/session", json={"access_code": "test-admin-code"}
-    )
+    response = await client.post("/api/admin/session")
     assert response.status_code == 200
     return {"X-CSRF-Token": client.cookies.get("ssm_csrf")}
 

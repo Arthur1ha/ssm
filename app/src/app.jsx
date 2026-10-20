@@ -18,7 +18,7 @@ function useHashLocal() {
 /* 路由跳转 */
 function navigate(hash) { window.location.hash = hash; }
 
-function App({ session, logout }) {
+function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
   const { useState, useEffect, useRef } = React;
   const {
     connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
@@ -35,6 +35,13 @@ function App({ session, logout }) {
 
   /* 退出动画：保留即将消失的 uid，待动画完成后清除 */
   const [exitingUid, setExitingUid] = useState(null);
+
+  useEffect(() => {
+    if (openBuilderOnEnter && session.actor === 'admin') {
+      setSpaceOpen(true);
+      onBuilderOpened?.();
+    }
+  }, [openBuilderOnEnter, session.actor, onBuilderOpened]);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
   const ready = !loadingAgents;
@@ -213,7 +220,7 @@ function App({ session, logout }) {
 
         {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
-        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)}/>}
+        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents}/>}
       </div>
 
       {/* ── 设备页：叠在主屏之上，CSS 滑入/滑出 ── */}

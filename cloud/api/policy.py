@@ -44,7 +44,7 @@ def audit_event(event: str, session: dict[str, Any] | None = None, **fields: Any
     if session:
         record.update({"session_id": session.get("session_id"), "actor": session.get("actor")})
     for key, value in fields.items():
-        if key.lower() not in {"token", "token_hash", "cookie", "access_code", "secret"}:
+        if key.lower() not in {"token", "token_hash", "cookie", "secret"}:
             record[key] = value
     encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
     _AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)

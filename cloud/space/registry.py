@@ -97,11 +97,14 @@ class SpaceRegistry:
     def _normalize(self, raw: Any) -> dict[str, Any]:
         data = raw if isinstance(raw, dict) else {}
         invite = data.get("invite") if isinstance(data.get("invite"), dict) else {}
+        device_ids = data.get("device_ids", _DEFAULT_SPACE["device_ids"])
+        if not isinstance(device_ids, list):
+            device_ids = _DEFAULT_SPACE["device_ids"]
         return {
             "version": 1,
             "id": DEFAULT_SPACE_ID,
             "name": str(data.get("name") or _DEFAULT_SPACE["name"]),
-            "device_ids": _unique_strings(data.get("device_ids") or _DEFAULT_SPACE["device_ids"]),
+            "device_ids": _unique_strings(device_ids),
             "invite": {
                 "enabled": bool(invite.get("enabled", False)),
                 "token_hash": str(invite.get("token_hash") or ""),
@@ -144,10 +147,10 @@ class SpaceRegistry:
                 data["name"] = clean_name
             if device_ids is not None:
                 clean_ids = _unique_strings(device_ids)
-                if not clean_ids:
-                    raise ValueError("device_ids must not be empty")
-                if not {"esp32_desk", "go2"}.issubset(clean_ids):
-                    raise ValueError("the main space must include esp32_desk and go2")
+                supported = {"esp32_desk", "go2"}
+                unsupported = set(clean_ids) - supported
+                if unsupported:
+                    raise ValueError(f"unsupported device ids: {', '.join(sorted(unsupported))}")
                 data["device_ids"] = clean_ids
             data["updated_at"] = int(time.time())
             self._atomic_save(data)

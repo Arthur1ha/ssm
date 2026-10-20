@@ -86,7 +86,7 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 
 | 接口 | 说明 |
 |------|------|
-| `POST /api/admin/session`、`POST /api/visitor/session` | 管理员访问码与访客邀请兑换 |
+| `POST /api/admin/session`、`POST /api/visitor/session` | 创建管理员会话与访客邀请兑换 |
 | `GET /api/me`、`DELETE /api/session` | 当前会话与退出清理 |
 | `GET  /api/devices` | 固定 `main` 空间设备；已配置的离线设备仍返回 |
 | `GET  /api/devices/{unit_id}/agent` | **A2A Agent Card**：机器可读的能力描述（数据取自 `cloud/cards/`） |
@@ -118,7 +118,7 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 
 无构建步骤的 React 应用（Babel standalone）。浏览器只连接 FastAPI：REST 负责登录、命令与管理，认证 SSE 负责实时设备状态和编排反馈；浏览器不加载 MQTT.js，也不持有 broker 写凭据。
 
-系统只有一个固定空间 `main`。管理员通过访问码进入并管理规则、邀请与长期资产；体验者扫描邀请二维码获得短期 Cookie 会话，只能使用已有能力。界面形态为**单屏聊天中心 + hash 设备子页**，访客界面不会显示长期配置入口。
+系统只有一个固定空间 `main`。用户点击“创建空间”即可进入并管理规则、邀请与长期资产；体验者扫描邀请二维码获得短期 Cookie 会话，只能使用已有能力。界面形态为**单屏聊天中心 + hash 设备子页**，访客界面不会显示长期配置入口。
 
 ## MQTT 消息协议
 
@@ -184,7 +184,7 @@ mpremote connect <端口> reset
 
 ### 3. 打开手机 PWA
 
-先在 `cloud/.env` 配置 `ADMIN_ACCESS_CODE`、`SSM_SESSION_SECRET`、`SSM_INTERNAL_SERVICE_TOKEN` 和 MQTT 凭据。可另设 `SSM_MQTT_SIGNING_SECRET`；留空时系统从 internal token 做域隔离派生，但不会把可复用 token 放进 MQTT payload。浏览器访问 `https://ssm.eliottxu.top`：管理员可生成访客二维码；新浏览器扫码即可进入临时体验。
+按现有部署需要配置 MQTT 凭据。浏览器访问 `https://ssm.eliottxu.top`：点击“创建空间”可进入 `main` 管理页并生成访客二维码；新浏览器扫码即可进入临时体验。未配置 `SSM_SESSION_SECRET` 时，服务使用进程内临时密钥，重启服务后现有会话会失效。
 
 公开部署前必须拆分 `ssm_api`、`ssm_orchestrator`、`esp32_desk` 三个 MQTT 账号并启用 ACL。用 `mosquitto_passwd` 配置账号，复制 `infra/broker/acl.example` 为 `infra/broker/acl`，启用 `mosquitto.conf.tmpl` 中的 `acl_file`；云端分别填写 `MQTT_API_*` / `MQTT_ORCHESTRATOR_*`，ESP32 使用设备账号。ACL 使只有 API/编排器能发布 task，避免在资源受限的 MicroPython 固件中分发云端 HMAC 密钥。旧版本曾将 broker 凭据随 PWA 发布过，部署时应轮换旧凭据；ACL 尚未启用前，不要把 broker 暴露给不可信网络。
 

@@ -28,6 +28,7 @@ function SessionGate({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [openBuilderOnEnter, setOpenBuilderOnEnter] = useState(false);
 
   const applySession = useCallback(data => {
     const next = normalizeSession(data);
@@ -97,12 +98,22 @@ function SessionGate({ children }) {
     return () => clearTimeout(timer);
   }, [session?.expires_at]);
 
-  const adminLogin = async accessCode => {
+  const adminLogin = async () => {
     const data = await apiClient.request('/api/admin/session', {
-      method: 'POST', body: { access_code: accessCode }, suppressUnauthorized: true,
+      method: 'POST', suppressUnauthorized: true,
     });
     applySession(data);
+    setOpenBuilderOnEnter(true);
     try { await loadMe(); } catch (_) {}
+  };
+
+  const visitorJoin = async inviteValue => {
+    const token = extractInviteToken(inviteValue);
+    if (!token) throw new Error('请粘贴访客邀请链接或二维码中的邀请码');
+    const data = await apiClient.request('/api/visitor/session', {
+      method: 'POST', body: { token }, suppressUnauthorized: true,
+    });
+    applySession(data);
   };
 
   const logout = async () => {
@@ -115,8 +126,24 @@ function SessionGate({ children }) {
   };
 
   if (loading) return <SessionLoading/>;
-  if (!session) return <SessionEntry error={error} onAdminLogin={adminLogin}/>;
-  return children({ session, logout, refreshSession: loadMe });
+  if (!session) return <SessionEntry error={error} onAdminLogin={adminLogin} onVisitorJoin={visitorJoin}/>;
+  return children({
+    session, logout, refreshSession: loadMe,
+    openBuilderOnEnter,
+    onBuilderOpened: () => setOpenBuilderOnEnter(false),
+  });
+}
+
+function extractInviteToken(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw, window.location.origin);
+    const fragment = new URLSearchParams(url.hash.replace(/^#\??/, ''));
+    return fragment.get('invite') || fragment.get('token') || (raw.includes('://') ? '' : raw);
+  } catch (_) {
+    return raw;
+  }
 }
 
 function SessionLoading() {
@@ -129,22 +156,36 @@ function SessionLoading() {
   );
 }
 
-function SessionEntry({ error, onAdminLogin }) {
-  const [showLogin, setShowLogin] = React.useState(false);
-  const [code, setCode] = React.useState('');
+function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
+  const [showJoin, setShowJoin] = React.useState(false);
+  const [inviteValue, setInviteValue] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState(error || '');
 
   React.useEffect(() => setMessage(error || ''), [error]);
 
-  const submit = async event => {
-    event.preventDefault();
-    if (!code.trim() || busy) return;
+  const createMain = async () => {
+    if (busy) return;
     setBusy(true);
     setMessage('');
-    try { await onAdminLogin(code); }
-    catch (loginError) { setMessage(apiErrorText(loginError, '访问码不正确')); }
+    try { await onAdminLogin(); }
+    catch (loginError) { setMessage(apiErrorText(loginError, '暂时无法创建空间，请重试')); }
     finally { setBusy(false); }
+  };
+
+  const join = async event => {
+    event.preventDefault();
+    if (!inviteValue.trim() || busy) return;
+    setBusy(true);
+    setMessage('');
+    try { await onVisitorJoin(inviteValue); }
+    catch (joinError) { setMessage(apiErrorText(joinError, '邀请无效或已过期')); }
+    finally { setBusy(false); }
+  };
+
+  const backToChoices = () => {
+    setShowJoin(false);
+    setMessage('');
   };
 
   return (
@@ -157,30 +198,41 @@ function SessionEntry({ error, onAdminLogin }) {
           <span/><span/><span/><span/>
           <b>MAIN</b>
         </div>
-        <p className="session-entry__eyebrow">固定体验空间</p>
-        <h1>让空间里的智能体<br/>一起回应你</h1>
-        <p className="session-entry__copy">扫描管理员分享的体验码会自动进入。空间建设者可使用访问码管理设备与长期规则。</p>
+        <p className="session-entry__eyebrow">SSM · MAIN SPACE</p>
+        <h1>让设备，<br/>成为空间的一部分。</h1>
+        <p className="session-entry__copy">先建设你的空间，或通过邀请进入一个正在运行的空间。</p>
 
         {message && <div className="session-entry__error" role="alert">{message}</div>}
 
-        {showLogin ? (
-          <form className="session-entry__form" onSubmit={submit}>
-            <label htmlFor="admin-code">管理员访问码</label>
-            <input id="admin-code" type="password" autoComplete="current-password"
-              value={code} onChange={event => setCode(event.target.value)} autoFocus/>
-            <div className="session-entry__actions">
-              <button type="button" className="btn" onClick={() => setShowLogin(false)}>返回</button>
-              <button type="submit" className="btn btn--accent" disabled={busy || !code.trim()}>
-                {busy ? '正在验证…' : '进入管理席'}
-              </button>
-            </div>
-          </form>
+        {showJoin ? (
+          <section className="entry-subflow">
+            <div className="entry-subflow__heading"><span className="entry-flow-mark entry-flow-mark--join"><Icon name="scan" size={16}/></span><div><small>JOIN A SPACE</small><h2>扫码加入</h2></div></div>
+            <p>用手机相机扫描管理员生成的二维码。也可以粘贴邀请链接。</p>
+            <form className="session-entry__form" onSubmit={join}>
+              <label htmlFor="invite-link">访客邀请链接或邀请码</label>
+              <input id="invite-link" type="text" inputMode="url" autoComplete="off"
+                value={inviteValue} onChange={event => setInviteValue(event.target.value)} autoFocus
+                placeholder="粘贴邀请链接或邀请码"/>
+              <div className="session-entry__actions">
+                <button type="button" className="btn" onClick={backToChoices}>返回</button>
+                <button type="submit" className="btn btn--accent" disabled={busy || !inviteValue.trim()}>
+                  {busy ? '正在验证…' : '进入体验空间'}
+                </button>
+              </div>
+            </form>
+          </section>
         ) : (
           <div className="session-entry__choices">
-            <button className="btn btn--accent" onClick={() => setShowLogin(true)}>
-              <Icon name="user" size={14}/> 管理员进入
+            <button className="entry-choice entry-choice--create" onClick={createMain} disabled={busy}>
+              <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong><small>进入 main，添加设备并生成访客码</small></span>
+              <Icon name="arrow" size={17}/>
             </button>
-            <p><Icon name="scan" size={13}/> 体验者请扫描邀请二维码</p>
+            <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>
+              <span className="entry-choice__icon"><Icon name="scan" size={20}/></span>
+              <span className="entry-choice__copy"><strong>扫码加入</strong><small>使用管理员邀请，开始临时体验</small></span>
+              <Icon name="arrow" size={17}/>
+            </button>
           </div>
         )}
       </section>

@@ -25,7 +25,6 @@ class FakeMqtt:
 
 @pytest.fixture
 def api_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("ADMIN_ACCESS_CODE", "correct horse battery staple")
     monkeypatch.setenv("SSM_SESSION_SECRET", "s" * 48)
     monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "i" * 32)
     monkeypatch.setenv("SSM_COOKIE_SECURE", "false")
@@ -64,6 +63,6 @@ async def client(app):
 
 
 async def login_admin(client):
-    response = await client.post("/api/admin/session", json={"access_code": "correct horse battery staple"})
+    response = await client.post("/api/admin/session")
     assert response.status_code == 200
     return {"X-CSRF-Token": client.cookies.get("ssm_csrf")}

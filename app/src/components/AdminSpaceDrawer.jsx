@@ -1,10 +1,11 @@
 /* AdminSpaceDrawer — fixed-space and Go2 long-lived asset workbench.
  * This component is mounted by App for administrators only.
  */
-function AdminSpaceDrawer({ open, onClose }) {
+function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
   const { useCallback, useEffect, useState } = React;
   const [space, setSpace] = useState(null);
   const [spaceName, setSpaceName] = useState('');
+  const [deviceCandidates, setDeviceCandidates] = useState([]);
   const [locations, setLocations] = useState([]);
   const [personality, setPersonality] = useState('');
   const [people, setPeople] = useState([]);
@@ -21,18 +22,20 @@ function AdminSpaceDrawer({ open, onClose }) {
     setMessage(null);
     const requests = [
       apiClient.request('/api/admin/space'),
+      apiClient.request('/api/admin/device-candidates'),
       apiClient.request('/api/go2/navigation/locations'),
       apiClient.request('/api/go2/personality'),
       apiClient.request('/api/go2/people'),
       apiClient.request('/api/go2/memory'),
     ];
-    const [spaceResult, locationResult, personalityResult, peopleResult, memoryResult] =
+    const [spaceResult, candidateResult, locationResult, personalityResult, peopleResult, memoryResult] =
       await Promise.allSettled(requests);
 
     if (spaceResult.status === 'fulfilled') {
       setSpace(spaceResult.value);
       setSpaceName(spaceResult.value.name || '');
     }
+    if (candidateResult.status === 'fulfilled') setDeviceCandidates(candidateResult.value || []);
     if (locationResult.status === 'fulfilled') {
       setLocations(Array.isArray(locationResult.value) ? locationResult.value : []);
     }
@@ -49,7 +52,7 @@ function AdminSpaceDrawer({ open, onClose }) {
       });
     }
 
-    const failures = [spaceResult, locationResult, personalityResult, peopleResult, memoryResult]
+    const failures = [spaceResult, candidateResult, locationResult, personalityResult, peopleResult, memoryResult]
       .filter(result => result.status === 'rejected');
     if (failures.length) {
       setMessage({
@@ -83,6 +86,25 @@ function AdminSpaceDrawer({ open, onClose }) {
       setMessage({ tone: 'ok', text: '空间名称已保存' });
     } catch (error) {
       setMessage({ tone: 'error', text: apiErrorText(error, '空间名称保存失败') });
+    } finally { setBusy(''); }
+  };
+
+  const toggleDevice = async deviceId => {
+    if (!space || busy) return;
+    const current = new Set(space.device_ids || []);
+    if (current.has(deviceId)) current.delete(deviceId);
+    else current.add(deviceId);
+    setBusy(`device-${deviceId}`); setMessage(null);
+    try {
+      const updated = await apiClient.request('/api/admin/space', {
+        method: 'PATCH', body: { device_ids: [...current] },
+      });
+      setSpace(updated);
+      setDeviceCandidates(rows => rows.map(row => ({ ...row, added: current.has(row.device_id) })));
+      onDevicesChanged?.();
+      setMessage({ tone: 'ok', text: current.has(deviceId) ? '设备已加入 main' : '设备已从 main 移除' });
+    } catch (error) {
+      setMessage({ tone: 'error', text: apiErrorText(error, '设备配置保存失败') });
     } finally { setBusy(''); }
   };
 
@@ -164,7 +186,7 @@ function AdminSpaceDrawer({ open, onClose }) {
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section asset-section--space">
             <div className="asset-section__heading">
-              <div><small>SPACE ID · {space?.id || 'main'}</small><h3>固定体验空间</h3></div>
+              <div><small>SPACE ID · {space?.id || 'main'}</small><h3>默认空间 · MAIN</h3></div>
               <span>{space?.device_ids?.length || 0} 台设备</span>
             </div>
             <form className="asset-inline-form" onSubmit={saveSpaceName}>
@@ -177,6 +199,28 @@ function AdminSpaceDrawer({ open, onClose }) {
             </form>
             <div className="space-members">
               {(space?.device_ids || []).map(deviceId => <code key={deviceId}>{deviceId}</code>)}
+            </div>
+          </section>
+
+          <section className="asset-section asset-section--devices">
+            <div className="asset-section__heading">
+              <div><small>SPACE DEVICES</small><h3>空间设备</h3></div>
+              <span>{space?.device_ids?.length || 0} 台已加入</span>
+            </div>
+            <p className="asset-section__intro">选择要加入 main 的设备。离线设备也可以先加入，连线后会自动显示状态。</p>
+            <div className="space-device-options">
+              {deviceCandidates.map(device => (
+                <button type="button" key={device.device_id}
+                  className={`space-device-option ${device.added ? 'is-added' : ''}`}
+                  onClick={() => toggleDevice(device.device_id)}
+                  disabled={loading || Boolean(busy)} aria-pressed={device.added}>
+                  <span className="space-device-option__icon"><Icon name={device.device_id === 'go2' ? 'scan' : 'bulb'} size={17}/></span>
+                  <span className="space-device-option__copy"><strong>{device.name}</strong><small>{device.description}</small></span>
+                  <span className={`space-device-option__state ${device.online ? 'is-online' : ''}`}>
+                    <i/>{device.online ? '在线' : '离线'} · {device.added ? '已加入' : '添加'}
+                  </span>
+                </button>
+              ))}
             </div>
           </section>
 
@@ -281,6 +325,12 @@ function AdminSpaceDrawer({ open, onClose }) {
             </div>
           </section>
         </div>
+        <footer className="space-drawer__footer">
+          <span>main · {space?.device_ids?.length || 0} 台设备</span>
+          <button className="btn btn--accent" onClick={onInvite} disabled={!space?.device_ids?.length}>
+            生成访客二维码 <Icon name="arrow" size={14}/>
+          </button>
+        </footer>
       </aside>
     </>
   );
