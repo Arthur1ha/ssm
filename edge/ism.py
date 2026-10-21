@@ -5,18 +5,15 @@ class State:
     SAMPLING   = "SAMPLING"
     MONITORING = "MONITORING"
     OFF        = "OFF"
-    DIM        = "DIM"
-    BRIGHT     = "BRIGHT"
-    COLOR      = "COLOR"
-    BLINK      = "BLINK"
+    ON         = "ON"
+    BLINKING   = "BLINKING"
     ERROR      = "ERROR"
 
 class Trigger:
     SENSOR_FAIL      = "SENSOR_FAIL"
     SENSOR_RECOVERED = "SENSOR_RECOVERED"
     CMD_OFF          = "CMD_OFF"
-    CMD_DIM          = "CMD_DIM"
-    CMD_BRIGHT       = "CMD_BRIGHT"
+    CMD_ON           = "CMD_ON"
     CMD_COLOR        = "CMD_COLOR"
     CMD_BLINK        = "CMD_BLINK"
     CMD_RESET        = "CMD_RESET"
@@ -30,29 +27,18 @@ SENSOR_TABLE = {
 }
 
 LED_TABLE = {
-    (State.OFF,    Trigger.CMD_OFF):    State.OFF,
-    (State.OFF,    Trigger.CMD_BRIGHT): State.BRIGHT,
-    (State.OFF,    Trigger.CMD_DIM):    State.DIM,
-    (State.OFF,    Trigger.CMD_COLOR):  State.COLOR,
-    (State.OFF,    Trigger.CMD_BLINK):  State.BLINK,
-    (State.BRIGHT, Trigger.CMD_OFF):    State.OFF,
-    (State.BRIGHT, Trigger.CMD_DIM):    State.DIM,
-    (State.BRIGHT, Trigger.CMD_COLOR):  State.COLOR,
-    (State.BRIGHT, Trigger.CMD_BLINK):  State.BLINK,
-    (State.DIM,    Trigger.CMD_OFF):    State.OFF,
-    (State.DIM,    Trigger.CMD_BRIGHT): State.BRIGHT,
-    (State.DIM,    Trigger.CMD_COLOR):  State.COLOR,
-    (State.DIM,    Trigger.CMD_BLINK):  State.BLINK,
-    (State.COLOR,  Trigger.CMD_OFF):    State.OFF,
-    (State.COLOR,  Trigger.CMD_BRIGHT): State.BRIGHT,
-    (State.COLOR,  Trigger.CMD_DIM):    State.DIM,
-    (State.COLOR,  Trigger.CMD_COLOR):  State.COLOR,
-    (State.COLOR,  Trigger.CMD_BLINK):  State.BLINK,
-    (State.BLINK,  Trigger.CMD_OFF):    State.OFF,
-    (State.BLINK,  Trigger.CMD_BRIGHT): State.BRIGHT,
-    (State.BLINK,  Trigger.CMD_DIM):    State.DIM,
-    (State.BLINK,  Trigger.CMD_COLOR):  State.COLOR,
-    (State.BLINK,  Trigger.BLINK_DONE): State.OFF,
+    (State.OFF,      Trigger.CMD_OFF):   State.OFF,
+    (State.OFF,      Trigger.CMD_ON):    State.ON,
+    (State.OFF,      Trigger.CMD_COLOR): State.ON,
+    (State.OFF,      Trigger.CMD_BLINK): State.BLINKING,
+    (State.ON,       Trigger.CMD_OFF):   State.OFF,
+    (State.ON,       Trigger.CMD_ON):    State.ON,
+    (State.ON,       Trigger.CMD_COLOR): State.ON,
+    (State.ON,       Trigger.CMD_BLINK): State.BLINKING,
+    (State.BLINKING, Trigger.CMD_OFF):   State.OFF,
+    (State.BLINKING, Trigger.CMD_ON):    State.ON,
+    (State.BLINKING, Trigger.CMD_COLOR): State.ON,
+    (State.BLINKING, Trigger.CMD_BLINK): State.BLINKING,
 }
 
 
@@ -62,7 +48,14 @@ class ISM:
         self.agent_id = agent_id
         self._table   = table
 
-    def transition(self, trigger):
+    def transition(self, trigger, target=None):
+        if trigger == Trigger.BLINK_DONE and self._table is LED_TABLE:
+            if self.state != State.BLINKING or target not in (State.OFF, State.ON):
+                return False
+            old = self.state
+            self.state = target
+            print("[ISM:{}] {} --{}--> {}".format(self.agent_id, old, trigger, self.state))
+            return True
         key = (self.state, trigger)
         if key in self._table:
             old = self.state
@@ -73,4 +66,6 @@ class ISM:
         return False
 
     def allows(self, trigger):
+        if trigger == Trigger.BLINK_DONE and self._table is LED_TABLE:
+            return self.state == State.BLINKING
         return (self.state, trigger) in self._table

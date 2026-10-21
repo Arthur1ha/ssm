@@ -1,5 +1,5 @@
-/* SpaceMenu — the single space action entry in the main header. */
-function SpaceMenu({ actor, onAddDevice, onShareSpace, onRules, onSpaceSettings, onExit }) {
+/* SpaceMenu — space management actions in the main header. */
+function SpaceMenu({ actor, onShareSpace, onRules, onSpaceSettings, onExit }) {
   const { useEffect, useRef, useState } = React;
   const [open, setOpen] = useState(false);
   const triggerRef = useRef(null);
@@ -67,11 +67,6 @@ function SpaceMenu({ actor, onAddDevice, onShareSpace, onRules, onSpaceSettings,
             </header>
             <div className="space-menu__items">
               {isAdmin && <>
-                <button type="button" className="space-menu__item" onClick={() => select(onAddDevice)}>
-                  <span className="space-menu__item-icon"><Icon name="addDevice" size={18}/></span>
-                  <span className="space-menu__item-copy"><strong>添加设备</strong><small>扫描设备二维码</small></span>
-                  <Icon name="arrow" size={16}/>
-                </button>
                 <button type="button" className="space-menu__item" onClick={() => select(onShareSpace)}>
                   <span className="space-menu__item-icon"><Icon name="link" size={18}/></span>
                   <span className="space-menu__item-copy"><strong>分享空间</strong><small>邀请其他人加入</small></span>

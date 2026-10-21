@@ -26,6 +26,7 @@ class CardRegistry:
     def __init__(self) -> None:
         """初始化空注册表。"""
         self._cards: dict[str, AgentCard] = {}
+        self._states: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     def subscribe(self, client) -> None:
@@ -42,7 +43,7 @@ class CardRegistry:
         logger.info("[CardRegistry] Subscribed to card / manifest / status")
 
     def handle_message(self, topic: str, payload: bytes | str) -> None:
-        """处理 MQTT 消息，更新注册表。
+        """处理 MQTT 消息，更新注册表及最近一次设备状态。
 
         topic 匹配 ssm/agents/+/status：
             - online/offline → 按 unit_id 或 parent_id 匹配，维护 card.online（含 LWT）
@@ -52,6 +53,7 @@ class CardRegistry:
         topic 匹配 ssm/agents/+/manifest：
             - 空 payload → 移除该单元 card（单元缺席）
             - 非空 payload → build_card_from_manifest → 以 card.unit_id 存入（保留已知 online）
+        topic 匹配 ssm/agents/+/state：保存 retained 快照供设备列表读取。
         其他 topic：静默忽略。
         """
         parts = topic.split("/")
@@ -60,6 +62,20 @@ class CardRegistry:
 
         msg_type = parts[3]
         raw = payload if isinstance(payload, bytes) else payload.encode()
+
+        if msg_type == "state":
+            try:
+                state = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                return
+            if not isinstance(state, dict):
+                return
+            unit_id = parts[2]
+            with self._lock:
+                self._states[unit_id] = state
+                if unit_id in self._cards:
+                    self._cards[unit_id]["state"] = state
+            return
 
         # status：父设备/设备级在线状态（含 LWT），按 unit_id 或 parent_id 匹配
         if msg_type == "status":
@@ -83,6 +99,7 @@ class CardRegistry:
                     if unit_id in self._cards:
                         del self._cards[unit_id]
                         logger.info("[CardRegistry] Removed card: %s", unit_id)
+                    self._states.pop(unit_id, None)
             else:
                 try:
                     data = json.loads(raw)
@@ -92,6 +109,8 @@ class CardRegistry:
                         prev = self._cards.get(card["unit_id"])
                         if prev is not None and "online" in prev:
                             card["online"] = prev["online"]
+                        if card["unit_id"] in self._states:
+                            card["state"] = self._states[card["unit_id"]]
                         self._cards[card["unit_id"]] = card
                     logger.info("[CardRegistry] Stored card (self-described): %s", card["unit_id"])
                 except Exception as exc:
@@ -105,6 +124,7 @@ class CardRegistry:
                     if unit_id in self._cards:
                         del self._cards[unit_id]
                         logger.info("[CardRegistry] Removed card (manifest cleared): %s", unit_id)
+                    self._states.pop(unit_id, None)
                 return
             try:
                 data = json.loads(raw)
@@ -119,6 +139,8 @@ class CardRegistry:
                     prev = self._cards.get(card["unit_id"])
                     if prev is not None and "online" in prev:
                         card["online"] = prev["online"]
+                    if card["unit_id"] in self._states:
+                        card["state"] = self._states[card["unit_id"]]
                     self._cards[card["unit_id"]] = card
                 logger.info("[CardRegistry] Stored card (from manifest): %s", card["unit_id"])
             except Exception as exc:

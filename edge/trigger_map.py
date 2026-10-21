@@ -2,13 +2,14 @@
 # All topics follow: ssm/agents/{unit_id}/{state|event}
 
 import time
-from ism import Trigger
+from ism import State, Trigger
 from config import DEVICE_ID, UNIT_LIGHT, UNIT_IR, UNIT_SOUND, UNIT_LED
 
 _LED_STATE_TRIG = {
     "OFF":    Trigger.CMD_OFF,
-    "BRIGHT": Trigger.CMD_BRIGHT,
-    "DIM":    Trigger.CMD_DIM,
+    "ON":     Trigger.CMD_ON,
+    "BRIGHT": Trigger.CMD_COLOR,  # migration aliases
+    "DIM":    Trigger.CMD_COLOR,
 }
 
 
@@ -21,6 +22,11 @@ class TriggerMap:
         self._mqtt       = mqtt
         self._local      = local_rules
         self._pending_blink = None
+        self._last_on = (255, 255, 255, 200)
+        self._blink_restore = None
+        self._blink_id = None
+        self._blink_config = None
+        self._last_led_snapshot = None
         self._recent_results = []  # bounded QoS-1 duplicate suppression
 
         self._led_task_pfx = "ssm/task/{}/".format(UNIT_LED)
@@ -68,33 +74,46 @@ class TriggerMap:
         trigger = {"SET_COLOR": Trigger.CMD_COLOR, "BLINK": Trigger.CMD_BLINK}.get(action)
         if action == "SET_STATE":
             trigger = _LED_STATE_TRIG.get(params.get("state"))
+        if action == "SET_COLOR":
+            color = (params.get("r", 255), params.get("g", 255),
+                     params.get("b", 255), params.get("brightness", 200))
+            if color[3] == 0 or not any(color[:3]):
+                trigger = Trigger.CMD_OFF
+        elif action == "SET_STATE" and params.get("state") in ("BRIGHT", "DIM"):
+            brightness = 255 if params["state"] == "BRIGHT" else 40
+            color = (255, 255, 255, brightness)
         if not trigger or not self._ism_led.allows(trigger):
             return False
         # Hardware runs before committing the public state; failures never announce a target state.
-        if action == "SET_COLOR":
-            r   = int(params.get("r", 255))
-            g   = int(params.get("g", 255))
-            b   = int(params.get("b", 255))
-            bri = int(params.get("brightness", 200))
-            self._bsm.led_set_color(r, g, b, bri)
-
+        if action == "SET_COLOR" or (action == "SET_STATE" and params.get("state") in ("BRIGHT", "DIM")):
+            if trigger == Trigger.CMD_OFF:
+                self._bsm.led_set_state("OFF")
+            else:
+                self._bsm.led_set_color(*color)
+                self._last_on = color
         elif action == "SET_STATE":
-            st   = params.get("state")
-            trig = _LED_STATE_TRIG.get(st) if st else None
-            if not trig:
-                return False
-            self._bsm.led_set_state(st)
-
+            if trigger == Trigger.CMD_OFF:
+                self._bsm.led_set_state("OFF")
+            else:
+                self._bsm.led_set_color(*self._last_on)
         elif action == "BLINK":
-            r   = int(params.get("r", 255))
-            g   = int(params.get("g", 255))
-            b   = int(params.get("b", 255))
-            cnt = int(params.get("count", 3))
-            self._bsm.led_blink(r, g, b, cnt)
+            blink = (params.get("r", 255), params.get("g", 255),
+                     params.get("b", 255), params.get("count", 3))
+            blink_id = self._bsm.led_blink(*blink)
 
         else:
             return False
 
+        was_blinking = self._ism_led.state == State.BLINKING
+        if action == "BLINK":
+            if not was_blinking:
+                self._blink_restore = self._ism_led.state
+            self._blink_id = blink_id
+            self._blink_config = blink
+        elif was_blinking:
+            self._blink_restore = None
+            self._blink_id = None
+            self._blink_config = None
         ok = self._ism_led.transition(trigger)
         if self._pending_blink:
             tid, sid = self._pending_blink
@@ -135,7 +154,26 @@ class TriggerMap:
             self._local.on_sound_event()
 
         elif event == "BLINK_DONE":
-            self._ism_led.transition(Trigger.BLINK_DONE)
+            if (self._ism_led.state != State.BLINKING or
+                    data.get("blink_id") != self._blink_id):
+                return
+            target = self._blink_restore
+            # Restore pixels before announcing the stable state or task success.
+            try:
+                if target == State.ON:
+                    self._bsm.led_set_color(*self._last_on)
+                else:
+                    self._bsm.led_set_state("OFF")
+            except Exception as exc:
+                if self._pending_blink:
+                    tid, sid = self._pending_blink
+                    self._pending_blink = None
+                    self._publish_result(tid, sid, "error", str(exc))
+                return
+            self._blink_restore = None
+            self._blink_id = None
+            self._blink_config = None
+            self._ism_led.transition(Trigger.BLINK_DONE, target)
             self._publish_led_state()
             if self._pending_blink:
                 tid, sid = self._pending_blink
@@ -185,7 +223,21 @@ class TriggerMap:
                 self._recent_results.pop(0)
         self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), payload)
 
-    def _publish_led_state(self):
-        self._mqtt.publish("ssm/agents/{}/state".format(UNIT_LED), {
-            "unit_id": UNIT_LED, "ism": self._ism_led.state, "ts": time.time()
-        }, retain=True)
+    def _publish_led_state(self, force=False):
+        state = self._ism_led.state
+        if state == State.ON:
+            values = self._last_on
+        elif state == State.BLINKING:
+            values = self._blink_config[:3] + (255, self._blink_config[3])
+        else:
+            values = (0, 0, 0, 0)
+        snapshot = (state,) + values
+        if not force and snapshot == self._last_led_snapshot:
+            return
+        payload = {"unit_id": UNIT_LED, "agent_id": UNIT_LED,
+                   "ism": state, "r": values[0], "g": values[1],
+                   "b": values[2], "brightness": values[3], "ts": time.time()}
+        if state == State.BLINKING:
+            payload["count"] = values[4]
+        self._mqtt.publish("ssm/agents/{}/state".format(UNIT_LED), payload, retain=True)
+        self._last_led_snapshot = snapshot

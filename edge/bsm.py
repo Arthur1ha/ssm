@@ -72,6 +72,7 @@ class BSM:
         self._blink_r     = 255
         self._blink_g     = 255
         self._blink_b     = 255
+        self._blink_id    = 0
 
 
     # ── Main loop (call every iteration) ─────────────────────
@@ -183,38 +184,35 @@ class BSM:
     #  RGB LED
     # ─────────────────────────────────────────────────────────
     def led_set_color(self, r, g, b, brightness=255):
+        # Write first so a failed hardware operation cannot commit a new command.
+        bri = brightness / 255.0
+        self._set_raw(int(r * bri), int(g * bri), int(b * bri))
         self._led_r = r
         self._led_g = g
         self._led_b = b
         self._led_brightness = brightness
         self._blinking = False
-        self._apply_led()
+        self._blink_id += 1
 
     def led_set_state(self, state):
         if state == "OFF":
-            self._blinking = False
-            self._led_r = self._led_g = self._led_b = 0
-            self._led_brightness = 0
-        elif state == "BRIGHT":
-            self._blinking = False
-            self._led_r = self._led_g = self._led_b = 255
-            self._led_brightness = 255
-        elif state == "DIM":
-            self._blinking = False
-            self._led_r = self._led_g = self._led_b = 255
-            self._led_brightness = 40
+            self.led_set_color(0, 0, 0, 0)
+        elif state == "ON":
+            self.led_set_color(255, 255, 255, 200)
         else:
-            return
-        self._apply_led()
+            raise ValueError("unknown LED state")
 
     def led_blink(self, r=255, g=255, b=255, count=3):
+        self._set_raw(r, g, b)
+        self._blink_id += 1
         self._blink_r     = r
         self._blink_g     = g
         self._blink_b     = b
         self._blink_count = count
-        self._blink_last  = 0
-        self._blink_on    = False
+        self._blink_last  = time.ticks_ms()
+        self._blink_on    = True
         self._blinking    = True
+        return self._blink_id
 
     def _tick_blink(self, now):
         if not self._blinking:
@@ -230,7 +228,7 @@ class BSM:
             self._blink_count -= 1
             if self._blink_count <= 0:
                 self._blinking = False
-                self._event_cb("BLINK_DONE", {})
+                self._event_cb("BLINK_DONE", {"blink_id": self._blink_id})
 
 
     def _apply_led(self):

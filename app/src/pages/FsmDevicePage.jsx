@@ -39,7 +39,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const [widgets, setWidgets]   = useState(device?.widgets || []);
   const [suggestions, setSuggestions] = useState(device?.suggestions || []);
 
-  // card 热更新后同步 modes/widgets/suggestions（fetch 见下方 Agent Card effect）
+  // manifest/card 热更新后同步拓扑与控件（fetch 见下方 Agent Card effect）
+  useEffect(() => { if (device?.state_machine) setSm(device.state_machine); }, [device?.state_machine]);
+  useEffect(() => { if (device?.transport) setTransport(device.transport); }, [device?.transport]);
   useEffect(() => { if (device?.modes) setModes(device.modes); }, [device?.modes]);
   useEffect(() => { if (device?.widgets) setWidgets(device.widgets); }, [device?.widgets]);
   useEffect(() => { if (device?.suggestions) setSuggestions(device.suggestions); }, [device?.suggestions]);
@@ -100,9 +102,17 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
 
   /* ── 当前态 ── */
   const isHttp  = transport?.kind === 'http';
-  const current = isHttp
+  const rawCurrent = isHttp
     ? (sseState || sm?.initial || '')
-    : (liveState?.state?.ism || sm?.initial || '');
+    : (liveState?.state?.ism || device?.state?.ism || sm?.initial || '');
+  const isLed = agentKind(device || { unit_id: unitId, name: unitId }) === 'led';
+  const ledState = liveState?.state || device?.state || {};
+  const ledInfo = isLed ? getLedStateInfo(ledState) : null;
+  // 兼容旧固件 retained 状态与新版三状态卡片的短暂交错。
+  const legacyLedStates = { BRIGHT: 'ON', DIM: 'ON', COLOR: 'ON', BLINK: 'BLINKING' };
+  const current = isLed && sm?.states?.includes('ON') && !sm.states.includes(rawCurrent)
+    ? (legacyLedStates[rawCurrent] || rawCurrent)
+    : rawCurrent;
 
   /* ── 派发 FSM 转移 ── */
   const fire = async trigger => {
@@ -180,7 +190,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
           }}>{device?.name || unitId}</div>
           <div className="device-header__status">
             <i className={offline ? 'is-offline' : ''}/>
-            {offline ? '离线' : `在线 · ${sm?.views?.[current]?.label || current || '状态同步中'}`}
+            {offline ? '离线' : `在线 · ${isLed && ledState.ism ? ledInfo.label : (sm?.views?.[current]?.label || current || '状态同步中')}`}
           </div>
         </div>
         {actor === 'admin' && (modes.length > 0 || isGo2) && <button type="button" className="device-header__settings"
@@ -197,7 +207,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
           transition: 'filter 0.2s, opacity 0.2s',
         }}>
           <div className="device-state-workspace__graph">
-            <div className="device-state-workspace__heading">状态 · 点击连线切换</div>
+            <div className="device-state-workspace__heading">
+              {isLed && sm && !sm.states?.includes('ON') ? '旧版状态机 · 设备固件待更新' : '状态 · 点击连线切换'}
+            </div>
             {sm ? (
               <FsmGraph
                 states={sm.states}
@@ -210,6 +222,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
             ) : <div className="device-state-workspace__fallback">{current || '—'}</div>}
           </div>
           <div className="device-state-workspace__content">
+            {isLed && ledState.ism && <div className="device-led-output" aria-label={`灯光状态：${ledInfo.label}${ledInfo.details ? '，' + ledInfo.details : ''}`}>
+              <span className="device-led-output__swatch" style={{
+                background: ledState.ism === 'OFF' ? '#15161c' : (ledInfo.color || 'var(--color-surface-3)'),
+                boxShadow: ledState.ism === 'OFF' || !ledInfo.color ? 'none' : `0 0 18px ${ledInfo.color}`,
+              }}/>
+              <span><strong>{ledInfo.label}</strong><small>{ledInfo.details || '颜色与亮度待同步'}</small></span>
+            </div>}
             <StateVisual view={sm?.views?.[current]} state={current} color={ACCENT}/>
             {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution, actor)}
           </div>

@@ -47,8 +47,7 @@ def on_reconnect():
     mqtt.publish("ssm/agents/{}/location".format(DEVICE_ID),
                  {"unit_id": DEVICE_ID, "lng": LOCATION_LNG, "lat": LOCATION_LAT,
                   "type": "fixed", "ts": time.time()}, retain=True)
-    mqtt.publish("ssm/agents/{}/state".format(UNIT_LED),
-                 {"unit_id": UNIT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
+    trigger_map._publish_led_state(force=True)
     if PRESENCE.get(UNIT_SOUND):
         mqtt.publish("ssm/agents/{}/state".format(UNIT_SOUND),
                      {"unit_id": UNIT_SOUND, "detected": False, "ts": time.time()}, retain=True)
@@ -70,8 +69,7 @@ mqtt.publish("ssm/agents/{}/location".format(DEVICE_ID),
              {"unit_id": DEVICE_ID, "lng": LOCATION_LNG, "lat": LOCATION_LAT,
               "type": "fixed", "ts": time.time()}, retain=True)
 
-mqtt.publish("ssm/agents/{}/state".format(UNIT_LED),
-             {"unit_id": UNIT_LED, "ism": ism_led.state, "ts": time.time()}, retain=True)
+trigger_map._publish_led_state(force=True)
 
 if PRESENCE.get(UNIT_SOUND):
     mqtt.publish("ssm/agents/{}/state".format(UNIT_SOUND),

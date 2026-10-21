@@ -117,7 +117,11 @@ function App({ session, logout, refreshSession }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             {session.actor === 'visitor' && <SessionBadge session={session}/>}
-            <SpaceMenu actor={session.actor} onAddDevice={() => setDeviceScanOpen(true)}
+            {session.actor === 'admin' && <button type="button" className="btn device-scan-trigger"
+              onClick={() => setDeviceScanOpen(true)} aria-label="扫描设备二维码添加设备">
+              <Icon name="scan" size={16}/><span>扫描设备</span>
+            </button>}
+            <SpaceMenu actor={session.actor}
               onShareSpace={() => setInviteOpen(true)} onRules={() => setRulesOpen(true)}
               onSpaceSettings={() => setSpaceOpen(true)} onExit={logout}/>
           </div>

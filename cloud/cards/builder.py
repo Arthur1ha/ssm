@@ -101,14 +101,11 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
 }
 
 # ── 声明式状态机表 ────────────────────────────────────────────────
-# 状态转移直接取自 edge/ism.py；这里仅补充显示文案与命令参数。
+# 旧固件没有 fsm_version；保留其拓扑快照，不能依赖升级后的 edge.ism。
 _LED_LABELS = {
     "CMD_OFF": "关灯", "CMD_BRIGHT": "亮", "CMD_DIM": "调暗",
     "CMD_COLOR": "彩色", "CMD_BLINK": "闪烁",
 }
-
-# Generate UI transitions from the same pure contract imported by the edge runtime.
-from edge.ism import LED_TABLE
 
 _LED_COMMANDS = {
     "CMD_OFF": ("SET_STATE", {"state": "OFF"}),
@@ -117,9 +114,23 @@ _LED_COMMANDS = {
     "CMD_COLOR": ("SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
     "CMD_BLINK": ("BLINK", {"r": 255, "g": 255, "b": 255, "count": 3}),
 }
+_LEGACY_LED_TABLE = {
+    ("OFF", "CMD_OFF"): "OFF", ("OFF", "CMD_BRIGHT"): "BRIGHT",
+    ("OFF", "CMD_DIM"): "DIM", ("OFF", "CMD_COLOR"): "COLOR",
+    ("OFF", "CMD_BLINK"): "BLINK",
+    ("BRIGHT", "CMD_OFF"): "OFF", ("BRIGHT", "CMD_DIM"): "DIM",
+    ("BRIGHT", "CMD_COLOR"): "COLOR", ("BRIGHT", "CMD_BLINK"): "BLINK",
+    ("DIM", "CMD_OFF"): "OFF", ("DIM", "CMD_BRIGHT"): "BRIGHT",
+    ("DIM", "CMD_COLOR"): "COLOR", ("DIM", "CMD_BLINK"): "BLINK",
+    ("COLOR", "CMD_OFF"): "OFF", ("COLOR", "CMD_BRIGHT"): "BRIGHT",
+    ("COLOR", "CMD_DIM"): "DIM", ("COLOR", "CMD_COLOR"): "COLOR",
+    ("COLOR", "CMD_BLINK"): "BLINK",
+    ("BLINK", "CMD_OFF"): "OFF", ("BLINK", "CMD_BRIGHT"): "BRIGHT",
+    ("BLINK", "CMD_DIM"): "DIM", ("BLINK", "CMD_COLOR"): "COLOR",
+}
 _LED_EDGES = [
     (src, trigger, dst, *_LED_COMMANDS[trigger])
-    for (src, trigger), dst in LED_TABLE.items() if trigger in _LED_COMMANDS
+    for (src, trigger), dst in _LEGACY_LED_TABLE.items()
 ]
 
 FSM_DEFS: dict[str, StateMachine] = {
@@ -157,6 +168,47 @@ FSM_DEFS: dict[str, StateMachine] = {
                 "type": "light_ring", "color": "#FF5252", "intensity": 0.65, "motion": "alert",
             },
         },
+    },
+}
+
+_NEW_LED_TRANSITIONS = [
+    ("OFF", "ON", "CMD_ON", "开灯", "SET_STATE", {"state": "ON"}),
+    ("ON", "ON", "CMD_ON", "开灯", "SET_STATE", {"state": "ON"}),
+    ("BLINKING", "ON", "CMD_ON", "开灯", "SET_STATE", {"state": "ON"}),
+    ("OFF", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
+    ("ON", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
+    ("BLINKING", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
+    ("OFF", "BLINKING", "CMD_BLINK", "闪烁", "BLINK", {"count": 3}),
+    ("ON", "BLINKING", "CMD_BLINK", "闪烁", "BLINK", {"count": 3}),
+    ("BLINKING", "BLINKING", "CMD_BLINK", "重新闪烁", "BLINK", {"count": 3}),
+    ("BLINKING", "OFF", "BLINK_DONE", "恢复关闭", "", {}),
+    ("BLINKING", "ON", "BLINK_DONE", "恢复常亮", "", {}),
+]
+
+NEW_LED_FSM: StateMachine = {
+    "states": ["OFF", "ON", "BLINKING"],
+    "initial": "OFF",
+    "transitions": [
+        {"src": src, "dst": dst, "trigger": trigger, "label": label,
+         "action": action, "params": params}
+        for src, dst, trigger, label, action, params in _NEW_LED_TRANSITIONS
+    ],
+    "views": {
+        "OFF": {"label": "已关闭", "description": "灯环熄灭。",
+                "type": "light_ring", "color": "#505363", "intensity": 0.08},
+        "ON": {"label": "常亮", "description": "按当前颜色和亮度持续发光。",
+               "type": "light_ring", "color": "#FFFFFF", "intensity": 1.0},
+        "BLINKING": {"label": "闪烁中", "description": "闪烁结束后恢复先前灯光。",
+                     "type": "light_ring", "color": "#FFFFFF", "intensity": 0.9,
+                     "motion": "pulse"},
+    },
+}
+
+NEW_SET_STATE_SKILL: SkillDef = {
+    **CAPABILITY_SKILLS["SET_STATE"],
+    "params_schema": {
+        "type": "object", "required": ["state"],
+        "properties": {"state": {"enum": ["ON", "OFF"]}},
     },
 }
 
@@ -250,7 +302,9 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     skills: list[SkillDef] = []
     for cap in capabilities:
         action = cap.get("action", "")
-        skill = CAPABILITY_SKILLS.get(action)
+        skill = (NEW_SET_STATE_SKILL if action == "SET_STATE" and
+                 _fsm_key(manifest) == "led" and manifest.get("fsm_version") == 2
+                 else CAPABILITY_SKILLS.get(action))
         if skill:
             skills.append(skill)
 
@@ -268,7 +322,8 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     card["parent_id"] = manifest.get("parent_id", "")
     fsm_key = _fsm_key(manifest)
     if fsm_key:
-        card["state_machine"] = FSM_DEFS[fsm_key]
+        card["state_machine"] = (NEW_LED_FSM if fsm_key == "led" and
+                                 manifest.get("fsm_version") == 2 else FSM_DEFS[fsm_key])
         modes = MODE_DEFS.get(fsm_key)
         if modes:
             card["modes"] = modes

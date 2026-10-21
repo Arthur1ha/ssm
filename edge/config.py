@@ -18,7 +18,7 @@ LOCATION_LAT  = 31.0316
 # ── MQTT ─────────────────────────────────────────────────────
 MQTT_PORT      = 1883
 DEVICE_ID       = "esp32_desk"
-FIRMWARE_VER   = "0.2.0"
+FIRMWARE_VER   = "0.3.0"
 
 # Per-unit IDs（unit_id = device_id + unit，见 protocol/identifiers.md）
 UNIT_LIGHT = DEVICE_ID + "_light"
@@ -100,12 +100,13 @@ UNIT_CONFIGS = {
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
             'slug': 'desk-lamp',
+            'fsm_version': 2,
             'num_pixels': WS2812_NUM,
             'commands': ['SET_COLOR', 'SET_STATE', 'BLINK'],
-            'ism_states': ['OFF', 'DIM', 'BRIGHT', 'COLOR', 'BLINK'],
+            'ism_states': ['OFF', 'ON', 'BLINKING'],
             'capabilities': [
                 {'action': 'SET_COLOR', 'params': ['r', 'g', 'b', 'brightness']},
-                {'action': 'SET_STATE', 'params': ['state'], 'values': ['OFF', 'BRIGHT', 'DIM']},
+                {'action': 'SET_STATE', 'params': ['state'], 'values': ['OFF', 'ON']},
                 {'action': 'BLINK',     'params': ['r', 'g', 'b', 'count']},
             ],
             'tags': ['lighting', 'ambiance'],

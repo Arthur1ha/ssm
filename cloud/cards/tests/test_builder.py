@@ -276,7 +276,7 @@ def test_第二次_manifest_覆盖第一次():
 # ── state_machine 注入测试 ──────────────────────────────────────
 
 def test_led_manifest_carries_state_machine():
-    """LED 设备 manifest 应构建出包含 state_machine 拓扑的 card。"""
+    """无版本标记的旧固件继续使用五状态卡片。"""
     manifest = {
         "unit_id": "esp32_desk_led",
         "name": "智能灯",
@@ -295,6 +295,42 @@ def test_led_manifest_carries_state_machine():
     assert t["label"]
     assert sm["views"]["BRIGHT"]["type"] == "light_ring"
     assert sm["views"]["DIM"]["label"] == "柔和亮起"
+
+
+def test_led_v2_manifest_uses_three_state_machine_and_new_skill():
+    manifest = {**LED_MANIFEST, "fsm_version": 2,
+                "capabilities": [
+                    {"action": "SET_STATE", "params": ["state"], "values": ["ON", "OFF"]},
+                    {"action": "SET_COLOR", "params": ["r", "g", "b", "brightness"]},
+                    {"action": "BLINK", "params": ["r", "g", "b", "count"]},
+                ]}
+    card = build_card_from_manifest(manifest)
+    sm = card["state_machine"]
+    assert sm["states"] == ["OFF", "ON", "BLINKING"]
+    assert set(sm["views"]) == set(sm["states"])
+    assert not {"DIM", "BRIGHT", "COLOR", "ERROR", "BLINK"} & set(sm["states"])
+    transitions = {(t["src"], t["trigger"], t["dst"]) for t in sm["transitions"]}
+    assert ("OFF", "CMD_ON", "ON") in transitions
+    assert ("ON", "CMD_ON", "ON") in transitions
+    assert ("BLINKING", "CMD_BLINK", "BLINKING") in transitions
+    assert ("BLINKING", "BLINK_DONE", "ON") in transitions
+    assert ("BLINKING", "BLINK_DONE", "OFF") in transitions
+    state_skill = next(s for s in card["skills"] if s["id"] == "set_light_state")
+    assert state_skill["params_schema"]["properties"]["state"]["enum"] == ["ON", "OFF"]
+
+
+def test_led_manifest_version_switches_card_on_republish():
+    from cloud.cards.registry import CardRegistry
+    import json
+
+    registry = CardRegistry()
+    topic = "ssm/agents/esp32_desk_led/manifest"
+    registry.handle_message(topic, json.dumps(LED_MANIFEST))
+    assert "BRIGHT" in registry.get_card("esp32_desk_led")["state_machine"]["states"]
+    registry.handle_message(topic, json.dumps({**LED_MANIFEST, "fsm_version": 2}))
+    card = registry.get_card("esp32_desk_led")
+    assert card["state_machine"]["states"] == ["OFF", "ON", "BLINKING"]
+    assert card["skills"][1]["params_schema"]["properties"]["state"]["enum"] == ["ON", "OFF"]
 
 
 # ── 模式轴展开测试 ──────────────────────────────────────────────

@@ -138,10 +138,11 @@ body {
   height: auto;
   max-height: 280px;
 }
-.fsm-graph__edge, .fsm-graph__node.is-reachable { cursor: pointer; }
-.fsm-graph__edge:hover path:not(:first-of-type),
-.fsm-graph__edge:focus-visible path:not(:first-of-type) { stroke-width: 3; }
-.fsm-graph__edge:hover text, .fsm-graph__edge:focus-visible text { opacity: 1; font-weight: 700; }
+.fsm-graph__edge:not(.is-automatic), .fsm-graph__node.is-reachable { cursor: pointer; }
+.fsm-graph__edge:not(.is-automatic):hover path:not(:first-of-type),
+.fsm-graph__edge:not(.is-automatic):focus-visible path:not(:first-of-type) { stroke-width: 3; }
+.fsm-graph__edge:not(.is-automatic):hover text, .fsm-graph__edge:not(.is-automatic):focus-visible text { opacity: 1; font-weight: 700; }
+.fsm-graph__edge.is-automatic { pointer-events: none; opacity: .55; }
 .fsm-graph__edge:focus-visible, .fsm-graph__node:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .fsm-graph-wrap { width: 100%; min-height: 0; display: flex; flex-direction: column; align-items: center; }
 .fsm-safety-edge { width: min(100%, 340px); min-height: 38px; margin: -4px 0 3px; padding: 5px 9px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--color-danger-border); border-radius: 8px; background: var(--color-danger-dim); color: var(--color-danger); font-family: var(--font-sans); cursor: pointer; }
@@ -190,6 +191,26 @@ body {
   scrollbar-width: thin;
 }
 .device-state-workspace__graph .fsm-graph { max-height: min(25dvh, 185px); }
+.device-led-output {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+.device-led-output__swatch {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+}
+.device-led-output span:last-child { display: grid; gap: 3px; min-width: 0; }
+.device-led-output strong { font-size: 12px; color: var(--color-text); }
+.device-led-output small { font: 10px var(--font-mono); color: var(--color-text-muted); overflow-wrap: anywhere; }
 .device-state-visual {
   color: var(--color-accent);
   border: 1px solid var(--color-accent-border);
@@ -327,6 +348,8 @@ body {
 .session-badge--visitor { border-color: var(--color-accent-border); background: var(--color-accent-dim); color: var(--color-accent); font-family: var(--font-mono); }
 .session-badge--visitor > i { background: var(--color-accent); box-shadow: 0 0 7px var(--color-accent); }
 .header-icon-btn { width: 30px; height: 30px; padding: 0; justify-content: center; flex-shrink: 0; }
+.device-scan-trigger { min-height: 38px; padding: 0 10px; gap: 7px; flex-shrink: 0; color: var(--color-accent); border-color: var(--color-accent-border); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.device-scan-trigger:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .space-menu__trigger { min-height: 38px; padding: 0 12px; gap: 7px; flex-shrink: 0; color: var(--color-text); font-size: 12px; font-weight: 600; }
 .space-menu__trigger:focus-visible, .space-menu__panel button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .space-menu__layer { position: fixed; inset: 0; z-index: 190; }
@@ -470,7 +493,7 @@ body {
 .space-overview__dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--color-offline); }
 .space-overview__dot.is-online { background: var(--color-online); box-shadow: 0 0 6px var(--color-online-glow); }
 .space-overview__actor-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-muted); }
-.space-overview__actor-state { margin-left: auto; color: var(--color-text); white-space: nowrap; }
+.space-overview__actor-state { margin-left: auto; max-width: 70%; color: var(--color-text); text-align: right; overflow-wrap: anywhere; }
 .space-overview__sensors { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 .space-overview__sensors > span { padding: 6px 9px; border: 1px solid var(--color-border); border-radius: 7px; color: var(--color-text-dim); font-size: 10px; }
 .space-overview__sensors strong { margin-left: 4px; color: var(--color-text-muted); font-weight: 600; }

@@ -93,6 +93,25 @@ class TestHandleManifest:
         registry.handle_message("ssm/agents/esp32_desk_led/manifest", b"not-json")
         assert len(registry.get_all_cards()) == 0
 
+    def test_retained_state在manifest前后均进入设备卡(self, registry):
+        state = {"unit_id": "esp32_desk_led", "ism": "ON", "r": 255,
+                 "g": 120, "b": 0, "brightness": 180, "ts": 123}
+        state_topic = "ssm/agents/esp32_desk_led/state"
+        manifest_topic = "ssm/agents/esp32_desk_led/manifest"
+        v2_manifest = {**LED_MANIFEST, "fsm_version": 2}
+
+        registry.handle_message(state_topic, json.dumps(state))
+        registry.handle_message(manifest_topic, json.dumps(v2_manifest))
+        card = registry.get_card("esp32_desk_led")
+        assert card["state"] == state
+        assert card["state_machine"]["states"] == ["OFF", "ON", "BLINKING"]
+
+        registry.handle_message(manifest_topic, json.dumps(v2_manifest))
+        assert registry.get_card("esp32_desk_led")["state"] == state
+        registry.handle_message(manifest_topic, b"")
+        registry.handle_message(manifest_topic, json.dumps(v2_manifest))
+        assert registry.get_card("esp32_desk_led")["state"] == {}
+
 
 # ── card topic 测试 ─────────────────────────────────────────────
 

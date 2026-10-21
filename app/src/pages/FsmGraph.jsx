@@ -29,8 +29,8 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
   }, [states, transitions]);
 
   const outgoing  = transitions.filter(t => t.src === current && t.dst !== current && !t.safety);
-  const safetyEdges = transitions.filter(t => t.src === current && t.safety);
-  const reachable = new Set(outgoing.map(t => t.dst));
+  const safetyEdges = transitions.filter(t => t.src === current && t.safety && t.action);
+  const reachable = new Set(outgoing.filter(t => t.action).map(t => t.dst));
 
   if (states.length === 0) return null;
 
@@ -90,12 +90,11 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
         if (!arc) return null;
         return (
           <g key={`${t.trigger}-${t.dst}`}
-            className="fsm-graph__edge"
-            role="button" tabIndex={0}
-            aria-label={t.action
-              ? `${views[current]?.label || current}，${t.label}，切换到${views[t.dst]?.label || t.dst}`
-              : `${views[current]?.label || current}，${t.label}`}
-            onClick={() => fire(t.trigger)} onKeyDown={onKey(t.trigger)}>
+            className={`fsm-graph__edge${t.action ? '' : ' is-automatic'}`}
+            role={t.action ? 'button' : undefined} tabIndex={t.action ? 0 : undefined}
+            aria-label={t.action ? `${views[current]?.label || current}，${t.label}，切换到${views[t.dst]?.label || t.dst}` : undefined}
+            onClick={t.action ? () => fire(t.trigger) : undefined}
+            onKeyDown={t.action ? onKey(t.trigger) : undefined}>
             <title>{t.label} → {views[t.dst]?.label || t.dst}</title>
             <path d={arc.d} fill="none" stroke="transparent" strokeWidth={18}/>
             <path d={arc.d} fill="none" stroke={color} strokeWidth={1.8}
@@ -130,7 +129,7 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
           : 'rgba(255,255,255,0.28)';
 
         const singleArc = isReachable
-          ? outgoing.filter(tr => tr.dst === s)
+          ? outgoing.filter(tr => tr.dst === s && tr.action)
           : [];
         const trigger = singleArc.length === 1 ? singleArc[0].trigger : null;
         const label = views[s]?.label || s;

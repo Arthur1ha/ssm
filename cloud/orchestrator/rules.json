@@ -9,9 +9,12 @@
     },
     "action": {
       "tag": "lighting",
-      "cmd": "SET_STATE",
+      "cmd": "SET_COLOR",
       "params": {
-        "state": "BRIGHT"
+        "r": 255,
+        "g": 255,
+        "b": 255,
+        "brightness": 255
       }
     },
     "created_at": 1782183412

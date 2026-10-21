@@ -2,6 +2,13 @@
 const _EXCL_TYPES = new Set(['decision']);
 const _EXCL_PLAT = new Set(['cloud']);
 
+function mergeDeviceState(previous, unitId, state) {
+  if (!state || typeof state !== 'object' || !Object.keys(state).length) return previous;
+  const current = previous[unitId]?.state;
+  if (current && (current.ts || 0) > (state.ts || 0)) return previous;
+  return { ...previous, [unitId]: { ...(previous[unitId] || {}), state } };
+}
+
 function useSsmCore() {
   const { useState, useEffect, useRef, useCallback } = React;
   const [connected, setConnected] = useState(apiClient.eventsConnected);
@@ -24,6 +31,9 @@ function useSsmCore() {
       if (seq !== refreshSeqRef.current) return [];
       const list = normalizeDevices(devices);
       setAgents(list);
+      setUnitData(previous => list.reduce(
+        (data, device) => mergeDeviceState(data, device.unit_id, device.state), previous
+      ));
       return list;
     } catch (error) {
       if (seq !== refreshSeqRef.current) return [];
@@ -60,15 +70,16 @@ function useSsmCore() {
           });
         return merged;
       });
+      if (payload.card?.state) {
+        setUnitData(previous => mergeDeviceState(previous, unitId, payload.card.state));
+      }
       if (payload.state || payload.event) {
-        setUnitData(previous => ({
-          ...previous,
-          [unitId]: {
-            ...(previous[unitId] || {}),
-            ...(payload.state ? { state: payload.state } : {}),
-            ...(payload.event ? { event: payload.event } : {}),
-          },
-        }));
+        setUnitData(previous => {
+          const withState = payload.state ? mergeDeviceState(previous, unitId, payload.state) : previous;
+          return payload.event
+            ? { ...withState, [unitId]: { ...(withState[unitId] || {}), event: payload.event } }
+            : withState;
+        });
       }
     };
     apiClient.addEventListener('events-open', connectedHandler);

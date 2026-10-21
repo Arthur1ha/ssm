@@ -188,6 +188,18 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
             lines.append(f"  skill: {skill['id']}（{skill.get('name', '')}）params: {params_desc}")
     agents_str = "\n".join(lines) if lines else "无可用智能体"
 
+    legacy_light = any(
+        "BRIGHT" in skill.get("params_schema", {}).get("properties", {}).get("state", {}).get("enum", [])
+        for card in cards.values() for skill in card.get("skills", [])
+        if skill.get("id") == "set_light_state"
+    )
+    light_state_guidance = (
+        "- set_light_state 请严格按设备卡中的 state 枚举填写；旧版灯接受 OFF/DIM/BRIGHT，"
+        "新版灯接受 ON/OFF。调色或指定亮度用 set_light_color。\n"
+        if legacy_light else
+        "- set_light_state 只接受 ON/OFF：用户明确要开灯或关灯时用；ON 恢复上次常亮颜色和亮度。\n"
+    )
+
     history_str = ""
     if history:
         turns = [f"  用户：{h['user']}\n  助理：{h['assistant']}" for h in history]
@@ -229,7 +241,8 @@ def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
         f"灯光（你是唯一调色大脑，像贴心管家那样自行拿捏什么最贴合用户当下的需要，不要套固定场景规则）：\n"
         f"- set_light_color 是精细手段：可调任意颜色与亮度（r/g/b/brightness 均为 0-255）。"
         f"当用户想要某种感受/氛围、或没有现成预设贴合时，用它，色温和明暗你自己判断。\n"
-        f"- set_light_state 只有三个粗预设 OFF/DIM/BRIGHT（其中 DIM 是偏冷的白光）：仅当用户就是直白地要开/关/调暗/调亮时用。\n"
+        f"{light_state_guidance}"
+        f"- 用户要调暗或调亮时用 set_light_color，给出合适的 RGB 和 brightness；亮度 0 或全黑会关灯。\n"
         f"- 用户不再需要灯时（要睡了、离开了）就关灯，别画蛇添足。\n\n"
         f"act 校验：unit_id 必须在已接入可调用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
         f"params 必须符合对应 skill 的 params_schema。\n"

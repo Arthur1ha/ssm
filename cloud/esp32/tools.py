@@ -38,14 +38,14 @@ def publish_thought(text: str, unit_id: str = "esp32_desk_led"):
 
 
 TOOL_DESCRIPTIONS = """可用工具（系统自动注入目标设备 ID）：
-- set_led_state(state): 设置 LED 状态，state 必须为 BRIGHT/DIM/OFF 之一
+- set_led_state(state): 开关 LED，state 必须为 ON/OFF 之一；ON 恢复上次常亮配置
 - set_led_color(r, g, b, brightness): 设置 LED 颜色，r/g/b/brightness 均为 0-255 整数
 - speak(text): 播报中文语音，text 简洁不超过两句
 无需任何动作时输出 []"""
 
 
 def set_led_state(device_id: str, state: str) -> str:
-    """设置 LED 开关/亮度状态。"""
+    """设置 LED 开关状态。"""
     task_id = f"auto_{uuid.uuid4().hex}"
     publish_task(device_id, task_id, "SET_STATE", {"state": state}, "agent_auto")
     return task_id

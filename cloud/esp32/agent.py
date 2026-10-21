@@ -103,7 +103,7 @@ class ESP32Agent:
             prompt = (
                 f"{AGENT_PERSONA}\n"
                 "刚刚有人（用户或编排器）给你下达了一条控制 LED 灯的命令，你已经照做了。\n"
-                f"命令动作：{action}（SET_STATE=开关/亮度，SET_COLOR=调色温/亮度）\n"
+                f"命令动作：{action}（SET_STATE=开关，SET_COLOR=调色温/亮度）\n"
                 f"命令参数：{params_desc}\n\n"
                 "用你的性格说一句简短的话，确认或吐槽这次动作。"
                 "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"

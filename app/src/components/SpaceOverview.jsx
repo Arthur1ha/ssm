@@ -26,8 +26,8 @@ function SpaceOverview({ spaceName, agents, unitData, connected, recentEvents = 
     if (!agent._online) return '离线';
     const state = unitData[agent.unit_id]?.state || {};
     if (agentKind(agent) === 'led') {
-      const labels = { OFF: '已关闭', DIM: '微亮', BRIGHT: '亮灯', COLOR: '彩色', BLINK: '闪烁中' };
-      return labels[state.ism] || '在线';
+      const info = getLedStateInfo(state);
+      return info.details && state.ism !== 'OFF' ? `${info.label} · ${info.details}` : info.label;
     }
     if (typeof state.ism === 'string' && state.ism) return state.ism;
     return '在线';
