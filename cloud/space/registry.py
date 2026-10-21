@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ _DEFAULT_SPACE = {
     "id": DEFAULT_SPACE_ID,
     "name": "SSM 体验空间",
     "device_ids": [],
-    "invite": {"enabled": False, "token_hash": "", "version": 0, "updated_at": 0},
+    "invite": {"enabled": False, "share_id": "", "version": 0, "updated_at": 0},
     "updated_at": 0,
 }
 
@@ -92,6 +93,7 @@ class SpaceRegistry:
             data = dict(_DEFAULT_SPACE)
             data["invite"] = dict(_DEFAULT_SPACE["invite"])
             data["updated_at"] = int(time.time())
+            data["invite"]["share_id"] = secrets.token_urlsafe(24)
             self._atomic_save(data)
 
     def _normalize(self, raw: Any) -> dict[str, Any]:
@@ -107,7 +109,7 @@ class SpaceRegistry:
             "device_ids": _unique_strings(device_ids),
             "invite": {
                 "enabled": bool(invite.get("enabled", False)),
-                "token_hash": str(invite.get("token_hash") or ""),
+                "share_id": str(invite.get("share_id") or ""),
                 "version": max(0, int(invite.get("version") or 0)),
                 "updated_at": int(invite.get("updated_at") or 0),
             },
@@ -117,14 +119,28 @@ class SpaceRegistry:
     def _load_unlocked(self) -> dict[str, Any]:
         self._ensure_file()
         try:
-            return self._normalize(json.loads(self._path.read_text(encoding="utf-8")))
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
-            return self._normalize({})
+            raw = {}
+        data = self._normalize(raw)
+        old_invite = raw.get("invite", {}) if isinstance(raw, dict) else {}
+        old_hash = old_invite.get("token_hash") if isinstance(old_invite, dict) else None
+        has_legacy_field = isinstance(old_invite, dict) and "token_hash" in old_invite
+        if not data["invite"]["share_id"] or has_legacy_field:
+            if not data["invite"]["share_id"]:
+                data["invite"]["share_id"] = secrets.token_urlsafe(24)
+            if old_hash and data["invite"]["enabled"]:
+                data["invite"]["version"] += 1
+            data["invite"]["updated_at"] = int(time.time())
+            data["updated_at"] = data["invite"]["updated_at"]
+            self._atomic_save(data)
+        return data
 
     def _atomic_save(self, data: dict[str, Any]) -> None:
         tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
         encoded = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-        with tmp.open("w", encoding="utf-8") as handle:
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
@@ -174,17 +190,21 @@ class SpaceRegistry:
             self._atomic_save(data)
             return True
 
-    def rotate_invite(self, token_hash: str) -> dict[str, Any]:
+    def get_invite(self) -> dict[str, Any]:
+        """Return the immutable share ID created with the space."""
+        with self._lock:
+            return dict(self._load_unlocked()["invite"])
+
+    def enable_invite(self) -> dict[str, Any]:
         with self._lock:
             data = self._load_unlocked()
-            now = int(time.time())
             invite = data["invite"]
-            invite.update({
-                "enabled": True, "token_hash": token_hash,
-                "version": int(invite["version"]) + 1, "updated_at": now,
-            })
-            data["updated_at"] = now
-            self._atomic_save(data)
+            if not invite["enabled"]:
+                invite["enabled"] = True
+                invite["version"] = int(invite["version"]) + 1
+                invite["updated_at"] = int(time.time())
+                data["updated_at"] = invite["updated_at"]
+                self._atomic_save(data)
             return dict(invite)
 
     def disable_invite(self) -> dict[str, Any]:
@@ -193,7 +213,7 @@ class SpaceRegistry:
             now = int(time.time())
             invite = data["invite"]
             invite.update({
-                "enabled": False, "token_hash": "",
+                "enabled": False,
                 "version": int(invite["version"]) + 1, "updated_at": now,
             })
             data["updated_at"] = now

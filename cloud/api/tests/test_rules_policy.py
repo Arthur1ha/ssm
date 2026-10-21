@@ -27,7 +27,7 @@ async def test_rules_write_is_admin_only(api_env, monkeypatch, tmp_path):
         )
         assert created.status_code == 200
 
-        token = (await admin.post("/api/admin/invite/rotate", headers=csrf)).json()["token"]
+        token = (await admin.post("/api/admin/invite/enable", headers=csrf)).json()["share_id"]
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as visitor:
             assert (await visitor.post("/api/visitor/session", json={"token": token})).status_code == 200
             visitor_csrf = {"X-CSRF-Token": visitor.cookies.get("ssm_csrf")}

@@ -281,24 +281,8 @@ body {
   background-size: auto, 28px 28px, 28px 28px, auto;
 }
 .session-entry__panel { width: min(100%, 468px); }
-.session-entry__brand { display: flex; align-items: center; gap: 9px; margin-bottom: 36px; }
+.session-entry__brand { margin-bottom: 24px; }
 .session-entry__brand > span, .session-entry__mark { font-size: 18px; font-weight: 800; letter-spacing: .12em; }
-.session-entry__brand > i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 10px var(--color-accent); }
-.session-entry__brand > small { color: var(--color-text-dim); font: 9px var(--font-mono); letter-spacing: .14em; }
-.session-entry__signal {
-  position: relative; width: 92px; height: 92px; margin: 0 0 24px 18px;
-  display: grid; place-items: center; border: 1px solid rgba(200,255,62,.28); border-radius: 50%;
-  box-shadow: 0 0 0 13px rgba(200,255,62,.025), 0 0 0 26px rgba(200,255,62,.015);
-}
-.session-entry__signal::before, .session-entry__signal::after { content: ''; position: absolute; background: rgba(200,255,62,.22); }
-.session-entry__signal::before { width: 126px; height: 1px; }
-.session-entry__signal::after { width: 1px; height: 126px; }
-.session-entry__signal > span { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 12px var(--color-accent); }
-.session-entry__signal > span:nth-child(1) { left: 7px; top: 34px; }
-.session-entry__signal > span:nth-child(2) { right: 5px; top: 48px; background: #4bd4ff; box-shadow: 0 0 12px #4bd4ff; }
-.session-entry__signal > span:nth-child(3) { left: 32px; bottom: 5px; background: #b284ff; box-shadow: 0 0 12px #b284ff; }
-.session-entry__signal > span:nth-child(4) { right: 26px; top: 6px; width: 5px; height: 5px; }
-.session-entry__signal > b { z-index: 1; padding: 7px 10px; border-radius: 7px; background: var(--color-surface-2); color: var(--color-text); font: 600 10px var(--font-mono); letter-spacing: .16em; }
 .session-entry__eyebrow { margin-bottom: 9px; color: var(--color-accent); font: 9px var(--font-mono); letter-spacing: .2em; }
 .session-entry h1 { color: var(--color-text); font-size: clamp(34px, 9vw, 48px); line-height: 1.04; letter-spacing: -.055em; font-weight: 650; }
 .session-entry__copy { max-width: 370px; margin: 15px 0 24px; color: var(--color-text-muted); font-size: 13px; line-height: 1.75; }
@@ -423,7 +407,7 @@ body {
 .invite-pass > code { width: 100%; margin-top: 10px; overflow: hidden; color: var(--color-text-dim); font: 8px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; text-align: center; }
 .invite-empty { min-height: 230px; display: grid; place-content: center; justify-items: center; color: var(--color-text-dim); }
 .invite-message { margin: 10px 0 0; color: var(--color-text-muted); font-size: 11px; text-align: center; }
-.invite-drawer__actions { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin-top: 14px; }
+.invite-drawer__actions { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 14px; }
 .invite-drawer__actions .btn { min-height: 42px; justify-content: center; }
 
 @media (min-width: 680px) {

@@ -149,7 +149,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
         <footer className="space-drawer__footer">
           <span>{space?.name || '当前空间'} · {space?.device_ids?.length || 0} 台设备</span>
           <button className="btn btn--accent" onClick={onInvite} disabled={!space?.device_ids?.length}>
-            生成访客二维码 <Icon name="arrow" size={14}/>
+            查看空间二维码 <Icon name="arrow" size={14}/>
           </button>
         </footer>
       </aside>

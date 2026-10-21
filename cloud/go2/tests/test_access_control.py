@@ -228,7 +228,7 @@ async def test_visitor_cannot_read_long_term_go2_assets(monkeypatch, tmp_path):
     monkeypatch.setenv("SSM_SESSION_SECRET", "s" * 48)
     store = space_registry.SpaceRegistry(tmp_path / "space.json")
     monkeypatch.setattr(space_registry, "_registry", store)
-    invite = store.rotate_invite(auth.hash_invite_token("invite-token"))
+    invite = store.enable_invite()
     visitor = auth.new_session("visitor", invite_version=invite["version"])
 
     app = FastAPI()

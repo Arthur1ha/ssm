@@ -121,9 +121,9 @@ function App({ session, logout, refreshSession }) {
               onClick={() => setDeviceScanOpen(true)} aria-label="扫描设备二维码添加设备">
               <Icon name="scan" size={16}/><span>扫描设备</span>
             </button>}
-            <SpaceMenu actor={session.actor}
+            {session.actor === 'admin' && <SpaceMenu
               onShareSpace={() => setInviteOpen(true)} onRules={() => setRulesOpen(true)}
-              onSpaceSettings={() => setSpaceOpen(true)} onExit={logout}/>
+              onSpaceSettings={() => setSpaceOpen(true)} onExit={logout}/>}
           </div>
         </div>
 

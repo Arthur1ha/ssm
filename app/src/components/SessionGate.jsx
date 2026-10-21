@@ -209,11 +209,7 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
     <main className="session-entry">
       <section className="session-entry__panel">
         <div className="session-entry__brand">
-          <span>SSM</span><i/> <small>SMART SYSTEM MESH</small>
-        </div>
-        <div className="session-entry__signal" aria-hidden="true">
-          <span/><span/><span/><span/>
-          <b>SPACE</b>
+          <span>SSM</span>
         </div>
 
         {message && <div className="session-entry__error" role="alert">{message}</div>}
@@ -241,7 +237,7 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
           <div className="session-entry__choices">
             <button className="entry-choice entry-choice--create" onClick={enterSpace} disabled={busy}>
               <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
-              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '进入我的空间'}</strong></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong></span>
               <Icon name="arrow" size={17}/>
             </button>
             <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>
@@ -279,10 +275,11 @@ function SessionBadge({ session }) {
 function AdminInviteDrawer({ open, onClose }) {
   const { useEffect, useRef, useState } = React;
   const [invite, setInvite] = useState(null);
-  const [inviteUrl, setInviteUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const qrRef = useRef(null);
+  const inviteUrl = invite?.share_id
+    ? `${window.location.origin}${window.location.pathname}#invite=${encodeURIComponent(invite.share_id)}` : '';
 
   const load = async () => {
     try { setInvite(await apiClient.request('/api/admin/invite')); }
@@ -303,15 +300,11 @@ function AdminInviteDrawer({ open, onClose }) {
     return () => { active = false; };
   }, [open, inviteUrl]);
 
-  const rotate = async () => {
+  const enable = async () => {
     setBusy(true); setMessage('');
     try {
-      const data = await apiClient.request('/api/admin/invite/rotate', { method: 'POST', body: {} });
-      const token = data.token || data.invite_token || '';
-      const url = data.url || data.invite_url || (token
-        ? `${window.location.origin}${window.location.pathname}#invite=${encodeURIComponent(token)}` : '');
-      setInvite(data); setInviteUrl(url);
-      setMessage('新邀请已启用，旧二维码已失效');
+      setInvite(await apiClient.request('/api/admin/invite/enable', { method: 'POST', body: {} }));
+      setMessage('空间分享已启用，二维码保持不变');
     } catch (error) { setMessage(apiErrorText(error)); }
     finally { setBusy(false); }
   };
@@ -319,7 +312,7 @@ function AdminInviteDrawer({ open, onClose }) {
     setBusy(true); setMessage('');
     try {
       const data = await apiClient.request('/api/admin/invite/disable', { method: 'POST', body: {} });
-      setInvite(data); setInviteUrl(''); setMessage('访客邀请已停用');
+      setInvite(data); setMessage('空间分享已停用，访客会话已结束');
     } catch (error) { setMessage(apiErrorText(error)); }
     finally { setBusy(false); }
   };
@@ -343,19 +336,19 @@ function AdminInviteDrawer({ open, onClose }) {
           {inviteUrl ? (
             <div className="invite-pass">
               <div className="invite-pass__qr" ref={qrRef}/>
-            <p>加入者扫码后会获得临时体验会话。刷新分享链接会让旧链接失效。</p>
+              <p>{invite.enabled ? '扫码可加入当前空间。此二维码与空间绑定，保持不变。' : '分享已停用。重新启用后，此二维码仍可使用。'}</p>
               <button className="btn" onClick={copy}><Icon name="link" size={13}/> 复制邀请链接</button>
               <code>{inviteUrl}</code>
             </div>
           ) : (
-            <div className="invite-empty"><Icon name="scan" size={26}/><p>生成后二维码只在当前页面显示，请及时分享。</p></div>
+            <div className="invite-empty"><Icon name="scan" size={26}/><p>正在加载空间二维码…</p></div>
           )}
           {message && <div className="invite-message" role="status">{message}</div>}
           <div className="invite-drawer__actions">
-            <button className="btn btn--accent" onClick={rotate} disabled={busy}>
-              {invite?.enabled ? '刷新邀请' : '生成邀请'}
+            <button className={`btn ${invite?.enabled ? 'btn--danger' : ''}`}
+              onClick={invite?.enabled ? disable : enable} disabled={busy || !invite}>
+              {invite?.enabled ? '停用分享' : '启用分享'}
             </button>
-            <button className="btn btn--danger" onClick={disable} disabled={busy || !invite?.enabled}>停用邀请</button>
           </div>
         </div>
       </aside>

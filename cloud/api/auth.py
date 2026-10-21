@@ -57,10 +57,6 @@ def _ttl(actor: str) -> int:
         return default
 
 
-def hash_invite_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 def new_session(actor: str, invite_version: int | None = None) -> dict[str, Any]:
     now = int(time.time())
     session = {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import secrets
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -12,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from cloud.api.auth import (
     check_rate_limit,
     clear_session_cookies,
-    hash_invite_token,
     new_session,
     public_session,
     require_admin,
@@ -94,9 +92,8 @@ async def bind_device(req: DeviceBindRequest, session: dict[str, Any] = Depends(
 async def create_visitor_session(req: VisitorSessionRequest, request: Request, response: Response):
     check_rate_limit(request, "visitor-session")
     invite = get_space_registry().get_space()["invite"]
-    supplied = hash_invite_token(req.token)
-    valid = bool(invite["enabled"] and invite["token_hash"])
-    valid = valid and hmac.compare_digest(supplied, str(invite["token_hash"]))
+    valid = bool(invite["enabled"] and invite["share_id"])
+    valid = valid and hmac.compare_digest(req.token, invite["share_id"])
     if not valid:
         audit_event("visitor_exchange_rejected")
         raise HTTPException(status_code=401, detail="invalid or disabled invitation")
@@ -179,31 +176,25 @@ async def get_admin_device_candidates(_session: dict[str, Any] = Depends(require
     ]
 
 
+def _admin_invite(response: Response, invite: dict[str, Any]) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {key: invite[key] for key in ("enabled", "version", "updated_at", "share_id")}
+
+
 @router.get("/api/admin/invite")
-async def get_admin_invite(_session: dict[str, Any] = Depends(require_admin)):
-    return _public_space()["invite"]
+async def get_admin_invite(response: Response, _session: dict[str, Any] = Depends(require_admin)):
+    return _admin_invite(response, get_space_registry().get_invite())
 
 
-@router.post("/api/admin/invite/rotate")
-async def rotate_admin_invite(session: dict[str, Any] = Depends(require_admin_csrf)):
-    # 192 bits: comfortably above the plan's 128-bit minimum.
-    token = secrets.token_urlsafe(24)
-    invite = get_space_registry().rotate_invite(hash_invite_token(token))
-    audit_event("invite_rotated", session, invite_version=invite["version"])
-    return {
-        "enabled": True,
-        "version": invite["version"],
-        "updated_at": invite["updated_at"],
-        "token": token,  # Returned exactly once; never stored or logged.
-    }
+@router.post("/api/admin/invite/enable")
+async def enable_admin_invite(response: Response, session: dict[str, Any] = Depends(require_admin_csrf)):
+    invite = get_space_registry().enable_invite()
+    audit_event("invite_enabled", session, invite_version=invite["version"])
+    return _admin_invite(response, invite)
 
 
 @router.post("/api/admin/invite/disable")
-async def disable_admin_invite(session: dict[str, Any] = Depends(require_admin_csrf)):
+async def disable_admin_invite(response: Response, session: dict[str, Any] = Depends(require_admin_csrf)):
     invite = get_space_registry().disable_invite()
     audit_event("invite_disabled", session, invite_version=invite["version"])
-    return {
-        "enabled": False,
-        "version": invite["version"],
-        "updated_at": invite["updated_at"],
-    }
+    return _admin_invite(response, invite)
