@@ -1,6 +1,6 @@
 /* FsmDevicePage — 通用状态机设备页。
- * 布局：头部 → 左侧状态图 / 右侧按 Card 组合的当前状态视图 → 对话。
- * 完全由 Agent Card 的 transport / state_machine 驱动，无设备特判。
+ * 固定控制区展示 Card 声明的状态与转移；当前态内容和对话排在其后。
+ * 核心控制由 Agent Card 的 transport / state_machine 驱动。
  */
 function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const { useState, useEffect, useRef } = React;
@@ -22,6 +22,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const [messages, setMessages] = useState([initialMsg]);
   const [sending, setSending] = useState(false);
   const [execution, setExecution] = useState('');
+  const [go2AssetsOpen, setGo2AssetsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const reportExecution = result => setExecution(commandBus.describe(result));
 
   // 命令反馈是短暂提示；设备的当前状态由下方实时状态图呈现。
@@ -114,7 +116,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     }
     setExecution('正在等待设备执行反馈…');
     const result = await commandBus.command(unitId, t.action, t.params || {});
-    if (result?.result === 'accepted' && result.fsm_state === t.dst) {
+    if (t.safety && result?.ok) {
+      setExecution(`${t.label}已发送，等待状态同步`);
+    } else if (result?.result === 'accepted' && result.fsm_state === t.dst) {
       setExecution('');
     } else {
       reportExecution(result);
@@ -137,19 +141,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const meta    = getAgentMeta(device || { unit_id: unitId, name: unitId });
   const ACCENT  = meta.color;
   const offline = !device?._online;   // 离线：控制面板置灰、禁用交互
-  const isRobot = device?.agent_type === 'robot' || unitId === 'go2';
+  const isGo2 = unitId === 'go2' || device?.device_id === 'go2';
   const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
   const hasUserMsg = messages.some(m => m.role === 'user');
-
-  const emergencyStop = async () => {
-    setExecution('正在发送紧急停止…');
-    try {
-      const result = await apiClient.request('/api/emergency-stop', {
-        method: 'POST', body: { reason: 'device_page' },
-      });
-      setExecution(commandBus.describe(result?.result && typeof result.result === 'object' ? result.result : { result: 'ok' }));
-    } catch (error) { setExecution(apiErrorText(error, '紧急停止没有送达')); }
-  };
 
   return (
     <div style={{
@@ -169,61 +163,32 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         flexShrink: 0,
       }}>
         {/* 返回按钮 */}
-        <button onClick={onBack} style={{
+        <button onClick={onBack} aria-label="返回空间" style={{
           background: 'none', border: 'none',
           color: 'var(--color-text-dim)', cursor: 'pointer',
           fontSize: 18, padding: '0 4px', lineHeight: 1,
           fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
         }}>←</button>
 
-        {/* 设备名 + 副标题 */}
-        <div>
+        {/* 设备名 + 实时状态 */}
+        <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{
-            fontSize: 13, fontWeight: 700, letterSpacing: '0.12em',
+            fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             color: offline ? 'var(--color-text-dim)' : ACCENT,
             textShadow: (isOn && !offline) ? `0 0 12px ${ACCENT}80` : 'none',
             transition: 'text-shadow 0.4s',
-          }}>{(device?.name || unitId).toUpperCase()}</div>
-          <div style={{
-            fontSize: 9, color: 'var(--color-text-dim)',
-            letterSpacing: '0.18em', marginTop: 1,
-          }}>{(meta.label || '').toUpperCase()}</div>
+          }}>{device?.name || unitId}</div>
+          <div className="device-header__status">
+            <i className={offline ? 'is-offline' : ''}/>
+            {offline ? '离线' : `在线 · ${sm?.views?.[current]?.label || current || '状态同步中'}`}
+          </div>
         </div>
-
-        {/* 右侧：状态点 + 当前态文字 + AGENT 按钮 */}
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{
-            width: 7, height: 7, borderRadius: '50%',
-            background: offline ? 'var(--color-offline)' : ACCENT,
-            boxShadow: (isOn && !offline) ? `0 0 8px ${ACCENT}` : 'none',
-            transition: 'box-shadow 0.4s',
-          }}/>
-          <span style={{
-            fontSize: 10, letterSpacing: '0.1em',
-            color: offline ? 'var(--color-text-dim)' : ACCENT,
-            fontFamily: 'var(--font-mono)',
-          }}>
-            {offline ? 'OFFLINE' : (current || 'ONLINE').toUpperCase()}
-          </span>
-          <a href={'/api/devices/' + unitId + '/agent'} target="_blank" rel="noopener"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-              background: `${ACCENT}12`, color: ACCENT,
-              border: `1px solid ${ACCENT}30`,
-              borderRadius: 'var(--radius-sm)', padding: '5px 10px',
-              fontSize: 10, letterSpacing: '0.1em',
-              cursor: 'pointer', textDecoration: 'none',
-              fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
-            }}>
-            <Icon name="zap" size={10} color={ACCENT}/>
-            AGENT
-          </a>
-          {isRobot && <button className="emergency-stop" onClick={emergencyStop} title="紧急停止">STOP</button>}
-        </div>
+        {actor === 'admin' && (modes.length > 0 || isGo2) && <button type="button" className="device-header__settings"
+          onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>}
       </div>
 
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
-      {/* ── Card 驱动的状态工作区：图是导航，右侧按当前态组合视图和控件。 ── */}
+      {/* ── Card 驱动的固定状态机控制区 + 当前态内容。 ── */}
       {cardLoaded && (
         <div className="device-state-workspace" style={{
           filter: offline ? 'grayscale(1)' : 'none',
@@ -258,6 +223,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
+      <div className="device-chat-heading">与{device?.name || unitId}对话</div>
       <ChatPanel
         messages={messages}
         thinking={sending}
@@ -268,30 +234,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         disabled={offline}
         variant="inline"
       >
-        {/* 模式轴切换（通用，零设备特判） */}
-        {actor === 'admin' && modes.map(axis => (
-          <div key={axis.id} style={{
-            display: 'flex', gap: 6, padding: '8px 12px 0',
-            pointerEvents: offline ? 'none' : 'auto',
-          }}>
-            {axis.options.map((opt, i) => {
-              const active = modeVals[axis.id] === opt.value;
-              const c = i === 0 ? '#00d4ff' : ACCENT;
-              return (
-                <button key={opt.value} onClick={() => switchMode(axis, opt.value)} title={opt.description} style={{
-                  flex: 1, padding: '7px 4px',
-                  background: active ? `${c}18` : 'var(--color-surface-1)',
-                  color: active ? c : 'var(--color-text-dim)',
-                  border: `1px solid ${active ? `${c}40` : 'var(--color-border)'}`,
-                  borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 700,
-                  cursor: 'pointer', letterSpacing: '0.07em', fontFamily: 'inherit',
-                  WebkitTapHighlightColor: 'transparent', transition: 'all 0.15s',
-                }}>{(i === 0 ? '◉' : '◎')} {opt.label}</button>
-              );
-            })}
-          </div>
-        ))}
-
         {/* 快捷指令（card.suggestions 驱动）：无用户消息时显示，位置与主屏建议一致 */}
         {suggestions.length > 0 && !hasUserMsg && !sending && !offline && (
           <div style={{
@@ -313,7 +255,56 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         )}
       </ChatPanel>
       </div>
+      {actor === 'admin' && <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
+        modes={modes} modeVals={modeVals} onSwitchMode={switchMode}
+        offline={offline} isGo2={isGo2} onGo2Settings={() => setGo2AssetsOpen(true)}/>}
+      {actor === 'admin' && isGo2 && <Go2AssetsDrawer open={go2AssetsOpen} onClose={() => setGo2AssetsOpen(false)}/>}
     </div>
   );
 }
 window.FsmDevicePage = FsmDevicePage;
+
+function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, isGo2, onGo2Settings }) {
+  const panelRef = React.useRef(null);
+  const closeRef = React.useRef(onClose);
+  closeRef.current = onClose;
+  React.useEffect(() => {
+    if (!open) return undefined;
+    panelRef.current?.querySelector('button')?.focus();
+    const onKey = event => {
+      if (event.key === 'Escape') closeRef.current();
+      if (event.key !== 'Tab') return;
+      const buttons = panelRef.current?.querySelectorAll('button:not([disabled])');
+      if (!buttons?.length) return;
+      if (event.shiftKey && document.activeElement === buttons[0]) {
+        event.preventDefault();
+        buttons[buttons.length - 1].focus();
+      } else if (!event.shiftKey && document.activeElement === buttons[buttons.length - 1]) {
+        event.preventDefault();
+        buttons[0].focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+  if (!open) return null;
+
+  return <div className="device-settings-layer">
+    <div className="device-settings-scrim" onClick={onClose}/>
+    <section ref={panelRef} className="device-settings-panel" role="dialog" aria-modal="true" aria-label="设备设置">
+      <header><h2>设备设置</h2><button type="button" className="btn" onClick={onClose} aria-label="关闭设备设置"><Icon name="x" size={15}/></button></header>
+      {modes.map(axis => <section key={axis.id} className="device-settings-axis">
+        <h3>{axis.label}</h3>
+        <div>{axis.options.map(option => <button type="button" key={option.value}
+          className={modeVals[axis.id] === option.value ? 'is-active' : ''}
+          onClick={() => onSwitchMode(axis, option.value)} disabled={offline}
+          title={option.description}>
+          <strong>{option.label}</strong><small>{option.description}</small>
+        </button>)}</div>
+      </section>)}
+      {isGo2 && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onGo2Settings(); }}>
+        <span><strong>Go2 设置</strong><small>地点、人设、人员与记忆</small></span><Icon name="arrow" size={15}/>
+      </button>}
+    </section>
+  </div>;
+}

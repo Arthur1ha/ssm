@@ -43,12 +43,11 @@ function ActuatorCard({ agent, unitData }) {
   const meta     = getAgentMeta(agent);
   const active   = isAgentActive(agent, unitData);
   const offline  = !agent._online;
-  const canClick = true;
-
   return (
-    <div
-      onClick={canClick ? () => navigate('#/devices/' + uid) : undefined}
-      className={`glass${canClick ? ' interactive' : ''}`}
+    <button type="button"
+      onClick={() => navigate('#/devices/' + encodeURIComponent(uid))}
+      aria-label={`查看${agent.name || uid}详情`}
+      className="glass interactive home-device-card"
       style={{
         padding: '12px 14px', marginBottom: 10,
         borderRadius: 'var(--radius-card)',
@@ -57,7 +56,6 @@ function ActuatorCard({ agent, unitData }) {
           : 'var(--color-surface-1)',
         border: `1px solid ${active && !offline ? meta.color + '40' : 'var(--color-border)'}`,
         opacity: offline ? 0.4 : 1,
-        cursor: canClick ? 'pointer' : 'default',
       }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
@@ -83,7 +81,7 @@ function ActuatorCard({ agent, unitData }) {
           background: offline ? 'var(--color-offline)' : 'var(--color-online)',
           boxShadow: offline ? 'none' : '0 0 6px var(--color-online-glow)' }}/>
       </div>
-    </div>
+    </button>
   );
 }
 

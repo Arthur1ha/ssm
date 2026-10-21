@@ -28,7 +28,8 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
     return map;
   }, [states, transitions]);
 
-  const outgoing  = transitions.filter(t => t.src === current && t.dst !== current);
+  const outgoing  = transitions.filter(t => t.src === current && t.dst !== current && !t.safety);
+  const safetyEdges = transitions.filter(t => t.src === current && t.safety);
   const reachable = new Set(outgoing.map(t => t.dst));
 
   if (states.length === 0) return null;
@@ -61,6 +62,7 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
   };
 
   return (
+    <div className="fsm-graph-wrap">
     <svg
       className="fsm-graph"
       width={W} height={H}
@@ -159,6 +161,11 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
         );
       })}
     </svg>
+    {safetyEdges.map(t => <button type="button" key={t.trigger} className="fsm-safety-edge"
+      onClick={() => fire(t.trigger)} aria-label={`${t.label}，${views[current]?.label || current}到${views[t.dst]?.label || t.dst}`}>
+      <span>{views[current]?.label || current}</span><b>── {t.label} ──▶</b><span>{views[t.dst]?.label || t.dst}</span>
+    </button>)}
+    </div>
   );
 }
 window.FsmGraph = FsmGraph;

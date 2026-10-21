@@ -18,11 +18,12 @@ function useHashLocal() {
 /* 路由跳转 */
 function navigate(hash) { window.location.hash = hash; }
 
-function App({ session, logout }) {
+function App({ session, logout, refreshSession }) {
   const { useState, useEffect, useRef } = React;
   const {
     connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
+  const recentEvents = useSpaceActivity(agents);
   const { thinking, thinkingText, send } = useSendIntent();
   const currentHash = useHashLocal();
 
@@ -30,7 +31,6 @@ function App({ session, logout }) {
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
-  const [qrMenuOpen,  setQrMenuOpen]  = useState(false);
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const [deviceNotice, setDeviceNotice] = useState('');
   const [pendingRule, setPendingRule]  = useState(null);
@@ -103,20 +103,23 @@ function App({ session, logout }) {
           alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
           borderBottom: '1px solid var(--color-border)',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '0.08em' }}>SSM</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <div style={{
               width: 7, height: 7, borderRadius: '50%',
               background: connected ? 'var(--color-accent)' : 'var(--color-danger)',
               boxShadow: connected ? '0 0 8px var(--color-online-glow)' : 'none',
+              flexShrink: 0,
             }}/>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.space_name || '当前空间'}</div>
+              <div style={{ fontSize: 10, color: 'var(--color-text-dim)' }}>{connected ? '空间已连接' : '连接中断'}</div>
+            </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <SessionBadge session={session}/>
-            {session.actor === 'admin' && <button onClick={() => setQrMenuOpen(true)} className="btn header-icon-btn" title="设备与空间二维码" aria-label="设备与空间二维码"><Icon name="scan" size={16}/></button>}
-            {session.actor === 'admin' && <button onClick={() => setSpaceOpen(true)} className="btn header-icon-btn" title="空间建设" aria-label="空间建设"><Icon name="settings" size={13}/></button>}
-            {session.actor === 'admin' && <button onClick={() => setRulesOpen(true)} className="btn header-icon-btn" title="自动化规则" aria-label="自动化规则"><Icon name="list" size={13}/></button>}
-            <button onClick={logout} className="btn header-icon-btn" title={session.actor === 'visitor' ? '结束体验' : '退出管理'} aria-label="退出"><Icon name="x" size={13}/></button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {session.actor === 'visitor' && <SessionBadge session={session}/>}
+            <SpaceMenu actor={session.actor} onAddDevice={() => setDeviceScanOpen(true)}
+              onShareSpace={() => setInviteOpen(true)} onRules={() => setRulesOpen(true)}
+              onSpaceSettings={() => setSpaceOpen(true)} onExit={logout}/>
           </div>
         </div>
 
@@ -137,18 +140,18 @@ function App({ session, logout }) {
               </div>
             </div>
           )}
-          {hasDevices && <DevicesScreen agents={agents} unitData={unitData}/>}
-          {!loadingAgents && !agentsError && !hasDevices && <div className="device-empty">
-            <span className="device-empty__icon"><Icon name="addDevice" size={26}/></span>
-            <strong>空间里还没有设备</strong>
-            <p>{session.actor === 'admin' ? '点击右上角二维码入口，选择扫码添加设备。' : '管理员添加设备后，它们会出现在这里。'}</p>
-            {session.actor === 'admin' && <button className="btn btn--accent" onClick={() => setQrMenuOpen(true)}>添加或分享</button>}
-          </div>}
+          {hasDevices && <>
+            <SpaceOverview spaceName={session.space_name} agents={agents} unitData={unitData}
+              connected={connected} recentEvents={recentEvents}/>
+            <DevicesScreen agents={agents} unitData={unitData}/>
+          </>}
+          {!loadingAgents && !agentsError && !hasDevices &&
+            <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}
           {deviceNotice && <div className="device-bind-notice" role="status">{deviceNotice}<button className="btn" onClick={() => setDeviceNotice('')}>关闭</button></div>}
 
           {activityLog.length > 0 && (
             <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
-              <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>活动</span>
+              <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
             </div>
           )}
 
@@ -222,11 +225,7 @@ function App({ session, logout }) {
 
         {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
-        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents}/>}
-        {session.actor === 'admin' && qrMenuOpen && <QrActionsDialog
-          onClose={() => setQrMenuOpen(false)}
-          onAdd={() => { setQrMenuOpen(false); setDeviceScanOpen(true); }}
-          onShare={() => { setQrMenuOpen(false); setInviteOpen(true); }}/>}
+        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
         {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)} onBound={async result => {
           setDeviceScanOpen(false);
           setDeviceNotice(result.result === 'already_added' ? '设备已在空间中，原有设置已保留。' : '设备已加入当前空间。');
@@ -258,34 +257,6 @@ function App({ session, logout }) {
   );
 }
 window.App = App;
-
-function QrActionsDialog({ onClose, onAdd, onShare }) {
-  const addRef = React.useRef(null);
-  React.useEffect(() => {
-    addRef.current?.focus();
-    const onKey = event => { if (event.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
-    <section className="qr-actions-dialog" role="dialog" aria-modal="true" aria-labelledby="qr-actions-title" onClick={event => event.stopPropagation()}>
-      <header><div><small>SPACE</small><h2 id="qr-actions-title">设备与空间二维码</h2></div>
-        <button className="btn header-icon-btn" onClick={onClose} aria-label="关闭"><Icon name="x" size={16}/></button></header>
-      <p>选择接下来要做的事。</p>
-      <button ref={addRef} className="qr-actions-choice" onClick={onAdd}>
-        <span className="qr-actions-choice__icon"><Icon name="addDevice" size={20}/></span>
-        <span><strong>扫码添加设备</strong><small>扫描设备上的二维码标签</small></span>
-        <Icon name="arrow" size={15}/>
-      </button>
-      <button className="qr-actions-choice" onClick={onShare}>
-        <span className="qr-actions-choice__icon"><Icon name="scan" size={20}/></span>
-        <span><strong>分享空间二维码</strong><small>生成邀请，让其他人进入当前空间</small></span>
-        <Icon name="arrow" size={15}/>
-      </button>
-    </section>
-  </div>;
-}
 
 function DeviceScanDialog({ onClose, onBound }) {
   const { useEffect, useRef, useState } = React;

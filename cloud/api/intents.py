@@ -404,6 +404,8 @@ async def create_command(
             "remember_person", "add_person_face", "delete_person",
         }:
             audit_event("go2_asset_updated", session, action=req.action)
+        if req.action.upper() == "STOP":
+            audit_event("emergency_stop", session, reason="device_state_machine")
         return {"ok": True, "result": result}
 
     if req.action.lower() == "set_mode":

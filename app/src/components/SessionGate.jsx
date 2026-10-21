@@ -241,7 +241,7 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
           <div className="session-entry__choices">
             <button className="entry-choice entry-choice--create" onClick={enterSpace} disabled={busy}>
               <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
-              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '进入我的空间'}</strong></span>
               <Icon name="arrow" size={17}/>
             </button>
             <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>
@@ -271,7 +271,7 @@ function SessionBadge({ session }) {
   const seconds = left % 60;
   return (
     <span className="session-badge session-badge--visitor" title="空间参与会话剩余时间">
-      <i/> 空间参与者 · {minutes}:{String(seconds).padStart(2, '0')}
+      <i/> 参与 · {minutes}:{String(seconds).padStart(2, '0')}
     </span>
   );
 }

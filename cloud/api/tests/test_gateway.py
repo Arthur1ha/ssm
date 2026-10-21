@@ -65,6 +65,24 @@ async def test_go2_command_uses_trusted_internal_headers(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_state_machine_emergency_stop_uses_safety_endpoint(client, monkeypatch):
+    csrf = await login_admin(client)
+    captured = {}
+
+    async def fake_request(path, method, session, body=None):
+        captured.update(path=path, method=method, actor=session["actor"])
+        return {"ok": True, "mode": "manual"}
+
+    monkeypatch.setattr(intents, "_internal_request", fake_request)
+    response = await client.post(
+        "/api/commands/go2", json={"action": "STOP", "params": {}}, headers=csrf,
+    )
+    assert response.status_code == 200
+    assert captured == {"path": "/api/go2/stop", "method": "POST", "actor": "admin"}
+    assert response.json()["result"]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_admin_go2_asset_command_is_proxied_with_trusted_context(client, monkeypatch):
     csrf = await login_admin(client)
     captured = {}

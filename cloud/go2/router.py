@@ -63,6 +63,14 @@ def _go2_state_machine() -> dict:
                 "action": trigger,
                 "params": {},
             })
+    for src in _FSM_AVAILABLE:
+        if src in {"offline", "connecting"}:
+            continue
+        transitions.append({
+            "src": src, "dst": "lying" if src == "lying" else "standing",
+            "trigger": "EMERGENCY_STOP", "label": "紧急停止",
+            "action": "STOP", "params": {}, "safety": True,
+        })
     return {
         "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
         "transitions": transitions,

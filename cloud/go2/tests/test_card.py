@@ -268,6 +268,18 @@ def test_state_machine_has_action_states_not_executing():
     )
 
 
+def test_emergency_stop_is_a_safety_transition_to_real_state():
+    router_mod, _ = _load_router_with_stub()
+    sm = router_mod._go2_state_machine()
+    assert "emergency_stop" not in sm["states"]
+    stops = {t["src"]: t for t in sm["transitions"] if t.get("safety")}
+    assert set(stops) == set(sm["states"])
+    assert all(t["action"] == "STOP" and t["label"] == "紧急停止" for t in stops.values())
+    assert stops["moving"]["dst"] == "standing"
+    assert stops["standing"]["dst"] == "standing"
+    assert stops["lying"]["dst"] == "lying"
+
+
 def test_video_widget_states_drop_executing():
     """video 富控件显示状态对齐动作态，不再引用已删除的 executing。"""
     router_mod, _ = _load_router_with_stub()

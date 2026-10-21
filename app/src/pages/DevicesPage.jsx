@@ -1,66 +1,60 @@
-/* DevicesScreen — 主屏设备分组列表 */
-function DevicesScreen({ agents, unitData }) {
-  const { useState: useStateD } = React;
-  const [sensorsOpen, setSensorsOpen] = useStateD(false);
-
-  const agentDevices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
-  const sensors      = agents.filter(a => a.agent_type !== 'robot' && a.agent_type !== 'actuator');
-
-  const sectionLabel = (text, count, collapsible, open, onToggle) => (
-    <div onClick={collapsible ? onToggle : undefined}
-      style={{ padding: '16px 6px 8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        cursor: collapsible ? 'pointer' : 'default', userSelect: 'none' }}>
-      <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>{text}</span>
-      {collapsible && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          {!open && count > 0 && (
-            <span style={{ fontSize: 10, color: 'var(--color-text-dim)', fontFamily: 'monospace' }}>
-              {count} 个
-            </span>
-          )}
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-            stroke="var(--color-text-dim)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-            style={{ transition: 'transform 0.2s', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
-            <path d="M6 9l6 6 6-6"/>
-          </svg>
-        </div>
-      )}
-    </div>
-  );
-
-  if (agents.length === 0) {
-    return (
-      <div style={{ padding: '40px 20px', textAlign: 'center' }}>
-        <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 8 }}>
-          等待设备上线…
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', opacity: 0.6, lineHeight: 1.6 }}>
-          请确认设备已开机、联网，并向空间发布能力信息
-        </div>
-      </div>
-    );
-  }
-
+/* 空间首页：操作入口保持显眼，环境读数默认只占一行。 */
+function DeviceEmptyState({ isAdmin, onAddDevice }) {
   return (
-    <div style={{ padding: '0 14px' }}>
-      {agentDevices.length > 0 && (
-        <>
-          {sectionLabel('智能体')}
-          {agentDevices.map(a => (
-            <ActuatorCard key={a.unit_id} agent={a} unitData={unitData}/>
-          ))}
-        </>
-      )}
-      {sensors.length > 0 && (
-        <>
-          {sectionLabel('传感器', sensors.length, true, sensorsOpen, () => setSensorsOpen(v => !v))}
-          {sensorsOpen && sensors.map(a => (
-            <SensorCard key={a.unit_id} agent={a} unitData={unitData}/>
-          ))}
-        </>
-      )}
+    <div className="device-empty">
+      <span className="device-empty__icon"><Icon name="addDevice" size={26}/></span>
+      <strong>空间里还没有设备</strong>
+      <p>{isAdmin
+        ? '添加第一台设备，空间就能开始感知和响应。'
+        : '管理员添加设备后，设备状态会自动出现在这里。'}</p>
+      {isAdmin && <button type="button" className="btn btn--accent" onClick={onAddDevice}>添加设备</button>}
     </div>
   );
 }
 
+function DevicesScreen({ agents, unitData }) {
+  const { useState: useStateD } = React;
+  const [sensorsOpen, setSensorsOpen] = useStateD(false);
+  const devices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
+  const sensors = agents.filter(a => a.agent_type !== 'robot' && a.agent_type !== 'actuator');
+  const visibleSensors = sensors.slice(0, 3);
+
+  if (!agents.length) return null;
+
+  return (
+    <section className="home-devices" aria-label="空间设备">
+      {devices.length > 0 && <div className="home-devices__group">
+        <h2 className="home-devices__heading">可操作设备 <span>{devices.length}</span></h2>
+        <div className="home-devices__list">
+          {devices.map(agent => <ActuatorCard key={agent.unit_id} agent={agent} unitData={unitData}/>)}
+        </div>
+      </div>}
+      {sensors.length > 0 && <div className="home-devices__group">
+        <div className="home-devices__heading-row">
+          <h2 className="home-devices__heading">环境感知 <span>{sensors.length}</span></h2>
+          <button type="button" className="home-devices__expand" aria-expanded={sensorsOpen}
+            onClick={() => setSensorsOpen(open => !open)}>
+            {sensorsOpen ? '收起' : '查看全部'}
+            <Icon name="arrow" size={12} sw={2}/>
+          </button>
+        </div>
+        {!sensorsOpen && <div className="home-sensor-summary">
+          {visibleSensors.map(agent => {
+            const reading = agent._online ? getSensorReading(agent, unitData).value : '离线';
+            return <div className="home-sensor-summary__item" key={agent.unit_id}>
+              <span>{agent.name || getAgentMeta(agent).label}</span>
+              <strong>{reading}</strong>
+            </div>;
+          })}
+          {sensors.length > visibleSensors.length && <span className="home-sensor-summary__more">另有 {sensors.length - visibleSensors.length} 个</span>}
+        </div>}
+        {sensorsOpen && <div className="home-devices__list">
+          {sensors.map(agent => <SensorCard key={agent.unit_id} agent={agent} unitData={unitData}/>)}
+        </div>}
+      </div>}
+    </section>
+  );
+}
+
+window.DeviceEmptyState = DeviceEmptyState;
 window.DevicesScreen = DevicesScreen;

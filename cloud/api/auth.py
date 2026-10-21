@@ -217,6 +217,7 @@ def public_session(session: dict[str, Any]) -> dict[str, Any]:
         "session_id": session["session_id"],
         "actor": session["actor"],
         "space_id": DEFAULT_SPACE_ID,
+        "space_name": get_space_registry().get_space()["name"],
         "issued_at": session["issued_at"],
         "expires_at": session["expires_at"],
         # Double-submit CSRF token is intentionally readable by this origin's
