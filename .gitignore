@@ -31,3 +31,4 @@ cloudflared
 cloud/go2/data/
 cloud/esp32/data/
 cloud/space/audit.jsonl
+cloud/space/device_codes.json

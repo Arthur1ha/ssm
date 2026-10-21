@@ -18,7 +18,7 @@ function useHashLocal() {
 /* 路由跳转 */
 function navigate(hash) { window.location.hash = hash; }
 
-function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
+function App({ session, logout }) {
   const { useState, useEffect, useRef } = React;
   const {
     connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
@@ -30,18 +30,14 @@ function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
+  const [qrMenuOpen,  setQrMenuOpen]  = useState(false);
+  const [deviceScanOpen, setDeviceScanOpen] = useState(false);
+  const [deviceNotice, setDeviceNotice] = useState('');
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
 
   /* 退出动画：保留即将消失的 uid，待动画完成后清除 */
   const [exitingUid, setExitingUid] = useState(null);
-
-  useEffect(() => {
-    if (openBuilderOnEnter && session.actor === 'admin') {
-      setSpaceOpen(true);
-      onBuilderOpened?.();
-    }
-  }, [openBuilderOnEnter, session.actor, onBuilderOpened]);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
   const ready = !loadingAgents;
@@ -117,8 +113,8 @@ function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <SessionBadge session={session}/>
+            {session.actor === 'admin' && <button onClick={() => setQrMenuOpen(true)} className="btn header-icon-btn" title="设备与空间二维码" aria-label="设备与空间二维码"><Icon name="scan" size={16}/></button>}
             {session.actor === 'admin' && <button onClick={() => setSpaceOpen(true)} className="btn header-icon-btn" title="空间建设" aria-label="空间建设"><Icon name="settings" size={13}/></button>}
-            {session.actor === 'admin' && <button onClick={() => setInviteOpen(true)} className="btn header-icon-btn" title="访客邀请" aria-label="访客邀请"><Icon name="scan" size={13}/></button>}
             {session.actor === 'admin' && <button onClick={() => setRulesOpen(true)} className="btn header-icon-btn" title="自动化规则" aria-label="自动化规则"><Icon name="list" size={13}/></button>}
             <button onClick={logout} className="btn header-icon-btn" title={session.actor === 'visitor' ? '结束体验' : '退出管理'} aria-label="退出"><Icon name="x" size={13}/></button>
           </div>
@@ -142,6 +138,13 @@ function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
             </div>
           )}
           {hasDevices && <DevicesScreen agents={agents} unitData={unitData}/>}
+          {!loadingAgents && !agentsError && !hasDevices && <div className="device-empty">
+            <span className="device-empty__icon"><Icon name="addDevice" size={26}/></span>
+            <strong>空间里还没有设备</strong>
+            <p>{session.actor === 'admin' ? '点击右上角二维码入口，选择扫码添加设备。' : '管理员添加设备后，它们会出现在这里。'}</p>
+            {session.actor === 'admin' && <button className="btn btn--accent" onClick={() => setQrMenuOpen(true)}>添加或分享</button>}
+          </div>}
+          {deviceNotice && <div className="device-bind-notice" role="status">{deviceNotice}<button className="btn" onClick={() => setDeviceNotice('')}>关闭</button></div>}
 
           {activityLog.length > 0 && (
             <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
@@ -220,6 +223,15 @@ function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
         {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents}/>}
+        {session.actor === 'admin' && qrMenuOpen && <QrActionsDialog
+          onClose={() => setQrMenuOpen(false)}
+          onAdd={() => { setQrMenuOpen(false); setDeviceScanOpen(true); }}
+          onShare={() => { setQrMenuOpen(false); setInviteOpen(true); }}/>}
+        {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)} onBound={async result => {
+          setDeviceScanOpen(false);
+          setDeviceNotice(result.result === 'already_added' ? '设备已在空间中，原有设置已保留。' : '设备已加入当前空间。');
+          await refreshAgents();
+        }}/>}
       </div>
 
       {/* ── 设备页：叠在主屏之上，CSS 滑入/滑出 ── */}
@@ -246,3 +258,96 @@ function App({ session, logout, openBuilderOnEnter, onBuilderOpened }) {
   );
 }
 window.App = App;
+
+function QrActionsDialog({ onClose, onAdd, onShare }) {
+  const addRef = React.useRef(null);
+  React.useEffect(() => {
+    addRef.current?.focus();
+    const onKey = event => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
+    <section className="qr-actions-dialog" role="dialog" aria-modal="true" aria-labelledby="qr-actions-title" onClick={event => event.stopPropagation()}>
+      <header><div><small>SPACE</small><h2 id="qr-actions-title">设备与空间二维码</h2></div>
+        <button className="btn header-icon-btn" onClick={onClose} aria-label="关闭"><Icon name="x" size={16}/></button></header>
+      <p>选择接下来要做的事。</p>
+      <button ref={addRef} className="qr-actions-choice" onClick={onAdd}>
+        <span className="qr-actions-choice__icon"><Icon name="addDevice" size={20}/></span>
+        <span><strong>扫码添加设备</strong><small>扫描设备上的二维码标签</small></span>
+        <Icon name="arrow" size={15}/>
+      </button>
+      <button className="qr-actions-choice" onClick={onShare}>
+        <span className="qr-actions-choice__icon"><Icon name="scan" size={20}/></span>
+        <span><strong>分享空间二维码</strong><small>生成邀请，让其他人进入当前空间</small></span>
+        <Icon name="arrow" size={15}/>
+      </button>
+    </section>
+  </div>;
+}
+
+function DeviceScanDialog({ onClose, onBound }) {
+  const { useEffect, useRef, useState } = React;
+  const [attempt, setAttempt] = useState(0);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    const onKey = event => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const submit = async value => {
+    if (inFlight.current) return;
+    const raw = String(value || '').trim();
+    if (!raw) { setError('请扫描或粘贴设备码'); return; }
+    if (raw.includes('#invite=') || raw.includes('#token=')) {
+      setError('这不是设备二维码');
+      return;
+    }
+    inFlight.current = true;
+    setBusy(true);
+    setError('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const result = await apiClient.request('/api/admin/devices/bind', { method: 'POST', body: { code: raw }, signal: controller.signal });
+      await onBound(result);
+    } catch (requestError) {
+      setError(requestError.name === 'AbortError' ? '识别超时，请检查网络后重试'
+        : requestError.status === 400 ? '这不是有效的设备二维码'
+        : requestError.status === 404 ? '还未发现这台设备，请先启动设备并等待能力卡发布'
+        : apiErrorText(requestError, '设备识别失败，请重试'));
+      setPasteOpen(true);
+    } finally {
+      clearTimeout(timeout);
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
+    <section className="device-scan-dialog" role="dialog" aria-modal="true" aria-labelledby="device-scan-title" onClick={event => event.stopPropagation()}>
+      <header><div><small>DEVICE ONBOARDING</small><h2 id="device-scan-title">扫码添加设备</h2></div>
+        <button className="btn header-icon-btn" onClick={onClose} aria-label="关闭扫码"><Icon name="x" size={16}/></button></header>
+      <p>扫描设备上的二维码标签，识别后自动加入当前空间。</p>
+      {!busy && !pasteOpen && <QrScanner key={attempt} onScan={submit} hint="将设备二维码放入框内"/>}
+      {busy && <div className="device-scan-working" role="status">正在识别设备…</div>}
+      {error && <p className="device-scan-error" role="alert">{error}</p>}
+      {pasteOpen && !busy && <form className="session-entry__form" onSubmit={event => { event.preventDefault(); submit(code); }}>
+        <label htmlFor="device-code">设备码</label>
+        <input id="device-code" value={code} onChange={event => setCode(event.target.value)} autoComplete="off" placeholder="粘贴设备标签中的内容"/>
+        <button className="btn btn--accent" disabled={!code.trim()}>识别并添加设备</button>
+      </form>}
+      <div className="device-scan-actions">
+        <button className="btn" onClick={() => { setError(''); setPasteOpen(false); setAttempt(value => value + 1); }} disabled={busy}>重新扫码</button>
+        <button className="btn" onClick={() => setPasteOpen(value => !value)} disabled={busy}>{pasteOpen ? '返回摄像头' : '粘贴设备码'}</button>
+      </div>
+    </section>
+  </div>;
+}

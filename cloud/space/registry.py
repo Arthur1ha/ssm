@@ -1,4 +1,4 @@
-"""Single-space configuration and device/card projection.
+"""Space configuration and device/card projection.
 
 ``space.json`` is the only runtime source for space membership. The legacy
 ``devices.json`` is intentionally left untouched as a rollback artefact.
@@ -19,7 +19,7 @@ _DEFAULT_SPACE = {
     "version": 1,
     "id": DEFAULT_SPACE_ID,
     "name": "SSM 体验空间",
-    "device_ids": ["esp32_desk", "go2"],
+    "device_ids": [],
     "invite": {"enabled": False, "token_hash": "", "version": 0, "updated_at": 0},
     "updated_at": 0,
 }
@@ -75,7 +75,7 @@ def _offline_card(device_id: str) -> dict[str, Any]:
 
 
 class SpaceRegistry:
-    """Thread-safe store for the one fixed space."""
+    """Thread-safe store for the configured space."""
 
     def __init__(self, path: Path = _DATA_FILE) -> None:
         self._path = path
@@ -137,7 +137,10 @@ class SpaceRegistry:
             data["device_ids"] = list(data["device_ids"])
             return data
 
-    def update_space(self, *, name: str | None = None, device_ids: list[str] | None = None) -> dict[str, Any]:
+    def update_space(
+        self, *, name: str | None = None, device_ids: list[str] | None = None,
+        removals_only: bool = False,
+    ) -> dict[str, Any]:
         with self._lock:
             data = self._load_unlocked()
             if name is not None:
@@ -151,10 +154,25 @@ class SpaceRegistry:
                 unsupported = set(clean_ids) - supported
                 if unsupported:
                     raise ValueError(f"unsupported device ids: {', '.join(sorted(unsupported))}")
+                if removals_only and not set(clean_ids).issubset(data["device_ids"]):
+                    raise ValueError("devices must be added by scanning their device code")
                 data["device_ids"] = clean_ids
             data["updated_at"] = int(time.time())
             self._atomic_save(data)
             return self.get_space()
+
+    def add_device(self, device_id: str) -> bool:
+        """Add a supported physical device without overwriting concurrent space edits."""
+        if device_id not in {"esp32_desk", "go2"}:
+            raise ValueError("unsupported device id")
+        with self._lock:
+            data = self._load_unlocked()
+            if device_id in data["device_ids"]:
+                return False
+            data["device_ids"].append(device_id)
+            data["updated_at"] = int(time.time())
+            self._atomic_save(data)
+            return True
 
     def rotate_invite(self, token_hash: str) -> dict[str, Any]:
         with self._lock:
@@ -209,7 +227,7 @@ def get_space_cards(cards: dict[str, dict[str, Any]], registry: SpaceRegistry | 
 def get_adopted_cards(
     cards: dict[str, dict[str, Any]], registry: SpaceRegistry | None = None, *_legacy: Any
 ) -> dict[str, dict[str, Any]]:
-    """Deprecated name retained for read-only callers; always projects ``main``."""
+    """Deprecated name retained for read-only callers; projects the configured space."""
     return get_space_cards(cards, registry)
 
 

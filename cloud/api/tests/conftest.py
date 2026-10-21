@@ -8,6 +8,7 @@ from cloud.api.devices import router as devices_router
 from cloud.api.intents import router as intents_router
 from cloud.api.sessions import router as sessions_router
 from cloud.space import registry as space_registry
+from cloud.space import device_codes
 
 
 class FakePublishInfo:
@@ -31,6 +32,7 @@ def api_env(monkeypatch, tmp_path):
     monkeypatch.setenv("SSM_AUTH_RATE_LIMIT_PER_MIN", "100")
     store = space_registry.SpaceRegistry(tmp_path / "space.json")
     monkeypatch.setattr(space_registry, "_registry", store)
+    monkeypatch.setattr(device_codes, "_store", device_codes.DeviceCodeStore(tmp_path / "device_codes.json"))
     monkeypatch.setattr(policy, "_AUDIT_FILE", tmp_path / "audit.jsonl")
     with auth._rate_lock:
         auth._rate_attempts.clear()

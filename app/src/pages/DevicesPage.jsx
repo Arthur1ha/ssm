@@ -35,7 +35,7 @@ function DevicesScreen({ agents, unitData }) {
           等待设备上线…
         </div>
         <div style={{ fontSize: 11, color: 'var(--color-text-dim)', opacity: 0.6, lineHeight: 1.6 }}>
-          请确认 ESP32 已开机并连接到同一网络
+          请确认设备已开机、联网，并向空间发布能力信息
         </div>
       </div>
     );

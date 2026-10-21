@@ -43,7 +43,8 @@ async def test_invite_hash_rotation_disable_and_visitor_invalidation(client, app
 
 
 @pytest.mark.asyncio
-async def test_admin_only_space_and_fixed_id(client):
+async def test_admin_only_space_and_fixed_id(client, api_env):
+    api_env[0].update_space(device_ids=["go2"])
     csrf = await login_admin(client)
     response = await client.patch(
         "/api/admin/space", json={"name": "Demo"}, headers=csrf,
@@ -60,7 +61,8 @@ async def test_admin_only_space_and_fixed_id(client):
 
 
 @pytest.mark.asyncio
-async def test_admin_can_manage_devices_in_main_space(client):
+async def test_admin_can_manage_devices_in_main_space(client, api_env):
+    api_env[0].update_space(device_ids=["esp32_desk", "go2"])
     csrf = await login_admin(client)
     candidates = await client.get("/api/admin/device-candidates")
     assert candidates.status_code == 200
@@ -78,6 +80,11 @@ async def test_admin_can_manage_devices_in_main_space(client):
     )
     assert empty.status_code == 200
     assert empty.json()["device_ids"] == []
+
+    forbidden_add = await client.patch(
+        "/api/admin/space", json={"device_ids": ["go2"]}, headers=csrf,
+    )
+    assert forbidden_add.status_code == 400
 
     unsupported = await client.patch(
         "/api/admin/space", json={"device_ids": ["other"]}, headers=csrf,

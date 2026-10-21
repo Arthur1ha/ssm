@@ -1,4 +1,4 @@
-"""Authenticated fixed-space device/card endpoints."""
+"""Authenticated device and Agent Card endpoints for the current space."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ async def list_devices(request: Request, _session: dict[str, Any] = Depends(requ
 async def get_device(unit_id: str, _session: dict[str, Any] = Depends(require_session)):
     card = _fixed_cards().get(unit_id)
     if card is None:
-        raise HTTPException(status_code=404, detail=f"unit '{unit_id}' is not in the fixed space")
+        raise HTTPException(status_code=404, detail=f"unit '{unit_id}' is not in the current space")
     return _card_response(card)
 
 
@@ -47,5 +47,5 @@ async def get_device(unit_id: str, _session: dict[str, Any] = Depends(require_se
 async def device_agent_card(unit_id: str, _session: dict[str, Any] = Depends(require_session)):
     card = _fixed_cards().get(unit_id)
     if card is None:
-        raise HTTPException(status_code=404, detail=f"unit '{unit_id}' is not in the fixed space")
+        raise HTTPException(status_code=404, detail=f"unit '{unit_id}' is not in the current space")
     return card

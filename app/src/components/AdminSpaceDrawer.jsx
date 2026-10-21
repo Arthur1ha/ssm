@@ -1,5 +1,5 @@
-/* AdminSpaceDrawer — fixed-space and Go2 long-lived asset workbench.
- * This component is mounted by App for administrators only.
+/* AdminSpaceDrawer — current space settings, device membership, and available assets.
+ * This component is mounted by App for space managers.
  */
 function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
   const { useCallback, useEffect, useState } = React;
@@ -92,8 +92,8 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
   const toggleDevice = async deviceId => {
     if (!space || busy) return;
     const current = new Set(space.device_ids || []);
-    if (current.has(deviceId)) current.delete(deviceId);
-    else current.add(deviceId);
+    if (!current.has(deviceId)) return;
+    current.delete(deviceId);
     setBusy(`device-${deviceId}`); setMessage(null);
     try {
       const updated = await apiClient.request('/api/admin/space', {
@@ -102,7 +102,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
       setSpace(updated);
       setDeviceCandidates(rows => rows.map(row => ({ ...row, added: current.has(row.device_id) })));
       onDevicesChanged?.();
-      setMessage({ tone: 'ok', text: current.has(deviceId) ? '设备已加入 main' : '设备已从 main 移除' });
+      setMessage({ tone: 'ok', text: '设备已从当前空间移除' });
     } catch (error) {
       setMessage({ tone: 'error', text: apiErrorText(error, '设备配置保存失败') });
     } finally { setBusy(''); }
@@ -166,7 +166,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
         <div className="space-drawer__handle"/>
         <header className="space-drawer__header">
           <div>
-            <small>BUILDER CONSOLE · MAIN</small>
+            <small>SPACE MANAGEMENT</small>
             <h2 id="space-drawer-title">空间建设</h2>
           </div>
           <div className="space-drawer__header-actions">
@@ -186,7 +186,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section asset-section--space">
             <div className="asset-section__heading">
-              <div><small>SPACE ID · {space?.id || 'main'}</small><h3>默认空间 · MAIN</h3></div>
+              <div><small>SPACE ID · {space?.id || '—'}</small><h3>{space?.name || '当前空间'}</h3></div>
               <span>{space?.device_ids?.length || 0} 台设备</span>
             </div>
             <form className="asset-inline-form" onSubmit={saveSpaceName}>
@@ -207,19 +207,20 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
               <div><small>SPACE DEVICES</small><h3>空间设备</h3></div>
               <span>{space?.device_ids?.length || 0} 台已加入</span>
             </div>
-            <p className="asset-section__intro">选择要加入 main 的设备。离线设备也可以先加入，连线后会自动显示状态。</p>
+            <p className="asset-section__intro">在首页右上角扫码添加设备；这里可移除已加入的设备并管理标签。</p>
             <div className="space-device-options">
               {deviceCandidates.map(device => (
-                <button type="button" key={device.device_id}
-                  className={`space-device-option ${device.added ? 'is-added' : ''}`}
-                  onClick={() => toggleDevice(device.device_id)}
-                  disabled={loading || Boolean(busy)} aria-pressed={device.added}>
-                  <span className="space-device-option__icon"><Icon name={device.device_id === 'go2' ? 'scan' : 'bulb'} size={17}/></span>
+                <div key={device.device_id} className={`space-device-option ${device.added ? 'is-added' : ''}`}>
+                  <span className="space-device-option__icon"><Icon name="wifi" size={17}/></span>
                   <span className="space-device-option__copy"><strong>{device.name}</strong><small>{device.description}</small></span>
                   <span className={`space-device-option__state ${device.online ? 'is-online' : ''}`}>
-                    <i/>{device.online ? '在线' : '离线'} · {device.added ? '已加入' : '添加'}
+                    <i/>{device.online ? '在线' : '离线'} · {device.added ? '已加入' : '未加入'}
                   </span>
-                </button>
+                  <div className="space-device-option__actions">
+                    <DeviceLabelButton device={device}/>
+                    {device.added && <button type="button" className="btn btn--danger" onClick={() => toggleDevice(device.device_id)} disabled={loading || Boolean(busy)}>移除</button>}
+                  </div>
+                </div>
               ))}
             </div>
           </section>
@@ -326,7 +327,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
           </section>
         </div>
         <footer className="space-drawer__footer">
-          <span>main · {space?.device_ids?.length || 0} 台设备</span>
+          <span>{space?.name || '当前空间'} · {space?.device_ids?.length || 0} 台设备</span>
           <button className="btn btn--accent" onClick={onInvite} disabled={!space?.device_ids?.length}>
             生成访客二维码 <Icon name="arrow" size={14}/>
           </button>
@@ -337,3 +338,66 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged }) {
 }
 
 window.AdminSpaceDrawer = AdminSpaceDrawer;
+
+function DeviceLabelButton({ device }) {
+  const { useEffect, useRef, useState } = React;
+  const [label, setLabel] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const qrRef = useRef(null);
+
+  const load = async () => {
+    setOpen(true); setBusy(true); setError('');
+    try { setLabel(await apiClient.request(`/api/admin/device-codes/${encodeURIComponent(device.device_id)}`)); }
+    catch (requestError) { setError(apiErrorText(requestError, '设备标签暂时不可用')); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => {
+    if (!open || !label?.code || !qrRef.current) return;
+    let active = true;
+    qrRef.current.innerHTML = '';
+    loadQrLibrary('generate').then(QRCode => {
+      if (!active || !qrRef.current) return;
+      new QRCode(qrRef.current, { text: label.code, width: 176, height: 176,
+        colorDark: '#0c0c15', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+    }).catch(() => { if (active) setError('二维码生成失败，请重试'); });
+    return () => { active = false; };
+  }, [open, label?.code]);
+
+  const rotate = async () => {
+    if (!window.confirm(`轮换「${device.name}」设备标签？旧标签将立即失效。`)) return;
+    setBusy(true); setError('');
+    try { setLabel(await apiClient.request(`/api/admin/device-codes/${encodeURIComponent(device.device_id)}/rotate`, { method: 'POST', body: {} })); }
+    catch (requestError) { setError(apiErrorText(requestError, '标签轮换失败')); }
+    finally { setBusy(false); }
+  };
+  const save = () => {
+    const canvas = qrRef.current?.querySelector('canvas');
+    const image = qrRef.current?.querySelector('img');
+    const href = canvas?.toDataURL('image/png') || image?.src;
+    if (!href) { setError('二维码尚未生成，请稍后重试'); return; }
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = `ssm-${device.device_id}-label.png`;
+    link.click();
+  };
+
+  return <>
+    <button type="button" className="btn" onClick={load}>设备标签</button>
+    {open && ReactDOM.createPortal(<div className="device-label-backdrop" onClick={() => setOpen(false)}>
+      <section className="device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
+        <header><div><small>PHYSICAL DEVICE · {device.device_id}</small><h3>{device.name}设备标签</h3></div><button className="btn" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={14}/></button></header>
+        <p>保存或打印后贴在设备上。扫码时，设备仍需先发布能力卡。</p>
+        {busy && !label && <p role="status">正在读取设备标签…</p>}
+        {label && <div className="device-label-qr" ref={qrRef}/>}
+        {error && <p className="device-scan-error" role="alert">{error}</p>}
+        <div className="device-label-actions">
+          <button className="btn btn--accent" onClick={save} disabled={!label || busy}>保存二维码</button>
+          <button className="btn" onClick={() => window.print()} disabled={!label || busy}>打印</button>
+          <button className="btn btn--danger" onClick={rotate} disabled={busy}>轮换标签</button>
+        </div>
+      </section>
+    </div>, document.body)}
+  </>;
+}

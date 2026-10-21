@@ -48,21 +48,16 @@ function useSsmCore() {
       if (!unitId) return;
       setAgents(previous => {
         const card = payload.card && typeof payload.card === 'object' ? payload.card : null;
-        let found = false;
         const merged = previous
           .filter(device => !(card && device.unit_id === card.device_id && card.unit_id !== card.device_id))
           .map(device => {
             if (device.unit_id !== unitId) return device;
-            found = true;
             return {
               ...device,
               ...(card || {}),
               _online: payload.online ?? card?.online ?? device._online,
             };
           });
-        if (!found && card?.unit_id) {
-          merged.push({ ...card, _online: payload.online ?? card.online ?? false });
-        }
         return merged;
       });
       if (payload.state || payload.event) {

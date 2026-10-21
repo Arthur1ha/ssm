@@ -50,8 +50,8 @@ function useSendIntent() {
         callbacks.onPendingRule?.(payload.rule);
       } else if (stage === 'discovery_candidates') {
         finish();
-        // The product has one fixed space: discovery is informational only,
-        // never an adoption workflow in the browser.
+        // Discovery messages inform the user; device onboarding uses its
+        // dedicated flow instead of treating a chat event as consent.
         callbacks.onMessage?.(payload.text || '当前空间成员已经显示在设备列表中。');
       } else if (['done', 'partial', 'failed', 'denied'].includes(stage)) {
         finish();

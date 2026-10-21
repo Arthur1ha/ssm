@@ -25,7 +25,7 @@ _rate_lock = threading.Lock()
 _rate_attempts: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 # Keep the MVP usable without extra deployment setup. When no explicit secret
 # is supplied, cookies are signed with a process-local key; restarting the API
-# invalidates existing sessions, which is acceptable for this single-space MVP.
+# invalidates existing sessions, which is acceptable for the current MVP.
 _EPHEMERAL_SESSION_SECRET = secrets.token_bytes(32)
 
 

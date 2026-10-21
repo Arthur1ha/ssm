@@ -6,7 +6,7 @@ function normalizeSession(data) {
     ...raw,
     actor,
     expires_at: Number(raw.expires_at || 0),
-    space_name: raw.space_name || data?.space_name || 'SSM 体验空间',
+    space_name: raw.space_name || data?.space_name || '当前空间',
   };
 }
 
@@ -28,7 +28,6 @@ function SessionGate({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [openBuilderOnEnter, setOpenBuilderOnEnter] = useState(false);
 
   const applySession = useCallback(data => {
     const next = normalizeSession(data);
@@ -103,7 +102,6 @@ function SessionGate({ children }) {
       method: 'POST', suppressUnauthorized: true,
     });
     applySession(data);
-    setOpenBuilderOnEnter(true);
     try { await loadMe(); } catch (_) {}
   };
 
@@ -129,8 +127,6 @@ function SessionGate({ children }) {
   if (!session) return <SessionEntry error={error} onAdminLogin={adminLogin} onVisitorJoin={visitorJoin}/>;
   return children({
     session, logout, refreshSession: loadMe,
-    openBuilderOnEnter,
-    onBuilderOpened: () => setOpenBuilderOnEnter(false),
   });
 }
 
@@ -165,12 +161,12 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
 
   React.useEffect(() => setMessage(error || ''), [error]);
 
-  const createMain = async () => {
+  const enterSpace = async () => {
     if (busy) return;
     setBusy(true);
     setMessage('');
     try { await onAdminLogin(); }
-    catch (loginError) { setMessage(apiErrorText(loginError, '暂时无法创建空间，请重试')); }
+    catch (loginError) { setMessage(apiErrorText(loginError, '暂时无法进入空间，请重试')); }
     finally { setBusy(false); }
   };
 
@@ -217,11 +213,8 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
         </div>
         <div className="session-entry__signal" aria-hidden="true">
           <span/><span/><span/><span/>
-          <b>MAIN</b>
+          <b>SPACE</b>
         </div>
-        <p className="session-entry__eyebrow">SSM · MAIN SPACE</p>
-        <h1>让设备，<br/>成为空间的一部分。</h1>
-        <p className="session-entry__copy">先建设你的空间，或通过邀请进入一个正在运行的空间。</p>
 
         {message && <div className="session-entry__error" role="alert">{message}</div>}
 
@@ -246,14 +239,14 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
           </section>
         ) : (
           <div className="session-entry__choices">
-            <button className="entry-choice entry-choice--create" onClick={createMain} disabled={busy}>
+            <button className="entry-choice entry-choice--create" onClick={enterSpace} disabled={busy}>
               <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
-              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong><small>进入 main，添加设备并分享给其他人</small></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong></span>
               <Icon name="arrow" size={17}/>
             </button>
             <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>
               <span className="entry-choice__icon"><Icon name="scan" size={20}/></span>
-              <span className="entry-choice__copy"><strong>扫码加入</strong><small>使用空间分享链接，加入体验</small></span>
+              <span className="entry-choice__copy"><strong>扫码加入</strong></span>
               <Icon name="arrow" size={17}/>
             </button>
           </div>

@@ -1,4 +1,4 @@
-"""Administrator login, visitor invite exchange and fixed-space administration."""
+"""Space sessions, invitations, and administration endpoints."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from cloud.api.auth import (
 from cloud.api.policy import audit_event
 from cloud.cards.registry import get_registry
 from cloud.space.registry import get_space_registry, group_cards_by_device
+from cloud.space.device_codes import get_device_code_store, SUPPORTED_DEVICES
 
 router = APIRouter(tags=["sessions"])
 
@@ -31,6 +32,11 @@ router = APIRouter(tags=["sessions"])
 class VisitorSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: str = Field(..., min_length=16, max_length=512)
+
+
+class DeviceBindRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(..., min_length=1, max_length=512)
 
 
 class SpacePatchRequest(BaseModel):
@@ -48,6 +54,40 @@ async def create_admin_session(request: Request, response: Response):
     schedule_session_cleanup(session)
     audit_event("admin_session_created", session)
     return public_session(session)
+
+
+@router.get("/api/admin/device-codes/{device_id}")
+async def get_device_code(device_id: str, _session: dict[str, Any] = Depends(require_admin)):
+    if device_id not in SUPPORTED_DEVICES:
+        raise HTTPException(status_code=404, detail="unsupported device")
+    return get_device_code_store().get(device_id)
+
+
+@router.post("/api/admin/device-codes/{device_id}/rotate")
+async def rotate_device_code(device_id: str, session: dict[str, Any] = Depends(require_admin_csrf)):
+    if device_id not in SUPPORTED_DEVICES:
+        raise HTTPException(status_code=404, detail="unsupported device")
+    result = get_device_code_store().get(device_id, rotate=True)
+    audit_event("device_code_rotated", session, device_id=device_id, version=result["version"])
+    return result
+
+
+@router.post("/api/admin/devices/bind")
+async def bind_device(req: DeviceBindRequest, session: dict[str, Any] = Depends(require_admin_csrf)):
+    device_id = get_device_code_store().validate(req.code)
+    if device_id is None:
+        raise HTTPException(status_code=400, detail="invalid device code")
+    cards = group_cards_by_device(get_registry().get_all_cards()).get(device_id, [])
+    if not cards:
+        raise HTTPException(status_code=404, detail="device card has not been published")
+    added = get_space_registry().add_device(device_id)
+    audit_event("device_bound", session, device_id=device_id, result="added" if added else "already_added")
+    summary_keys = ("unit_id", "device_id", "name", "agent_type", "online", "description", "skills")
+    return {
+        "device_id": device_id,
+        "result": "added" if added else "already_added",
+        "cards": [{key: card[key] for key in summary_keys if key in card} for card in cards],
+    }
 
 
 @router.post("/api/visitor/session")
@@ -109,7 +149,7 @@ async def patch_admin_space(
     if req.name is None and req.device_ids is None:
         raise HTTPException(status_code=400, detail="no changes supplied")
     try:
-        get_space_registry().update_space(name=req.name, device_ids=req.device_ids)
+        get_space_registry().update_space(name=req.name, device_ids=req.device_ids, removals_only=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_event("space_updated", session, changed=[
@@ -120,7 +160,7 @@ async def patch_admin_space(
 
 @router.get("/api/admin/device-candidates")
 async def get_admin_device_candidates(_session: dict[str, Any] = Depends(require_admin)):
-    """Show the two supported device groups available to add to main."""
+    """Show device groups currently available for onboarding."""
     configured = set(get_space_registry().get_space()["device_ids"])
     groups = group_cards_by_device(get_registry().get_all_cards())
     labels = {

@@ -3,7 +3,8 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_devices_require_session_and_include_offline_fixed_devices(client):
+async def test_devices_require_session_and_include_offline_fixed_devices(client, api_env):
+    api_env[0].update_space(device_ids=["esp32_desk", "go2"])
     assert (await client.get("/api/devices")).status_code == 401
     await login_admin(client)
     response = await client.get("/api/devices")

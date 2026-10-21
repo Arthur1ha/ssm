@@ -105,6 +105,7 @@ async def test_visitor_go2_asset_command_is_rejected_before_dispatch(monkeypatch
 
 @pytest.mark.asyncio
 async def test_esp32_command_has_server_session_for_edge_correlation(client, api_env):
+    api_env[0].update_space(device_ids=["esp32_desk"])
     _store, mqtt = api_env
     get_registry().handle_message(
         "ssm/agents/esp32_desk_led/manifest",
@@ -140,6 +141,7 @@ def test_feedback_is_routed_only_to_its_session():
 
 
 def test_device_event_is_broadcast_to_active_sessions(api_env):
+    api_env[0].update_space(device_ids=["go2"])
     q1 = intents._events.subscribe("ses_a")
     q2 = intents._events.subscribe("ses_b")
     try:

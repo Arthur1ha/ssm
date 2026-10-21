@@ -3,8 +3,8 @@
   "id": "main",
   "name": "SSM 体验空间",
   "device_ids": [
-    "esp32_desk",
-    "go2"
+    "go2",
+    "esp32_desk"
   ],
   "invite": {
     "enabled": true,
@@ -12,5 +12,5 @@
     "version": 2,
     "updated_at": 1792508592
   },
-  "updated_at": 1792508592
+  "updated_at": 1792549841
 }

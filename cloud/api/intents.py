@@ -244,7 +244,7 @@ def _cancel_cleanup_task(session_id: str) -> None:
 
 
 def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
-    """Bridge private feedback and shared fixed-space device events to SSE."""
+    """Bridge private feedback and current-space device events to SSE."""
     parts = topic.split("/")
     try:
         payload = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
@@ -428,7 +428,7 @@ async def create_command(
         if not message:
             raise HTTPException(status_code=400, detail="chat requires message")
         if _configured_card(unit_id) is None:
-            raise HTTPException(status_code=404, detail="unit is not available in the fixed space")
+            raise HTTPException(status_code=404, detail="unit is not available in the current space")
         from cloud.esp32.agent import get_agent
 
         agent = get_agent()
@@ -448,7 +448,7 @@ async def create_command(
     if card is None:
         # Device-level ESP placeholder exists while offline, but cannot accept a
         # concrete command until a unit card declares its capabilities.
-        raise HTTPException(status_code=404, detail="unit is not available in the fixed space")
+        raise HTTPException(status_code=404, detail="unit is not available in the current space")
     transport = card.get("transport") or {}
     if transport.get("kind") != "mqtt":
         raise HTTPException(status_code=400, detail="unsupported device transport")

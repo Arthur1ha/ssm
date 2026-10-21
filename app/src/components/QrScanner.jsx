@@ -31,10 +31,9 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
         return;
       }
       try {
-        const decodeQr = await loadQrLibrary('scan');
-        if (stopped) return;
         const acquired = await navigator.mediaDevices.getUserMedia({
-          audio: false, video: { facingMode: 'environment' },
+          audio: false,
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
         });
         if (stopped) {
           acquired.getTracks().forEach(track => track.stop());
@@ -44,31 +43,66 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
         video.srcObject = stream;
         await video.play();
         if (stopped) return;
+        let detector = null;
+        let decodeQr = null;
+        if (typeof window.BarcodeDetector === 'function') {
+          try {
+            const formats = await window.BarcodeDetector.getSupportedFormats();
+            if (formats.includes('qr_code')) {
+              detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+            }
+          } catch (_) { /* Native detection is optional. */ }
+        }
+        if (!detector) {
+          setStatus('loading');
+          decodeQr = await loadQrLibrary('scan');
+        }
+        if (stopped) return;
         setStatus('scanning');
 
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d', { willReadFrequently: true });
         if (!context) throw new Error('canvas unavailable');
 
-        const scanFrame = () => {
+        const scanFrame = async () => {
           if (stopped) return;
-          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-            const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
-            canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-            canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const frame = context.getImageData(0, 0, canvas.width, canvas.height);
-            const code = decodeQr(frame.data, frame.width, frame.height, {
-              inversionAttempts: 'dontInvert',
-            });
-            if (code?.data) {
-              stop();
-              setStatus('done');
-              onScanRef.current(code.data);
-              return;
+          try {
+            if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+              let value = '';
+              if (detector) {
+                try {
+                  const codes = await detector.detect(video);
+                  value = codes.find(code => code.format === 'qr_code')?.rawValue || '';
+                } catch (_) {
+                  detector = null;
+                  decodeQr = await loadQrLibrary('scan');
+                }
+              } else {
+                const scale = Math.min(1, 480 / Math.max(video.videoWidth, video.videoHeight));
+                canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+                canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const frame = context.getImageData(0, 0, canvas.width, canvas.height);
+                value = decodeQr(frame.data, frame.width, frame.height, {
+                  inversionAttempts: 'dontInvert',
+                })?.data || '';
+              }
+              if (stopped) return;
+              if (value) {
+                stop();
+                setStatus('done');
+                onScanRef.current(value);
+                return;
+              }
             }
+          } catch (scanError) {
+            if (stopped) return;
+            stop();
+            setError('扫码器运行失败，请重试或粘贴二维码内容');
+            setStatus('error');
+            return;
           }
-          timer = setTimeout(scanFrame, 220);
+          if (!stopped) timer = setTimeout(scanFrame, 350);
         };
         scanFrame();
       } catch (cameraError) {
@@ -97,7 +131,7 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
         <video ref={videoRef} autoPlay muted playsInline aria-label="扫描二维码的摄像头画面"/>
         <span className="qr-scanner__target" aria-hidden="true"/>
         {status !== 'scanning' && <span className="qr-scanner__overlay">
-          {status === 'starting' ? '正在打开摄像头…' : status === 'done' ? '已识别二维码' : '摄像头不可用'}
+          {status === 'starting' ? '正在打开摄像头…' : status === 'loading' ? '正在加载扫码器…' : status === 'done' ? '已识别二维码' : '摄像头不可用'}
         </span>}
       </div>
       {error && <p className="qr-scanner__error" role="status">{error}</p>}
