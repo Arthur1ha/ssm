@@ -154,6 +154,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const isGo2 = unitId === 'go2' || device?.device_id === 'go2';
   const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
   const hasUserMsg = messages.some(m => m.role === 'user');
+  const hasBoardWidget = widgets.some(w => w.type !== 'video' && w.type !== 'connection'
+    && (!w.states?.length || w.states.includes(current)));
 
   return (
     <div style={{
@@ -198,40 +200,19 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       </div>
 
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
-      {/* ── Card 驱动的固定状态机控制区 + 当前态内容。 ── */}
+      {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
-        <div className="device-state-workspace" style={{
+        <div className={`device-state-workspace${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
           filter: offline ? 'grayscale(1)' : 'none',
           opacity: offline ? 0.45 : 1,
           pointerEvents: offline ? 'none' : 'auto',
           transition: 'filter 0.2s, opacity 0.2s',
         }}>
-          <div className="device-state-workspace__graph">
-            <div className="device-state-workspace__heading">
-              {isLed && sm && !sm.states?.includes('ON') ? '旧版状态机 · 设备固件待更新' : '状态 · 点击连线切换'}
-            </div>
-            {sm ? (
-              <FsmGraph
-                states={sm.states}
-                transitions={sm.transitions}
-                current={current}
-                onFire={fire}
-                color={ACCENT}
-                views={sm.views || {}}
-              />
-            ) : <div className="device-state-workspace__fallback">{current || '—'}</div>}
-          </div>
-          <div className="device-state-workspace__content">
-            {isLed && ledState.ism && <div className="device-led-output" aria-label={`灯光状态：${ledInfo.label}${ledInfo.details ? '，' + ledInfo.details : ''}`}>
-              <span className="device-led-output__swatch" style={{
-                background: ledState.ism === 'OFF' ? '#15161c' : (ledInfo.color || 'var(--color-surface-3)'),
-                boxShadow: ledState.ism === 'OFF' || !ledInfo.color ? 'none' : `0 0 18px ${ledInfo.color}`,
-              }}/>
-              <span><strong>{ledInfo.label}</strong><small>{ledInfo.details || '颜色与亮度待同步'}</small></span>
-            </div>}
-            <StateVisual view={sm?.views?.[current]} state={current} color={ACCENT}/>
-            {window.fsmWidget && window.fsmWidget(unitId, current, widgets, reportExecution, actor)}
-          </div>
+          <FsmBoard unitId={unitId} sm={sm} current={current} widgets={widgets}
+            onFire={fire} report={reportExecution} actor={actor} color={ACCENT}
+            ledState={isLed ? ledState : null} ledInfo={ledInfo}
+            legacyLed={isLed && sm && !sm.states?.includes('ON')}
+            online={!offline}/>
         </div>
       )}
 
@@ -282,6 +263,112 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   );
 }
 window.FsmDevicePage = FsmDevicePage;
+
+function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, ledState, ledInfo, legacyLed, online }) {
+  const { useState, useRef, useEffect } = React;
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const drag = useRef(null);
+  const pointers = useRef(new Map());
+  const pinch = useRef(null);
+  const joystickPointers = useRef(new Set());
+  const video = widgets.find(w => w.type === 'video');
+  const attachedWidgets = window.fsmWidget && window.fsmWidget(
+    unitId, current, widgets.filter(w => w.type !== 'video' && w.type !== 'connection'), report, actor,
+  );
+  const connectionWidgets = window.fsmWidget && window.fsmWidget(
+    unitId, current, widgets.filter(w => w.type === 'connection'), report, actor,
+  );
+  const safety = (sm?.transitions || []).find(t => t.src === current && t.safety && t.action);
+
+  // A new state starts centered so its state-specific controls remain visible.
+  useEffect(() => {
+    drag.current = null;
+    pointers.current.clear();
+    pinch.current = null;
+    joystickPointers.current.clear();
+    setPan({ x: 0, y: 0 });
+    setZoom(1);
+  }, [current]);
+
+  const startPan = event => {
+    if (event.button !== 0 || joystickPointers.current.size || event.target.closest('[role="button"], button, .device-joysticks, .device-state-video')) return;
+    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, pan };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      pinch.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom };
+      drag.current = null;
+    }
+  };
+  const movePan = event => {
+    if (pointers.current.has(event.pointerId)) {
+      pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    if (pinch.current && pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      setZoom(Math.max(0.85, Math.min(1.2, pinch.current.zoom * distance / Math.max(1, pinch.current.distance))));
+      return;
+    }
+    if (drag.current?.id !== event.pointerId) return;
+    setPan({
+      x: Math.max(-180, Math.min(180, drag.current.pan.x + event.clientX - drag.current.x)),
+      y: Math.max(-150, Math.min(150, drag.current.pan.y + event.clientY - drag.current.y)),
+    });
+  };
+  const endPan = event => {
+    pointers.current.delete(event.pointerId);
+    if (pointers.current.size < 2) pinch.current = null;
+    if (drag.current?.id === event.pointerId) drag.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const trackJoystick = event => {
+    if (!event.target.closest('.device-joysticks')) return;
+    joystickPointers.current.add(event.pointerId);
+    drag.current = null;
+    pointers.current.clear();
+    pinch.current = null;
+  };
+  const releaseJoystick = event => joystickPointers.current.delete(event.pointerId);
+
+  return <div className="device-board" style={{ '--board-accent': color }}>
+    <div className="device-board__viewport" onPointerDownCapture={trackJoystick}
+      onPointerUpCapture={releaseJoystick} onPointerCancelCapture={releaseJoystick}
+      onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan}>
+      <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), ${pan.y}px) scale(${zoom})` }}>
+        {sm ? <FsmGraph states={sm.states} transitions={sm.transitions} current={current}
+          onFire={onFire} color={color} views={sm.views || {}} layout={sm.layout || {}}
+          attachedWidget={attachedWidgets} showSafety={false}/>
+          : <div className="device-state-workspace__fallback">{current || '—'}</div>}
+      </div>
+    </div>
+    <div className="device-board__pinned">
+      {connectionWidgets}
+      {video && <div className="device-state-video device-board__video">
+        {online && current !== 'offline' && current !== 'connecting'
+          ? <VideoCanvas connected={true} endpoint={video.endpoint}/>
+          : <span>视频待连接</span>}
+      </div>}
+      {legacyLed && <div className="device-board__legacy">旧版状态机 · 固件待更新</div>}
+      {ledState?.ism && <div className="device-led-output" aria-label={`灯光状态：${ledInfo.label}${ledInfo.details ? '，' + ledInfo.details : ''}`}>
+        <span className="device-led-output__swatch" style={{
+          background: ledState.ism === 'OFF' ? '#15161c' : (ledInfo.color || 'var(--color-surface-3)'),
+          boxShadow: ledState.ism === 'OFF' || !ledInfo.color ? 'none' : `0 0 18px ${ledInfo.color}`,
+        }}/>
+        <span><strong>{ledInfo.label}</strong><small>{ledInfo.details || '颜色与亮度待同步'}</small></span>
+      </div>}
+      <div className="device-board__pose"><StateVisual view={sm?.views?.[current]} state={current} color={color}/></div>
+      {(Math.abs(pan.x) > 5 || Math.abs(pan.y) > 5 || Math.abs(zoom - 1) > 0.01) &&
+        <button type="button" className="device-board__reset" onClick={() => { setPan({ x: 0, y: 0 }); setZoom(1); }}>恢复画布位置</button>}
+      {safety && <button type="button" className="fsm-safety-edge device-board__safety"
+        onClick={() => onFire(safety.trigger)} aria-label={`${safety.label}，${sm?.views?.[current]?.label || current}到${sm?.views?.[safety.dst]?.label || safety.dst}`}>
+        <span>{sm?.views?.[current]?.label || current}</span><b>── {safety.label} ──▶</b><span>{sm?.views?.[safety.dst]?.label || safety.dst}</span>
+      </button>}
+    </div>
+  </div>;
+}
 
 function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, isGo2, onGo2Settings }) {
   const panelRef = React.useRef(null);

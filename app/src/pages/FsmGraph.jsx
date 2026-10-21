@@ -1,5 +1,5 @@
 /* FsmGraph — 当前状态的可用转换以连线呈现，点击连线即可执行。 */
-function FsmGraph({ states = [], transitions = [], current = '', onFire, color = '#C8FF3E', views = {} }) {
+function FsmGraph({ states = [], transitions = [], current = '', onFire, color = '#C8FF3E', views = {}, layout = {}, attachedWidget = null, showSafety = true }) {
   const { useMemo } = React;
 
   /* hex → "r,g,b" 供 rgba() 使用 */
@@ -25,8 +25,14 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
       const a = (i * 2 * Math.PI) / outer.length - Math.PI / 2;
       map[s] = { x: CX + LAYOUT_R * Math.cos(a), y: CY + LAYOUT_R * Math.sin(a) };
     });
+    states.forEach(s => {
+      const point = layout[s];
+      if (Number.isFinite(point?.x) && Number.isFinite(point?.y)) {
+        map[s] = { x: point.x * W, y: point.y * H };
+      }
+    });
     return map;
-  }, [states, transitions]);
+  }, [states, transitions, layout]);
 
   const outgoing  = transitions.filter(t => t.src === current && t.dst !== current && !t.safety);
   const safetyEdges = transitions.filter(t => t.src === current && t.safety && t.action);
@@ -160,7 +166,10 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
         );
       })}
     </svg>
-    {safetyEdges.map(t => <button type="button" key={t.trigger} className="fsm-safety-edge"
+    {attachedWidget && pos[current] && <div className="fsm-graph__attached-widget" style={{
+      left: `${pos[current].x / W * 100}%`, top: `${pos[current].y / H * 100}%`,
+    }}>{attachedWidget}</div>}
+    {showSafety && safetyEdges.map(t => <button type="button" key={t.trigger} className="fsm-safety-edge"
       onClick={() => fire(t.trigger)} aria-label={`${t.label}，${views[current]?.label || current}到${views[t.dst]?.label || t.dst}`}>
       <span>{views[current]?.label || current}</span><b>── {t.label} ──▶</b><span>{views[t.dst]?.label || t.dst}</span>
     </button>)}

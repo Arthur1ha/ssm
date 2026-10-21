@@ -150,47 +150,77 @@ body {
 .fsm-safety-edge b { flex: 0 0 auto; font-size: 10px; }
 .fsm-safety-edge:focus-visible { outline: 2px solid var(--color-danger); outline-offset: 2px; }
 
-/* 设备工作区由 Agent Card 的状态视图和 widgets 组合内容。 */
+/* Card 驱动的设备白板：图可拖动，视频、预览和安全动作固定。 */
 .device-state-workspace {
-  display: grid;
-  grid-template-rows: minmax(0, 60%) minmax(0, 40%);
   flex-shrink: 0;
-  height: min(56dvh, 420px);
-  min-height: 300px;
+  height: clamp(360px, 46dvh, 430px);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-1);
   overflow: hidden;
 }
-.device-state-workspace__graph {
-  min-width: 0;
-  padding: 8px 10px 4px;
-  border-bottom: 1px solid var(--color-border);
+.device-state-workspace--expanded { height: clamp(405px, 56dvh, 500px); }
+.device-board { position: relative; height: 100%; min-width: 0; background: var(--color-bg); }
+.device-board::before {
+  content: ''; position: absolute; inset: 0;
+  background-image: linear-gradient(var(--color-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
+  background-size: 22px 22px; opacity: .25; pointer-events: none;
+}
+.device-board__viewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; }
+.device-board__viewport:active { cursor: grabbing; }
+.device-board__canvas {
+  position: absolute; top: 55px; left: 50%; width: min(80vw, 30dvh, 300px);
+  transform-origin: center top; will-change: transform;
+}
+.device-board .fsm-graph-wrap { position: relative; width: 100%; }
+.device-board .fsm-graph { max-height: none; width: 100%; }
+.fsm-graph__attached-widget {
+  position: absolute; z-index: 2;
+  width: min(300px, calc(100vw - 44px));
+  transform: translate(-50%, 33px);
+  cursor: default;
+}
+.fsm-graph__attached-widget .device-joysticks {
+  margin: 0; padding: 8px 4px; border: 1px solid var(--color-accent-border);
+  border-radius: var(--radius-card); background: var(--color-surface-2);
+}
+.device-board__pinned { position: absolute; inset: 0; pointer-events: none; }
+.device-board__pinned button { pointer-events: auto; }
+.device-board__video {
+  position: absolute; top: 12px; left: 12px; width: 118px; aspect-ratio: 16 / 9;
+  margin: 0; background: var(--color-bg); z-index: 3;
+}
+.device-board__video span {
+  display: grid; place-items: center; width: 100%; height: 100%;
+  color: var(--color-text-dim); font-size: 10px;
+}
+.device-board__legacy {
+  position: absolute; top: 12px; right: 12px; max-width: calc(100% - 156px);
+  color: var(--color-text-muted); font-size: 10px; text-align: right;
+}
+.device-board__pose {
+  position: absolute; top: 12px; right: 12px; width: 112px; max-height: 74px;
   overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
 }
-.device-state-workspace__heading {
-  align-self: flex-start;
-  padding: 0 9px;
-  color: var(--color-text-dim);
-  font-size: 9px;
-  letter-spacing: .04em;
-  white-space: nowrap;
+.device-board__pose .device-state-visual__eyebrow,
+.device-board__pose .device-state-visual__description { display: none; }
+.device-board__pose .device-pose { max-height: 72px; }
+.device-board__pinned > .device-led-output {
+  position: absolute; top: 71px; left: 12px; max-width: 170px;
+  padding: 5px 7px; z-index: 3;
 }
+.device-board__reset {
+  position: absolute; left: 12px; bottom: 47px;
+  padding: 5px 8px; border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm); background: var(--color-surface-2);
+  color: var(--color-text-muted); font: 10px var(--font-sans); cursor: pointer;
+}
+.device-board__safety { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); margin: 0; z-index: 3; }
 .device-state-workspace__fallback {
   padding: 28px 9px;
   color: var(--color-accent);
   font: 600 14px var(--font-mono);
 }
-.device-state-workspace__content {
-  min-width: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 8px;
-  scrollbar-width: thin;
-}
-.device-state-workspace__graph .fsm-graph { max-height: min(25dvh, 185px); }
 .device-led-output {
   display: flex;
   align-items: center;
@@ -250,10 +280,15 @@ body {
   margin: 10px 0 3px;
 }
 @media (min-width: 700px) {
-  .device-state-workspace { grid-template-rows: none; grid-template-columns: minmax(0, 40%) minmax(0, 60%); height: min(43dvh, 370px); }
-  .device-state-workspace__graph { border-bottom: 0; border-right: 1px solid var(--color-border); }
-  .device-state-workspace__content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-content: start; gap: 10px; }
-  .device-state-video, .device-joysticks { margin-top: 0; }
+  .device-state-workspace { height: clamp(360px, 46dvh, 430px); }
+  .device-state-workspace--expanded { height: clamp(405px, 56dvh, 500px); }
+  .device-board__canvas { width: min(30dvh, 320px); top: 30px; }
+  .device-board__video { width: 160px; }
+  .device-board__pose { top: 12px; width: 140px; max-height: 100px; }
+  .device-board__pose .device-pose { max-height: 98px; }
+}
+@media (max-height: 700px) {
+  .device-board__canvas { top: 35px; }
 }
 
 /* Session boundary — the access pass is the product's one deliberate visual signal. */

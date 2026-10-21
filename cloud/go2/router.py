@@ -75,6 +75,15 @@ def _go2_state_machine() -> dict:
         "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
         "transitions": transitions,
         "initial": "offline",
+        "layout": {
+            "standing": {"x": 0.50, "y": 0.48},
+            "lying": {"x": 0.50, "y": 0.14},
+            "greeting": {"x": 0.16, "y": 0.28},
+            "stretching": {"x": 0.84, "y": 0.28},
+            "dancing1": {"x": 0.16, "y": 0.68},
+            "dancing2": {"x": 0.84, "y": 0.68},
+            "moving": {"x": 0.50, "y": 0.82},
+        },
         "views": {
             "offline": {"label": "未连接", "description": "机器狗尚未建立控制连接。", "type": "robot_pose", "pose": "offline"},
             "connecting": {"label": "正在连接", "description": "正在与机器狗建立实时控制通道。", "type": "robot_pose", "pose": "offline"},
@@ -183,7 +192,7 @@ def _build_go2_card() -> dict:
                 "visible": False,
             },
             {"type": "video",    "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
-            {"type": "joystick", "states": ["moving"],    "endpoint": "/api/go2/velocity"},
+            {"type": "joystick", "states": ["moving"], "endpoint": "/api/go2/velocity"},
         ],
     }
 

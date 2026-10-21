@@ -40,6 +40,7 @@ class StateMachine(TypedDict):
     transitions: list[FsmTransition]
     initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
     views: NotRequired[dict[str, StateView]]  # 状态语义与预览；前端不按设备类型硬编码
+    layout: NotRequired[dict[str, dict[str, float]]]  # 可选节点位置，x/y 为 0..1 的画布比例
 
 
 class SkillInvoke(TypedDict):

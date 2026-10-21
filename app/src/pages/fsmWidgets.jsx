@@ -218,10 +218,10 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor')
       const ep = w.endpoint || '/api/go2/velocity';
       return (
         <div key={'joy' + idx} className="device-joysticks">
-          <VirtualJoystick label="移动" radius={42} disabled={false}
+          <VirtualJoystick label="移动" radius={36} disabled={false}
             onMove={(dx, dy) => sendVelocity(ep, +(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
             onStop={() => sendVelocity(ep, 0, 0, 0)}/>
-          <VirtualJoystick label="转向" radius={42} disabled={false}
+          <VirtualJoystick label="转向" radius={36} disabled={false}
             onMove={(dx) => sendVelocity(ep, 0, 0, +(-dx * 0.8).toFixed(2))}
             onStop={() => sendVelocity(ep, 0, 0, 0)}/>
         </div>

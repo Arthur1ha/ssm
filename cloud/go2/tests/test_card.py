@@ -214,12 +214,13 @@ def test_go2_card_has_state_machine():
     assert sm is not None
     assert "standing" in sm["states"]
     assert "moving" in sm["states"]
-    # standing --Move--> moving 这条转移存在且有 label
+    # 进入移动控制由状态机负责，带速度的 Move 由摇杆数据面发送。
     t = next(x for x in sm["transitions"]
-             if x["src"] == "standing" and x["trigger"] == "Move")
+             if x["src"] == "standing" and x["trigger"] == "EnterMoveControl")
     assert t["dst"] == "moving"
     assert t["label"]
     assert sm["views"]["standing"]["type"] == "robot_pose"
+    assert sm["layout"]["moving"] == {"x": 0.50, "y": 0.82}
     assert sm["views"]["greeting"]["pose"] == "greeting"
 
 
@@ -250,6 +251,8 @@ def test_go2_card_含_autonomy_modes_与_widgets():
     widgets = card.get("widgets", [])
     types = [w["type"] for w in widgets]
     assert "joystick" in types and "video" in types
+    joystick = next(w for w in widgets if w["type"] == "joystick")
+    assert joystick["states"] == ["moving"]
     conn = next(w for w in widgets if w["type"] == "connection")
     assert conn["auto_connect"] is True
     assert conn["visible"] is False
