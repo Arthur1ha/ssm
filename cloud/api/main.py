@@ -30,6 +30,7 @@ from cloud.esp32.state import ESP32State
 from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
 from cloud.api.rules import router as rules_router
+from cloud.api.people import router as people_router
 from cloud.api.devices import router as devices_router
 from cloud.api.sessions import router as sessions_router
 from cloud.api import intents as intents_module
@@ -186,6 +187,7 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(go2_router)
+app.include_router(people_router)
 app.include_router(esp32_router)
 app.include_router(rules_router)
 app.include_router(devices_router)

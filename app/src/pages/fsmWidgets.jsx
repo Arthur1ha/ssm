@@ -96,7 +96,7 @@ function ConnectionWidget({ widget, unitId, actor }) {
         }}>
           {(status.fsm_state || 'offline').toUpperCase()}
         </div>
-        <button
+        <div className="feedback-button"><button
           className="btn"
           onClick={connected ? disconnect : connect}
           disabled={connecting || (connected && actor !== 'admin')}
@@ -110,88 +110,69 @@ function ConnectionWidget({ widget, unitId, actor }) {
         >
           {connecting ? '连接中...' : (connected ? (actor === 'admin' ? '断开' : '已连接') : '连接机器狗')}
         </button>
-      </div>
-      {status.error && (
-        <div style={{
-          marginTop: 8,
-          color: 'var(--color-danger)',
-          fontSize: 11,
-          lineHeight: 1.45,
-        }}>
-          {status.error}
+        {status.error && <small className="action-feedback action-feedback--error" role="status" title={status.error}>{status.error}</small>}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
-function ColorSwatchesWidget({ unitId, widget, report }) {
+function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
+  const { useState, useEffect, useRef } = React;
   const swatches = widget.swatches || [];
-  if (!swatches.length) return null;
+  const channelLabels = { r: '红色', g: '绿色', b: '蓝色', brightness: '亮度' };
+  const initial = () => ({
+    r: ledState?.r ?? 255, g: ledState?.g ?? 255,
+    b: ledState?.b ?? 255, brightness: ledState?.brightness ?? 180,
+  });
+  const [draft, setDraft] = useState(initial);
+  const lastSent = useRef('');
 
-  const sendColor = (swatch) => {
+  useEffect(() => {
+    if (!['ON', 'BRIGHT', 'DIM', 'COLOR'].includes(ledState?.ism)) return;
+    const next = initial();
+    setDraft(next);
+    lastSent.current = JSON.stringify(next);
+  }, [ledState?.r, ledState?.g, ledState?.b, ledState?.brightness, ledState?.ism]);
+
+  const sendColor = values => {
+    const next = {
+      r: Number(values.r), g: Number(values.g), b: Number(values.b),
+      brightness: Number(values.brightness),
+    };
+    const key = JSON.stringify(next);
+    if (key === lastSent.current) return;
+    lastSent.current = key;
+    setDraft(next);
     report({ result: 'executing' });
-    commandBus.mqtt(unitId, widget.action || 'SET_COLOR', {
-      r: Number(swatch.r) || 0,
-      g: Number(swatch.g) || 0,
-      b: Number(swatch.b) || 0,
-      brightness: Number(swatch.brightness ?? 180),
-    }).then(report);
+    commandBus.mqtt(unitId, widget.action || 'SET_COLOR', next)
+      .then(report).catch(error => report({ result: 'error', error: error.message }));
   };
 
-  return (
-    <div style={{
-      padding: '8px 12px 0',
-      display: 'flex',
-      gap: 8,
-      overflowX: 'auto',
-      scrollbarWidth: 'none',
-    }}>
-      {swatches.map((swatch, idx) => {
-        const rgb = `rgb(${swatch.r}, ${swatch.g}, ${swatch.b})`;
-        const isLight = Number(swatch.r) + Number(swatch.g) + Number(swatch.b) > 690;
-        return (
-          <button
-            key={(swatch.label || 'color') + idx}
-            className="btn"
-            onClick={() => sendColor(swatch)}
-            title={swatch.label}
-            aria-label={swatch.label}
-            style={{
-              flexShrink: 0,
-              minWidth: 64,
-              padding: '7px 10px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 6,
-              background: 'var(--color-surface-1)',
-              color: 'var(--color-text-muted)',
-              borderColor: 'var(--color-border)',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 11,
-              whiteSpace: 'nowrap',
-              cursor: 'pointer',
-            }}
-          >
-            <span style={{
-              width: 12,
-              height: 12,
-              borderRadius: '50%',
-              background: rgb,
-              border: isLight ? '1px solid var(--color-border-strong)' : '1px solid transparent',
-              boxShadow: `0 0 8px ${rgb}`,
-              flexShrink: 0,
-            }}/>
-            <span>{swatch.label}</span>
-          </button>
-        );
-      })}
+  return <div className="device-led-controls">
+    <div className="device-led-controls__sliders">
+      {(widget.channels || ['r', 'g', 'b', 'brightness']).map(channel => <label key={channel} className="device-led-controls__slider">
+        <span>{channelLabels[channel] || channel}</span>
+        <input type="range" min={channel === 'brightness' ? 1 : 0} max="255" step="1"
+          value={draft[channel]} aria-label={channelLabels[channel] || channel}
+          onChange={event => setDraft(prev => ({ ...prev, [channel]: Number(event.target.value) }))}
+          onPointerUp={event => sendColor({ ...draft, [channel]: Number(event.currentTarget.value) })}
+          onKeyUp={event => sendColor({ ...draft, [channel]: Number(event.currentTarget.value) })}
+          onBlur={event => sendColor({ ...draft, [channel]: Number(event.currentTarget.value) })}/>
+        <output>{draft[channel]}</output>
+      </label>)}
     </div>
-  );
+    {swatches.length > 0 && <div className="device-led-controls__presets" aria-label="预设颜色">
+      {swatches.map((swatch, idx) => <button key={(swatch.label || 'color') + idx}
+        type="button" onClick={() => sendColor(swatch)}>
+        <i style={{ background: `rgb(${swatch.r}, ${swatch.g}, ${swatch.b})` }}/>
+        {swatch.label}
+      </button>)}
+    </div>}
+  </div>;
 }
 
-function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor') {
+function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor', ledState = null) {
   if (!widgets || !widgets.length) return null;
 
   const VirtualJoystick = window.VirtualJoystick;
@@ -208,8 +189,8 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor')
   );
 
   const nodes = active.map((w, idx) => {
-    if (w.type === 'color_swatches') {
-      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report}/>;
+    if (w.type === 'led_color' || w.type === 'color_swatches') {
+      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report} ledState={ledState}/>;
     }
     if (w.type === 'connection') {
       return <ConnectionWidget key={'conn' + idx} widget={w} unitId={unitId} actor={actor}/>;

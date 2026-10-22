@@ -1,3 +1,1 @@
-from .people import KnownPerson, PeopleMemory
-
-__all__ = ["KnownPerson", "PeopleMemory"]
+"""Go2 私有记忆模块。人员库由空间模块管理。"""

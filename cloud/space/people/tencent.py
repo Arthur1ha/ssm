@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .provider import (
-    AddedFace,
     CreatedPerson,
     DuplicateFaceCandidate,
     FaceCandidate,
@@ -108,20 +107,6 @@ class TencentFaceProvider:
         if similar:
             raise DuplicateFaceCandidate(similar, str(resp.RequestId or ""))
         return CreatedPerson(person_id, str(resp.FaceId or ""), str(resp.RequestId or ""))
-
-    async def add_face(self, person_id: str, jpeg: bytes) -> AddedFace:
-        from tencentcloud.iai.v20200303 import models
-
-        req = models.CreateFaceRequest()
-        req.PersonId = person_id
-        req.Images = [self._image(jpeg)]
-        req.QualityControl = 3
-        req.FaceMatchThreshold = self.face_match_threshold
-        resp = await self._call(self._client.CreateFace, req)
-        codes = tuple(resp.RetCode or ())
-        if codes and codes[0] != 0:
-            raise FaceImageRejected(str(codes[0]), "当前画面未能增加为有效人脸", str(resp.RequestId or ""))
-        return AddedFace(person_id, tuple(resp.SucFaceIds or ()), str(resp.RequestId or ""))
 
     async def search_persons(self, jpeg: bytes) -> FaceSearchResult:
         from tencentcloud.iai.v20200303 import models

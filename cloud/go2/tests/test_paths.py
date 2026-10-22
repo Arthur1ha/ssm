@@ -15,7 +15,6 @@ def test_default_data_dir_under_go2(monkeypatch):
     assert paths.MEMORY_DIR == paths.DATA_DIR / "memory"
     assert paths.SOUL_DIR == paths.DATA_DIR / "soul"
     assert paths.RULES_FILE == paths.DATA_DIR / "rules.json"
-    assert paths.PEOPLE_FILE == paths.MEMORY_DIR / "people.json"
 
 
 def test_env_override(monkeypatch, tmp_path):

@@ -307,8 +307,8 @@ async def test_chat_default_session_id(chat_client, monkeypatch):
 def test_new_tools_in_fn_map():
     from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS
     for name in ("go2_tag_location", "go2_navigate_to", "go2_list_locations",
-                 "go2_set_led", "go2_remember_person", "go2_add_person_face",
-                 "go2_recognize_person", "go2_list_people", "go2_forget_person"):
+                 "go2_set_led",
+                 "go2_recognize_person", "go2_list_people"):
         assert name in TOOL_FN_MAP, f"{name} missing from TOOL_FN_MAP"
         assert name in TOOL_DESCRIPTIONS, f"{name} missing from TOOL_DESCRIPTIONS"
 

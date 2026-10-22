@@ -6,12 +6,12 @@ import pytest
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 from tencentcloud.iai.v20200303 import models
 
-from cloud.go2.agentcore.identity.provider import (
+from cloud.space.people.provider import (
     DuplicateFaceCandidate,
     FaceImageRejected,
     FaceProviderUnavailable,
 )
-from cloud.go2.agentcore.identity.tencent import TencentFaceProvider
+from cloud.space.people.tencent import TencentFaceProvider
 
 
 class FakeClient:

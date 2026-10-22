@@ -134,9 +134,9 @@ function QrScanner({ onScan, hint = '将二维码放入框内，识别后自动�
           {status === 'starting' ? '正在打开摄像头…' : status === 'loading' ? '正在加载扫码器…' : status === 'done' ? '已识别二维码' : '摄像头不可用'}
         </span>}
       </div>
-      {error && <p className="qr-scanner__error" role="status">{error}</p>}
       {status === 'done' || status === 'error' ? (
-        <button type="button" className="btn qr-scanner__retry" onClick={() => setAttempt(value => value + 1)}>重新扫码</button>
+        <><button type="button" className="btn qr-scanner__retry" onClick={() => setAttempt(value => value + 1)}>重新扫码</button>
+          {error && <p className="action-feedback action-feedback--error" role="status" title={error}>{error}</p>}</>
       ) : <p className="qr-scanner__hint">{hint}</p>}
     </div>
   );

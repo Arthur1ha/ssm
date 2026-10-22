@@ -31,6 +31,7 @@ function App({ session, logout, refreshSession }) {
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
+  const [peopleOpen,  setPeopleOpen]  = useState(false);
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const [deviceNotice, setDeviceNotice] = useState('');
   const [pendingRule, setPendingRule]  = useState(null);
@@ -117,13 +118,13 @@ function App({ session, logout, refreshSession }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             {session.actor === 'visitor' && <SessionBadge session={session}/>}
-            {session.actor === 'admin' && <button type="button" className="btn device-scan-trigger"
-              onClick={() => setDeviceScanOpen(true)} aria-label="扫描设备二维码添加设备">
+            {session.actor === 'admin' && <div className="feedback-button"><button type="button" className="btn device-scan-trigger"
+              onClick={() => { setDeviceNotice(''); setDeviceScanOpen(true); }} aria-label="扫描设备二维码添加设备">
               <Icon name="scan" size={16}/><span>扫描设备</span>
-            </button>}
+            </button>{deviceNotice && <small className="action-feedback action-feedback--ok" role="status" title={deviceNotice}>{deviceNotice}</small>}</div>}
             {session.actor === 'admin' && <SpaceMenu
               onShareSpace={() => setInviteOpen(true)} onRules={() => setRulesOpen(true)}
-              onSpaceSettings={() => setSpaceOpen(true)} onExit={logout}/>}
+              onSpaceSettings={() => setSpaceOpen(true)} onPeople={() => setPeopleOpen(true)} onExit={logout}/>}
           </div>
         </div>
 
@@ -131,16 +132,11 @@ function App({ session, logout, refreshSession }) {
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {agentsError && (
             <div style={{ padding: '14px 16px 0' }}>
-              <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-                padding: '11px 14px', borderRadius: 14,
-                background: 'rgba(255,92,92,0.08)', border: '1px solid rgba(255,92,92,0.22)',
-                color: 'var(--color-text-muted)', fontSize: 13,
-              }}>
-                <span>{agentsError}</span>
+              <div className="feedback-button" style={{ alignItems: 'flex-start' }}>
                 <button className="btn" onClick={refreshAgents} disabled={loadingAgents}>
                   {loadingAgents ? '重试中…' : '重试'}
                 </button>
+                <small className="action-feedback action-feedback--error" role="alert" title={agentsError}>{agentsError}</small>
               </div>
             </div>
           )}
@@ -151,7 +147,6 @@ function App({ session, logout, refreshSession }) {
           </>}
           {!loadingAgents && !agentsError && !hasDevices &&
             <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}
-          {deviceNotice && <div className="device-bind-notice" role="status">{deviceNotice}<button className="btn" onClick={() => setDeviceNotice('')}>关闭</button></div>}
 
           {activityLog.length > 0 && (
             <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
@@ -230,6 +225,7 @@ function App({ session, logout, refreshSession }) {
         {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
+        {session.actor === 'admin' && <SpacePeopleDrawer open={peopleOpen} onClose={() => setPeopleOpen(false)}/>}
         {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)} onBound={async result => {
           setDeviceScanOpen(false);
           setDeviceNotice(result.result === 'already_added' ? '设备已在空间中，原有设置已保留。' : '设备已加入当前空间。');
@@ -312,17 +308,18 @@ function DeviceScanDialog({ onClose, onBound }) {
         <button className="btn header-icon-btn" onClick={onClose} aria-label="关闭扫码"><Icon name="x" size={16}/></button></header>
       <p>扫描设备上的二维码标签，识别后自动加入当前空间。</p>
       {!busy && !pasteOpen && <QrScanner key={attempt} onScan={submit} hint="将设备二维码放入框内"/>}
-      {busy && <div className="device-scan-working" role="status">正在识别设备…</div>}
-      {error && <p className="device-scan-error" role="alert">{error}</p>}
       {pasteOpen && !busy && <form className="session-entry__form" onSubmit={event => { event.preventDefault(); submit(code); }}>
         <label htmlFor="device-code">设备码</label>
         <input id="device-code" value={code} onChange={event => setCode(event.target.value)} autoComplete="off" placeholder="粘贴设备标签中的内容"/>
         <button className="btn btn--accent" disabled={!code.trim()}>识别并添加设备</button>
+        {error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}
       </form>}
       <div className="device-scan-actions">
         <button className="btn" onClick={() => { setError(''); setPasteOpen(false); setAttempt(value => value + 1); }} disabled={busy}>重新扫码</button>
         <button className="btn" onClick={() => setPasteOpen(value => !value)} disabled={busy}>{pasteOpen ? '返回摄像头' : '粘贴设备码'}</button>
       </div>
+      {busy && <small className="action-feedback" role="status">正在识别设备…</small>}
+      {!pasteOpen && error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}
     </section>
   </div>;
 }

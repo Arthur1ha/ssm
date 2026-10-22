@@ -291,27 +291,6 @@ async def go2_set_led(color: str = "white", duration: int = 60) -> str:
 
 # ── 身份工具 ──────────────────────────────────────────────────────
 
-async def go2_remember_person(name: str, role: str) -> dict:
-    require_persist("remember a person")
-    from cloud.go2.agentcore.skills.identity import identity_skill
-    snapshot = await identity_skill.remember_person(name, role)
-    return _identity_result(snapshot)
-
-
-async def go2_add_person_face(person_id: str = "") -> dict:
-    require_persist("add a person's face")
-    from cloud.go2.agentcore.skills.identity import identity_skill
-    if not person_id and identity_skill.current.status == "recognized":
-        person_id = identity_skill.current.person_id
-    if not person_id:
-        owner = identity_skill.people.get_owner()
-        person_id = owner.person_id if owner else ""
-    if not person_id:
-        return {"result": "rejected", "error_code": "person_id_required"}
-    snapshot = await identity_skill.add_person_face(person_id)
-    return _identity_result(snapshot)
-
-
 async def go2_recognize_person() -> dict:
     from cloud.go2.agentcore.skills.identity import identity_skill
     snapshot = await identity_skill.recognize_now()
@@ -319,26 +298,13 @@ async def go2_recognize_person() -> dict:
 
 
 def go2_list_people() -> dict:
-    require_admin("read known people")
-    from cloud.go2.agentcore.skills.identity import identity_skill
+    require_admin("read space people")
+    from cloud.space.people.service import space_people
     people = [
         {"person_id": p.person_id, "name": p.name, "role": p.role, "face_count": p.face_count}
-        for p in identity_skill.list_people()
+        for p in space_people.list_people()
     ]
     return {"result": "ok", "people": people}
-
-
-async def go2_forget_person(person_id: str) -> dict:
-    require_persist("forget a person")
-    from cloud.go2.agentcore.identity.provider import FaceProviderError
-    from cloud.go2.agentcore.skills.identity import identity_skill
-    try:
-        await identity_skill.forget_person(person_id)
-    except ValueError as exc:
-        return {"result": "rejected", "error": str(exc)}
-    except FaceProviderError as exc:
-        return {"result": "disabled" if exc.code == "enrollment_disabled" else "error", "error_code": exc.code}
-    return {"result": "ok", "person_id": person_id}
 
 
 def _identity_result(snapshot) -> dict:
@@ -368,11 +334,8 @@ TOOL_FN_MAP = {
     "go2_navigate_to":            go2_navigate_to,
     "go2_list_locations":         go2_list_locations,
     "go2_set_led":                go2_set_led,
-    "go2_remember_person":        go2_remember_person,
-    "go2_add_person_face":        go2_add_person_face,
     "go2_recognize_person":       go2_recognize_person,
     "go2_list_people":            go2_list_people,
-    "go2_forget_person":          go2_forget_person,
 }
 
 TOOL_DESCRIPTIONS = """\
@@ -387,8 +350,5 @@ TOOL_DESCRIPTIONS = """\
 - go2_navigate_to(name): 导航到已保存的命名地点，支持模糊描述
 - go2_list_locations(): 列出所有已保存的命名地点
 - go2_set_led(color="white", duration=60): 设置 LED 颜色，支持 white/red/yellow/blue/green/cyan/purple
-- go2_remember_person(name, role): 用当前唯一清晰人脸登记人员；“我是你主人”固定传 name="主人", role="owner"
-- go2_add_person_face(person_id=""): 给已登记人员补录当前角度；说“再记住我现在这个样子”时可省略 person_id，工具会从当前身份或唯一主人解析
 - go2_recognize_person(): 立即识别面前的人；“面前是谁/你认识我吗”只能识别，不能隐式登记
-- go2_list_people(): 列出本地已知人员和关系
-- go2_forget_person(person_id): 仅在用户明确给出 person_id 并要求删除时调用，不得含糊删除"""
+- go2_list_people(): 列出空间已知人员和关系；人员增删请在手机的空间人员库中操作"""

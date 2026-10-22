@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from cloud.api import auth, intents, policy
 from cloud.api.devices import router as devices_router
 from cloud.api.intents import router as intents_router
+from cloud.api.people import router as people_router
 from cloud.api.sessions import router as sessions_router
 from cloud.space import registry as space_registry
 from cloud.space import device_codes
@@ -52,6 +53,7 @@ def app(api_env):
     app = FastAPI()
     app.include_router(sessions_router)
     app.include_router(intents_router)
+    app.include_router(people_router)
     app.include_router(devices_router)
     return app
 

@@ -70,8 +70,12 @@ function ActuatorCard({ agent, unitData }) {
             {agent.name || uid}
           </div>
           <div style={{ fontSize: 11, marginTop: 2, fontFamily: 'var(--font-mono)',
-            color: offline ? 'var(--color-text-dim)' : (active ? meta.color : 'var(--color-text-dim)') }}>
-            {offline ? '离线' : getStateLabel(agent, unitData)}
+            color: offline ? 'var(--color-text-dim)' : 'var(--color-online)' }}>
+            {offline ? '离线' : '在线'}
+          </div>
+          <div style={{ fontSize: 11, marginTop: 2, fontFamily: 'var(--font-mono)',
+            color: offline ? 'var(--color-text-dim)' : (active ? meta.color : 'var(--color-text-muted)') }}>
+            当前状态：{offline ? '不可用' : getStateLabel(agent, unitData)}
           </div>
         </div>
         <div style={{ flexShrink: 0, color: offline ? 'var(--color-text-dim)' : 'var(--color-text-muted)', opacity: offline ? 0.4 : 1 }}>

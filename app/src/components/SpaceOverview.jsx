@@ -22,17 +22,6 @@ function SpaceOverview({ spaceName, agents, unitData, connected, recentEvents = 
       return null;
     }).filter(Boolean).slice(0, 3);
 
-  const actorStatus = agent => {
-    if (!agent._online) return '离线';
-    const state = unitData[agent.unit_id]?.state || {};
-    if (agentKind(agent) === 'led') {
-      const info = getLedStateInfo(state);
-      return info.details && state.ism !== 'OFF' ? `${info.label} · ${info.details}` : info.label;
-    }
-    if (typeof state.ism === 'string' && state.ism) return state.ism;
-    return '在线';
-  };
-
   return <section className="space-overview" aria-label={`${spaceName || '当前空间'}概览`}>
     <div className="space-overview__heading">
       <span>空间现在</span>
@@ -42,7 +31,10 @@ function SpaceOverview({ spaceName, agents, unitData, connected, recentEvents = 
       {actors.map(agent => <div key={agent.unit_id} className="space-overview__actor">
         <span className={`space-overview__dot ${agent._online && connected ? 'is-online' : ''}`}/>
         <span className="space-overview__actor-name">{agent.name || getAgentMeta(agent).label}</span>
-        <span className="space-overview__actor-state">{connected ? actorStatus(agent) : '待同步'}</span>
+        <span className="space-overview__actor-state">
+          <span>{connected ? (agent._online ? '在线' : '离线') : '连接中断'}</span>
+          <span>{connected && agent._online ? getStateLabel(agent, unitData) : '状态不可用'}</span>
+        </span>
       </div>)}
     </div>}
     {connected && sensors.length > 0 && <div className="space-overview__sensors">

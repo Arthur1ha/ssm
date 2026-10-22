@@ -25,6 +25,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
     const failures = [spaceResult, candidateResult].filter(result => result.status === 'rejected');
     if (failures.length) {
       setMessage({
+        key: 'refresh',
         tone: 'error',
         text: failures.length === 2
           ? apiErrorText(failures[0].reason, '空间设置加载失败')
@@ -53,9 +54,9 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
       });
       setSpace(updated); setSpaceName(updated.name || name);
       onSpaceRenamed?.();
-      setMessage({ tone: 'ok', text: '空间名称已保存' });
+      setMessage({ key: 'space', tone: 'ok', text: '空间名称已保存' });
     } catch (error) {
-      setMessage({ tone: 'error', text: apiErrorText(error, '空间名称保存失败') });
+      setMessage({ key: 'space', tone: 'error', text: apiErrorText(error, '空间名称保存失败') });
     } finally { setBusy(''); }
   };
 
@@ -72,11 +73,14 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
       setSpace(updated);
       setDeviceCandidates(rows => rows.map(row => ({ ...row, added: current.has(row.device_id) })));
       onDevicesChanged?.();
-      setMessage({ tone: 'ok', text: '设备已从当前空间移除' });
+      setMessage({ key: `device-${deviceId}`, tone: 'ok', text: '设备已从当前空间移除' });
     } catch (error) {
-      setMessage({ tone: 'error', text: apiErrorText(error, '设备配置保存失败') });
+      setMessage({ key: `device-${deviceId}`, tone: 'error', text: apiErrorText(error, '设备配置保存失败') });
     } finally { setBusy(''); }
   };
+
+  const feedback = key => message?.key === key && <small className={`action-feedback action-feedback--${message.tone}`}
+    role="status" title={message.text}>{message.text}</small>;
 
   return (
     <>
@@ -90,18 +94,14 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
             <h2 id="space-drawer-title">空间设置</h2>
           </div>
           <div className="space-drawer__header-actions">
-            <button className="btn" onClick={loadAssets} disabled={loading}>
+            <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
               {loading ? '同步中…' : '刷新空间'}
-            </button>
+            </button>{feedback('refresh')}</div>
             <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭空间设置">
               <Icon name="x" size={14}/>
             </button>
           </div>
         </header>
-
-        {message && (
-          <div className={`space-notice space-notice--${message.tone}`} role="status">{message.text}</div>
-        )}
 
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section asset-section--space">
@@ -116,6 +116,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
                 <button className="btn btn--accent" disabled={busy === 'space' || !spaceName.trim() || spaceName.trim() === space?.name}>
                   {busy === 'space' ? '保存中…' : '保存名称'}
                 </button></div>
+              {feedback('space')}
             </form>
             <div className="space-members">
               {(space?.device_ids || []).map(deviceId => <code key={deviceId}>{deviceId}</code>)}
@@ -140,6 +141,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
                     <DeviceLabelButton device={device}/>
                     {device.added && <button type="button" className="btn btn--danger" onClick={() => toggleDevice(device.device_id)} disabled={loading || Boolean(busy)}>移除</button>}
                   </div>
+                  {feedback(`device-${device.device_id}`)}
                 </div>
               ))}
             </div>
@@ -165,12 +167,13 @@ function DeviceLabelButton({ device }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [errorTarget, setErrorTarget] = useState('load');
   const qrRef = useRef(null);
 
   const load = async () => {
     setOpen(true); setBusy(true); setError('');
     try { setLabel(await apiClient.request(`/api/admin/device-codes/${encodeURIComponent(device.device_id)}`)); }
-    catch (requestError) { setError(apiErrorText(requestError, '设备标签暂时不可用')); }
+    catch (requestError) { setErrorTarget('load'); setError(apiErrorText(requestError, '设备标签暂时不可用')); }
     finally { setBusy(false); }
   };
   useEffect(() => {
@@ -181,7 +184,7 @@ function DeviceLabelButton({ device }) {
       if (!active || !qrRef.current) return;
       new QRCode(qrRef.current, { text: label.code, width: 176, height: 176,
         colorDark: '#0c0c15', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
-    }).catch(() => { if (active) setError('二维码生成失败，请重试'); });
+    }).catch(() => { if (active) { setErrorTarget('save'); setError('二维码生成失败，请重试'); } });
     return () => { active = false; };
   }, [open, label?.code]);
 
@@ -189,14 +192,14 @@ function DeviceLabelButton({ device }) {
     if (!window.confirm(`轮换「${device.name}」设备标签？旧标签将立即失效。`)) return;
     setBusy(true); setError('');
     try { setLabel(await apiClient.request(`/api/admin/device-codes/${encodeURIComponent(device.device_id)}/rotate`, { method: 'POST', body: {} })); }
-    catch (requestError) { setError(apiErrorText(requestError, '标签轮换失败')); }
+    catch (requestError) { setErrorTarget('rotate'); setError(apiErrorText(requestError, '标签轮换失败')); }
     finally { setBusy(false); }
   };
   const save = () => {
     const canvas = qrRef.current?.querySelector('canvas');
     const image = qrRef.current?.querySelector('img');
     const href = canvas?.toDataURL('image/png') || image?.src;
-    if (!href) { setError('二维码尚未生成，请稍后重试'); return; }
+    if (!href) { setErrorTarget('save'); setError('二维码尚未生成，请稍后重试'); return; }
     const link = document.createElement('a');
     link.href = href;
     link.download = `ssm-${device.device_id}-label.png`;
@@ -209,13 +212,18 @@ function DeviceLabelButton({ device }) {
       <section className="device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
         <header><div><small>PHYSICAL DEVICE · {device.device_id}</small><h3>{device.name}设备标签</h3></div><button className="btn" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={14}/></button></header>
         <p>保存或打印后贴在设备上。扫码时，设备仍需先发布能力卡。</p>
-        {busy && !label && <p role="status">正在读取设备标签…</p>}
+        {busy && !label && <small className="action-feedback" role="status">正在读取设备标签…</small>}
         {label && <div className="device-label-qr" ref={qrRef}/>}
-        {error && <p className="device-scan-error" role="alert">{error}</p>}
+        {!label && !busy && errorTarget === 'load' && error && <div className="feedback-button">
+          <button className="btn" onClick={load}>重新读取</button>
+          <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>
+        </div>}
         <div className="device-label-actions">
-          <button className="btn btn--accent" onClick={save} disabled={!label || busy}>保存二维码</button>
+          <div className="feedback-button"><button className="btn btn--accent" onClick={save} disabled={!label || busy}>保存二维码</button>
+            {errorTarget === 'save' && error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}</div>
           <button className="btn" onClick={() => window.print()} disabled={!label || busy}>打印</button>
-          <button className="btn btn--danger" onClick={rotate} disabled={busy}>轮换标签</button>
+          <div className="feedback-button"><button className="btn btn--danger" onClick={rotate} disabled={busy}>轮换标签</button>
+            {errorTarget === 'rotate' && error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}</div>
         </div>
       </section>
     </div>, document.body)}

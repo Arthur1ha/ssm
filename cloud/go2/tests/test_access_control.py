@@ -48,7 +48,7 @@ def test_internal_token_and_role_make_visitor_non_persistent(monkeypatch):
 def test_visitor_final_write_guards_leave_every_file_unchanged(tmp_path, monkeypatch):
     from cloud.go2.agentcore.memory import spatial
     from cloud.go2.agentcore.memory.episode import EpisodeMemory, EventType
-    from cloud.go2.agentcore.memory.people import KnownPerson, PeopleMemory
+    from cloud.space.people.memory import KnownPerson, PeopleMemory
     from cloud.go2.agentcore.memory import daily_summary
     from cloud.go2.agentcore import soul
     from cloud.go2.agentcore.tools import tools
@@ -98,17 +98,14 @@ def test_visitor_final_write_guards_leave_every_file_unchanged(tmp_path, monkeyp
 
 
 def test_identity_remote_write_is_blocked_before_provider_call(tmp_path):
-    from cloud.go2.agentcore.memory.people import PeopleMemory
-    from cloud.go2.agentcore.skills.identity import IdentitySkill
+    from cloud.space.people.memory import PeopleMemory
+    from cloud.space.people.service import SpacePeopleService
 
     provider = MagicMock()
     provider.create_person = AsyncMock()
-    skill = IdentitySkill(
-        provider, PeopleMemory(tmp_path / "people.json"), lambda: (None, None),
-        enrollment_enabled=True,
-    )
+    people = SpacePeopleService(provider, PeopleMemory(tmp_path / "people.json"))
     with use_context(VISITOR_A), pytest.raises(PermissionError):
-        asyncio.run(skill.remember_person("someone", "known"))
+        asyncio.run(people.create("someone", "friend", b"photo"))
     provider.create_person.assert_not_awaited()
     assert not (tmp_path / "people.json").exists()
 
@@ -239,7 +236,6 @@ async def test_visitor_cannot_read_long_term_go2_assets(monkeypatch, tmp_path):
     ) as client:
         assert (await client.get("/api/go2/identity")).status_code == 200
         assert (await client.get("/api/go2/memory")).status_code == 403
-        assert (await client.get("/api/go2/people")).status_code == 403
         assert (await client.get("/api/go2/personality")).status_code == 403
 
 

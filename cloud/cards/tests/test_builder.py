@@ -130,10 +130,13 @@ class TestBuildCardFromManifestActuator:
         """builder 不填充动态状态，state 应为空 dict。"""
         assert self.card["state"] == {}
 
-    def test_widgets_含_color_swatches(self):
+    def test_widgets_含_led_color(self):
         widgets = self.card.get("widgets", [])
-        widget = next(w for w in widgets if w["type"] == "color_swatches")
+        widget = next(w for w in widgets if w["type"] == "led_color")
         assert widget["action"] == "SET_COLOR"
+        assert widget["states"] == ["ON", "BRIGHT", "DIM", "COLOR"]
+        assert widget["placement"] == "controls"
+        assert widget["channels"] == ["r", "g", "b", "brightness"]
         colors = {(s["r"], s["g"], s["b"]) for s in widget["swatches"]}
         assert (255, 0, 0) in colors
         assert (0, 255, 0) in colors
@@ -294,7 +297,7 @@ def test_led_manifest_carries_state_machine():
     assert t["dst"] == "BRIGHT"
     assert t["label"]
     assert sm["views"]["BRIGHT"]["type"] == "light_ring"
-    assert sm["views"]["DIM"]["label"] == "柔和亮起"
+    assert sm["views"]["DIM"]["label"] == "柔光"
 
 
 def test_led_v2_manifest_uses_three_state_machine_and_new_skill():

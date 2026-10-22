@@ -29,6 +29,7 @@ cloudflared
 
 # Go2 运行期状态（记忆/性格/规则）
 cloud/go2/data/
+cloud/space/data/
 cloud/esp32/data/
 cloud/space/audit.jsonl
 cloud/space/device_codes.json

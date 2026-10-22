@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from cloud.go2.agentcore.identity.provider import FaceProviderNotConfigured
-from cloud.go2.agentcore.identity.tencent import create_tencent_face_provider_from_env
+from cloud.space.people.provider import FaceProviderNotConfigured
+from cloud.space.people.tencent import create_tencent_face_provider_from_env
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 

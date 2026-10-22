@@ -33,13 +33,6 @@ class CreatedPerson:
 
 
 @dataclass(frozen=True)
-class AddedFace:
-    person_id: str
-    face_ids: tuple[str, ...]
-    request_id: str = ""
-
-
-@dataclass(frozen=True)
 class RemotePerson:
     person_id: str
     person_name: str
@@ -76,7 +69,6 @@ class DuplicateFaceCandidate(FaceProviderError):
 class FaceProvider(Protocol):
     async def check_group(self) -> GroupInfo: ...
     async def create_person(self, person_id: str, name: str, jpeg: bytes) -> CreatedPerson: ...
-    async def add_face(self, person_id: str, jpeg: bytes) -> AddedFace: ...
     async def search_persons(self, jpeg: bytes) -> FaceSearchResult: ...
     async def list_people(self) -> tuple[RemotePerson, ...]: ...
     async def remove_from_group(self, person_id: str) -> None: ...

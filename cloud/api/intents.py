@@ -320,10 +320,6 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         "tag_location": ("/api/go2/navigation/locations", "POST", {"name": str(params.get("name") or "").strip()}),
         "set_home": ("/api/go2/navigation/home", "PUT", {}),
         "set_personality": ("/api/go2/personality", "POST", {"prompt": str(params.get("prompt") or "").strip()}),
-        "remember_person": ("/api/go2/people", "POST", {
-            "name": str(params.get("name") or "").strip(),
-            "role": str(params.get("role") or "known").strip() or "known",
-        }),
     }
     if normalized in admin_routes:
         if session["actor"] != "admin":
@@ -333,22 +329,16 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail="tag_location requires name")
         if normalized == "set_personality" and not body["prompt"]:
             raise HTTPException(status_code=400, detail="set_personality requires prompt")
-        if normalized == "remember_person" and not body["name"]:
-            raise HTTPException(status_code=400, detail="remember_person requires name")
         return await _internal_request(path, method, session, body)
-    if normalized in {"delete_location", "add_person_face", "delete_person"}:
+    if normalized == "delete_location":
         if session["actor"] != "admin":
             raise HTTPException(status_code=403, detail="administrator permission required")
-        key = "name" if normalized == "delete_location" else "person_id"
+        key = "name"
         value = str(params.get(key) or "").strip()
         if not value:
             raise HTTPException(status_code=400, detail=f"{normalized} requires {key}")
         encoded = urllib.parse.quote(value, safe="")
-        if normalized == "delete_location":
-            return await _internal_request(f"/api/go2/navigation/locations/{encoded}", "DELETE", session)
-        if normalized == "add_person_face":
-            return await _internal_request(f"/api/go2/people/{encoded}/faces", "POST", session, {})
-        return await _internal_request(f"/api/go2/people/{encoded}", "DELETE", session)
+        return await _internal_request(f"/api/go2/navigation/locations/{encoded}", "DELETE", session)
     if normalized == "velocity":
         ensure_go2_action("VELOCITY")
         return await _internal_request("/api/go2/velocity", "POST", session, params)
@@ -401,7 +391,6 @@ async def create_command(
             raise
         if req.action.lower() in {
             "tag_location", "delete_location", "set_home", "set_personality",
-            "remember_person", "add_person_face", "delete_person",
         }:
             audit_event("go2_asset_updated", session, action=req.action)
         if req.action.upper() == "STOP":

@@ -253,6 +253,8 @@ def test_go2_card_含_autonomy_modes_与_widgets():
     assert "joystick" in types and "video" in types
     joystick = next(w for w in widgets if w["type"] == "joystick")
     assert joystick["states"] == ["moving"]
+    assert joystick["placement"] == "controls"
+    assert next(w for w in widgets if w["type"] == "video")["placement"] == "media"
     conn = next(w for w in widgets if w["type"] == "connection")
     assert conn["auto_connect"] is True
     assert conn["visible"] is False

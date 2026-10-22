@@ -154,8 +154,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const isGo2 = unitId === 'go2' || device?.device_id === 'go2';
   const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
   const hasUserMsg = messages.some(m => m.role === 'user');
-  const hasBoardWidget = widgets.some(w => w.type !== 'video' && w.type !== 'connection'
+  const hasBoardWidget = widgets.some(w => w.visible !== false
     && (!w.states?.length || w.states.includes(current)));
+  const statusLabel = offline ? '离线' : `在线 · ${isLed && ledState.ism ? ledInfo.label : (sm?.views?.[current]?.label || current || '状态同步中')}`;
 
   return (
     <div style={{
@@ -168,8 +169,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
 
       {/* ── 头部 ── */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 10,
-        padding: '11px 16px',
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '7px 16px',
         borderBottom: '1px solid var(--color-border)',
         background: 'var(--color-surface-1)',
         flexShrink: 0,
@@ -182,21 +183,21 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
           fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
         }}>←</button>
 
-        {/* 设备名 + 实时状态 */}
-        <div style={{ minWidth: 0, flex: 1 }}>
+        {/* 设备名与右侧实时状态 */}
+        <div style={{ minWidth: 0, flex: '0 1 auto' }}>
           <div style={{
             fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             color: offline ? 'var(--color-text-dim)' : ACCENT,
             textShadow: (isOn && !offline) ? `0 0 12px ${ACCENT}80` : 'none',
             transition: 'text-shadow 0.4s',
           }}>{device?.name || unitId}</div>
-          <div className="device-header__status">
-            <i className={offline ? 'is-offline' : ''}/>
-            {offline ? '离线' : `在线 · ${isLed && ledState.ism ? ledInfo.label : (sm?.views?.[current]?.label || current || '状态同步中')}`}
-          </div>
         </div>
-        {actor === 'admin' && (modes.length > 0 || isGo2) && <button type="button" className="device-header__settings"
-          onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>}
+        <div className="device-header__status" title={statusLabel}>
+          <i className={offline ? 'is-offline' : ''}/>
+          <span>{statusLabel}</span>
+        </div>
+        <button type="button" className="device-header__settings"
+          onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>
       </div>
 
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
@@ -210,9 +211,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         }}>
           <FsmBoard unitId={unitId} sm={sm} current={current} widgets={widgets}
             onFire={fire} report={reportExecution} actor={actor} color={ACCENT}
-            ledState={isLed ? ledState : null} ledInfo={ledInfo}
-            legacyLed={isLed && sm && !sm.states?.includes('ON')}
-            online={!offline}/>
+            liveState={ledState}
+            legacyLed={isLed && sm && !sm.states?.includes('ON')}/>
         </div>
       )}
 
@@ -255,44 +255,51 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         )}
       </ChatPanel>
       </div>
-      {actor === 'admin' && <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
+      <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         modes={modes} modeVals={modeVals} onSwitchMode={switchMode}
-        offline={offline} isGo2={isGo2} onGo2Settings={() => setGo2AssetsOpen(true)}/>}
+        offline={offline} isGo2={isGo2} actor={actor} unitId={unitId}
+        onGo2Settings={() => setGo2AssetsOpen(true)}/>
       {actor === 'admin' && isGo2 && <Go2AssetsDrawer open={go2AssetsOpen} onClose={() => setGo2AssetsOpen(false)}/>}
     </div>
   );
 }
 window.FsmDevicePage = FsmDevicePage;
 
-function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, ledState, ledInfo, legacyLed, online }) {
+function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, legacyLed }) {
   const { useState, useRef, useEffect } = React;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const drag = useRef(null);
   const pointers = useRef(new Map());
   const pinch = useRef(null);
-  const joystickPointers = useRef(new Set());
-  const video = widgets.find(w => w.type === 'video');
-  const attachedWidgets = window.fsmWidget && window.fsmWidget(
-    unitId, current, widgets.filter(w => w.type !== 'video' && w.type !== 'connection'), report, actor,
-  );
-  const connectionWidgets = window.fsmWidget && window.fsmWidget(
-    unitId, current, widgets.filter(w => w.type === 'connection'), report, actor,
-  );
+  const activeWidgets = widgets.map((widget, index) => ({ ...widget, _index: index }))
+    .filter(widget => !widget.states?.length || widget.states.includes(current));
+  const visibleWidgets = activeWidgets.filter(widget => widget.visible !== false)
+    .sort((a, b) => (a.order ?? a._index) - (b.order ?? b._index));
+  const placement = widget => widget.placement === 'media' || (!widget.placement && widget.type === 'video')
+    ? 'media' : 'controls';
+  const mediaWidgets = visibleWidgets.filter(widget => placement(widget) === 'media');
+  const controlWidgets = visibleWidgets.filter(widget => placement(widget) === 'controls');
+  const hiddenWidgets = activeWidgets.filter(widget => widget.visible === false);
+  const view = sm?.views?.[current];
+  const showPreview = view?.type === 'robot_pose' && !mediaWidgets.length;
+  const renderWidget = widget => <div key={`${widget.type}-${widget._index}`}
+    className={`device-board__widget device-board__widget--${placement(widget)}`}>
+    {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState)}
+  </div>;
   const safety = (sm?.transitions || []).find(t => t.src === current && t.safety && t.action);
 
-  // A new state starts centered so its state-specific controls remain visible.
+  // A new state starts with the graph centered; widgets stay in document flow below it.
   useEffect(() => {
     drag.current = null;
     pointers.current.clear();
     pinch.current = null;
-    joystickPointers.current.clear();
     setPan({ x: 0, y: 0 });
     setZoom(1);
   }, [current]);
 
   const startPan = event => {
-    if (event.button !== 0 || joystickPointers.current.size || event.target.closest('[role="button"], button, .device-joysticks, .device-state-video')) return;
+    if (event.button !== 0 || event.target.closest('[role="button"], button')) return;
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, pan };
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -324,53 +331,37 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     if (drag.current?.id === event.pointerId) drag.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
-  const trackJoystick = event => {
-    if (!event.target.closest('.device-joysticks')) return;
-    joystickPointers.current.add(event.pointerId);
-    drag.current = null;
-    pointers.current.clear();
-    pinch.current = null;
-  };
-  const releaseJoystick = event => joystickPointers.current.delete(event.pointerId);
-
   return <div className="device-board" style={{ '--board-accent': color }}>
-    <div className="device-board__viewport" onPointerDownCapture={trackJoystick}
-      onPointerUpCapture={releaseJoystick} onPointerCancelCapture={releaseJoystick}
+    <div className="device-board__viewport"
       onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan}>
-      <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), ${pan.y}px) scale(${zoom})` }}>
+      <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})` }}>
         {sm ? <FsmGraph states={sm.states} transitions={sm.transitions} current={current}
           onFire={onFire} color={color} views={sm.views || {}} layout={sm.layout || {}}
-          attachedWidget={attachedWidgets} showSafety={false}/>
+          showSafety={false}/>
           : <div className="device-state-workspace__fallback">{current || '—'}</div>}
       </div>
     </div>
-    <div className="device-board__pinned">
-      {connectionWidgets}
-      {video && <div className="device-state-video device-board__video">
-        {online && current !== 'offline' && current !== 'connecting'
-          ? <VideoCanvas connected={true} endpoint={video.endpoint}/>
-          : <span>视频待连接</span>}
+    {hiddenWidgets.map(widget => <React.Fragment key={`hidden-${widget._index}`}>
+      {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState)}
+    </React.Fragment>)}
+    {(mediaWidgets.length > 0 || controlWidgets.length > 0 || showPreview) && <div className="device-board__widget-tray">
+      {mediaWidgets.map(renderWidget)}
+      {showPreview && <div className="device-board__widget device-board__widget--media device-board__widget--preview">
+        <StateVisual view={view} state={current} color={color}/>
       </div>}
-      {legacyLed && <div className="device-board__legacy">旧版状态机 · 固件待更新</div>}
-      {ledState?.ism && <div className="device-led-output" aria-label={`灯光状态：${ledInfo.label}${ledInfo.details ? '，' + ledInfo.details : ''}`}>
-        <span className="device-led-output__swatch" style={{
-          background: ledState.ism === 'OFF' ? '#15161c' : (ledInfo.color || 'var(--color-surface-3)'),
-          boxShadow: ledState.ism === 'OFF' || !ledInfo.color ? 'none' : `0 0 18px ${ledInfo.color}`,
-        }}/>
-        <span><strong>{ledInfo.label}</strong><small>{ledInfo.details || '颜色与亮度待同步'}</small></span>
-      </div>}
-      <div className="device-board__pose"><StateVisual view={sm?.views?.[current]} state={current} color={color}/></div>
-      {(Math.abs(pan.x) > 5 || Math.abs(pan.y) > 5 || Math.abs(zoom - 1) > 0.01) &&
-        <button type="button" className="device-board__reset" onClick={() => { setPan({ x: 0, y: 0 }); setZoom(1); }}>恢复画布位置</button>}
+      {controlWidgets.map(renderWidget)}
+    </div>}
+    {(legacyLed || safety) && <div className="device-board__footer">
+      {legacyLed && <span className="device-board__legacy">旧版状态机 · 固件待更新</span>}
       {safety && <button type="button" className="fsm-safety-edge device-board__safety"
         onClick={() => onFire(safety.trigger)} aria-label={`${safety.label}，${sm?.views?.[current]?.label || current}到${sm?.views?.[safety.dst]?.label || safety.dst}`}>
         <span>{sm?.views?.[current]?.label || current}</span><b>── {safety.label} ──▶</b><span>{sm?.views?.[safety.dst]?.label || safety.dst}</span>
       </button>}
-    </div>
+    </div>}
   </div>;
 }
 
-function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, isGo2, onGo2Settings }) {
+function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, isGo2, actor, unitId, onGo2Settings }) {
   const panelRef = React.useRef(null);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
@@ -380,14 +371,14 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
     const onKey = event => {
       if (event.key === 'Escape') closeRef.current();
       if (event.key !== 'Tab') return;
-      const buttons = panelRef.current?.querySelectorAll('button:not([disabled])');
-      if (!buttons?.length) return;
-      if (event.shiftKey && document.activeElement === buttons[0]) {
+      const focusables = panelRef.current?.querySelectorAll('button:not([disabled]), a[href]');
+      if (!focusables?.length) return;
+      if (event.shiftKey && document.activeElement === focusables[0]) {
         event.preventDefault();
-        buttons[buttons.length - 1].focus();
-      } else if (!event.shiftKey && document.activeElement === buttons[buttons.length - 1]) {
+        focusables[focusables.length - 1].focus();
+      } else if (!event.shiftKey && document.activeElement === focusables[focusables.length - 1]) {
         event.preventDefault();
-        buttons[0].focus();
+        focusables[0].focus();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -399,7 +390,7 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
     <div className="device-settings-scrim" onClick={onClose}/>
     <section ref={panelRef} className="device-settings-panel" role="dialog" aria-modal="true" aria-label="设备设置">
       <header><h2>设备设置</h2><button type="button" className="btn" onClick={onClose} aria-label="关闭设备设置"><Icon name="x" size={15}/></button></header>
-      {modes.map(axis => <section key={axis.id} className="device-settings-axis">
+      {actor === 'admin' && modes.map(axis => <section key={axis.id} className="device-settings-axis">
         <h3>{axis.label}</h3>
         <div>{axis.options.map(option => <button type="button" key={option.value}
           className={modeVals[axis.id] === option.value ? 'is-active' : ''}
@@ -408,9 +399,13 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
           <strong>{option.label}</strong><small>{option.description}</small>
         </button>)}</div>
       </section>)}
-      {isGo2 && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onGo2Settings(); }}>
-        <span><strong>Go2 设置</strong><small>地点、人设、人员与记忆</small></span><Icon name="arrow" size={15}/>
+      {actor === 'admin' && isGo2 && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onGo2Settings(); }}>
+        <span><strong>Go2 设置</strong><small>地点、人设与记忆</small></span><Icon name="arrow" size={15}/>
       </button>}
+      <a className="device-settings-card" href={'/api/devices/' + encodeURIComponent(unitId) + '/agent'}
+        target="_blank" rel="noopener noreferrer">
+        <span><strong>Agent Card</strong><small>查看设备能力、状态机和控件声明</small></span><Icon name="arrow" size={15}/>
+      </a>
     </section>
   </div>;
 }

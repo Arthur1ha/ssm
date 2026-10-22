@@ -54,8 +54,8 @@ function getAgentDisplayName(agent) {
 // 灯的运行状态与颜色参数分开显示。旧固件的 retained 状态只作迁移期展示。
 function getLedStateInfo(state = {}) {
   const labels = {
-    OFF: '已关闭', ON: '常亮', BLINKING: '闪烁中',
-    DIM: '微亮', BRIGHT: '亮灯', COLOR: '彩色', BLINK: '闪烁中',
+    OFF: '熄灭', ON: '常亮', BLINKING: '闪烁',
+    DIM: '柔光', BRIGHT: '亮光', COLOR: '彩光', BLINK: '闪烁',
   };
   const ism = state.ism || '';
   const channel = value => Number.isInteger(value) && value >= 0 && value <= 255;
@@ -65,14 +65,14 @@ function getLedStateInfo(state = {}) {
   const brightness = hasBrightness ? `亮度 ${state.brightness}/255` : '';
   const details = [rgb, brightness].filter(Boolean).join(' · ');
   const color = hasRgb ? `rgb(${state.r}, ${state.g}, ${state.b})` : null;
-  return { label: labels[ism] || '在线', details, color };
+  return { label: labels[ism] || '状态待同步', details, color };
 }
 
 function getStateLabel(agent, unitData) {
   const uid  = agent.unit_id;
   const s    = (unitData[uid] || {}).state || {};
   switch (agentKind(agent)) {
-    case 'robot':  return s.ism || '待命';
+    case 'robot':  return agent.state_machine?.views?.[s.ism]?.label || s.ism || '状态待同步';
     case 'led': {
       const info = getLedStateInfo(s);
       return info.details && s.ism !== 'OFF' ? `${info.label} · ${info.details}` : info.label;
@@ -81,7 +81,7 @@ function getStateLabel(agent, unitData) {
     case 'ir':     return s.presence !== undefined ? (s.presence ? '有人' : '无人') : '监测中';
     case 'sound':  return s.detected ? '检测到声音' : '静默';
     case 'light':  return s.level || (s.lux !== undefined ? `${s.lux} lux` : '监测中');
-    default:       return '在线';
+    default:       return '状态待同步';
   }
 }
 
@@ -112,6 +112,10 @@ function getSensorReading(agent, unitData) {
 
 function isAgentActive(agent, unitData) {
   switch (agentKind(agent)) {
+    case 'led': {
+      const state = (unitData[agent.unit_id] || {}).state || {};
+      return Boolean(state.ism && state.ism !== 'OFF');
+    }
     default: return true;
   }
 }

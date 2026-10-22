@@ -3,11 +3,8 @@ function Go2AssetsDrawer({ open, onClose }) {
   const { useCallback, useEffect, useState } = React;
   const [locations, setLocations] = useState([]);
   const [personality, setPersonality] = useState('');
-  const [people, setPeople] = useState([]);
   const [memory, setMemory] = useState({ taught: [], today: '' });
   const [locationName, setLocationName] = useState('');
-  const [personName, setPersonName] = useState('');
-  const [personRole, setPersonRole] = useState('known');
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState(null);
@@ -18,25 +15,24 @@ function Go2AssetsDrawer({ open, onClose }) {
     const requests = [
       apiClient.request('/api/go2/navigation/locations'),
       apiClient.request('/api/go2/personality'),
-      apiClient.request('/api/go2/people'),
       apiClient.request('/api/go2/memory'),
     ];
-    const [locationResult, personalityResult, peopleResult, memoryResult] = await Promise.allSettled(requests);
+    const [locationResult, personalityResult, memoryResult] = await Promise.allSettled(requests);
     if (locationResult.status === 'fulfilled') {
       setLocations(Array.isArray(locationResult.value) ? locationResult.value : []);
     }
     if (personalityResult.status === 'fulfilled') setPersonality(personalityResult.value?.prompt || '');
-    if (peopleResult.status === 'fulfilled') setPeople(Array.isArray(peopleResult.value) ? peopleResult.value : []);
     if (memoryResult.status === 'fulfilled') {
       setMemory({
         taught: Array.isArray(memoryResult.value?.taught) ? memoryResult.value.taught : [],
         today: memoryResult.value?.today || '（今天暂无记录）',
       });
     }
-    const failures = [locationResult, personalityResult, peopleResult, memoryResult]
+    const failures = [locationResult, personalityResult, memoryResult]
       .filter(result => result.status === 'rejected');
     if (failures.length) {
       setMessage({
+        key: 'refresh',
         tone: 'error',
         text: failures.length === requests.length
           ? apiErrorText(failures[0].reason, 'Go2 资产加载失败')
@@ -56,17 +52,17 @@ function Go2AssetsDrawer({ open, onClose }) {
 
   const runGo2Action = async (key, action, params, successText) => {
     if (busy) return false;
+    const feedbackKey = key.startsWith('delete-location-') ? 'delete-location' : key;
     setBusy(key); setMessage(null);
     const result = await commandBus.command('go2', action, params);
     if (['error', 'blocked', 'timeout', 'cancelled'].includes(result?.result) || result?.error) {
-      setMessage({ tone: 'error', text: commandBus.describe(result) });
+      setMessage({ key: feedbackKey, tone: 'error', text: commandBus.describe(result) });
       setBusy('');
       return false;
     }
-    setMessage({ tone: 'ok', text: successText });
     setBusy('');
     await loadAssets();
-    setMessage({ tone: 'ok', text: successText });
+    setMessage({ key: feedbackKey, tone: 'ok', text: successText });
     return true;
   };
 
@@ -86,16 +82,6 @@ function Go2AssetsDrawer({ open, onClose }) {
     await runGo2Action('personality', 'set_personality', { prompt }, 'Go2 人设已更新');
   };
 
-  const rememberPerson = async event => {
-    event.preventDefault();
-    const name = personName.trim();
-    if (!name) return;
-    if (await runGo2Action('remember-person', 'remember_person', {
-      name, role: personRole,
-    }, `已登记「${name}」`)) setPersonName('');
-  };
-
-  const roleLabel = role => ({ owner: '主人', family: '家人', friend: '朋友', known: '熟人' }[role] || role || '熟人');
   const formatCoordinate = value => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
   const taughtLabel = rule => {
     const value = rule.behavior || rule.name || rule.action || rule.trigger;
@@ -103,6 +89,8 @@ function Go2AssetsDrawer({ open, onClose }) {
     if (value && typeof value === 'object') return JSON.stringify(value);
     return '未命名习惯';
   };
+  const feedback = key => message?.key === key && <small className={`action-feedback action-feedback--${message.tone}`}
+    role="status" title={message.text}>{message.text}</small>;
 
   return (
     <>
@@ -113,15 +101,14 @@ function Go2AssetsDrawer({ open, onClose }) {
         <header className="space-drawer__header">
           <div><small>GO2 MANAGEMENT</small><h2 id="go2-assets-title">Go2 设置</h2></div>
           <div className="space-drawer__header-actions">
-            <button className="btn" onClick={loadAssets} disabled={loading}>
+            <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
               {loading ? '同步中…' : '刷新资产'}
-            </button>
+            </button>{feedback('refresh')}</div>
             <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭 Go2 设置">
               <Icon name="x" size={14}/>
             </button>
           </div>
         </header>
-        {message && <div className={`space-notice space-notice--${message.tone}`} role="status">{message.text}</div>}
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section">
             <div className="asset-section__heading">
@@ -146,15 +133,18 @@ function Go2AssetsDrawer({ open, onClose }) {
                 </article>
               )) : <p className="asset-empty">还没有命名地点。让 Go2 站在目标位置后保存。</p>}
             </div>
+            {feedback('delete-location')}
             <form className="asset-action-row" onSubmit={tagLocation}>
               <input value={locationName} onChange={event => setLocationName(event.target.value)}
                 maxLength="48" placeholder="当前位置名称，如：窗边"/>
               <button className="btn btn--accent" disabled={busy === 'tag-location' || !locationName.trim()}>保存当前位置</button>
+              {feedback('tag-location')}
             </form>
             <button className="btn asset-wide-action" disabled={busy === 'set-home'}
               onClick={() => runGo2Action('set-home', 'set_home', {}, '当前位置已设为 home')}>
               <Icon name="home" size={13}/> 将当前位置设为 home
             </button>
+            {feedback('set-home')}
           </section>
 
           <section className="asset-section">
@@ -169,41 +159,7 @@ function Go2AssetsDrawer({ open, onClose }) {
                 <button className="btn btn--accent" disabled={busy === 'personality' || !personality.trim()}>
                   {busy === 'personality' ? '更新中…' : '更新人设'}
                 </button></div>
-            </form>
-          </section>
-
-          <section className="asset-section">
-            <div className="asset-section__heading">
-              <div><small>KNOWN PEOPLE</small><h3>人员库</h3></div>
-              <span>{people.length} 人</span>
-            </div>
-            <div className="people-list">
-              {people.length ? people.map(person => (
-                <article className="person-row" key={person.person_id}>
-                  <div className="person-row__avatar">{(person.name || '?').slice(0, 1)}</div>
-                  <div><strong>{person.name}</strong><small>{roleLabel(person.role)} · {person.face_count || 0} 张人脸</small></div>
-                  <button className="btn" disabled={busy === `face-${person.person_id}`}
-                    onClick={() => runGo2Action(`face-${person.person_id}`, 'add_person_face',
-                      { person_id: person.person_id }, `已为「${person.name}」补录当前人脸`)}>补录人脸</button>
-                  <button className="asset-icon-action" title={`忘记${person.name}`}
-                    disabled={busy === `delete-person-${person.person_id}`}
-                    onClick={() => {
-                      if (window.confirm(`从人员库删除「${person.name}」？`)) {
-                        runGo2Action(`delete-person-${person.person_id}`, 'delete_person',
-                          { person_id: person.person_id }, `已从人员库删除「${person.name}」`);
-                      }
-                    }}><Icon name="x" size={12}/></button>
-                </article>
-              )) : <p className="asset-empty">人员库为空。请让待登记的人单独站在 Go2 镜头前。</p>}
-            </div>
-            <form className="person-enrol" onSubmit={rememberPerson}>
-              <input value={personName} onChange={event => setPersonName(event.target.value)}
-                maxLength="48" placeholder="镜头前的人叫什么？"/>
-              <select value={personRole} onChange={event => setPersonRole(event.target.value)} aria-label="人员关系">
-                <option value="owner">主人</option><option value="family">家人</option>
-                <option value="friend">朋友</option><option value="known">熟人</option>
-              </select>
-              <button className="btn btn--accent" disabled={busy === 'remember-person' || !personName.trim()}>登记当前人脸</button>
+              {feedback('personality')}
             </form>
           </section>
 

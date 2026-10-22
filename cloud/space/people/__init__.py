@@ -1,7 +1,8 @@
-"""Go2 人脸身份 provider 契约与实现。"""
+"""空间共享人员库与人脸服务。"""
+
+from .memory import KnownPerson, PeopleMemory
 
 from .provider import (
-    AddedFace,
     CreatedPerson,
     DuplicateFaceCandidate,
     FaceCandidate,
@@ -15,7 +16,7 @@ from .provider import (
 )
 
 __all__ = [
-    "AddedFace", "CreatedPerson", "DuplicateFaceCandidate", "FaceCandidate",
+    "KnownPerson", "PeopleMemory", "CreatedPerson", "DuplicateFaceCandidate", "FaceCandidate",
     "FaceImageRejected", "FaceProvider", "FaceProviderNotConfigured",
     "FaceProviderUnavailable", "FaceSearchResult", "GroupInfo", "RemotePerson",
 ]

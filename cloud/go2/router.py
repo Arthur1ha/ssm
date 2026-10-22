@@ -19,7 +19,6 @@ from cloud.go2.navigation.drive import drive
 from cloud.go2.agentcore.skills.reactive import reactive_mind
 from cloud.go2.agentcore.skills.vision import vision_loop
 from cloud.go2.agentcore.skills.identity import IdentityEvent, identity_skill
-from cloud.go2.agentcore.identity.provider import FaceProviderError
 from cloud.go2.agentcore.memory.episode import EventType, episode_memory
 from cloud.go2.control import LeaseConflict, control_lease, session_tasks
 from cloud.go2.execution import (
@@ -41,7 +40,7 @@ def init_mqtt(client) -> None:
 
 
 _GO2_FSM_LABELS = {
-    "StandUp": "起立", "StandDown": "趴下休息", "EnterMoveControl": "移动控制", "Move": "移动", "StopMove": "退出移动控制",
+    "StandUp": "起立", "StandDown": "趴下", "EnterMoveControl": "进入遥控", "Move": "移动", "StopMove": "退出遥控",
     "Hello": "挥手", "Stretch": "伸展", "Dance1": "舞蹈1", "Dance2": "舞蹈2",
 }
 
@@ -59,7 +58,7 @@ def _go2_state_machine() -> dict:
                 continue  # 有速度的 Move 属于数据面；图上只显示控制状态入口。
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
-                "label": "结束动作" if src in _TRANSIENT_STATES else _GO2_FSM_LABELS.get(trigger, trigger),
+                "label": "停止" if src in _TRANSIENT_STATES else _GO2_FSM_LABELS.get(trigger, trigger),
                 "action": trigger,
                 "params": {},
             })
@@ -87,13 +86,13 @@ def _go2_state_machine() -> dict:
         "views": {
             "offline": {"label": "未连接", "description": "机器狗尚未建立控制连接。", "type": "robot_pose", "pose": "offline"},
             "connecting": {"label": "正在连接", "description": "正在与机器狗建立实时控制通道。", "type": "robot_pose", "pose": "offline"},
-            "lying": {"label": "趴下休息", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
-            "standing": {"label": "站立待命", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
-            "moving": {"label": "移动控制", "description": "拖动摇杆行走；松开后停下，退出控制才回到站立。", "type": "robot_pose", "pose": "moving"},
-            "greeting": {"label": "挥手问候", "description": "抬起前腿执行问候动作。", "type": "robot_pose", "pose": "greeting"},
-            "stretching": {"label": "正在伸展", "description": "降低身体前部并完成伸展动作。", "type": "robot_pose", "pose": "stretching"},
-            "dancing1": {"label": "舞蹈动作一", "description": "正在执行第一组节奏动作。", "type": "robot_pose", "pose": "dance-left"},
-            "dancing2": {"label": "舞蹈动作二", "description": "正在执行第二组节奏动作。", "type": "robot_pose", "pose": "dance-right"},
+            "lying": {"label": "趴卧", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
+            "standing": {"label": "站立", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
+            "moving": {"label": "遥控", "description": "可用摇杆控制行走；松开摇杆会停下，退出遥控后回到站立。", "type": "robot_pose", "pose": "moving"},
+            "greeting": {"label": "挥手", "description": "抬起前腿执行问候动作。", "type": "robot_pose", "pose": "greeting"},
+            "stretching": {"label": "伸展", "description": "降低身体前部并完成伸展动作。", "type": "robot_pose", "pose": "stretching"},
+            "dancing1": {"label": "舞蹈1", "description": "正在执行第一组节奏动作。", "type": "robot_pose", "pose": "dance-left"},
+            "dancing2": {"label": "舞蹈2", "description": "正在执行第二组节奏动作。", "type": "robot_pose", "pose": "dance-right"},
         },
     }
 
@@ -186,13 +185,15 @@ def _build_go2_card() -> dict:
             {
                 "type": "connection",
                 "states": ["offline", "connecting"],
+                "placement": "controls",
+                "order": 0,
                 "endpoint": "/api/go2/connection",
                 "status_endpoint": "/api/go2/connection",
                 "auto_connect": True,
                 "visible": False,
             },
-            {"type": "video",    "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "endpoint": "/api/go2/video"},
-            {"type": "joystick", "states": ["moving"], "endpoint": "/api/go2/velocity"},
+            {"type": "video", "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "placement": "media", "order": 10, "endpoint": "/api/go2/video"},
+            {"type": "joystick", "states": ["moving"], "placement": "controls", "order": 20, "endpoint": "/api/go2/velocity"},
         ],
     }
 
@@ -674,11 +675,6 @@ class PersonalityRequest(BaseModel):
     prompt: str
 
 
-class PersonCreateRequest(BaseModel):
-    name: str
-    role: str = "known"
-
-
 @router.post("/navigation/locations")
 async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = Depends(require_service_context)):
     context = _normalize_context(context)
@@ -857,57 +853,6 @@ async def go2_identity_recognize(context: ExecutionContext = Depends(require_ser
     with use_context(context):
         snapshot = await identity_skill.recognize_now()
     return asdict(snapshot)
-
-
-@router.get("/people")
-async def go2_people_list(context=Depends(require_admin_read)):
-    context = _normalize_context(context)
-    _require_admin_persist(context)
-    return [
-        {"person_id": p.person_id, "name": p.name, "role": p.role, "face_count": p.face_count}
-        for p in identity_skill.list_people()
-    ]
-
-
-@router.post("/people")
-async def go2_people_create(req: PersonCreateRequest, context: ExecutionContext = Depends(require_service_context)):
-    context = _normalize_context(context)
-    _require_admin_persist(context)
-    with use_context(context):
-        snapshot = await identity_skill.remember_person(req.name, req.role)
-    if snapshot.status in {"rejected", "disabled"}:
-        raise HTTPException(status_code=409, detail=snapshot.error_code)
-    if snapshot.status == "error":
-        raise HTTPException(status_code=503, detail=snapshot.error_code)
-    return asdict(snapshot)
-
-
-@router.post("/people/{person_id}/faces")
-async def go2_people_add_face(person_id: str, context: ExecutionContext = Depends(require_service_context)):
-    context = _normalize_context(context)
-    _require_admin_persist(context)
-    with use_context(context):
-        snapshot = await identity_skill.add_person_face(person_id)
-    if snapshot.status in {"rejected", "disabled"}:
-        raise HTTPException(status_code=409, detail=snapshot.error_code)
-    if snapshot.status == "error":
-        raise HTTPException(status_code=503, detail=snapshot.error_code)
-    return asdict(snapshot)
-
-
-@router.delete("/people/{person_id}")
-async def go2_people_delete(person_id: str, context: ExecutionContext = Depends(require_service_context)):
-    context = _normalize_context(context)
-    _require_admin_persist(context)
-    try:
-        with use_context(context):
-            await identity_skill.forget_person(person_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except FaceProviderError as exc:
-        status = 409 if exc.code == "enrollment_disabled" else 503
-        raise HTTPException(status_code=status, detail=exc.code)
-    return {"ok": True, "person_id": person_id}
 
 
 @router.get("/personality")

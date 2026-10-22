@@ -3,22 +3,17 @@
 import asyncio
 import logging
 import os
-import re
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Callable
 
-from cloud.go2.agentcore.identity.provider import (
-    DuplicateFaceCandidate,
-    FaceImageRejected,
+from cloud.space.people.provider import (
     FaceProvider,
     FaceProviderError,
-    FaceProviderNotConfigured,
 )
-from cloud.go2.agentcore.memory.people import KnownPerson, PeopleMemory
-from cloud.go2.execution import require_persist
+from cloud.space.people.memory import KnownPerson, PeopleMemory
 from cloud.go2.agentcore.skills.vision import VisionFaceRejected, VisionFrame, select_enrollment_face
+from cloud.space.people.service import space_people
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +51,6 @@ class IdentitySkill:
         frame_getter: FrameGetter,
         *,
         recognition_enabled: bool = True,
-        enrollment_enabled: bool = False,
         accept_score: float = 90.0,
         candidate_score: float = 80.0,
         recheck_s: float = 30.0,
@@ -66,7 +60,6 @@ class IdentitySkill:
         self.people = people
         self._frame_getter = frame_getter
         self.recognition_enabled = recognition_enabled and provider is not None
-        self.enrollment_enabled = enrollment_enabled and provider is not None
         self.accept_score = accept_score
         self.candidate_score = candidate_score
         self.recheck_s = recheck_s
@@ -212,90 +205,6 @@ class IdentitySkill:
             role=person.role, score=score,
         )
 
-    def _validate_enrollment(self, name: str, role: str) -> tuple[str, str]:
-        if not self.enrollment_enabled or self.provider is None:
-            raise FaceProviderNotConfigured("enrollment_disabled", "人员登记功能未开启")
-        name, role = name.strip(), role.strip().lower()
-        if not name or len(name) > 64 or any(ord(c) < 32 for c in name):
-            raise ValueError("姓名必须是 1~64 个可显示字符")
-        if not re.fullmatch(r"[a-z0-9_-]{1,32}", role):
-            raise ValueError("关系只允许字母、数字、下划线和连字符")
-        if role == "owner" and self.people.get_owner() is not None:
-            raise ValueError("主人已经存在；如需补录，请使用增加人脸功能")
-        return name, role
-
-    async def remember_person(self, name: str, role: str) -> IdentitySnapshot:
-        require_persist("remember a person")
-        try:
-            name, role = self._validate_enrollment(name, role)
-            crop = self._get_face_crop()
-        except (ValueError, VisionFaceRejected, FaceProviderError) as exc:
-            return self._set_current(self._snapshot("rejected", error_code=getattr(exc, "code", "invalid_person")))
-
-        person_id = "go2_owner" if role == "owner" else f"go2_person_{uuid.uuid4().hex}"
-        self._set_current(self._snapshot("enrolling", person_id=person_id, name=name, role=role))
-        try:
-            await self.provider.create_person(person_id, name, crop)  # type: ignore[union-attr]
-        except DuplicateFaceCandidate as exc:
-            return self._set_current(self._snapshot(
-                "rejected", person_id=exc.person_id, error_code=exc.code,
-            ))
-        except FaceImageRejected as exc:
-            return self._set_current(self._snapshot("rejected", error_code=exc.code))
-        except FaceProviderError as exc:
-            return self._set_current(self._snapshot("error", error_code=exc.code))
-
-        now = time.time()
-        person = KnownPerson(
-            person_id=person_id, name=name, role=role, provider="tencent_iai",
-            group_id=getattr(self.provider, "group_id", ""), face_count=1,
-            created_ts=now, updated_ts=now,
-        )
-        try:
-            self.people.upsert(person)
-        except Exception:
-            logger.exception("[Identity] 云端已创建但本地元数据写入失败 person_id=%s", person_id)
-            return self._set_current(self._snapshot(
-                "error", person_id=person_id, name=name, role=role,
-                error_code="local_persist_failed",
-            ))
-        return self._set_current(self._recognized(person, 100.0))
-
-    async def add_person_face(self, person_id: str) -> IdentitySnapshot:
-        require_persist("add a person's face")
-        if not self.enrollment_enabled or self.provider is None:
-            return self._set_current(self._snapshot("disabled", error_code="enrollment_disabled"))
-        person = self.people.get(person_id)
-        if person is None:
-            return self._set_current(self._snapshot("rejected", error_code="person_not_found"))
-        if person.face_count >= 5:
-            return self._set_current(self._snapshot("rejected", person_id=person_id, error_code="face_limit"))
-        try:
-            crop = self._get_face_crop()
-            await self.provider.add_face(person_id, crop)
-            updated = self.people.increment_face_count(person_id)
-        except (VisionFaceRejected, FaceProviderError, ValueError) as exc:
-            return self._set_current(self._snapshot("error", person_id=person_id, error_code=getattr(exc, "code", "add_face_failed")))
-        return self._set_current(self._recognized(updated, self._current.score or 100.0))
-
-    async def forget_person(self, person_id: str) -> None:
-        require_persist("forget a person")
-        if not self.enrollment_enabled or self.provider is None:
-            raise FaceProviderNotConfigured("enrollment_disabled", "人员删除功能未开启")
-        if not person_id or self.people.get(person_id) is None:
-            raise ValueError("必须指定已登记的 person_id")
-        try:
-            await self.provider.remove_from_group(person_id)
-        except FaceProviderError as exc:
-            if "NotExist" not in exc.code and "NotFound" not in exc.code:
-                raise
-        self.people.remove(person_id)
-        if self._current.person_id == person_id:
-            self.clear_transient()
-
-    def list_people(self) -> tuple[KnownPerson, ...]:
-        return self.people.list()
-
     def clear_transient(self) -> None:
         if self._auto_task and not self._auto_task.done():
             self._auto_task.cancel()
@@ -315,7 +224,6 @@ class IdentitySkill:
         except FaceProviderError as exc:
             logger.warning("[Identity] 人员库健康检查失败 code=%s", exc.code)
             self.recognition_enabled = False
-            self.enrollment_enabled = False
             self._set_current(self._snapshot("disabled", error_code=exc.code))
             return False
 
@@ -326,18 +234,11 @@ def _default_frame_getter() -> tuple[VisionFrame | None, bytes | None]:
 
 
 def _build_default_identity_skill() -> IdentitySkill:
-    provider = None
-    try:
-        from cloud.go2.agentcore.identity.tencent import create_tencent_face_provider_from_env
-        provider = create_tencent_face_provider_from_env()
-    except FaceProviderNotConfigured:
-        pass
     return IdentitySkill(
-        provider,
-        PeopleMemory(),
+        space_people.provider,
+        space_people.people,
         _default_frame_getter,
         recognition_enabled=_env_bool("GO2_FACE_RECOGNITION_ENABLED", True),
-        enrollment_enabled=_env_bool("GO2_FACE_ENROLLMENT_ENABLED", False),
         accept_score=float(os.getenv("GO2_FACE_ACCEPT_SCORE", "90")),
         candidate_score=float(os.getenv("GO2_FACE_CANDIDATE_SCORE", "80")),
         recheck_s=float(os.getenv("GO2_FACE_RECHECK_S", "30")),

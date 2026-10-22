@@ -9,13 +9,14 @@ import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from cloud.go2.paths import PEOPLE_FILE
-from cloud.go2.execution import require_persist
+from cloud.space.execution import require_persist
 
 logger = logging.getLogger(__name__)
 
 _PERSON_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ROLE_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+SPACE_PEOPLE_FILE = Path(os.getenv("SPACE_DATA_DIR", str(Path(__file__).resolve().parents[1] / "data"))) / "people.json"
+LEGACY_PEOPLE_FILE = Path(os.getenv("GO2_DATA_DIR", str(Path(__file__).resolve().parents[2] / "go2" / "data"))) / "memory" / "people.json"
 
 
 @dataclass(frozen=True)
@@ -31,8 +32,9 @@ class KnownPerson:
 
 
 class PeopleMemory:
-    def __init__(self, path: Path | str = PEOPLE_FILE) -> None:
+    def __init__(self, path: Path | str = SPACE_PEOPLE_FILE) -> None:
         self.path = Path(path)
+        self.legacy_path = LEGACY_PEOPLE_FILE if self.path == SPACE_PEOPLE_FILE else None
         self._lock = threading.RLock()
 
     @staticmethod
@@ -47,10 +49,11 @@ class PeopleMemory:
             raise ValueError("face_count 必须在 0~5 之间")
 
     def _read_unlocked(self) -> dict[str, KnownPerson]:
-        if not self.path.exists():
+        source = self.path if self.path.exists() else self.legacy_path
+        if source is None or not source.exists():
             return {}
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(source.read_text(encoding="utf-8"))
             if raw.get("version") != 1 or not isinstance(raw.get("people"), dict):
                 raise ValueError("unsupported people metadata format")
             result = {}
@@ -62,7 +65,7 @@ class PeopleMemory:
                 result[person_id] = person
             return result
         except Exception:
-            logger.exception("[PeopleMemory] 人员元数据损坏，保留原文件: %s", self.path)
+            logger.exception("[PeopleMemory] 人员元数据损坏，保留原文件: %s", source)
             raise
 
     def _write_unlocked(self, people: dict[str, KnownPerson]) -> None:
@@ -95,7 +98,7 @@ class PeopleMemory:
         with self._lock:
             people = self._read_unlocked()
             owner = next((p for p in people.values() if p.role == "owner" and p.person_id != person.person_id), None)
-            if owner:
+            if person.role == "owner" and owner:
                 raise ValueError("只能登记一个主人")
             now = time.time()
             previous = people.get(person.person_id)
@@ -108,20 +111,6 @@ class PeopleMemory:
             people[person.person_id] = normalized
             self._write_unlocked(people)
             return normalized
-
-    def increment_face_count(self, person_id: str) -> KnownPerson:
-        require_persist("add a person's face")
-        with self._lock:
-            people = self._read_unlocked()
-            person = people.get(person_id)
-            if person is None:
-                raise KeyError(person_id)
-            if person.face_count >= 5:
-                raise ValueError("每个人最多保存 5 张人脸")
-            person = replace(person, face_count=person.face_count + 1, updated_ts=time.time())
-            people[person_id] = person
-            self._write_unlocked(people)
-            return person
 
     def remove(self, person_id: str) -> bool:
         require_persist("forget a person")

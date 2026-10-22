@@ -103,8 +103,8 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
 # ── 声明式状态机表 ────────────────────────────────────────────────
 # 旧固件没有 fsm_version；保留其拓扑快照，不能依赖升级后的 edge.ism。
 _LED_LABELS = {
-    "CMD_OFF": "关灯", "CMD_BRIGHT": "亮", "CMD_DIM": "调暗",
-    "CMD_COLOR": "彩色", "CMD_BLINK": "闪烁",
+    "CMD_OFF": "关灯", "CMD_BRIGHT": "调亮", "CMD_DIM": "调暗",
+    "CMD_COLOR": "彩光", "CMD_BLINK": "闪烁",
 }
 
 _LED_COMMANDS = {
@@ -143,28 +143,28 @@ FSM_DEFS: dict[str, StateMachine] = {
         "initial": "OFF",
         "views": {
             "OFF": {
-                "label": "已关闭", "description": "灯环熄灭，等待下一条照明指令。",
+                "label": "熄灭", "description": "灯环熄灭，等待下一条照明指令。",
                 "type": "light_ring", "color": "#505363", "intensity": 0.08,
             },
             "DIM": {
-                "label": "柔和亮起", "description": "低亮暖光，适合休息和夜间环境。",
+                "label": "柔光", "description": "低亮暖光，适合休息和夜间环境。",
                 "type": "light_ring", "color": "#FFD08A", "intensity": 0.34,
             },
             "BRIGHT": {
-                "label": "明亮照明", "description": "高亮度照明，适合工作和阅读。",
+                "label": "亮光", "description": "高亮度照明，适合工作和阅读。",
                 "type": "light_ring", "color": "#FFF4D6", "intensity": 1.0,
             },
             "COLOR": {
-                "label": "彩色照明", "description": "以设定的颜色和亮度营造空间氛围。",
+                "label": "彩光", "description": "以设定的颜色和亮度营造空间氛围。",
                 "type": "light_ring", "color": "#FFB45C", "intensity": 0.78,
                 "palette": ["#FF8A5C", "#FFD05C", "#7EE8A2", "#6B8CFF", "#D76BFF"],
             },
             "BLINK": {
-                "label": "闪烁提醒", "description": "灯环间歇闪烁，用于提醒或引起注意。",
+                "label": "闪烁", "description": "灯环间歇闪烁，用于提醒或引起注意。",
                 "type": "light_ring", "color": "#FFFFFF", "intensity": 0.9, "motion": "pulse",
             },
             "ERROR": {
-                "label": "需要检查", "description": "灯光执行异常，请检查设备连接与供电。",
+                "label": "异常", "description": "灯光执行异常，请检查设备连接与供电。",
                 "type": "light_ring", "color": "#FF5252", "intensity": 0.65, "motion": "alert",
             },
         },
@@ -174,15 +174,15 @@ FSM_DEFS: dict[str, StateMachine] = {
 _NEW_LED_TRANSITIONS = [
     ("OFF", "ON", "CMD_ON", "开灯", "SET_STATE", {"state": "ON"}),
     ("ON", "ON", "CMD_ON", "开灯", "SET_STATE", {"state": "ON"}),
-    ("BLINKING", "ON", "CMD_ON", "开灯", "SET_STATE", {"state": "ON"}),
+    ("BLINKING", "ON", "CMD_ON", "常亮", "SET_STATE", {"state": "ON"}),
     ("OFF", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
     ("ON", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
     ("BLINKING", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
     ("OFF", "BLINKING", "CMD_BLINK", "闪烁", "BLINK", {"count": 3}),
     ("ON", "BLINKING", "CMD_BLINK", "闪烁", "BLINK", {"count": 3}),
-    ("BLINKING", "BLINKING", "CMD_BLINK", "重新闪烁", "BLINK", {"count": 3}),
-    ("BLINKING", "OFF", "BLINK_DONE", "恢复关闭", "", {}),
-    ("BLINKING", "ON", "BLINK_DONE", "恢复常亮", "", {}),
+    ("BLINKING", "BLINKING", "CMD_BLINK", "再闪烁", "BLINK", {"count": 3}),
+    ("BLINKING", "OFF", "BLINK_DONE", "自动熄灭", "", {}),
+    ("BLINKING", "ON", "BLINK_DONE", "自动常亮", "", {}),
 ]
 
 NEW_LED_FSM: StateMachine = {
@@ -194,11 +194,11 @@ NEW_LED_FSM: StateMachine = {
         for src, dst, trigger, label, action, params in _NEW_LED_TRANSITIONS
     ],
     "views": {
-        "OFF": {"label": "已关闭", "description": "灯环熄灭。",
+        "OFF": {"label": "熄灭", "description": "灯环熄灭。",
                 "type": "light_ring", "color": "#505363", "intensity": 0.08},
         "ON": {"label": "常亮", "description": "按当前颜色和亮度持续发光。",
                "type": "light_ring", "color": "#FFFFFF", "intensity": 1.0},
-        "BLINKING": {"label": "闪烁中", "description": "闪烁结束后恢复先前灯光。",
+        "BLINKING": {"label": "闪烁", "description": "闪烁结束后恢复先前灯光。",
                      "type": "light_ring", "color": "#FFFFFF", "intensity": 0.9,
                      "motion": "pulse"},
     },
@@ -248,9 +248,12 @@ _LED_COLOR_SWATCHES: list[dict] = [
 ]
 
 _LED_WIDGETS: list[dict] = [{
-    "type": "color_swatches",
-    "states": [],
+    "type": "led_color",
+    "states": ["ON", "BRIGHT", "DIM", "COLOR"],
+    "placement": "controls",
+    "order": 10,
     "action": "SET_COLOR",
+    "channels": ["r", "g", "b", "brightness"],
     "swatches": _LED_COLOR_SWATCHES,
 }]
 

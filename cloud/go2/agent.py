@@ -64,8 +64,7 @@ class Go2AgentState(TypedDict):
 
 _session_history: dict[str, deque[dict[str, str]]] = {}
 _PERSISTENT_TOOLS = {
-    "go2_add_rule", "go2_tag_location", "go2_remember_person",
-    "go2_add_person_face", "go2_forget_person",
+    "go2_add_rule", "go2_tag_location",
 }
 _ADMIN_ONLY_TOOLS = {
     # The full identity library is private. Visitors may only recognize the
@@ -223,10 +222,9 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
         f"1. 涉及视觉问题（看到什么/有没有人/描述场景）必须调用 go2_observe\n"
         f"2. 涉及历史记忆问题（今天去哪了/发生了什么/做了什么/最近几天）"
         f"直接从记忆上下文回答，输出 []\n"
-        f"3. “我是你主人，你记住了”调用 go2_remember_person，参数固定为 name=主人, role=owner\n"
-        f"4. “再记住我现在这个样子”先用当前身份；若当前未确认但只有一个主人，可用 go2_list_people 后再 go2_add_person_face\n"
-        f"5. 当前身份未确认时，“面前是谁/你认识我吗”调用 go2_recognize_person；普通询问绝不能登记\n"
-        f"6. 删除必须有明确 person_id；不得根据含糊描述调用 go2_forget_person\n"
+        f"3. 添加人员须在手机端的空间人员库中上传照片，不要调用摄像头登记\n"
+        f"4. 当前身份未确认时，“面前是谁/你认识我吗”调用 go2_recognize_person\n"
+        f"6. 人员库增删由空间管理员在手机端操作\n"
         f"7. 最多生成 3 个工具调用，直接输出 JSON 数组，不含解释或代码块\n"
         f"示例：[{{\"tool\": \"go2_sport\", \"params\": {{\"cmd\": \"StandUp\"}}}}]\n"
         f"无需工具时输出：[]"
@@ -277,20 +275,6 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
     status = _execution_status(results)
     if status != "ok":
         failed = next((r for r in results if _execution_status([r]) not in ("ok", "accepted")), None)
-        if failed and failed.get("tool") in {"go2_remember_person", "go2_add_person_face"}:
-            detail = failed.get("result")
-            code = str(detail.get("error_code", "")) if isinstance(detail, dict) else ""
-            action = "补录" if failed["tool"] == "go2_add_person_face" else "登记"
-            if "NoFace" in code or code in {"no_face", "empty_image"}:
-                return f"这次人脸{action}没成功：画面里没有识别到有效人脸。请正对我的摄像头、靠近一点再试。", True
-            if code == "multiple_faces":
-                return f"这次人脸{action}没成功：画面里有多张人脸。请单独面对摄像头再试。", True
-            if code == "face_too_small" or "FaceSize" in code:
-                return f"这次人脸{action}没成功：人脸太小。请靠近摄像头再试。", True
-            if status == "rejected":
-                return f"这次人脸{action}没成功，请调整角度或光线后再试。", True
-            if status == "error":
-                return f"这次人脸{action}没成功，人脸服务暂时无法完成处理。请稍后再试。", True
         replies = {
             "accepted": "指令已发送，尚未确认动作完成。",
             "timeout": "等待动作完成反馈超时，当前结果还不能确认。",
