@@ -126,27 +126,85 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
     b: ledState?.b ?? 255, brightness: ledState?.brightness ?? 180,
   });
   const [draft, setDraft] = useState(initial);
+  const draftRef = useRef(draft);
   const lastSent = useRef('');
+  const queued = useRef(null);
+  const sending = useRef(false);
+  const sendTimer = useRef(null);
+  const settleTimer = useRef(null);
+  const awaitingState = useRef('');
+  const retryAfter = useRef(0);
+  const remoteState = useRef(initial());
+  const adjusting = useRef(false);
 
   useEffect(() => {
     if (!['ON', 'BRIGHT', 'DIM', 'COLOR'].includes(ledState?.ism)) return;
     const next = initial();
+    remoteState.current = next;
+    if (adjusting.current || queued.current || sending.current) return;
+    if (awaitingState.current && JSON.stringify(next) !== awaitingState.current) return;
+    awaitingState.current = '';
+    clearTimeout(settleTimer.current);
+    draftRef.current = next;
     setDraft(next);
     lastSent.current = JSON.stringify(next);
   }, [ledState?.r, ledState?.g, ledState?.b, ledState?.brightness, ledState?.ism]);
 
-  const sendColor = values => {
+  useEffect(() => () => {
+    clearTimeout(sendTimer.current);
+    clearTimeout(settleTimer.current);
+  }, []);
+
+  const flushColor = async () => {
+    clearTimeout(sendTimer.current);
+    sendTimer.current = null;
+    if (sending.current || !queued.current) return;
+    if (Date.now() < retryAfter.current) {
+      sendTimer.current = setTimeout(flushColor, retryAfter.current - Date.now());
+      return;
+    }
+    const next = queued.current;
+    queued.current = null;
+    const key = JSON.stringify(next);
+    if (key === lastSent.current) return;
+    sending.current = true;
+    lastSent.current = key;
+    const result = await commandBus.mqtt(unitId, widget.action || 'SET_COLOR', next);
+    sending.current = false;
+    if (result?.result === 'error' || result?.result === 'timeout') {
+      retryAfter.current = Date.now() + 1000;
+      lastSent.current = '';
+      awaitingState.current = '';
+      clearTimeout(settleTimer.current);
+      report(result);
+    } else {
+      // The HTTP 202 only confirms dispatch. Keep the slider local until the
+      // matching ESP32 state arrives, so an older SSE update cannot pull it back.
+      awaitingState.current = JSON.stringify(remoteState.current) === key ? '' : key;
+      clearTimeout(settleTimer.current);
+      if (awaitingState.current) {
+        settleTimer.current = setTimeout(() => {
+          awaitingState.current = '';
+          if (!adjusting.current && !queued.current && !sending.current) {
+            draftRef.current = remoteState.current;
+            setDraft(remoteState.current);
+          }
+        }, 5000);
+      }
+    }
+    if (queued.current) flushColor();
+  };
+
+  const queueColor = (values, immediate = false) => {
     const next = {
       r: Number(values.r), g: Number(values.g), b: Number(values.b),
       brightness: Number(values.brightness),
     };
-    const key = JSON.stringify(next);
-    if (key === lastSent.current) return;
-    lastSent.current = key;
+    draftRef.current = next;
     setDraft(next);
-    report({ result: 'executing' });
-    commandBus.mqtt(unitId, widget.action || 'SET_COLOR', next)
-      .then(report).catch(error => report({ result: 'error', error: error.message }));
+    queued.current = next;
+    if (immediate) flushColor();
+    else if (!sendTimer.current) sendTimer.current = setTimeout(flushColor, 120);
   };
 
   return <div className="device-led-controls">
@@ -155,16 +213,18 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
         <span>{channelLabels[channel] || channel}</span>
         <input type="range" min={channel === 'brightness' ? 1 : 0} max="255" step="1"
           value={draft[channel]} aria-label={channelLabels[channel] || channel}
-          onChange={event => setDraft(prev => ({ ...prev, [channel]: Number(event.target.value) }))}
-          onPointerUp={event => sendColor({ ...draft, [channel]: Number(event.currentTarget.value) })}
-          onKeyUp={event => sendColor({ ...draft, [channel]: Number(event.currentTarget.value) })}
-          onBlur={event => sendColor({ ...draft, [channel]: Number(event.currentTarget.value) })}/>
+          onPointerDown={() => { adjusting.current = true; }}
+          onChange={event => queueColor({ ...draftRef.current, [channel]: Number(event.target.value) })}
+          onPointerUp={() => { adjusting.current = false; flushColor(); }}
+          onPointerCancel={() => { adjusting.current = false; flushColor(); }}
+          onKeyUp={() => flushColor()}
+          onBlur={() => { adjusting.current = false; flushColor(); }}/>
         <output>{draft[channel]}</output>
       </label>)}
     </div>
     {swatches.length > 0 && <div className="device-led-controls__presets" aria-label="预设颜色">
       {swatches.map((swatch, idx) => <button key={(swatch.label || 'color') + idx}
-        type="button" onClick={() => sendColor(swatch)}>
+        type="button" onClick={() => queueColor(swatch, true)}>
         <i style={{ background: `rgb(${swatch.r}, ${swatch.g}, ${swatch.b})` }}/>
         {swatch.label}
       </button>)}

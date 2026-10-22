@@ -182,7 +182,7 @@ class TriggerMap:
 
     # ─────────────────────────────────────────────────────────
     #  Orchestrator task handler
-    #  Topic: ssm/task/{device_id}/{task_id}
+    #  Topic: ssm/task/{unit_id}/{task_id}
     # ─────────────────────────────────────────────────────────
     def _handle_led_task(self, p, task_id):
         for result in self._recent_results:
@@ -212,7 +212,7 @@ class TriggerMap:
 
     def _publish_result(self, task_id, session_id, result, error=""):
         payload = {
-            "unit_id": UNIT_LED, "agent_id": UNIT_LED,
+            "unit_id": UNIT_LED,
             "task_id": task_id, "session_id": session_id,
             "result": result, "error": error,
             "ism_state": self._ism_led.state, "ts": time.time(),
@@ -234,7 +234,7 @@ class TriggerMap:
         snapshot = (state,) + values
         if not force and snapshot == self._last_led_snapshot:
             return
-        payload = {"unit_id": UNIT_LED, "agent_id": UNIT_LED,
+        payload = {"unit_id": UNIT_LED,
                    "ism": state, "r": values[0], "g": values[1],
                    "b": values[2], "brightness": values[3], "ts": time.time()}
         if state == State.BLINKING:

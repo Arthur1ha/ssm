@@ -41,6 +41,18 @@ function App({ session, logout, refreshSession }) {
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
+  useEffect(() => {
+    const onDeviceThought = message => {
+      const outer = message.detail || {};
+      const payload = outer.payload || outer.data || outer;
+      const thought = payload.thought;
+      if (payload.type !== 'device' || !thought || typeof thought.text !== 'string') return;
+      const text = thought.text.trim();
+      if (text) setActivityLog(previous => [...previous, { type: 'ai', agent: payload.unit_id, text }]);
+    };
+    apiClient.addEventListener('server-event', onDeviceThought);
+    return () => apiClient.removeEventListener('server-event', onDeviceThought);
+  }, []);
   const ready = !loadingAgents;
   const hasDevices = ready && agents.length > 0;
   const suggestions = hasDevices ? SUGGESTIONS : [];

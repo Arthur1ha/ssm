@@ -1,4 +1,4 @@
-# agent_manifest.py — Publish retained manifests for all present units.
+# agent_manifest.py — Publish retained manifests for present agents only.
 # Fully driven by UNIT_CONFIGS + PRESENCE; no unit-specific logic here.
 import time
 from config import DEVICE_ID, FIRMWARE_VER, UNIT_CONFIGS
@@ -12,8 +12,9 @@ def publish(mqtt):
         base = "ssm/agents/{}".format(unit_id)
         topic = base + "/manifest"
 
-        if not PRESENCE.get(unit_id, False):
-            # clear any previously retained manifest so PWA drops this unit
+        if cfg.get('agent_type') == 'sensor' or not PRESENCE.get(unit_id, False):
+            # Sensors are perception inputs, not discoverable agents. Also clear
+            # manifests retained by older firmware or by an absent agent.
             mqtt.publish(topic, b"", retain=True)
             continue
 

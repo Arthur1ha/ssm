@@ -7,38 +7,12 @@
 
 from __future__ import annotations
 
-from cloud.cards.schema import AgentCard, SkillDef, SkillInvoke, StateMachine, Transport
-
-
-def expand_mode_skills(modes: list[dict] | None) -> list[SkillDef]:
-    """把每个 ModeAxis 展开成一条 set_{axis_id} skill，供编排器统一调用。
-
-    params_schema.value 的 enum 即该轴 options 的 value 集合；
-    invoke.action 取 set（http 端点）或 set_topic（mqtt topic）。
-    """
-    skills: list[SkillDef] = []
-    for axis in modes or []:
-        axis_id = axis.get("id", "")
-        if not axis_id:
-            continue
-        values = [o["value"] for o in axis.get("options", [])]
-        skills.append({
-            "id": f"set_{axis_id}",
-            "name": f"切换{axis.get('label', axis_id)}",
-            "tags": ["mode"],
-            "params_schema": {
-                "type": "object",
-                "required": ["value"],
-                "properties": {"value": {"enum": values}},
-            },
-            "invoke": {"action": axis.get("set") or axis.get("set_topic") or ""},
-        })
-    return skills
+from cloud.cards.schema import AgentCard, SkillDef, StateMachine, Transport
 
 
 # ── 声明式技能映射表 ──────────────────────────────────────────────
 # 将 ESP32 manifest.capabilities 中的每条 action 映射到完整 SkillDef 结构。
-# 新增传感器 action 只需在此表添加一条，build_card_from_manifest 无需修改。
+# 新增智能体 action 只需在此表添加一条，build_card_from_manifest 无需修改。
 CAPABILITY_SKILLS: dict[str, SkillDef] = {
     "SET_COLOR": {
         "id": "set_light_color",
@@ -249,7 +223,7 @@ _LED_COLOR_SWATCHES: list[dict] = [
 
 _LED_WIDGETS: list[dict] = [{
     "type": "led_color",
-    "states": ["ON", "BRIGHT", "DIM", "COLOR"],
+    "states": ["ON", "BLINKING"],
     "placement": "controls",
     "order": 10,
     "action": "SET_COLOR",
@@ -297,7 +271,6 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     transport: Transport = {
         "kind": "mqtt",
         "task_topic": f"ssm/task/{unit_id}/{{task_id}}",  # 用 unit_id，保证 ESP32 能收到
-        "chat_endpoint": f"/api/esp32/{unit_id}/chat",    # ESP32 设备对话端点（所有 esp32 unit；执行器详情页使用，单一 ESP32 智能体处理）
     }
 
     capabilities: list[dict] = manifest.get("capabilities", [])
@@ -313,7 +286,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
 
     card = AgentCard(
         unit_id=unit_id,
-        device_id=manifest.get("device_id") or manifest.get("parent_id", "") or unit_id,
+        device_id=manifest.get("parent_id") or unit_id,
         name=name,
         description=description,
         agent_type=agent_type,
@@ -325,33 +298,35 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     card["parent_id"] = manifest.get("parent_id", "")
     fsm_key = _fsm_key(manifest)
     if fsm_key:
+        if fsm_key == "led" and agent_type == "actuator":
+            card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat"}
         card["state_machine"] = (NEW_LED_FSM if fsm_key == "led" and
                                  manifest.get("fsm_version") == 2 else FSM_DEFS[fsm_key])
         modes = MODE_DEFS.get(fsm_key)
         if modes:
             card["modes"] = modes
-            existing = {s["id"] for s in card["skills"]}
-            card["skills"].extend(
-                s for s in expand_mode_skills(modes) if s["id"] not in existing
-            )
         suggestions = SUGGESTION_DEFS.get(fsm_key)
         if suggestions:
             card["suggestions"] = suggestions
         widgets = WIDGET_DEFS.get(fsm_key)
         if widgets and "SET_COLOR" in capability_actions:
             card["widgets"] = _copy_widgets(widgets)
+            if fsm_key == "led" and manifest.get("fsm_version") != 2:
+                card["widgets"][0]["states"] = ["ON", "BRIGHT", "DIM", "COLOR"]
     return card
 
 
 def parse_card(payload: dict) -> AgentCard:
     """验证并返回自描述 Agent Card（Go2 等 HTTP 设备使用）。
 
-    unit_id 缺省回退 payload['slug']，兼容烧录/重启前的旧 retained card。
     state_machine 字段若存在则原样透传（Go2 等设备自带拓扑描述）。
     """
+    unit_id = payload.get("unit_id")
+    if not isinstance(unit_id, str) or not unit_id:
+        raise ValueError("Agent Card requires unit_id")
     card = AgentCard(
-        unit_id=payload.get("unit_id") or payload.get("slug", ""),
-        device_id=payload.get("device_id") or payload.get("parent_id") or payload.get("unit_id") or payload.get("slug", ""),
+        unit_id=unit_id,
+        device_id=payload.get("device_id") or payload.get("parent_id") or unit_id,
         name=payload.get("name", ""),
         description=payload.get("description", ""),
         agent_type=payload.get("agent_type", ""),
@@ -362,12 +337,7 @@ def parse_card(payload: dict) -> AgentCard:
     )
     if "state_machine" in payload:
         card["state_machine"] = payload["state_machine"]
-    for key in ("modes", "telemetry", "widgets", "suggestions"):
+    for key in ("modes", "telemetry", "widgets", "suggestions", "services"):
         if key in payload:
             card[key] = payload[key]
-    if payload.get("modes"):
-        existing = {s["id"] for s in card["skills"]}
-        card["skills"] = list(card["skills"]) + [
-            s for s in expand_mode_skills(payload["modes"]) if s["id"] not in existing
-        ]
     return card

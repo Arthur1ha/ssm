@@ -68,38 +68,23 @@ UNIT_CONFIGS = {
         'agent_type': 'sensor',
         'name': '光敏传感器',
         'probe': {'type': 'adc', 'pin': LIGHT_SENSOR_PIN, 'min_val': 30},
-        'manifest': {
-            'tags': ['light_level'],
-            'levels': ['DARK', 'DIM', 'NORMAL', 'BRIGHT'],
-            'ism_states': ['SAMPLING', 'ERROR'],
-        },
     },
     UNIT_IR: {
         'agent_type': 'sensor',
         'name': '红外传感器',
         'probe': {'type': 'digital', 'pin': IR_SENSOR_PIN, 'pull': 'down', 'active': 1},
-        'manifest': {
-            'tags': ['presence'],
-            'values': [True, False],
-            'ism_states': ['MONITORING', 'ERROR'],
-        },
     },
     UNIT_SOUND: {
         'agent_type': 'sensor',
         'name': '声音传感器',
         # DO 引脚为开漏输出，安静时浮空无法数字探测，改为手动标志位
         'probe': {'type': 'flag', 'enabled': True},
-        'manifest': {
-            'tags': ['sound'],
-            'values': ['detected'],
-        },
     },
     UNIT_LED: {
         'agent_type': 'actuator',
         'name': '智能灯',
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
-            'slug': 'desk-lamp',
             'fsm_version': 2,
             'num_pixels': WS2812_NUM,
             'commands': ['SET_COLOR', 'SET_STATE', 'BLINK'],

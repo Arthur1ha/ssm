@@ -74,7 +74,6 @@ class Transport(TypedDict):
 
     kind: Literal["mqtt", "http"]
     task_topic: NotRequired[str]        # mqtt only: ssm/task/{unit_id}/{task_id}
-    chat_endpoint: NotRequired[str]     # mqtt 设备 HTTP 对话端点（如 /api/esp32/{unit_id}/chat），补充 mqtt 传输
     endpoint: NotRequired[str]          # http: LLM 编排/对话入口（如 /api/go2/chat）
     command_endpoint: NotRequired[str]  # http: FSM 转移直接派发（如 /api/go2/commands）
     state_stream: NotRequired[str]      # http: SSE 实时状态流（如 /api/go2/connection/stream）
@@ -140,6 +139,7 @@ class AgentCard(TypedDict):
     agent_type: str   # "actuator" | "sensor" | "robot" | "decision"
     online: bool
     transport: Transport
+    services: NotRequired[dict[str, str]]  # 云端 API 能力（如 chat_endpoint），不属于设备 transport
     skills: list[SkillDef]
     state: dict        # 动态状态，初始为空
     state_machine: NotRequired[StateMachine]   # 静态拓扑，无此字段则前端回退富页

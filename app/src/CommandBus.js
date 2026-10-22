@@ -2,7 +2,7 @@
 const commandBus = {
   async command(unitId, action, params = {}) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    const timer = setTimeout(() => controller.abort(), action === 'chat' ? 60000 : 30000);
     try {
       const data = await apiClient.request(`/api/commands/${encodeURIComponent(unitId)}`, {
         method: 'POST', body: { action, params }, signal: controller.signal,

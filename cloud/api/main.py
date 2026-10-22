@@ -51,6 +51,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
         client.subscribe([
             ("ssm/agents/+/state",  0),
             ("ssm/agents/+/event",  0),
+            (f"ssm/agents/{os.getenv('ESP32_LED_UNIT_ID', 'esp32_desk_led')}/thought", 0),
             ("ssm/result/+/+",      0),
             ("ssm/task/+/+",        0),
             ("ssm/feedback/+",      0),
@@ -83,6 +84,10 @@ def _on_esp32_message(client, userdata, msg):
             _esp32_state.on_manifest(unit_id, payload)
         if msg_type in ("state", "event") and isinstance(payload, dict):
             _esp32_state.on_agent_msg(unit_id, msg_type, payload)
+            if msg_type == "state" and unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+                agent = esp32_agent_mod.get_agent()
+                if agent:
+                    agent.push_sensor_event(unit_id, payload)
         if msg_type == "event":
             suffix = unit_id.split("_")[-1]
             if suffix in ("light", "ir", "sound"):
@@ -98,20 +103,23 @@ def _on_esp32_message(client, userdata, msg):
     elif len(parts) == 4 and parts[1] == "task":
         # 识别"用户/编排器对设备的命令"（排除灯智能体自身的 agent_auto 任务），
         # 触发自主层让位窗口，避免自主调光立刻翻掉用户设置。
-        if isinstance(payload, dict) and payload.get("session_id") not in (None, "agent_auto", "auto"):
+        if (parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+                and isinstance(payload, dict)
+                and payload.get("session_id") not in (None, "agent_auto", "auto")):
             agent = esp32_agent_mod.get_agent()
             if agent:
                 agent.mark_user_command(parts[2])
-                # 灯被命令时也用 persona 吐一句台词（发 thought），与 Go2 行为一致。
-                # LLM 调用是秒级的，另起 daemon 线程跑，绝不阻塞 MQTT 回调线程。
-                action = payload.get("action")
-                params = payload.get("params", {})
-                threading.Thread(
-                    target=_narrate_completed_command,
-                    args=(agent, parts[3], action, params),
-                    daemon=True,
-                    name="ESP32Narrate",
-                ).start()
+                if payload.get("source") != "lamp_chat":
+                    # 设备页对话已在执行完成后回复，无需再生成一条重复的 thought。
+                    # 其他命令的旁白在子线程等待结果，不阻塞 MQTT 回调。
+                    action = payload.get("action")
+                    params = payload.get("params", {})
+                    threading.Thread(
+                        target=_narrate_completed_command,
+                        args=(agent, parts[3], action, params),
+                        daemon=True,
+                        name="ESP32Narrate",
+                    ).start()
 
 
 def _narrate_completed_command(agent, task_id, action, params):

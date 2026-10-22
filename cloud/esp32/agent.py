@@ -64,6 +64,7 @@ class ESP32Agent:
         self._autonomy_mode: str = "manual"   # 默认手动：连上不自动控灯，reactive 需显式开启
         self._user_hold_until: float = 0.0
         self._last_reason_sig: tuple | None = None   # 上次问 LLM 时的情境签名（实质变化门）
+        self._last_reason_ts: float = 0.0
 
     def get_autonomy_mode(self) -> str:
         """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""
@@ -83,11 +84,15 @@ class ESP32Agent:
         self._user_hold_until = time.time() + USER_HOLD_TTL
         logger.info("user command on %s → 自主层让位 %ds", unit_id, USER_HOLD_TTL)
 
+    def wait_task_result(self, task_id: str, timeout: float = 20.0) -> dict:
+        """供设备页对话等待 ESP32 的实际执行反馈。"""
+        return self._state.wait_task_result(task_id, timeout=timeout)
+
     def narrate_command(self, action: str, params: dict) -> None:
         """收到用户/编排器命令时，用 persona 生成一句台词并发 thought。
 
-        与 Go2 行为一致：执行后用性格大脑吐一句确认/吐槽，PWA 经
-        ssm/agents/+/thought 通配渲染。必须能安全地从子线程调用——
+        与 Go2 行为一致：执行后用性格大脑吐一句确认/吐槽，并发布到
+        ssm/agents/+/thought。必须能安全地从子线程调用——
         内部全部 try/except 包好，LLM 异常时用兜底台词，绝不向外抛。
         """
         try:
@@ -95,7 +100,7 @@ class ESP32Agent:
             desc_parts = []
             if "state" in params:
                 desc_parts.append(f"state={params['state']}")
-            for k in ("r", "g", "b", "brightness"):
+            for k in ("r", "g", "b", "brightness", "count"):
                 if k in params:
                     desc_parts.append(f"{k}={params[k]}")
             params_desc = "、".join(desc_parts) if desc_parts else "无额外参数"
@@ -103,7 +108,7 @@ class ESP32Agent:
             prompt = (
                 f"{AGENT_PERSONA}\n"
                 "刚刚有人（用户或编排器）给你下达了一条控制 LED 灯的命令，你已经照做了。\n"
-                f"命令动作：{action}（SET_STATE=开关，SET_COLOR=调色温/亮度）\n"
+                f"命令动作：{action}（SET_STATE=开关，SET_COLOR=调色温/亮度，BLINK=闪烁）\n"
                 f"命令参数：{params_desc}\n\n"
                 "用你的性格说一句简短的话，确认或吐槽这次动作。"
                 "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"
@@ -124,26 +129,34 @@ class ESP32Agent:
             logger.warning("narrate_command failed: %s", e)
 
     def handle_user_text(self, text: str, *, persist: bool = True) -> str | dict:
-        """处理设备页直达的用户文本：LLM 分类『闲聊/调教』，调教则落库。
-
-        本入口不执行即时命令（仍走 FSM 按钮/MQTT task）。全程 try/except，
-        解析失败降级为礼貌回复，绝不抛出。
-        """
+        """理解设备页文本：即时控灯、调教或闲聊；实际动作由 API 派发。"""
         from cloud.esp32.memory import taught
         prompt = (
             f"{AGENT_PERSONA}\n"
-            "用户对你说了一句话。判断这是『闲聊』，还是『调教』"
-            "（教你以后遇到某情境就做某事）。\n"
+            "用户对你说了一句话。把当前要执行的灯光指令分类为 act；"
+            "教你以后遇到某情境再做某事分类为 teach；其他问题或闲聊分类为 chat。\n"
+            "act 只能使用以下动作：SET_STATE 开关灯，params.state 为 ON 或 OFF；"
+            "SET_COLOR 调色或调亮度，params 含 r、g、b（0-255 整数）和 brightness（0-255 整数）；"
+            "BLINK 闪烁，params.count 为 1-20 整数，可选 r、g、b。"
+            "用户只要求改变亮度时，请保留当前 RGB；只要求改变颜色时，请保留当前亮度。\n"
+            f"当前灯状态：{json.dumps(self._state.actuator_snapshot(), ensure_ascii=False)}\n"
             f"用户说：{text}\n\n"
             "只输出 JSON，不含代码块：\n"
-            '{"type": "teach"或"chat", "trigger": "情境(调教时填，自然语言)", '
-            '"behavior": "行为(调教时填，自然语言)", "reply": "你回复用户的一句话"}'
+            '{"type": "act|teach|chat", "action": "act 时填 SET_STATE|SET_COLOR|BLINK", '
+            '"params": {}, "trigger": "teach 时填未来情境", '
+            '"behavior": "teach 时填未来行为", "reply": "简短回复；act 时仅在执行成功后展示"}\n'
+            '例："打开灯" → {"type":"act","action":"SET_STATE","params":{"state":"ON"},'
+            '"reply":"行吧，给你开了。"}；'
+            '"调成红色" → {"type":"act","action":"SET_COLOR",'
+            '"params":{"r":255,"g":0,"b":0,"brightness":180},"reply":"给你调红了。"}'
         )
         try:
             resp = self._llm.invoke([HumanMessage(content=prompt)])
             content = resp.content.strip()
             content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
             data = json.loads(content[content.find("{"):content.rfind("}") + 1])
+            if not isinstance(data, dict):
+                raise ValueError("LLM reply is not a JSON object")
         except Exception as e:
             logger.warning("handle_user_text parse error: %s", e)
             return {
@@ -152,6 +165,13 @@ class ESP32Agent:
                 "error": "llm_unavailable",
             }
 
+        if data.get("type") == "act":
+            return {
+                "type": "act",
+                "action": str(data.get("action") or "").upper(),
+                "params": data.get("params"),
+                "reply": data.get("reply") or "行吧，照你说的办了。",
+            }
         if data.get("type") == "teach" and data.get("trigger") and data.get("behavior"):
             if not persist:
                 return {
@@ -159,8 +179,11 @@ class ESP32Agent:
                     "persisted": False,
                 }
             taught.add(data["trigger"], data["behavior"])
+            self._event_queue.put({"unit_id": "taught_rules", "enqueue_ts": time.time()})
             return data.get("reply") or f"学会了：{data['trigger']}就{data['behavior']}"
-        return data.get("reply") or "好的~"
+        if data.get("type") == "chat":
+            return data.get("reply") or "好的~"
+        return {"result": "error", "reply": "这句话我没理解清楚，请再说一次。"}
 
     def _in_user_hold(self) -> bool:
         """当前是否处于用户让位窗口内。"""
@@ -226,11 +249,12 @@ class ESP32Agent:
         sound_detected = server_sound_recent or snap_sound_recent
 
         led_state = "UNKNOWN"
-        led_device_id = "esp32_desk_led"
+        led_config = {"r": 0, "g": 0, "b": 0, "brightness": 0, "count": None}
         for uid, data in self._state.actuator_snapshot().items():
             if uid.endswith("_led"):
-                led_state = (data.get("state") or {}).get("ism", "UNKNOWN")
-                led_device_id = uid
+                state = data.get("state") or {}
+                led_state = state.get("ism", "UNKNOWN")
+                led_config = {key: state.get(key) for key in led_config}
                 break
 
         now_dt = datetime.datetime.now()
@@ -246,7 +270,7 @@ class ESP32Agent:
         return {
             "light_level": level, "light_value": value, "light_lux": lux,
             "sound_detected": sound_detected, "sound_recent": sound_detected,
-            "led_state": led_state, "led_device_id": led_device_id,
+            "led_state": led_state, "led_config": led_config,
             "time_str": time_str, "time_period": time_period,
         }
 
@@ -296,7 +320,8 @@ class ESP32Agent:
             "你负责控制桌面 LED 灯，根据当前传感器观测自主决定是否采取行动。\n\n"
             f"当前观测：{json.dumps(sense_data, ensure_ascii=False)}\n"
             "字段说明：light_level（DARK/DIM/NORMAL/BRIGHT）、light_lux（照度，越小越暗）、"
-            "sound_detected（近 5 秒内是否有声音）、led_state（当前灯状态）、time_period（时段）\n\n"
+            "sound_detected（近 5 秒内是否有声音）、led_state（当前灯状态）、"
+            "led_config（当前 RGB、亮度、闪烁次数）、time_period（时段）\n\n"
             f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
             f"{history_lines}"
             f"{hints_str}{taught_str}\n\n"
@@ -320,30 +345,30 @@ class ESP32Agent:
             logger.warning("reason parse error: %s", e)
             return None
 
-    def _find_led_device(self) -> str:
-        """从 actuator 快照中查找 LED 设备 ID，找不到返回默认值。"""
+    def _find_led_unit(self) -> str:
+        """从 actuator 快照中查找 LED 单元 ID，找不到返回默认值。"""
         for uid in self._state.actuator_snapshot():
             if uid.endswith("_led"):
                 return uid
         return "esp32_desk_led"
 
-    def _get_current_ism(self, led_device: str) -> str:
+    def _get_current_ism(self, led_unit: str) -> str:
         """读取 LED 当前 ISM 状态。"""
         snap = self._state.actuator_snapshot()
-        return (snap.get(led_device, {}).get("state") or {}).get("ism", "").upper()
+        return (snap.get(led_unit, {}).get("state") or {}).get("ism", "").upper()
 
-    def _dispatch_tool(self, tool_name: str, params: dict, led_device: str) -> bool:
+    def _dispatch_tool(self, tool_name: str, params: dict, led_unit: str) -> bool:
         """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
 
-        set_led_state / set_led_color 共享 self._cooldown（同参 5 分钟内只发一次）；
+        set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
         speak 等不受冷却约束。色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
         """
         from cloud.esp32 import tools as _tools_mod
         now = time.time()
         params = dict(params)
 
-        if tool_name in ("set_led_state", "set_led_color"):
-            params["device_id"] = led_device
+        if tool_name in ("set_led_state", "set_led_color", "blink_led"):
+            params["unit_id"] = led_unit
             key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
             if now - self._cooldown.get(key, 0) < 300:
                 logger.debug("cooldown skip: %s", key)
@@ -358,7 +383,7 @@ class ESP32Agent:
             return False
         try:
             task_id = fn(**params)
-            if tool_name in ("set_led_state", "set_led_color"):
+            if tool_name in ("set_led_state", "set_led_color", "blink_led"):
                 # Real tools return an auto_* task id and must await the edge result.
                 # A synchronous adapter may return a completion marker directly.
                 if isinstance(task_id, str) and task_id.startswith("auto_"):
@@ -374,7 +399,7 @@ class ESP32Agent:
             logger.warning("tool %s failed: %s", tool_name, e)
             return False
 
-    def _execute(self, tool_calls: list, led_device: str):
+    def _execute(self, tool_calls: list, led_unit: str):
         """执行 planner 输出的工具调用列表（逐个走单一执行口）。
 
         若某调用带 taught_id 且执行成功，记一次调教命中。
@@ -382,7 +407,7 @@ class ESP32Agent:
         from cloud.esp32.memory import taught as _taught
         completed = []
         for call in tool_calls:
-            ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_device)
+            ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_unit)
             if not ok:
                 break  # do not narrate success or run dependent actions after a failed command
             completed.append(call.get("tool", ""))
@@ -392,6 +417,9 @@ class ESP32Agent:
 
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
+        current_level = sense.get("light_level", "")
+        level_changed = bool(self._last_light_level and current_level != self._last_light_level)
+        self._last_light_level = current_level
         if now - self._last_proactive_ts < 600:
             return []
         triggers = []
@@ -406,14 +434,14 @@ class ESP32Agent:
         if self._work_start_ts > 0 and (now - self._work_start_ts) >= 3600:
             triggers.append("long_work")
 
-        current_level = sense.get("light_level", "")
-        if self._last_light_level and current_level != self._last_light_level:
+        if level_changed:
             triggers.append("env_changed")
-        self._last_light_level = current_level
 
         if self._last_act_ts > 0 and (now - self._last_act_ts) >= 300:
             triggers.append("unimproved")
 
+        if triggers:
+            self._last_proactive_ts = now
         return triggers
 
     def _summarize_beliefs(self) -> str:
@@ -432,7 +460,7 @@ class ESP32Agent:
             return ""
 
     def _loop(self):
-        logger.info("sensor automation running")
+        logger.info("sensor worker started (autonomy mode=%s)", self._autonomy_mode)
         _last_event_ts: dict[str, float] = {}
         DEBOUNCE_SECS     = 5
         OFFLINE_THRESHOLD = 120
@@ -450,12 +478,17 @@ class ESP32Agent:
                         continue
                     _last_event_ts[unit_id] = enqueue_ts
                     triggered_by_event = True
-                    logger.info("triggered by %s", unit_id)
+                    logger.debug("sensor event received from %s", unit_id)
                 except queue.Empty:
                     if time.time() - _last_any_event_ts > OFFLINE_THRESHOLD:
                         logger.debug("periodic tick: device offline, skip")
                         continue
                     logger.debug("periodic tick")
+
+                if not self._should_act():
+                    logger.debug("autonomy gated (mode=%s hold=%s), skip self-action",
+                                 self._autonomy_mode, self._in_user_hold())
+                    continue
 
                 sense = self._sense()
                 if sense is None:
@@ -465,18 +498,23 @@ class ESP32Agent:
 
                 sense["proactive_hints"] = self._check_proactive(sense)
 
-                if not self._should_act():
-                    logger.debug("autonomy gated (mode=%s hold=%s), skip self-action",
-                                 self._autonomy_mode, self._in_user_hold())
-                    continue
-
-                # 实质变化门：只有慢变量（光照档位 / 时段）变了才值得问 LLM。
-                # 声音等高频噪声不进签名，避免反复花配额让 LLM 决定"不用动灯"。
-                sig = (sense["light_level"], sense["time_period"])
+                # 仅在感知、灯配置或调教规则变化时重新评估；事件去抖和最小间隔限制 LLM 频率。
+                from cloud.esp32.memory import taught as _taught
+                rule_sig = tuple((r.get("id"), r.get("trigger"), r.get("behavior"), r.get("enabled"))
+                                 for r in _taught.list_all())
+                led_config = sense.get("led_config") or {}
+                sig = (sense["light_level"], sense["time_period"],
+                       sense["sound_detected"], sense["led_state"],
+                       tuple(led_config.get(k) for k in ("r", "g", "b", "brightness", "count")),
+                       rule_sig)
                 if sig == self._last_reason_sig:
                     logger.debug("no material change %s, skip LLM", sig)
                     continue
+                if time.time() - self._last_reason_ts < 10:
+                    logger.debug("reason rate limit, wait for next tick")
+                    continue
 
+                self._last_reason_ts = time.time()
                 tool_calls = self._reason(sense)
                 if tool_calls is None:
                     continue
@@ -484,7 +522,7 @@ class ESP32Agent:
 
                 logger.info("tool_calls (%d): %s", len(tool_calls), json.dumps(tool_calls, ensure_ascii=False))
 
-                completed = self._execute(tool_calls, self._find_led_device()) if tool_calls else []
+                completed = self._execute(tool_calls, self._find_led_unit()) if tool_calls else []
                 self._belief_history.append({
                     "ts": time.time(),
                     "context": f"light={sense['light_level']} sound={sense['sound_detected']} led={sense['led_state']}",

@@ -1,5 +1,7 @@
 """cloud.esp32.router — ESP32 桌面智能体 HTTP 端点。"""
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -7,6 +9,12 @@ from cloud.esp32 import agent as _esp32_agent
 from cloud.api.auth import require_admin, require_admin_csrf, require_session
 
 router = APIRouter(prefix="/api/esp32", tags=["esp32"])
+_LED_UNIT_ID = os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+
+
+def _require_led_unit(unit_id: str) -> None:
+    if unit_id != _LED_UNIT_ID:
+        raise HTTPException(status_code=404, detail="lamp agent is not available for this unit")
 
 
 class AutonomyRequest(BaseModel):
@@ -41,19 +49,16 @@ async def esp32_autonomy_set(req: AutonomyRequest, _session: dict = Depends(requ
 
 @router.post("/{unit_id}/chat")
 async def esp32_chat(unit_id: str, req: ChatRequest, _session: dict = Depends(require_admin_csrf)):
-    """设备页对话直达灯智能体：分类闲聊/调教并回复。"""
-    agent = _esp32_agent.get_agent()
-    if agent is None:
-        raise HTTPException(status_code=503, detail="ESP32 Agent 未初始化")
-    result = agent.handle_user_text(req.text)
-    if isinstance(result, dict):
-        return result
-    return {"reply": result, "llm_available": True}
+    """设备页对话直达灯智能体：控灯、调教或闲聊。"""
+    _require_led_unit(unit_id)
+    from cloud.api.intents import execute_lamp_chat
+    return await execute_lamp_chat(unit_id, req.text.strip(), _session)
 
 
 @router.get("/{unit_id}/memory")
 async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
     """返回灯智能体的成长资产：调教记录 + 历史规律摘要。"""
+    _require_led_unit(unit_id)
     from cloud.esp32.memory import taught
     agent = _esp32_agent.get_agent()
     belief = getattr(agent, "_belief_summary", "") if agent else ""

@@ -43,8 +43,14 @@ broker-bg:
 # ── API ──────────────────────────────────────────────────────
 api:
 	@mkdir -p $(LOG_DIR)
-	@pkill -9 -f "[u]vicorn cloud.api.main" || true
-	@sleep 1
+	@pkill -TERM -f "[u]vicorn cloud.api.main" || true
+	@for i in $$(seq 1 15); do \
+		pgrep -f "[u]vicorn cloud.api.main" >/dev/null || break; \
+		sleep 1; \
+	done
+	@if pgrep -f "[u]vicorn cloud.api.main" >/dev/null; then \
+		echo "API 进程未在 15 秒内退出，请检查旧进程"; exit 1; \
+	fi
 	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload --timeout-graceful-shutdown 10 2>&1 | tee $(LOG_DIR)/api.log
 
 api-bg:

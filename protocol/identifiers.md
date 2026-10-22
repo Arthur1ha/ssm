@@ -5,7 +5,7 @@
 | 概念 | 唯一字段名 | 含义 | 示例 | 谁用 |
 |------|-----------|------|------|------|
 | 整机 / 连接 | `device_id` | 一块物理板子 / 一个进程；单单元设备里 == unit_id | `esp32_desk`、`go2` | LWT/status、rules、location、manifest.parent_id |
-| 传输单元 | `unit_id` | 每个可寻址智能体的唯一 ID，`{device_id}_{unit}` | `esp32_desk_led`、`go2` | **所有 topic、所有 payload 自标识、CardRegistry key、URL、Planner 对 LLM 的索引** |
+| 传输单元 | `unit_id` | 每个可寻址智能体或传感输入的唯一 ID，通常为 `{device_id}_{unit}` | `esp32_desk_led`、`esp32_desk_light`、`go2` | **所有 topic、所有 payload 自标识**；仅智能体进入 CardRegistry、设备 URL 与 Planner 能力索引 |
 
 > **slug 已废弃**：曾作展示别名，但与 unit_id 几乎重合（仅 `desk-lamp` 一例）、无实际需求，已合并进 unit_id。寻址/URL 用 `unit_id`，显示用 `name`，分类用 `tags`，slug 不再存在。
 

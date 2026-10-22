@@ -280,6 +280,10 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
             event["state"] = payload if isinstance(payload, dict) else {"value": payload}
         elif message_type == "event":
             event["event"] = payload if isinstance(payload, dict) else {"value": payload}
+        elif message_type == "thought":
+            if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+                return False
+            event["thought"] = payload
         else:
             return False
         _events.broadcast(event)
@@ -312,6 +316,101 @@ def _configured_card(unit_id: str) -> dict[str, Any] | None:
     if card and card_device_id(card) in configured:
         return card
     return None
+
+
+def _dispatch_mqtt_task(
+    unit_id: str, action: str, params: dict[str, Any], session: dict[str, Any],
+    *, source: str | None = None,
+) -> str:
+    ensure_instant_action(action.upper())
+    card = _configured_card(unit_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="unit is not available in the current space")
+    if (card.get("transport") or {}).get("kind") != "mqtt":
+        raise HTTPException(status_code=400, detail="unsupported device transport")
+    allowed = {
+        str((skill.get("invoke") or {}).get("action") or "")
+        for skill in card.get("skills", [])
+    }
+    allowed.update(str(edge.get("action") or "") for edge in (card.get("state_machine") or {}).get("transitions", []))
+    if allowed and action not in allowed:
+        raise HTTPException(status_code=403, detail="action is not declared by this unit")
+    task_id = "task_" + uuid.uuid4().hex
+    payload = {
+        "task_id": task_id,
+        "session_id": session["session_id"],
+        "action": action,
+        "params": params,
+        "actor": session["actor"],
+        "persist": session["actor"] == "admin",
+        "space_id": DEFAULT_SPACE_ID,
+        "ts": int(time.time()),
+    }
+    if source:
+        payload["source"] = source
+    _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
+    return task_id
+
+
+def _valid_lamp_params(action: str, params: Any) -> bool:
+    if not isinstance(params, dict):
+        return False
+    if action == "SET_STATE":
+        return set(params) == {"state"} and params["state"] in ("ON", "OFF")
+    if action == "SET_COLOR":
+        required, optional = {"r", "g", "b"}, {"brightness"}
+        if not required <= set(params) or set(params) - required - optional:
+            return False
+        return all(type(value) is int and 0 <= value <= 255 for value in params.values())
+    if action == "BLINK":
+        if "count" not in params or set(params) - {"count", "r", "g", "b"}:
+            return False
+        return all(
+            type(value) is int and (1 <= value <= 20 if key == "count" else 0 <= value <= 255)
+            for key, value in params.items()
+        )
+    return False
+
+
+def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
+    planned = agent.handle_user_text(message, persist=session["actor"] == "admin")
+    if not isinstance(planned, dict):
+        return {"result": "ok", "reply": str(planned)}
+    if planned.get("llm_available") is False:
+        return {"result": "error", **planned}
+    if planned.get("type") != "act":
+        return {"result": "ok", **planned}
+
+    action, params = planned.get("action"), planned.get("params")
+    if not _valid_lamp_params(action, params):
+        logger.warning("lamp chat produced invalid action or params: %s %s", action, params)
+        return {"result": "error", "reply": "这条灯光指令我没理解清楚，请再说一次。"}
+
+    task_id = _dispatch_mqtt_task(unit_id, action, params, session, source="lamp_chat")
+    execution = agent.wait_task_result(task_id, 20.0)
+    outcome = execution.get("result", "error")
+    if outcome == "ok":
+        return {"result": "ok", "reply": planned["reply"], "action": action, "task_id": task_id}
+    detail = execution.get("error") or execution.get("reason")
+    logger.warning("lamp chat task %s ended with %s: %s", task_id, outcome, detail)
+    reply = "灯没能执行这条命令。" if outcome != "timeout" else "还没收到灯的执行反馈，暂时不能确认它是否执行了。"
+    if detail:
+        reply += f"原因：{detail}"
+    return {"result": outcome, "reply": reply, "task_id": task_id}
+
+
+async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
+    """理解灯的对话，并在即时命令时等待 ESP32 的执行结果。"""
+    if not message.strip():
+        raise HTTPException(status_code=400, detail="chat requires message")
+    if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led") or _configured_card(unit_id) is None:
+        raise HTTPException(status_code=404, detail="unit is not available in the current space")
+    from cloud.esp32.agent import get_agent
+
+    agent = get_agent()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="ESP32 agent is unavailable")
+    return await asyncio.to_thread(_run_lamp_chat, agent, unit_id, message, session)
 
 
 async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, Any]) -> Any:
@@ -398,6 +497,8 @@ async def create_command(
         return {"ok": True, "result": result}
 
     if req.action.lower() == "set_mode":
+        if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led") or _configured_card(unit_id) is None:
+            raise HTTPException(status_code=404, detail="lamp agent is not available for this unit")
         if session["actor"] != "admin":
             audit_event("command_rejected", session, unit_id=unit_id, action=req.action, status=403)
             raise HTTPException(status_code=403, detail="only an administrator may change autonomy mode")
@@ -416,51 +517,10 @@ async def create_command(
 
     if req.action.lower() == "chat":
         message = str(req.params.get("message") or "").strip()
-        if not message:
-            raise HTTPException(status_code=400, detail="chat requires message")
-        if _configured_card(unit_id) is None:
-            raise HTTPException(status_code=404, detail="unit is not available in the current space")
-        from cloud.esp32.agent import get_agent
-
-        agent = get_agent()
-        if agent is None:
-            raise HTTPException(status_code=503, detail="ESP32 agent is unavailable")
-        reply = await asyncio.to_thread(
-            agent.handle_user_text, message, persist=session["actor"] == "admin"
-        )
-        result = {"result": "ok", **reply} if isinstance(reply, dict) else {
-            "result": "ok", "reply": str(reply)
-        }
+        result = await execute_lamp_chat(unit_id, message, session)
         return {"ok": True, "result": result}
 
-    ensure_instant_action(req.action.upper())
-
-    card = _configured_card(unit_id)
-    if card is None:
-        # Device-level ESP placeholder exists while offline, but cannot accept a
-        # concrete command until a unit card declares its capabilities.
-        raise HTTPException(status_code=404, detail="unit is not available in the current space")
-    transport = card.get("transport") or {}
-    if transport.get("kind") != "mqtt":
-        raise HTTPException(status_code=400, detail="unsupported device transport")
-    allowed = {
-        str((skill.get("invoke") or {}).get("action") or "")
-        for skill in card.get("skills", [])
-    }
-    allowed.update(str(edge.get("action") or "") for edge in (card.get("state_machine") or {}).get("transitions", []))
-    if allowed and req.action not in allowed:
-        raise HTTPException(status_code=403, detail="action is not declared by this unit")
-    task_id = "task_" + uuid.uuid4().hex
-    payload = {
-        "task_id": task_id,
-        # Kept at the top level for the MicroPython result correlation contract;
-        # unlike the retired browser path this value is generated by the server.
-        "session_id": session["session_id"],
-        "action": req.action,
-        "params": req.params,
-        "context": _context(session),
-    }
-    _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
+    task_id = _dispatch_mqtt_task(unit_id, req.action, req.params, session)
     response.status_code = status.HTTP_202_ACCEPTED
     return {"accepted": True, "status": "dispatched", "task_id": task_id}
 

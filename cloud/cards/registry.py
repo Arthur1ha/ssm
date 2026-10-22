@@ -27,6 +27,7 @@ class CardRegistry:
         """初始化空注册表。"""
         self._cards: dict[str, AgentCard] = {}
         self._states: dict[str, dict] = {}
+        self._statuses: dict[str, bool] = {}
         self._lock = threading.Lock()
 
     def subscribe(self, client) -> None:
@@ -82,6 +83,7 @@ class CardRegistry:
             device_id = parts[2]
             online = (raw.strip() == b"online")
             with self._lock:
+                self._statuses[device_id] = online
                 for c in self._cards.values():
                     if (
                         c.get("unit_id") == device_id
@@ -103,11 +105,20 @@ class CardRegistry:
             else:
                 try:
                     data = json.loads(raw)
+                    if data.get("agent_type") == "sensor":
+                        with self._lock:
+                            self._cards.pop(unit_id, None)
+                        return
                     card = parse_card(data)
                     with self._lock:
                         # 保留已知 online（status 可能先于 card 到达，且是在线真相）
                         prev = self._cards.get(card["unit_id"])
-                        if prev is not None and "online" in prev:
+                        status_id = card.get("device_id") or card.get("parent_id") or card["unit_id"]
+                        if status_id in self._statuses:
+                            card["online"] = self._statuses[status_id]
+                        elif card["unit_id"] in self._statuses:
+                            card["online"] = self._statuses[card["unit_id"]]
+                        elif prev is not None and "online" in prev:
                             card["online"] = prev["online"]
                         if card["unit_id"] in self._states:
                             card["state"] = self._states[card["unit_id"]]
@@ -128,8 +139,10 @@ class CardRegistry:
                 return
             try:
                 data = json.loads(raw)
-                # 系统/监控节点不参与编排
-                if data.get("agent_type") == "decision":
+                # 感知输入与系统节点不生成独立 Agent Card。
+                if data.get("agent_type") in ("sensor", "decision"):
+                    with self._lock:
+                        self._cards.pop(unit_id, None)
                     return
                 if data.get("hw_platform") == "cloud":
                     return
@@ -137,7 +150,12 @@ class CardRegistry:
                 with self._lock:
                     # 保留已知 online（status 可能先于 manifest 到达，且是在线真相）
                     prev = self._cards.get(card["unit_id"])
-                    if prev is not None and "online" in prev:
+                    status_id = card.get("device_id") or card.get("parent_id") or card["unit_id"]
+                    if status_id in self._statuses:
+                        card["online"] = self._statuses[status_id]
+                    elif card["unit_id"] in self._statuses:
+                        card["online"] = self._statuses[card["unit_id"]]
+                    elif prev is not None and "online" in prev:
                         card["online"] = prev["online"]
                     if card["unit_id"] in self._states:
                         card["state"] = self._states[card["unit_id"]]

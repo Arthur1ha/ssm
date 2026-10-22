@@ -7,10 +7,10 @@
 **目标用户**：探索边缘-云端-移动端三层分布式智能体架构的开发者；核心体验是"新接一个传感器，整个系统自动感知并纳入决策"。
 
 **核心业务逻辑**：
-1. ESP32 启动时探测引脚 → 向 broker 发布已接设备的 manifest（retained）
-2. 手机 PWA 订阅 `ssm/agents/#`，自动发现所有在线设备，以设备卡片列表呈现
-3. 用户语音/文字 → PWA 经 MQTT 发布 `ssm/intent/{session_id}` → 编排器 Planner（唯一大脑，一次 LLM 完成 act/chat/define_rule 分类）→ Dispatcher→Evaluator→Responder 执行并反馈
-4. 传感器事件也触发云端 ESP32 智能体自动决策（如变暗自动开灯）
+1. ESP32 启动时探测引脚 → 为已接智能体发布 retained manifest；传感器仅发布独立的 state/event，不产生设备卡
+2. 云端 API 订阅 manifest、card、status、state、event 等 MQTT 主题，仅为智能体维护设备卡；手机 PWA 经 `/api/devices` 与 `/api/events`（SSE）自动发现和展示智能体
+3. 用户语音/文字 → PWA 请求 `/api/intents` → API 发布 MQTT `ssm/intent/{session_id}` → 编排器 Planner（一次 LLM 完成 act/chat/define_rule 分类）→ Dispatcher→Evaluator→Responder 执行并反馈
+4. `reactive` 模式下，传感器事件也可触发云端 ESP32 智能体自主决策；默认 `manual` 不自发控灯
 5. 云端离线时 ESP32 本地规则接管（兜底层）
 6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{unit_id}/agent`）暴露能力，供编排器与 PWA 动态发现
 
@@ -27,7 +27,7 @@
 | LLM（编排/Go2/ESP32 智能体） | 火山方舟 Ark `deepseek-v4-flash` / `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
 | Go2 机器狗 | `unitree-webrtc-connect`（WebRTC）+ YOLO（ultralytics）视觉 | HTTP REST，非 MQTT |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
-| 手机 PWA | React 18（无构建，Babel standalone） + MQTT.js | React 18.3.1、mqtt.js 5.3.4 |
+| 手机 PWA | React 18（无构建，Babel standalone）+ 同源 HTTP/SSE | React 18.3.1 |
 | Python 环境 | uv 管理，Python 3.13 | `pyproject.toml` + `uv.lock` |
 
 ---
@@ -39,7 +39,7 @@ ssm/
 ├── edge/                ← MicroPython 边缘智能体（跑在 ESP32 上）
 │   ├── config.py        ← ★ 唯一配置入口：引脚、MQTT、UNIT_CONFIGS 注册表
 │   ├── probe.py         ← 通用引脚探测引擎（读 UNIT_CONFIGS，零硬编码）
-│   ├── agent_manifest.py← 通用 manifest 发布（读 UNIT_CONFIGS + PRESENCE）
+│   ├── agent_manifest.py← 智能体 manifest 发布及旧传感器 manifest 清理（读 UNIT_CONFIGS + PRESENCE）
 │   ├── bsm.py           ← 硬件驱动层（GPIO/ADC/PWM），只抛事件
 │   ├── ism.py           ← 状态机契约层，只做状态转换
 │   ├── trigger_map.py   ← ★ 唯一耦合点：BSM↔ISM↔MQTT 接线
@@ -76,11 +76,10 @@ ssm/
 ├── app/                 ← 用户端 PWA（跑在手机/浏览器）
 │   ├── index.html / manifest.json / sw.js / styles/app.css
 │   └── src/
-│       ├── app.jsx      ← ★ 主 React 应用（单屏聊天中心 + hash 子页、MQTT 引导、聊天状态）
-│       ├── config.js    ← Broker 地址、阈值等前端配置
-│       ├── MqttBus.js / AgentRegistry.js / ISMTracker.js ← MQTT 总线 / 设备注册表 / 状态跟踪
-│       ├── hooks/       ← useSendIntent.js（发布 ssm/intent）
-│       ├── pages/       ← DeviceDetailPage、DevicesPage、Go2Page、RulesPage（hash 子页）
+│       ├── app.jsx      ← ★ 主 React 应用（单屏聊天中心 + hash 子页、聊天状态）
+│       ├── ApiClient.js / CommandBus.js ← 会话 API/SSE 与设备命令入口
+│       ├── hooks/       ← useSendIntent.js（调用 /api/intents）、useSsmCore.js（设备快照与事件）
+│       ├── pages/       ← FsmDevicePage、DevicesPage、RulesPage（hash 子页）
 │       ├── components/  ← ActivityFeed（活动流气泡）、ChatPanel、DeviceCard、Icon、RulesDrawer
 │       └── utils/       ← agentMeta、audio
 ├── protocol/            ← MQTT 协议契约（单一真实来源）
@@ -102,7 +101,7 @@ ssm/
 |------|------|------|
 | WS2812 灯环 | GPIO4 | 已接 |
 | 光线传感器 | GPIO34 | 已接（ADC 模拟） |
-| 红外传感器 | GPIO19 | 未接（`UNIT_CONFIGS` 有条目，探测缺席不发 manifest） |
+| 红外传感器 | GPIO19 | 未接（`UNIT_CONFIGS` 有条目，探测缺席不发 state/event） |
 | 声音传感器 | GPIO15 | 已接 |
 
 > 注：蜂鸣器在 `config.py` 中无任何条目（既未接线也无配置），故不在此表。
@@ -128,13 +127,13 @@ ssm/
 - **不用 `asyncio`**：当前架构用同步主循环（`while True: bsm.tick(); mqtt.check_msg()`），引入 asyncio 会破坏现有 tick 节奏
 - **`time.ticks_ms()` + `time.ticks_diff()`**：ESP32 的 `ticks_ms` 会溢出，必须用 `ticks_diff` 做差值，不能直接相减
 - **引脚释放**：probe.py 探测后必须 `Pin(n, Pin.IN)` 释放引脚，否则 BSM 初始化时引脚模式冲突
-- **每条 MQTT 消息带 `ts` 和 `agent_id`**：`ts = time.time()`（Unix 秒），非 `ticks_ms`
+- **ESP32 的 JSON 状态/事件消息用 `unit_id` 自标识，并携带 `ts`**：`ts = time.time()`（Unix 秒），非 `ticks_ms`
 
 ### 云端 / PWA
 
 - 云端服务始终用 `uv run python`，不手动激活 venv
 - PWA 无构建步骤，直接编辑 `.jsx`，浏览器刷新即生效
-- PWA 内所有 MQTT 操作通过 `MqttBus` 单例，不直接调用 `mqtt.js` API
+- PWA 经 `ApiClient` 和 `CommandBus` 访问同源 API；MQTT 发布与订阅由云端服务负责
 
 ---
 
@@ -158,7 +157,7 @@ ssm/
 
 ### 3. UNIT_CONFIGS 作为设备注册表（普适性）
 
-**决策**：每个 unit 的引脚、探测策略、manifest 元数据全部声明在 `config.py` 的 `UNIT_CONFIGS` 字典里，`probe.py` 和 `agent_manifest.py` 是纯通用引擎。
+**决策**：每个 unit 的引脚与探测策略声明在 `config.py` 的 `UNIT_CONFIGS` 字典里；只有智能体条目声明 manifest 元数据。`probe.py` 和 `agent_manifest.py` 按配置通用处理，不硬编码单元名称。传感器保留独立 MQTT `state/event` 供灯大脑感知，但不生成设备卡。
 
 **原因**：新增传感器只改 `config.py` 一行，其余文件零修改；保证系统天然支持任意数量的同类设备。
 
@@ -168,13 +167,13 @@ ssm/
 
 **决策**：用有向图而不是单一 LLM 调用处理用户意图；每个节点职责单一。
 
-**原因**：Planner 只生成任务列表；Dispatcher 只发 MQTT；Evaluator 只校验结果；Responder 只组织回复。每个节点可以独立更换模型或逻辑。LLM fallback 链（多模型按顺序重试）也在图内透明处理。
+**原因**：Planner 只生成任务列表；Dispatcher 按设备传输类型派发 MQTT/HTTP；Evaluator 只校验结果；Responder 只组织回复。每个节点可以独立更换模型或逻辑。LLM fallback 链（多模型按顺序重试）也在图内透明处理。
 
 **避免**：在一个节点里同时做规划+执行+评估；在 tools.py 里写业务逻辑（tools 只做 MQTT 操作和状态查询）。
 
 ### 5. PWA 无"订阅"UI 状态
 
-**决策**：PWA 在 MQTT 层订阅 `ssm/agents/#` 通配符，接收所有消息。设备发现和显示是自动的，不存在用户手动"订阅设备"的 UI 步骤。
+**决策**：云端 API 在 MQTT 层订阅设备消息，PWA 通过 `/api/devices` 获取快照、通过 `/api/events`（SSE）接收变化。设备发现和显示是自动的，不存在用户手动"订阅设备"的 UI 步骤。
 
 **原因**：原有"长按订阅"逻辑和 MQTT 订阅无关，是误导性的 UI 概念；去掉后设备接入体验从"发现→订阅→控制"变为"发现→控制"。
 
@@ -182,7 +181,7 @@ ssm/
 
 ### 6. 灯智能体自主模式（manual / reactive）+ 用户让位窗口
 
-**决策**：ESP32 灯桌面智能体有 `manual`（仅听编排器/用户命令）/ `reactive`（自发看上下文调色温+亮度，默认）两种模式，经 `PUT /api/esp32/autonomy` 切换；reactive 下收到非自身发出的命令会进入让位窗口（`USER_HOLD_TTL` 秒），窗口内不自发改灯，尊重用户设置。
+**决策**：ESP32 灯桌面智能体有 `manual`（仅听编排器/用户命令，默认）/ `reactive`（自发看上下文调色温+亮度）两种模式，经 `PUT /api/esp32/autonomy` 切换；reactive 下收到非自身发出的命令会进入让位窗口（`USER_HOLD_TTL` 秒），窗口内不自发改灯，尊重用户设置。
 
 **原因**：灯的价值是"自动选合适的色温/亮度"而非开关，但自主调光与用户/编排器命令并发会互相打架。模式开关 + 让位窗口让"全自动可介入 / 完全用户控制"成为可切换实验条件，且 LLM 始终是调色唯一大脑，不降级为规则表。仿机器狗 `_autonomy_mode` + `user_interrupt`，但灯是 tick 循环故用带 TTL 的窗口而非瞬时标志。
 
@@ -203,7 +202,7 @@ make logs
 # [Probe] {'esp32_desk_light': True, 'esp32_desk_ir': False, 'esp32_desk_sound': True, ...}
 # [Manifest] Published N manifests for esp32_desk
 
-# PWA 验证：打开 DevTools Console 观察 MQTT 消息收发
+# PWA 验证：打开 DevTools Network 观察 /api/devices、/api/intents、/api/commands 和 /api/events
 make tunnel-url
 ```
 

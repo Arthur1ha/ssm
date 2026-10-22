@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 def _card_response(card: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "unit_id", "device_id", "parent_id", "name", "description", "agent_type",
-        "online", "transport", "state", "state_machine", "skills", "modes", "telemetry",
+        "online", "transport", "services", "state", "state_machine", "skills", "modes", "telemetry",
         "widgets", "suggestions", "tags",
     )
     return {key: card.get(key) for key in keys if key in card}
