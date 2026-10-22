@@ -1,10 +1,15 @@
 broker/data/
 broker/logs/
 logs/
-server/.env
-cloud/.env
+# 本地凭据和证书
+.env
+*.pem
+*.key
+*.p12
+*.pfx
 edge/local_config.py
-broker/mosquitto.conf
+infra/broker/passwd
+infra/broker/mosquitto.conf
 *.log
 *.swp
 .DS_Store
@@ -12,6 +17,12 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+
+# 本地测试代码
+tests/
+test_*.py
+*_test.py
 
 # 运行时数据，不纳入版本控制
 *.db
@@ -33,3 +44,7 @@ cloud/space/data/
 cloud/esp32/data/
 cloud/space/audit.jsonl
 cloud/space/device_codes.json
+cloud/orchestrator/devices.json
+cloud/orchestrator/rules.json
+cloud/space/devices.json
+cloud/space/space.json
