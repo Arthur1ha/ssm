@@ -78,6 +78,10 @@ class EpisodeMemory:
         self._cleanup_old()
         self._load_recent()
 
+    @property
+    def episodes_dir(self) -> Path:
+        return self._dir
+
     def _cleanup_old(self) -> None:
         cutoff = (datetime.now().date() - timedelta(days=_RETENTION_DAYS))
         deleted = 0

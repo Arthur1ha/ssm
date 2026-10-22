@@ -1,245 +1,47 @@
 """cloud.go2.router — Go2 机器狗 FastAPI 路由。
 
-负责 Go2 连接/断开/控制的全部 HTTP 端点，以及连接状态变更时的
-MQTT 控制面管理（发布/清除 retained card）。
+负责 Go2 连接/断开/控制的 HTTP 端点与自主模式装配。
+Card 构建和 MQTT retained 发布由 card.py 实现。
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from cloud.go2.connection import go2
-from cloud.go2.navigation.drive import drive
-from cloud.go2.agentcore.skills.reactive import reactive_mind
-from cloud.go2.agentcore.skills.vision import vision_loop
-from cloud.go2.agentcore.skills.identity import IdentityEvent, identity_skill
+from cloud.go2.agentcore.mode.free_explore import drive
+from cloud.go2.agentcore.mode.reactive import reactive_mind
+from cloud.go2.agentcore.perception.vision import vision_loop
+from cloud.go2.agentcore.perception.identity import IdentityEvent, identity_skill
 from cloud.go2.agentcore.memory.episode import EventType, episode_memory
 from cloud.go2.control import LeaseConflict, control_lease, session_tasks
 from cloud.go2.execution import (
     ExecutionContext, SYSTEM_CONTEXT, current_context, require_admin_read,
     require_authenticated_read, require_service_context, use_context,
 )
+from cloud.go2.card import (
+    GO2_CARD_TOPIC, GO2_STATUS_TOPIC, _build_go2_card, _publish_go2_card,
+    _publish_go2_status, _clear_go2_card,
+)
 
 # MQTT 客户端，由 api/main.py 通过 init_mqtt() 注入
 _mqtt_client = None
-
-GO2_CARD_TOPIC = "ssm/agents/go2/card"
-GO2_STATUS_TOPIC = "ssm/agents/go2/status"
 
 
 def init_mqtt(client) -> None:
     """注入 api 进程的 MQTT 客户端，供发布/清除 Go2 card 使用。"""
     global _mqtt_client
     _mqtt_client = client
-
-
-_GO2_FSM_LABELS = {
-    "StandUp": "起立", "StandDown": "趴下", "EnterMoveControl": "进入遥控", "Move": "移动", "StopMove": "退出遥控",
-    "Hello": "挥手", "Stretch": "伸展", "Dance1": "舞蹈1", "Dance2": "舞蹈2",
-}
-
-
-def _go2_state_machine() -> dict:
-    """依据 connection/fsm.py 的 _FSM_NEXT 生成静态状态机拓扑（单一真相）。
-
-    延迟导入以避免在测试 stub 环境中与 cloud.go2.connection 补丁冲突。
-    """
-    from cloud.go2.connection.fsm import _FSM_AVAILABLE, _FSM_NEXT, _TRANSIENT_STATES  # noqa: PLC0415
-    transitions = []
-    for src, edges in _FSM_NEXT.items():
-        for trigger, dst in edges.items():
-            if trigger == "Move":
-                continue  # 有速度的 Move 属于数据面；图上只显示控制状态入口。
-            transitions.append({
-                "src": src, "dst": dst, "trigger": trigger,
-                "label": "停止" if src in _TRANSIENT_STATES else _GO2_FSM_LABELS.get(trigger, trigger),
-                "action": trigger,
-                "params": {},
-            })
-    for src in _FSM_AVAILABLE:
-        if src in {"offline", "connecting"}:
-            continue
-        transitions.append({
-            "src": src, "dst": "lying" if src == "lying" else "standing",
-            "trigger": "EMERGENCY_STOP", "label": "紧急停止",
-            "action": "STOP", "params": {}, "safety": True,
-        })
-    return {
-        "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
-        "transitions": transitions,
-        "initial": "offline",
-        "layout": {
-            "standing": {"x": 0.50, "y": 0.48},
-            "lying": {"x": 0.50, "y": 0.14},
-            "greeting": {"x": 0.16, "y": 0.28},
-            "stretching": {"x": 0.84, "y": 0.28},
-            "dancing1": {"x": 0.16, "y": 0.68},
-            "dancing2": {"x": 0.84, "y": 0.68},
-            "moving": {"x": 0.50, "y": 0.82},
-        },
-        "views": {
-            "offline": {"label": "未连接", "description": "机器狗尚未建立控制连接。", "type": "robot_pose", "pose": "offline"},
-            "connecting": {"label": "正在连接", "description": "正在与机器狗建立实时控制通道。", "type": "robot_pose", "pose": "offline"},
-            "lying": {"label": "趴卧", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
-            "standing": {"label": "站立", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
-            "moving": {"label": "遥控", "description": "可用摇杆控制行走；松开摇杆会停下，退出遥控后回到站立。", "type": "robot_pose", "pose": "moving"},
-            "greeting": {"label": "挥手", "description": "抬起前腿执行问候动作。", "type": "robot_pose", "pose": "greeting"},
-            "stretching": {"label": "伸展", "description": "降低身体前部并完成伸展动作。", "type": "robot_pose", "pose": "stretching"},
-            "dancing1": {"label": "舞蹈1", "description": "正在执行第一组节奏动作。", "type": "robot_pose", "pose": "dance-left"},
-            "dancing2": {"label": "舞蹈2", "description": "正在执行第二组节奏动作。", "type": "robot_pose", "pose": "dance-right"},
-        },
-    }
-
-
-def _build_go2_card() -> dict:
-    """构建 Go2 Agent Card dict（静态能力描述，符合 AgentCard schema）。
-
-    card 只含能力，不含 volatile state；online/status 表示真实 WebRTC 连接状态，
-    FSM/动作等动态状态经 HTTP /api/go2/* 实时获取。
-    """
-    return {
-        "unit_id": "go2",
-        "device_id": "go2",
-        "name": "Go2 机器狗",
-        "description": "四足机器人，支持运动控制、导航和视觉感知",
-        "agent_type": "robot",
-        "online": bool(go2.is_connected),
-        "transport": {
-            "kind": "http",
-            "endpoint": "/api/go2/chat",
-            "command_endpoint": "/api/go2/commands",
-            "state_stream": "/api/go2/connection/stream",
-        },
-        "skills": [
-            {
-                "id": "go2_chat",
-                "name": "对话 / 自然语言控制",
-                "tags": ["conversation", "robot"],
-                "params_schema": {
-                    "type": "object",
-                    "required": ["message"],
-                    "properties": {"message": {"type": "string"}},
-                },
-                "invoke": {"action": "CHAT"},
-            },
-            {
-                "id": "go2_sport",
-                "name": "预定义动作",
-                "tags": ["motion", "robot"],
-                "params_schema": {
-                    "type": "object",
-                    "required": ["cmd"],
-                    "properties": {
-                        "cmd": {
-                            "enum": ["StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2"]
-                        }
-                    },
-                },
-                "invoke": {"action": "SPORT"},
-            },
-            {
-                "id": "go2_navigate",
-                "name": "导航到命名地点",
-                "tags": ["navigation", "robot"],
-                "params_schema": {
-                    "type": "object",
-                    "required": ["name"],
-                    "properties": {"name": {"type": "string"}},
-                },
-                "invoke": {"action": "NAVIGATE"},
-            },
-            {
-                "id": "go2_recognize_person",
-                "name": "识别面前的人",
-                "tags": ["vision", "identity", "robot"],
-                "params_schema": {"type": "object", "properties": {}},
-                "invoke": {"action": "RECOGNIZE_PERSON"},
-            },
-        ],
-        # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
-        "state": {},
-        "state_machine": _go2_state_machine(),
-        "modes": [{
-            "id": "autonomy",
-            "label": "自主性",
-            "options": [
-                {"value": "manual",       "label": "完全遥控", "description": "由用户/编排器遥控决定行动"},
-                {"value": "reactive",     "label": "自主反应", "description": "机器狗根据视觉输入自主做即时反应"},
-                {"value": "free_explore", "label": "自由探索", "description": "机器狗自主探索环境"},
-            ],
-            "get": "/api/go2/autonomy",
-            "set": "/api/go2/autonomy",
-        }],
-        "telemetry": [
-            {"key": "fsm_state",   "label": "动作状态"},
-            {"key": "body_height", "label": "身高", "unit": "m"},
-            {"key": "velocity",    "label": "速度", "unit": "m/s"},
-        ],
-        "widgets": [
-            {
-                "type": "connection",
-                "states": ["offline", "connecting"],
-                "placement": "controls",
-                "order": 0,
-                "endpoint": "/api/go2/connection",
-                "status_endpoint": "/api/go2/connection",
-                "auto_connect": True,
-                "visible": False,
-            },
-            {"type": "video", "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "placement": "media", "order": 10, "endpoint": "/api/go2/video"},
-            {"type": "joystick", "states": ["moving"], "placement": "controls", "order": 20, "endpoint": "/api/go2/velocity"},
-        ],
-    }
-
-
-def _publish_go2_card() -> None:
-    """向 MQTT broker 发布 Go2 card（retained=True，qos=1）。
-
-    若 MQTT 客户端尚未注入则静默失败，不影响连接流程。
-    """
-    if _mqtt_client is None:
-        logging.warning("[Go2] MQTT 客户端未注入，跳过 card 发布")
-        return
-    try:
-        card = _build_go2_card()
-        _mqtt_client.publish(GO2_CARD_TOPIC, json.dumps(card, ensure_ascii=False), retain=True, qos=1)
-        logging.info("[Go2] 已发布 retained card 到 %s", GO2_CARD_TOPIC)
-    except Exception as exc:
-        logging.error("[Go2] 发布 card 失败: %s", exc)
-
-
-def _publish_go2_status(online: bool | None = None) -> None:
-    """发布 Go2 真实连接状态（retained，API 进程 LWT 会兜底置 offline）。"""
-    if _mqtt_client is None:
-        return
-    try:
-        if online is None:
-            online = bool(go2.is_connected)
-        _mqtt_client.publish(GO2_STATUS_TOPIC, "online" if online else "offline", retain=True, qos=1)
-        logging.info("[Go2] status → %s", "online" if online else "offline")
-    except Exception as exc:
-        logging.error("[Go2] 发布 status 失败: %s", exc)
-
-
-def _clear_go2_card() -> None:
-    """清除 broker 上的 Go2 retained card（发布空 payload，qos=1）。
-
-    若 MQTT 客户端尚未注入则静默失败，不影响断开流程。
-    """
-    if _mqtt_client is None:
-        logging.warning("[Go2] MQTT 客户端未注入，跳过 card 清除")
-        return
-    try:
-        _mqtt_client.publish(GO2_CARD_TOPIC, "", retain=True, qos=1)
-        logging.info("[Go2] 已清除 retained card: %s", GO2_CARD_TOPIC)
-    except Exception as exc:
-        logging.error("[Go2] 清除 card 失败: %s", exc)
+    from cloud.go2.card import init_mqtt as init_card_mqtt
+    init_card_mqtt(client)
 
 
 router = APIRouter(prefix="/api/go2", tags=["go2"])
@@ -295,6 +97,33 @@ def _acquire_motion(context: ExecutionContext) -> None:
             "[Go2/Lease] admin %s preempted %s",
             context.session_id, previous.owner_session_id,
         )
+
+
+def _check_direct_motion(command: str, params: dict, context: ExecutionContext) -> None:
+    """Apply the tool motion preflight to FSM buttons and joystick input."""
+    from cloud.go2.agentcore.tools.executor import check_direct_motion
+    previous = control_lease.snapshot()
+    if (command == "StopMove" and previous is not None
+            and previous.owner_session_id != context.session_id):
+        raise HTTPException(status_code=409, detail={
+            "code": "go2_control_busy", "message": "当前会话不能停止其他会话的运动",
+            "owner_session_id": previous.owner_session_id, "expires_at": previous.expires_at,
+        })
+    try:
+        check_direct_motion(command, params, context)
+    except LeaseConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "go2_control_busy", "message": "机器狗正在被其他体验者使用",
+            "owner_session_id": exc.owner_session_id, "expires_at": exc.expires_at,
+        }) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if (command != "StopMove" and previous is not None
+            and previous.owner_session_id != context.session_id and context.actor == "admin"):
+        from cloud.go2.navigation.navigator import navigator
+        navigator.stop(owner_session_id=previous.owner_session_id)
+        session_tasks.cancel(previous.owner_session_id)
+        logging.info("[Go2/Lease] admin %s preempted %s", context.session_id, previous.owner_session_id)
 
 
 def _on_identity_event(event: IdentityEvent) -> None:
@@ -356,9 +185,10 @@ async def _initialize_identity_vision() -> None:
     _configure_vision_consumers(_autonomy_mode)
 
 
-def _configure_vision_consumers(mode: str, owner_session_id: str = "system") -> None:
+def _configure_vision_consumers(mode: str, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
     """统一重配视觉消费者；身份在三种 autonomy 模式下都可保持运行。"""
     global _active_rule_cb, _active_drive_cb, _active_identity_cb
+    reactive_mind.set_active(False)
     drive.stop()
     for callback in (_active_rule_cb, _active_drive_cb, _active_identity_cb):
         if callback is not None:
@@ -373,12 +203,13 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system") -> 
         _active_identity_cb = _on_identity_vision_frame
         vision_loop.add_callback(_active_identity_cb)
     if mode == "reactive":
+        reactive_mind.set_active(True, context)
         _active_rule_cb = reactive_mind.on_vision_frame
         vision_loop.add_callback(_active_rule_cb)
     elif mode == "free_explore":
         _active_drive_cb = drive.on_vision_frame
         vision_loop.add_callback(_active_drive_cb)
-        drive.start(owner_session_id=owner_session_id)
+        drive.start(owner_session_id=owner_session_id, context=context)
 
     if any((_active_identity_cb, _active_rule_cb, _active_drive_cb)):
         vision_loop.start(lambda: go2._latest_frame)
@@ -524,8 +355,12 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
     context = _normalize_context(context)
-    if cmd != "StopMove":
-        _acquire_motion(context)
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    from unitree_webrtc_connect.constants import SPORT_CMD
+    if cmd not in SPORT_CMD:
+        raise HTTPException(status_code=400, detail=f"Unknown command: {cmd}")
+    _check_direct_motion(cmd, req.params or {}, context)
     try:
         result = await go2.send_command(cmd, req.params or None)
     except ValueError as exc:
@@ -541,8 +376,8 @@ async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
-    if any((req.vx, req.vy, req.vyaw)):
-        _acquire_motion(context)
+    command = "Move" if any((req.vx, req.vy, req.vyaw)) else "StopMove"
+    _check_direct_motion(command, {"x": req.vx, "y": req.vy, "z": req.vyaw}, context)
     try:
         result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=2.0)
     except ValueError as exc:
@@ -558,12 +393,70 @@ class ChatRequest(BaseModel):
     message: str
     skill_id: str | None = None
     params: dict | None = None
+    task_id: str | None = None
+    deadline: float | None = None
+    sync_window_s: float = 8.0
+
+
+async def _stop_task_motion(context: ExecutionContext) -> dict:
+    """Stop only motion still owned by this task's trusted session."""
+    lease = control_lease.snapshot()
+    if lease is None:
+        return {"result": "ok", "message": "no_active_motion_lease"}
+    if lease.owner_session_id != context.session_id:
+        return {"result": "accepted", "error": "control_lease_transferred",
+                "owner_session_id": lease.owner_session_id}
+    from cloud.go2.navigation.navigator import navigator
+    try:
+        navigator.stop(owner_session_id=context.session_id)
+    except Exception as exc:
+        logging.warning("[Go2/Task] navigator stop failed: %s", exc)
+    if not go2.is_connected:
+        return {"result": "accepted", "error": "device_disconnected"}
+    try:
+        result = await go2.send_command("StopMove")
+    except Exception as exc:
+        return {"result": "accepted", "error": str(exc)}
+    return result if isinstance(result, dict) else {"result": "accepted", "error": "stop_unconfirmed"}
 
 
 @router.post("/chat")
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.agent import run_agent
     context = _normalize_context(context)
+    if req.task_id is not None:
+        from cloud.go2.tasks import chat_tasks
+        if not req.task_id or len(req.task_id) > 128:
+            raise HTTPException(status_code=400, detail="invalid task_id")
+        deadline = req.deadline if req.deadline is not None else time.time() + 45
+        if not isinstance(deadline, (int, float)) or not time.time() < deadline <= time.time() + 300:
+            raise HTTPException(status_code=400, detail="invalid deadline")
+        if not 0 <= req.sync_window_s <= 30:
+            raise HTTPException(status_code=400, detail="invalid sync_window_s")
+        fingerprint = hashlib.sha256(json.dumps({
+            "message": req.message, "skill_id": req.skill_id, "params": req.params,
+        }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+        async def run_task():
+            drive.user_interrupt = True
+            try:
+                return await run_agent(
+                    context.session_id, req.message, skill_id=req.skill_id,
+                    params=req.params, context=context,
+                )
+            finally:
+                drive.user_interrupt = False
+
+        try:
+            record = chat_tasks.start(
+                req.task_id, context.session_id, fingerprint, deadline, run_task,
+                on_timeout=lambda: _stop_task_motion(context),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        session_tasks.track(context.session_id, record.task)
+        result = await chat_tasks.wait(record, req.sync_window_s)
+        return JSONResponse(result, status_code=202) if result.get("result") == "executing" else result
     drive.user_interrupt = True
     task = asyncio.create_task(
         run_agent(
@@ -577,6 +470,28 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         return await task
     finally:
         drive.user_interrupt = False
+
+
+@router.get("/tasks/{task_id}")
+async def go2_task_status(task_id: str, context: ExecutionContext = Depends(require_service_context)):
+    from cloud.go2.tasks import chat_tasks
+    context = _normalize_context(context)
+    record = chat_tasks.get(task_id, context.session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    result = record.snapshot()
+    return JSONResponse(result, status_code=202) if result.get("result") == "executing" else result
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(require_service_context)):
+    from cloud.go2.tasks import chat_tasks
+    context = _normalize_context(context)
+    record = chat_tasks.get(task_id, context.session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    return await chat_tasks.cancel(record, lambda: _stop_task_motion(context))
 
 
 @router.post("/chat/stream")
@@ -836,7 +751,7 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
         logging.info("[Go2] 自主模式 → 自由探索")
 
     _autonomy_mode = req.mode
-    _configure_vision_consumers(_autonomy_mode, owner_session_id=context.session_id)
+    _configure_vision_consumers(_autonomy_mode, owner_session_id=context.session_id, context=context)
     return {"ok": True, "mode": _autonomy_mode}
 
 

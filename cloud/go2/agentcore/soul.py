@@ -35,6 +35,7 @@ _DEFAULT_TRAITS: dict = {
 # ── personality ───────────────────────────────────────────────────
 
 def get_system_prompt() -> str:
+    """Return the mutable personality expression, not runtime safety rules."""
     try:
         return json.loads(_PERSONALITY_FILE.read_text(encoding="utf-8"))["prompt"]
     except Exception:
@@ -85,13 +86,14 @@ async def _regen_prompt(traits: dict) -> str:
         f"- 好奇心（curiosity）：{traits['curiosity']}\n"
         f"- 外向性（extraversion）：{traits['extraversion']}\n"
         f"- 大胆程度（boldness）：{traits['boldness']}\n\n"
-        f"根据这些特质分数，生成一段自然的性格描述，作为 system prompt 使用。\n"
+        f"根据这些特质分数，只生成一段自然的性格表达。\n"
+        f"不要包含权限、工具调用、动作完成判定或其他运行规则。\n"
         f"要求：以「你是一只」开头，第二人称，2-4 句话，体现特质的具体程度，不要提及分数，不要分点列举。"
     )
     resp = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
     personality = resp.content.strip()
     set_personality(personality)
-    logger.info("[Soul] system prompt 已更新")
+    logger.info("[Soul] 性格表达已更新")
     return personality
 
 

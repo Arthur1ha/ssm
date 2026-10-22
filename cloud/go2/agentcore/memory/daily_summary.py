@@ -7,11 +7,16 @@ from typing import Optional
 from cloud.go2.paths import MEMORY_DIR
 from cloud.go2.agentcore.memory.episode import read_day
 from cloud.go2.agentcore.tools.tools import get_text_llm
+from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.execution import can_persist, require_persist
 
 logger = logging.getLogger(__name__)
 
 _SUMMARIES_DIR = MEMORY_DIR / "summaries"
+_SUMMARY_INPUT_CHARS = 5000
+_SUMMARY_INPUT_EVENTS = 40
+_BACKFILL_DAYS = 7
+_BACKFILL_PER_CALL = 1
 
 
 def _summary_file(date_str: str, base_dir: Optional[Path] = None) -> Path:
@@ -25,6 +30,8 @@ def get_summary(date_str: str, base_dir: Optional[Path] = None) -> Optional[str]
     if not f.exists():
         return None
     text = f.read_text(encoding="utf-8").strip()
+    if text.startswith("<!-- source_date:"):
+        text = text.split("-->", 1)[-1].strip()
     return text or None
 
 
@@ -53,21 +60,23 @@ async def generate_and_save(
     from langchain_core.messages import HumanMessage, SystemMessage
     from cloud.go2.agentcore.soul import get_system_prompt
 
-    episodes_text = "\n".join(episodes)
-    prompt = (
-        f"以下是机器狗 {date_str} 的完整事件记录：\n\n"
-        f"{episodes_text}\n\n"
-        f"请用第一人称生成一份简洁的当日摘要，涵盖：\n"
-        f"1. 探索的地点和路线\n"
-        f"2. 遇到的人（外貌或行为描述）\n"
-        f"3. 执行的动作和与用户的交互\n"
-        f"4. 其他值得记录的事项\n\n"
-        f"要求：简洁，不超过 200 字，不要有编号或标题。"
+    # Keep the start and end of a busy day; never send unbounded JSONL to LLM.
+    if len(episodes) > _SUMMARY_INPUT_EVENTS:
+        episodes = episodes[:10] + episodes[-(_SUMMARY_INPUT_EVENTS - 10):]
+    per_event_limit = max(40, _SUMMARY_INPUT_CHARS // len(episodes) - 1)
+    episodes_text = "\n".join(line[:per_event_limit] for line in episodes)[:_SUMMARY_INPUT_CHARS]
+    bundle = build_prompt(
+        "daily_summary",
+        personality=get_system_prompt(),
+        user_input=f"请概括来源日期 {date_str} 的记录。",
+        memory=episodes_text,
+        memory_sources=(f"episode:{date_str}",),
+        budget_chars=7000,
     )
     try:
         resp = await get_text_llm().ainvoke([
-            SystemMessage(content=get_system_prompt()),
-            HumanMessage(content=prompt),
+            SystemMessage(content=bundle.system),
+            HumanMessage(content=bundle.human),
         ])
         summary = resp.content.strip()
     except Exception as exc:
@@ -76,7 +85,7 @@ async def generate_and_save(
 
     f = _summary_file(date_str, base_dir)
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(summary, encoding="utf-8")
+    f.write_text(f"<!-- source_date: {date_str} -->\n{summary}", encoding="utf-8")
     logger.info("[DailySummary] 已生成 %s 摘要（%d 条记录）", date_str, len(episodes))
     return summary
 
@@ -98,13 +107,18 @@ def get_recent_summaries(
 async def ensure_yesterday_summary(
     episodes_dir: Optional[Path] = None, base_dir: Optional[Path] = None
 ) -> None:
-    """懒触发：若昨天有 episode 记录但无摘要，则自动生成，不阻塞调用方。"""
+    """Backfill at most one retained day per call, including yesterday."""
     if not can_persist():
         return
-    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    if get_summary(yesterday, base_dir) is not None:
-        return
-    if not _get_episodes_for_date(yesterday, episodes_dir):
-        return
-    logger.info("[DailySummary] 昨天（%s）缺少摘要，后台生成中...", yesterday)
-    await generate_and_save(yesterday, episodes_dir=episodes_dir, base_dir=base_dir)
+    attempts = 0
+    for days_ago in range(_BACKFILL_DAYS, 0, -1):
+        source_date = (date.today() - timedelta(days=days_ago)).isoformat()
+        if get_summary(source_date, base_dir) is not None:
+            continue
+        if not _get_episodes_for_date(source_date, episodes_dir):
+            continue
+        logger.info("[DailySummary] 补写 %s 摘要", source_date)
+        await generate_and_save(source_date, episodes_dir=episodes_dir, base_dir=base_dir)
+        attempts += 1
+        if attempts >= _BACKFILL_PER_CALL:
+            break

@@ -14,9 +14,12 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.tools.tools import go2_sport, go2_observe, get_text_llm, _VALID_SPORT_CMDS
-from cloud.go2.agentcore.skills.vision import VisionFrame
+from cloud.go2.agentcore.tools.tools import go2_observe, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.tools.executor import execute_tool
+from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
+from cloud.go2.agentcore.perception.vision import VisionFrame
 from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 from cloud.go2.navigation import frontier as frontier_mod
 
@@ -61,6 +64,41 @@ class Drive:
         self._task: Optional[asyncio.Task] = None
         self._identity = None
         self.owner_session_id: str | None = None
+        self._context: ExecutionContext = SYSTEM_CONTEXT
+        self._last_execution_result: str = "ok"
+        self._last_prompt_metadata: dict | None = None
+
+    @staticmethod
+    def _result_text(result: dict) -> str:
+        return str(result.get("message") or result.get("error") or result.get("result"))
+
+    async def _execute_motion(self, name: str, params: dict) -> dict:
+        if self.user_interrupt or not go2.is_connected:
+            return {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
+        result = await execute_tool(name, params, context=self._context)
+        self._last_execution_result = result.get("result", "error")
+        return result
+
+    async def _navigate(self, name: str) -> dict:
+        from cloud.go2.navigation.navigator import navigator
+        owner_session_id = self.owner_session_id
+        nav_task = asyncio.create_task(self._execute_motion("go2_navigate_to", {"name": name}))
+        try:
+            while not nav_task.done():
+                if self.user_interrupt or self._person_engaging or not go2.is_connected:
+                    nav_task.cancel()
+                    await asyncio.gather(nav_task, return_exceptions=True)
+                    if owner_session_id is not None:
+                        navigator.stop(owner_session_id=owner_session_id)
+                    return {"result": "cancelled", "message": "导航被打断"}
+                await asyncio.sleep(0.5)
+            return nav_task.result()
+        except asyncio.CancelledError:
+            nav_task.cancel()
+            await asyncio.gather(nav_task, return_exceptions=True)
+            if owner_session_id is not None:
+                navigator.stop(owner_session_id=owner_session_id)
+            raise
 
     @property
     def state_snapshot(self) -> dict:
@@ -276,9 +314,15 @@ class Drive:
             )
 
             try:
+                bundle = build_prompt(
+                    "free_explore", personality=get_system_prompt(), device_state=prompt,
+                    tool_results=history_str, tool_version="go2-tools-v1",
+                )
+                self._last_prompt_metadata = bundle.metadata
+                logger.info("[Go2/Prompt] %s", bundle.metadata)
                 resp = await get_text_llm().ainvoke([
-                    SystemMessage(content=get_system_prompt()),
-                    HumanMessage(content=prompt),
+                    SystemMessage(content=bundle.system),
+                    HumanMessage(content=bundle.human),
                 ])
                 content = re.sub(r"```(?:json)?\n?", "", resp.content.strip()).strip().rstrip("`")
                 decision = json.loads(content)
@@ -308,29 +352,28 @@ class Drive:
                 f"探索步骤{step + 1}[{tool}]：{reason} → {result}",
             )
             self._last_action_ts = time.time()
+            if self._last_execution_result not in {"ok", "blocked"}:
+                logger.info("[Drive] 动作未确认，结束本次探索：%s", self._last_execution_result)
+                break
 
         logger.info("[Drive] 探索会话结束，共 %d 步", len(history))
 
     async def _exec_explore_tool(self, tool: str, params: dict) -> str:
         """执行探索中 LLM 决策的工具调用，导航工具可被打断。"""
+        self._last_execution_result = "ok"
+        if self.user_interrupt or not go2.is_connected:
+            self._last_execution_result = "cancelled"
+            return "自主模式已中断或设备已断开"
         try:
             if tool == "explore_direction":
                 return await self._exec_explore_direction(params.get("direction", "forward"))
             elif tool == "go2_sport":
-                return await go2_sport(params.get("cmd", ""))
+                return self._result_text(await self._execute_motion("go2_sport", {"cmd": params.get("cmd", "")}))
             elif tool == "go2_observe":
                 return await go2_observe(params.get("question", "描述当前场景"))
             elif tool == "go2_navigate_to":
-                from cloud.go2.navigation.navigator import navigator
                 name = params.get("name", "")
-                nav_task = asyncio.create_task(navigator.go_to(name))
-                while not nav_task.done():
-                    if self.user_interrupt or self._person_engaging:
-                        nav_task.cancel()
-                        navigator.stop()
-                        return "导航被打断"
-                    await asyncio.sleep(0.5)
-                return nav_task.result()
+                return self._result_text(await self._navigate(name))
             elif tool == "go2_tag_location":
                 from cloud.go2.agentcore.memory import spatial as spatial_memory
                 odom = go2.odom
@@ -344,17 +387,9 @@ class Drive:
 
     async def _return_home(self) -> None:
         """探索结束后导航回 home 点，被打断时就地停止。"""
-        from cloud.go2.navigation.navigator import navigator
         logger.info("[Drive] 探索结束，导航回 home")
-        nav_task = asyncio.create_task(navigator.go_to("home"))
-        while not nav_task.done():
-            if self.user_interrupt or self._person_engaging:
-                nav_task.cancel()
-                navigator.stop()
-                logger.info("[Drive] 回家导航被打断")
-                return
-            await asyncio.sleep(0.5)
-        logger.info("[Drive] 已回到 home：%s", nav_task.result())
+        result = await self._navigate("home")
+        logger.info("[Drive] 回家导航结果：%s", result)
 
     async def _exec_explore_direction(self, direction: str) -> str:
         """explore_direction 工具的实现：用地图算出安全目标坐标，Navigator 闭环导过去。
@@ -369,17 +404,21 @@ class Drive:
             return "无法移动：odom 不可用"
 
         grid_obj = go2.occupancy_grid
-        target   = frontier_mod.find_exploration_target(grid_obj, odom, direction) if grid_obj else None
+        target   = frontier_mod.find_exploration_target(grid_obj, odom, direction) if grid_obj is not None else None
 
-        if target is None:
-            # 地图不可用或该方向被堵死，降级：用 move_velocity 前进 2s
-            logger.info("[Drive] explore_direction 无地图/方向受阻，降级前进 2s")
-            import asyncio as _aio
-            go2.move_velocity(0.3, 0.0, 0.0)
-            try:
-                await _aio.sleep(2.0)
-            finally:
-                go2.move_velocity(0.0, 0.0, 0.0)
+        if grid_obj is not None and target is None:
+            self._last_execution_result = "blocked"
+            return (
+                f"方向「{direction}」路径不通，不能向前移动。"
+                "建议先远观并标记兴趣点，再选择地图中的可通行方向。"
+            )
+
+        if grid_obj is None:
+            # 仅地图缺席时尝试短距移动，仍走统一参数校验与停止确认。
+            logger.info("[Drive] explore_direction 无地图，降级前进 2s")
+            move_result = await self._execute_motion("go2_move", {"direction": "forward", "speed": 0.3, "duration": 2.0})
+            if move_result.get("result") != "ok":
+                return self._result_text(move_result)
             new_odom = go2.odom
             pos = f"({new_odom['x']:.2f}, {new_odom['y']:.2f})" if new_odom else "未知"
             nav_summary = f"地图不可用，短距前进完成，当前位置 {pos}"
@@ -406,17 +445,13 @@ class Drive:
         tmp_name = f"_explore_{int(time.time())}"
         spatial_memory.tag_location(tmp_name, {"x": target_x, "y": target_y, "heading": 0.0})
 
-        nav_task = asyncio.create_task(navigator.go_to(tmp_name))
         try:
-            while not nav_task.done():
-                if self.user_interrupt or self._person_engaging:
-                    nav_task.cancel()
-                    navigator.stop()
-                    return "导航被打断"
-                await asyncio.sleep(0.5)
-            result = nav_task.result()
+            nav_result = await self._navigate(tmp_name)
         finally:
             spatial_memory.delete_location(tmp_name)
+        if nav_result.get("result") != "ok":
+            return self._result_text(nav_result)
+        result = self._result_text(nav_result)
 
         new_odom = go2.odom
         if new_odom:
@@ -445,7 +480,6 @@ class Drive:
         _publish_thought({"type": "think", "text": observation})
         memory_ctx = episode_memory.format_context()
         prompt = (
-            f"{memory_ctx}\n\n"
             f"{self._identity_context()}\n"
             f"最新观察：{observation}\n"
             f"可用姿态动作：{', '.join(sorted(_VALID_SPORT_CMDS))}\n\n"
@@ -453,9 +487,15 @@ class Drive:
             f"直接输出 JSON，不含代码块：{{\"action\": \"动作名或null\", \"reason\": \"一句话\"}}"
         )
         try:
+            bundle = build_prompt(
+                "free_explore", personality=get_system_prompt(), memory=memory_ctx,
+                device_state=prompt, memory_sources=("episode",), tool_version="go2-tools-v1",
+            )
+            self._last_prompt_metadata = bundle.metadata
+            logger.info("[Go2/Prompt] %s", bundle.metadata)
             resp = await get_text_llm().ainvoke([
-                SystemMessage(content=get_system_prompt()),
-                HumanMessage(content=prompt),
+                SystemMessage(content=bundle.system),
+                HumanMessage(content=bundle.human),
             ])
             content = re.sub(r"```(?:json)?\n?", "", resp.content.strip()).strip().rstrip("`")
             decision = json.loads(content)
@@ -468,8 +508,8 @@ class Drive:
         _publish_thought({"type": "think", "text": reason})
         if action:
             try:
-                result = await go2_sport(action)
-                if not (isinstance(result, str) and result.startswith("已执行")):
+                result = await self._execute_motion("go2_sport", {"cmd": action})
+                if result.get("result") != "ok":
                     _publish_thought({"type": "act", "text": f"{action} 尚未确认完成", "execution": result})
                     return
                 self._last_action_ts = time.time()
@@ -483,7 +523,7 @@ class Drive:
 
     # ── 生命周期 ───────────────────────────────────────────────────
 
-    def start(self, owner_session_id: str = "system") -> None:
+    def start(self, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
         """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
@@ -494,18 +534,24 @@ class Drive:
         self._last_engaging_ts = time.time()
         self._task             = asyncio.create_task(self._run_loop())
         self.owner_session_id  = owner_session_id
+        self._context = context or SYSTEM_CONTEXT
+        self.user_interrupt = False
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self, owner_session_id: str | None = None) -> bool:
         """停止内驱动循环，取消后台任务，同时停止 navigator 避免孤儿导航 task。"""
         if owner_session_id is not None and self.owner_session_id != owner_session_id:
             return False
-        if self._task is not None:
+        owned_session = self.owner_session_id
+        active = self._task is not None
+        self.user_interrupt = True
+        if active:
             self._task.cancel()
             self._task = None
         self.owner_session_id = None
         from cloud.go2.navigation.navigator import navigator
-        navigator.stop()
+        if active and owned_session is not None:
+            navigator.stop(owner_session_id=owned_session)
         logger.info("[Drive] 内驱动循环已停止")
         return True
 

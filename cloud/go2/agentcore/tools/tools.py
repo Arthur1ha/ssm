@@ -1,119 +1,35 @@
 import asyncio
 import json
-import os
 import time
 import math
+import uuid
 from dataclasses import asdict, is_dataclass
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
 
 from cloud.go2.connection import go2
 from cloud.go2.paths import RULES_FILE
 from cloud.go2.control import control_lease
 from cloud.go2.execution import current_context, require_admin, require_persist
 
-# ── 规则存储 ──────────────────────────────────────────────────────
+# Compatibility wrappers for existing callers; implementation lives in agentcore.rules.
+from cloud.go2.agentcore import rules as _rules
+from cloud.go2.agentcore.llm import get_text_llm, get_vision_llm
 
+def load_rules():
+    return _rules.load_rules(rules_file=RULES_FILE)
 
-def load_rules() -> list:
-    if not RULES_FILE.exists():
-        return []
-    return json.loads(RULES_FILE.read_text(encoding="utf-8"))
+def save_rules(rules):
+    return _rules.save_rules(rules, rules_file=RULES_FILE)
 
+def _migrate_rule(rule):
+    return _rules._migrate_rule(rule)
 
-def save_rules(rules: list) -> None:
-    require_persist("modify trained rules")
-    RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    RULES_FILE.write_text(
-        json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+def check_rules(observation, *, include_rules=False):
+    return _rules.check_rules(observation, include_rules=include_rules, rules_file=RULES_FILE)
 
-
-def _migrate_rule(rule: dict) -> dict:
-    """把旧记录 {trigger, action, cooldown_s, last_triggered} 补全为富 schema。"""
-    rule.setdefault("id", f"tb_{int(time.time() * 1000)}")
-    rule.setdefault("behavior", rule.get("action", ""))
-    rule.setdefault("action_hint", {"skill": rule.get("action", "")})
-    rule.setdefault("enabled", True)
-    rule.setdefault("created_ts", time.time())
-    rule.setdefault("hit_count", 0)
-    rule.setdefault("last_fired_ts", None)
-    return rule
-
-
-_NEGATION_PREFIXES = ("没有", "无", "没", "看不到", "未发现", "不见")
-
-
-def _is_negated(trigger: str, text: str) -> bool:
-    for prefix in _NEGATION_PREFIXES:
-        if prefix + trigger in text:
-            return True
-    return False
-
-
-def check_rules(observation: str, *, include_rules: bool = False) -> list:
-    """Match and reserve cooldown; successful execution is recorded separately."""
-    rules = [_migrate_rule(r) for r in load_rules()]
-    now = time.time()
-    triggered: list[str] = []
-    changed = False
-    for rule in rules:
-        if not rule.get("enabled", True):
-            continue
-        trigger = rule["trigger"]
-        if trigger in observation and not _is_negated(trigger, observation):
-            if now - rule.get("last_triggered", 0) >= rule["cooldown_s"]:
-                rule["last_triggered"] = now
-                triggered.append(dict(rule) if include_rules else rule["action"])
-                changed = True
-    if changed:
-        save_rules(rules)
-    return triggered
-
-
-def record_rule_completion(rule_id: str) -> None:
-    rules = load_rules()
-    for rule in rules:
-        if rule.get("id") == rule_id:
-            rule["hit_count"] = rule.get("hit_count", 0) + 1
-            rule["last_fired_ts"] = time.time()
-            save_rules(rules)
-            return
-
-
-# ── LLM 单例 ──────────────────────────────────────────────────────
-
-_text_llm = None
-_vision_llm = None
-
-
-def get_text_llm() -> ChatOpenAI:
-    global _text_llm
-    if _text_llm is None:
-        _text_llm = ChatOpenAI(
-            model=os.getenv("GO2_TEXT_MODEL", "deepseek-chat"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0,
-            timeout=30,
-        )
-    return _text_llm
-
-
-def get_vision_llm() -> ChatOpenAI:
-    global _vision_llm
-    if _vision_llm is None:
-        _vision_llm = ChatOpenAI(
-            model=os.getenv("GO2_VISION_MODEL", "qwen"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
-            api_key=os.getenv("OPENAI_API_KEY"),
-            temperature=0,
-            timeout=30,
-        )
-    return _vision_llm
-
+def record_rule_completion(rule_id):
+    return _rules.record_rule_completion(rule_id, rules_file=RULES_FILE)
 
 # ── 工具函数 ──────────────────────────────────────────────────────
 
@@ -151,13 +67,13 @@ async def go2_sport(cmd: str) -> str:
         control_lease.acquire(current_context())
     result = await go2.send_command(canonical)
     if not isinstance(result, dict):
-        return f"已执行 {canonical}"
+        return {"result": "error", "error": "invalid_device_result", "action": canonical}
     status = result.get("result", "error")
     if status == "ok":
-        return f"已执行 {canonical}"
+        return {"result": "ok", "action": canonical, "message": f"已执行 {canonical}"}
     if status == "accepted":
-        return f"指令已发送 {canonical}，尚未确认完成"
-    raise RuntimeError(result.get("error") or f"{canonical} 执行未完成（{status}）")
+        return {"result": "accepted", "action": canonical, "message": f"指令已发送 {canonical}，尚未确认完成"}
+    return {"result": status, "action": canonical, "error": result.get("error") or f"{canonical} 执行未完成"}
 
 
 async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) -> str:
@@ -165,16 +81,34 @@ async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) ->
         return "Go2 未连接，请先建立连接"
     if direction not in _DIRECTION_MAP:
         return f"未知方向 {direction}，支持: {', '.join(_DIRECTION_MAP)}"
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not math.isfinite(speed) or not 0 < speed <= 0.5:
+        raise ValueError("speed must be in (0, 0.5]")
     if not math.isfinite(duration) or not 0 < duration <= 10:
         raise ValueError("duration must be in (0, 10] seconds")
     control_lease.acquire(current_context())
+    task_id = uuid.uuid4().hex
     params = _DIRECTION_MAP[direction](speed)
-    await go2.send_command("Move", params)
+    started = await go2.send_command("Move", params)
+    if not isinstance(started, dict) or started.get("result") not in ("ok", "accepted"):
+        return {"result": "error", "task_id": task_id, "action": "Move", "start": started,
+                "error": "move_not_accepted"}
     try:
         await asyncio.sleep(duration)
     finally:
-        stopped = await go2.send_command("StopMove")
-    return {"result": "accepted", "action": "Move", "stop": stopped,
+        owner = control_lease.snapshot()
+        if owner is not None and owner.owner_session_id != current_context().session_id:
+            stopped = {"result": "error", "error": "lease_transferred"}
+        else:
+            try:
+                stopped = await go2.send_command("StopMove")
+            except Exception as exc:
+                stopped = {"result": "error", "error": type(exc).__name__}
+    stop_status = stopped.get("result") if isinstance(stopped, dict) else None
+    if stop_status not in ("ok", "accepted"):
+        return {"result": "timeout" if stop_status == "timeout" else "error",
+                "task_id": task_id, "action": "Move", "start": started, "stop": stopped,
+                "error": "stop_not_confirmed", "message": "停止指令未确认，需检查设备状态"}
+    return {"result": "accepted", "task_id": task_id, "action": "Move", "start": started, "stop": stopped,
             "message": "定时移动和停止指令已发送，实际位移未确认"}
 
 
@@ -292,7 +226,7 @@ async def go2_set_led(color: str = "white", duration: int = 60) -> str:
 # ── 身份工具 ──────────────────────────────────────────────────────
 
 async def go2_recognize_person() -> dict:
-    from cloud.go2.agentcore.skills.identity import identity_skill
+    from cloud.go2.agentcore.perception.identity import identity_skill
     snapshot = await identity_skill.recognize_now()
     return _identity_result(snapshot)
 
@@ -338,17 +272,6 @@ TOOL_FN_MAP = {
     "go2_list_people":            go2_list_people,
 }
 
-TOOL_DESCRIPTIONS = """\
-可用工具：
-- go2_sport(cmd): 执行预定义动作。cmd 取值及含义：StandUp（站起来）/StandDown（趴下/安静休息/待命）/StopMove（停止移动）/Hello（打招呼）/Stretch（伸展）/Dance1/Dance2（跳舞）
-- go2_move(direction, speed=0.3, duration=1.0): 移动机器狗。direction: forward/backward/left/right/turn_left/turn_right
-- go2_observe(question="描述你看到的场景"): 用摄像头分析当前画面，返回视觉描述
-- go2_status(): 查询连接状态和机器狗当前姿态
-- go2_add_rule(trigger, action, cooldown_s=30): 添加视觉触发规则，检测到 trigger 关键词时自动执行 action(同 go2_sport 的 cmd 取值）
-- go2_list_rules(): 列出当前所有视觉触发规则
-- go2_tag_location(name): 将当前位置保存为命名地点，供导航使用
-- go2_navigate_to(name): 导航到已保存的命名地点，支持模糊描述
-- go2_list_locations(): 列出所有已保存的命名地点
-- go2_set_led(color="white", duration=60): 设置 LED 颜色，支持 white/red/yellow/blue/green/cyan/purple
-- go2_recognize_person(): 立即识别面前的人；“面前是谁/你认识我吗”只能识别，不能隐式登记
-- go2_list_people(): 列出空间已知人员和关系；人员增删请在手机的空间人员库中操作"""
+from cloud.go2.agentcore.tools.registry import tool_descriptions
+
+TOOL_DESCRIPTIONS = tool_descriptions()

@@ -12,7 +12,7 @@ from cloud.space.people.provider import (
     FaceProviderError,
 )
 from cloud.space.people.memory import KnownPerson, PeopleMemory
-from cloud.go2.agentcore.skills.vision import VisionFaceRejected, VisionFrame, select_enrollment_face
+from cloud.go2.agentcore.perception.vision import VisionFaceRejected, VisionFrame, select_enrollment_face
 from cloud.space.people.service import space_people
 
 logger = logging.getLogger(__name__)
@@ -229,7 +229,7 @@ class IdentitySkill:
 
 
 def _default_frame_getter() -> tuple[VisionFrame | None, bytes | None]:
-    from cloud.go2.agentcore.skills.vision import vision_loop
+    from cloud.go2.agentcore.perception.vision import vision_loop
     return vision_loop.latest_frame_pair()
 
 

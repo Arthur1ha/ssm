@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sys as _sys
+import time
 from collections import deque
 from typing import TypedDict
 
@@ -40,9 +41,15 @@ from langgraph.graph import StateGraph, END
 from cloud.go2.agentcore.soul import get_system_prompt, ensure_yesterday_evolved
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 from cloud.go2.agentcore.memory import daily_summary as summary_mod
+from cloud.go2.agentcore.memory.recall import recall_memory
+from cloud.go2.agentcore.prompts import build_prompt
 
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP, TOOL_DESCRIPTIONS, get_text_llm
+from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP
+from cloud.go2.agentcore.tools.registry import get_tool_spec, tool_descriptions
+from cloud.go2.agentcore.tools.executor import execute_tool
+from cloud.go2.agentcore.llm import get_text_llm
+from cloud.go2.card import get_card_skill
 from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT, use_context
 
 
@@ -63,25 +70,22 @@ class Go2AgentState(TypedDict):
 
 
 _session_history: dict[str, deque[dict[str, str]]] = {}
-_PERSISTENT_TOOLS = {
-    "go2_add_rule", "go2_tag_location",
-}
-_ADMIN_ONLY_TOOLS = {
-    # The full identity library is private. Visitors may only recognize the
-    # person currently in view; saved locations remain usable for navigation.
-    "go2_list_people",
-}
-
-
+_pending_clarifications: dict[tuple[str, str], dict] = {}
+_CLARIFICATION_TTL_S = 180
 def _tool_denial(state: Go2AgentState, tool_name: str) -> str:
-    if state.get("actor", "admin") != "admin" and tool_name in _ADMIN_ONLY_TOOLS:
+    spec = get_tool_spec(tool_name)
+    if spec is None:
+        return "unknown_tool"
+    if state.get("actor", "admin") not in spec.roles:
         return "admin_only_tool_denied"
-    if not state.get("persist", True) and tool_name in _PERSISTENT_TOOLS:
+    if not state.get("persist", True) and spec.persists:
         return "visitor_persistence_denied"
     return ""
 
 
 def _permission_reply(reason: str) -> str:
+    if reason == "unknown_tool":
+        return "请求中的工具不存在。"
     if reason == "admin_only_tool_denied":
         return "这个请求会读取空间的长期人员或资产信息，访客会话不能访问；我只能帮你识别当前面前的人。"
     return "这个请求会修改空间的长期记忆，访客会话不能执行。"
@@ -120,18 +124,12 @@ def _remember_turn(session_id: str, role: str, content: str) -> None:
 
 
 def cleanup_session(session_id: str) -> bool:
+    _pending_clarifications.pop((session_id, "go2"), None)
     return _session_history.pop(session_id, None) is not None
 
 
-_SKILL_TO_TOOL = {
-    "go2_navigate": "go2_navigate_to",
-    "go2_recognize_person": "go2_recognize_person",
-    "go2_chat":     None,   # chat 走 LLM，无对应工具函数
-}
-
-
 def _identity_context() -> str:
-    from cloud.go2.agentcore.skills.identity import identity_skill
+    from cloud.go2.agentcore.perception.identity import identity_skill
     current = identity_skill.current
     if current.status == "recognized":
         return f"当前人物：{current.name}（{current.role}，置信分 {current.score:.1f}）"
@@ -147,7 +145,7 @@ def _cached_identity_reply(user_msg: str) -> str:
     identity_queries = ("我是谁", "认识我", "知道我是谁")
     if not any(phrase in user_msg for phrase in identity_queries):
         return ""
-    from cloud.go2.agentcore.skills.identity import identity_skill
+    from cloud.go2.agentcore.perception.identity import identity_skill
     current = identity_skill.current
     if current.status != "recognized":
         return ""
@@ -155,12 +153,61 @@ def _cached_identity_reply(user_msg: str) -> str:
     return f"我认识你，你是{current.name}{relation}。"
 
 
+def _clarification(state: Go2AgentState) -> dict | None:
+    """Keep ambiguous short movement goals scoped to one Go2 conversation."""
+    message = state["user_msg"].strip()
+    key = (state["session_id"], "go2")
+    pending = _pending_clarifications.get(key)
+    if pending and pending["expires_at"] < time.monotonic():
+        _pending_clarifications.pop(key, None)
+        pending = None
+    directions = {"前": "向前", "后": "向后", "左": "向左", "右": "向右"}
+    direction_match = re.search(r"向([前后左右])|([前后左右])进|([前后左右])退", message)
+    direction = directions.get(next((part for part in direction_match.groups() if part), "")) if direction_match else None
+    duration_match = re.search(r"(\d+(?:\.\d+)?)\s*秒", message)
+    duration = duration_match.group(1) if duration_match else None
+    step_request = bool(re.search(r"(?:移动|走|前进|后退).*(?:两步|2步|几步)", message))
+    if step_request:
+        pending = {"expires_at": time.monotonic() + _CLARIFICATION_TTL_S,
+                   "direction": direction, "duration": None}
+        _pending_clarifications[key] = pending
+    if pending:
+        is_continuation = step_request or bool(direction or duration) and bool(
+            re.fullmatch(r"(?:向?[前后左右](?:进|退|走|移动)?|\d+(?:\.\d+)?\s*秒|向?[前后左右].*\d+(?:\.\d+)?\s*秒)", message)
+        )
+        if not is_continuation:
+            _pending_clarifications.pop(key, None)
+            return None
+        pending["direction"] = direction or pending["direction"]
+        pending["duration"] = duration or pending["duration"]
+        missing = [field for field in ("direction", "duration") if not pending[field]]
+        if missing:
+            question = "我只能按时长近似移动，无法确认实际走了几步。"
+            if "direction" in missing:
+                question += "请告诉我方向。"
+            if "duration" in missing:
+                question += "请告诉我移动时长（秒）。"
+            return {"result": "needs_clarification", "question": question,
+                    "missing_fields": missing}
+        state["user_msg"] = f"{pending['direction']}移动{pending['duration']}秒，按时长近似移动，实际位移未确认"
+        _pending_clarifications.pop(key, None)
+    return None
+
+
 async def planner_node(state: Go2AgentState) -> Go2AgentState:
+    clarification = _clarification(state)
+    if clarification:
+        return {**state, "planned_tools": [], "response_text": clarification["question"],
+                "early_exit": True, "result_override": "needs_clarification",
+                "question": clarification["question"], "missing_fields": clarification["missing_fields"]}
     # 若上游已确定 skill_id，直接跳过 LLM 重规划
     if state.get("skill_id"):
         skill_id = state["skill_id"]
-        # 将 card skill_id 映射到 TOOL_FN_MAP 键名；None 表示需要 LLM 处理
-        tool_name = _SKILL_TO_TOOL.get(skill_id, skill_id)
+        card_skill = get_card_skill(skill_id)
+        if card_skill is None:
+            return {**state, "planned_tools": [], "response_text": f"未知能力: {skill_id}",
+                    "early_exit": True, "error": "unknown_skill", "result_override": "error"}
+        tool_name = card_skill["tool_name"]
         if tool_name is None:
             # go2_chat 等无对应工具的 skill 退回 LLM 规划
             pass
@@ -196,48 +243,35 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
                 "response_text": "Go2 当前未连接，请先通过「连接」按钮建立连接。",
                 "error": "go2_not_connected"}
 
-    memory_parts = []
     if state.get("persist", False):
         # These background jobs write files and therefore only run for an
         # administrator context.
         asyncio.create_task(summary_mod.ensure_yesterday_summary())
         asyncio.create_task(ensure_yesterday_evolved())
-        recent_summaries = summary_mod.get_recent_summaries(6)
-        if recent_summaries:
-            lines = "\n".join(f"- {s['date']}：{s['summary']}" for s in recent_summaries)
-            memory_parts.append(f"过去几天摘要：\n{lines}")
-        memory_parts.append(episode_memory.format_today())
-    else:
-        memory_parts.append(_history_context(state["session_id"]))
-    memory_parts.append(_identity_context())
-    memory_context = "\n\n".join(memory_parts)
-
-    logger.info("[Go2/Agent] 用户指令: %s", state["user_msg"])
-    prompt = (
-        f"你是 Go2 机器狗控制智能体。根据指令生成工具调用列表。\n"
-        f"{TOOL_DESCRIPTIONS}\n\n"
-        f"【记忆上下文】\n{memory_context}\n\n"
-        f"用户指令：{state['user_msg']}\n\n"
-        f"规则：\n"
-        f"1. 涉及视觉问题（看到什么/有没有人/描述场景）必须调用 go2_observe\n"
-        f"2. 涉及历史记忆问题（今天去哪了/发生了什么/做了什么/最近几天）"
-        f"直接从记忆上下文回答，输出 []\n"
-        f"3. 添加人员须在手机端的空间人员库中上传照片，不要调用摄像头登记\n"
-        f"4. 当前身份未确认时，“面前是谁/你认识我吗”调用 go2_recognize_person\n"
-        f"6. 人员库增删由空间管理员在手机端操作\n"
-        f"7. 最多生成 3 个工具调用，直接输出 JSON 数组，不含解释或代码块\n"
-        f"示例：[{{\"tool\": \"go2_sport\", \"params\": {{\"cmd\": \"StandUp\"}}}}]\n"
-        f"无需工具时输出：[]"
+    recalled = recall_memory(
+        state["user_msg"], actor=state.get("actor", "admin"),
+        session_id=state["session_id"],
+        session_history=_session_history.get(state["session_id"], ()),
+        current_state=_identity_context(), persist=state.get("persist", True),
     )
+    memory_context = recalled.text
+
+    logger.info("[Go2/Agent] planning session=%s message_chars=%d", state["session_id"], len(state["user_msg"]))
+    prompt = build_prompt(
+        "planner", personality=get_system_prompt(), user_input=state["user_msg"], memory=memory_context,
+        tools=tool_descriptions(), device_state=f"fsm={getattr(go2, 'fsm_state', 'unknown')}",
+        memory_sources=recalled.sources, tool_version="go2-tools-v1",
+    )
+    logger.info("[Go2/Prompt] %s", prompt.metadata)
     try:
         llm = get_text_llm()
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await llm.ainvoke([SystemMessage(content=prompt.system), HumanMessage(content=prompt.human)])
         content = resp.content.strip()
-        logger.info("[Go2/Agent] LLM 原始输出: %s", content)
-        content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
-        idx_s, idx_e = content.find("["), content.rfind("]")
+        logger.info("[Go2/Agent] planner output_chars=%d", len(content))
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
     except Exception as exc:
-        logger.warning("[Go2/Agent] planner llm error: %s", exc)
+        logger.warning("[Go2/Agent] planner llm error: %s", type(exc).__name__)
         return {
             **state,
             "memory_context": memory_context,
@@ -249,10 +283,19 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
             "error": "llm_unavailable",
         }
     try:
-        tools_raw = json.loads(content[idx_s:idx_e + 1]) if idx_s != -1 else []
-    except Exception:
-        tools_raw = []
-    planned = [t for t in tools_raw if isinstance(t, dict) and "tool" in t]
+        tools_raw = json.loads(content)
+        if not isinstance(tools_raw, list) or any(
+            not isinstance(t, dict) or not isinstance(t.get("tool"), str)
+            or not isinstance(t.get("params", {}), dict) for t in tools_raw
+        ):
+            raise ValueError("planner_output_invalid_shape")
+        if len(tools_raw) > 3:
+            raise ValueError("tool_call_limit_exceeded")
+    except (ValueError, json.JSONDecodeError) as exc:
+        error = "tool_call_limit_exceeded" if str(exc) == "tool_call_limit_exceeded" else "invalid_planner_json"
+        return {**state, "planned_tools": [], "response_text": "我暂时无法可靠解析这个指令，请换种说法。",
+                "early_exit": True, "error": error, "result_override": "error"}
+    planned = tools_raw
     for call in planned:
         denial = _tool_denial(state, call.get("tool", ""))
         if denial:
@@ -266,7 +309,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
                 "tool_results": [], "response_text": _permission_reply(denial),
                 "early_exit": True, "error": denial,
             }
-    logger.info("[Go2/Agent] 规划工具调用 (%d 个): %s", len(planned), json.dumps(planned, ensure_ascii=False))
+    logger.info("[Go2/Agent] planned tool_count=%d", len(planned))
     return {**state, "memory_context": memory_context, "planned_tools": planned, "early_exit": False}
 
 
@@ -274,7 +317,6 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
     # Physical outcomes are authoritative; a language model cannot upgrade acceptance to completion.
     status = _execution_status(results)
     if status != "ok":
-        failed = next((r for r in results if _execution_status([r]) not in ("ok", "accepted")), None)
         replies = {
             "accepted": "指令已发送，尚未确认动作完成。",
             "timeout": "等待动作完成反馈超时，当前结果还不能确认。",
@@ -282,70 +324,57 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
             "blocked": "当前状态不允许这个动作，设备没有执行。",
             "rejected": "这个请求没有执行：当前画面或人员信息不符合要求。",
             "disabled": "人脸登记或识别功能当前没有开启。",
+            "needs_clarification": "请补充完成这个动作所需的信息。",
         }
         return replies.get(status, "动作未能完成，请查看设备状态后重试。"), True
-    if not results:
-        prompt = (
-            f"【记忆上下文】\n{memory_context}\n\n"
-            f"用户问：'{user_msg}'\n"
-            f"用机器狗 Go2 的第一人称口吻回答，像在和主人说话。没有相关记忆就直接说不记得了。"
-        )
-    else:
-        results_text = "\n".join(f"- {r['tool']}: {r['result']}" for r in results)
-        prompt = (
-            f"用户说：'{user_msg}'\n"
-            f"执行结果：\n{results_text}\n"
-            f"用机器狗 Go2 的第一人称口吻用一句话回应，像在和主人说话，不提工具名或技术细节。"
-        )
+    prompt = build_prompt("responder", personality=get_system_prompt(),
+                          user_input=user_msg, memory=memory_context,
+                          tool_results=results)
+    logger.info("[Go2/Prompt] %s", prompt.metadata)
     try:
         resp = await get_text_llm().ainvoke([
-            SystemMessage(content=get_system_prompt()),
-            HumanMessage(content=prompt),
+            SystemMessage(content=prompt.system),
+            HumanMessage(content=prompt.human),
         ])
         return resp.content.strip(), True
     except Exception as exc:
-        logger.warning("[Go2/Agent] response llm error: %s", exc)
+        logger.warning("[Go2/Agent] response llm error: %s", type(exc).__name__)
         if results:
             return "动作我已经做完了，不过云端大脑刚才没把结果整理成一句话。你看页面状态就能确认。", False
         return GO2_LLM_UNAVAILABLE_REPLY, False
+
+
+async def _execute_calls(state: Go2AgentState, context: ExecutionContext):
+    accepted_motion = False
+    for call in state.get("planned_tools", [])[:3]:
+        name = call["tool"]
+        params = call.get("params", {})
+        spec = get_tool_spec(name)
+        is_stop = name == "go2_sport" and params.get("cmd") == "StopMove"
+        if accepted_motion and spec and spec.motion and not is_stop:
+            result = {"result": "blocked", "error": "previous_motion_unconfirmed",
+                      "message": "前一个运动尚未确认完成，未执行后续运动"}
+        else:
+            result = await execute_tool(name, params, context=context)
+        item = {"tool": name, "result": result}
+        yield item
+        if spec and spec.motion and result["result"] == "accepted" and not is_stop:
+            accepted_motion = True
+        if result["result"] not in ("ok", "accepted"):
+            break
 
 
 async def executor_node(state: Go2AgentState) -> Go2AgentState:
     if state.get("early_exit"):
         return state
 
-    results = []
-    for call in state["planned_tools"]:
-        tool_name = call.get("tool", "")
-        params = call.get("params", {})
-        fn = TOOL_FN_MAP.get(tool_name)
-        if fn is None:
-            logger.warning("[Go2/Agent] 未知工具: %s", tool_name)
-            results.append({"tool": tool_name, "result": f"未知工具: {tool_name}"})
-            continue
-        denial = _tool_denial(state, tool_name)
-        if denial:
-            _audit_tool_denial(state, tool_name, denial)
-            logger.warning(
-                "[Go2/Security] executor denied tool=%s actor=%s session=%s reason=%s",
-                tool_name, state.get("actor"), state.get("session_id"), denial,
-            )
-            results.append({"tool": tool_name, "result": {"result": "rejected", "error": denial}})
-            break
-        logger.info("[Go2/Agent] 调用 %s 参数=%s", tool_name, json.dumps(params, ensure_ascii=False))
-        try:
-            result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
-        except Exception as exc:
-            result = {"result": "blocked" if isinstance(exc, ValueError) else "error", "error": str(exc)}
-        logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
-        results.append({"tool": tool_name, "result": result})
-        if _execution_status([results[-1]]) not in ("ok", "accepted"):
-            break
+    context = ExecutionContext(state["session_id"], state.get("actor", "admin"), state.get("persist", True))
+    results = [item async for item in _execute_calls(state, context)]
 
     response_text, reply_llm_available = await _generate_response(
         state["user_msg"], state.get("memory_context", ""), results
     )
-    logger.info("[Go2/Agent] 最终回复: %s", response_text)
+    logger.info("[Go2/Agent] response_chars=%d", len(response_text))
     error = state.get("error", "")
     if not reply_llm_available and not results:
         error = "llm_unavailable"
@@ -417,7 +446,7 @@ async def run_agent(
             "persist":        context.persist,
         })
         except Exception as exc:
-            logger.warning("[Go2/Agent] run_agent error: %s", exc)
+            logger.warning("[Go2/Agent] run_agent error: %s", type(exc).__name__)
             return {
                 "result": "error",
                 "response": GO2_AGENT_UNAVAILABLE_REPLY,
@@ -431,13 +460,15 @@ async def run_agent(
         _remember_turn(context.session_id, "Go2", state["response_text"])
     if state["response_text"] and not state.get("early_exit"):
         _publish_thought({"type": "think", "text": state["response_text"]})
-    result = "error" if state.get("error") else _execution_status(state["tool_results"])
+    result = state.get("result_override") or ("error" if state.get("error") else _execution_status(state["tool_results"]))
     return {
         "result":        result,
         "response":      state["response_text"],
         "actions_taken": [r["tool"] for r in state["tool_results"] if _execution_status([r]) == "ok"],
         "tool_results": state["tool_results"],
         "llm_available": state.get("llm_available", True),
+        **({"question": state["question"], "missing_fields": state["missing_fields"]}
+           if result == "needs_clarification" else {}),
         **({"error": state["error"]} if state.get("error") else {}),
     }
 
@@ -469,46 +500,21 @@ async def run_agent_stream(session_id: str, message: str, context: ExecutionCont
 
     if state.get("early_exit"):
         yield {"type": "response", "text": state["response_text"]}
-        yield {"type": "done"}
+        yield {"type": "done", "result": state.get("result_override") or
+               ("error" if state.get("error") else "ok"),
+               **({"question": state["question"], "missing_fields": state["missing_fields"]}
+                  if state.get("result_override") == "needs_clarification" else {})}
         return
 
     results = []
-    for call in state["planned_tools"]:
-        tool_name = call.get("tool", "")
-        params    = call.get("params", {})
-        fn        = TOOL_FN_MAP.get(tool_name)
-
-        yield {"type": "thinking", "text": f"执行 {tool_name}…"}
-
-        denial = _tool_denial(state, tool_name)
-        if denial:
-            _audit_tool_denial(state, tool_name, denial)
-            logger.warning(
-                "[Go2/Security] stream executor denied tool=%s actor=%s session=%s reason=%s",
-                tool_name, context.actor, context.session_id, denial,
-            )
-            result = {"result": "rejected", "error": denial}
-        elif fn is None:
-            logger.warning("[Go2/Agent] 未知工具: %s", tool_name)
-            result = f"未知工具: {tool_name}"
-        else:
-            logger.info("[Go2/Agent] 调用 %s 参数=%s", tool_name, json.dumps(params, ensure_ascii=False))
-            try:
-                with use_context(context):
-                    result = await fn(**params) if asyncio.iscoroutinefunction(fn) else fn(**params)
-            except Exception as exc:
-                result = {"result": "blocked" if isinstance(exc, ValueError) else "error", "error": str(exc)}
-            logger.info("[Go2/Agent] %s 返回: %s", tool_name, result)
-
-        results.append({"tool": tool_name, "result": result})
-        yield {"type": "tool_done", "tool": tool_name, "result": str(result)}
-        if _execution_status([results[-1]]) not in ("ok", "accepted"):
-            break
+    async for item in _execute_calls(state, context):
+        results.append(item)
+        yield {"type": "tool_done", "tool": item["tool"], "result": item["result"]}
 
     yield {"type": "thinking", "text": "整理回复…"}
 
     response_text, _ = await _generate_response(message, state.get("memory_context", ""), results)
-    logger.info("[Go2/Agent] 最终回复: %s", response_text)
+    logger.info("[Go2/Agent] response_chars=%d", len(response_text))
     with use_context(context):
         episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
     if not context.persist:

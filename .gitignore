@@ -48,3 +48,11 @@ cloud/orchestrator/devices.json
 cloud/orchestrator/rules.json
 cloud/space/devices.json
 cloud/space/space.json
+
+# Go2 runtime plan regression tests are part of the implementation.
+!cloud/go2/tests/
+!cloud/go2/tests/test_tool_runtime.py
+!cloud/go2/tests/test_tasks.py
+!cloud/go2/tests/test_recall.py
+!cloud/go2/tests/test_prompts.py
+!cloud/go2/tests/test_mode_runtime.py

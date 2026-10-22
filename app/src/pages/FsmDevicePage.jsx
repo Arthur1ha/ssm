@@ -142,7 +142,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     setSending(true);
     commandBus.command(unitId, 'chat', { message: text })
       .then(result => {
-        const reply = result?.reply || result?.response || result?.text || result?.error || commandBus.describe(result);
+        const reply = result?.question || result?.reply || result?.response || result?.text || commandBus.describe(result);
         setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: reply }]);
       })
       .finally(() => setSending(false));

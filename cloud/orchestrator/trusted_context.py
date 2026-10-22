@@ -95,6 +95,7 @@ def parse_trusted_intent(
         "requirements": [],
         "intent_hint": unsigned.get("intent_hint", ""),
         "device_hint": unsigned.get("device_hint", ""),
+        "event_id": unsigned.get("event_id", ""),
     }
 
 

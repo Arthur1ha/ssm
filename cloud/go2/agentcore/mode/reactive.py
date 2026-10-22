@@ -7,9 +7,12 @@ from typing import Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from cloud.go2.agentcore.skills.vision import VisionFrame
-from cloud.go2.agentcore.tools.tools import check_rules, record_rule_completion, go2_sport, go2_move, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.perception.vision import VisionFrame
+from cloud.go2.agentcore.tools.tools import check_rules, record_rule_completion, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.tools.executor import execute_tool
+from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
 from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,16 @@ class ReactiveMind:
         self._prev_person_count: int = -1
         self._prev_face_count: int = -1
         self._identity = None
+        self._active = False
+        self._generation = 0
+        self._context: ExecutionContext = SYSTEM_CONTEXT
+        self._last_prompt_metadata: dict | None = None
+
+    def set_active(self, active: bool, context: ExecutionContext | None = None) -> None:
+        self._generation += 1
+        self._active = active
+        if context is not None:
+            self._context = context
 
     @property
     def last_decision(self) -> Optional[dict]:
@@ -79,8 +92,10 @@ class ReactiveMind:
 
     # ── 单一执行口，规则层与自主层共用 ────────────────────────────
 
-    async def _dispatch_action(self, action: str, reason: str, source: str, rule_id: str = "") -> None:
+    async def _dispatch_action(self, action: str, reason: str, source: str, rule_id: str = "", generation: int | None = None) -> None:
         """真正下发一个动作：校验 → 共享冷却 → 执行 → 记忆 → 日志。"""
+        if not self._active or (generation is not None and generation != self._generation):
+            return
         if action not in _ALL_ACTIONS:
             logger.info("[ReactiveMind] 未知动作 %s，跳过", action)
             return
@@ -89,10 +104,10 @@ class ReactiveMind:
             return
         try:
             if action in _VALID_SPORT_CMDS:
-                result = await go2_sport(action)
+                result = await execute_tool("go2_sport", {"cmd": action}, context=self._context)
             else:
-                result = await go2_move(**_TURN_ACTIONS[action])
-            if not (isinstance(result, str) and result.startswith("已执行")):
+                result = await execute_tool("go2_move", _TURN_ACTIONS[action], context=self._context)
+            if result.get("result") != "ok":
                 _publish_thought({"type": "act", "text": f"{action} 尚未确认完成", "execution": result})
                 self._action_cooldowns[action] = time.time()
                 return
@@ -110,6 +125,8 @@ class ReactiveMind:
     # ── 同步入口，由 vision_loop 回调 ─────────────────────────────
 
     def on_vision_frame(self, frame: VisionFrame) -> None:
+        if not self._active:
+            return
         observation = _frame_to_observation(frame)
         rule_actions = check_rules(observation, include_rules=True) if observation else []
 
@@ -131,16 +148,18 @@ class ReactiveMind:
         # 规则层（快速反射）优先：命中即执行，不再走 LLM 推理
         if rule_actions:
             for rule in rule_actions:
-                loop.create_task(self._dispatch_action(rule["action"], "规则命中", "规则响应", rule["id"]))
+                loop.create_task(self._dispatch_action(rule["action"], "规则命中", "规则响应", rule["id"], self._generation))
             return
 
         # 规则未命中且画面变化 → 自主推理（LLM 兜底）
         if changed:
-            loop.create_task(self._autonomous_reason(frame))
+            loop.create_task(self._autonomous_reason(frame, self._generation))
 
     # ── 异步自主推理 ──────────────────────────────────────────────
 
-    async def _autonomous_reason(self, frame: VisionFrame) -> None:
+    async def _autonomous_reason(self, frame: VisionFrame, generation: int | None = None) -> None:
+        if not self._active or (generation is not None and generation != self._generation):
+            return
         now = time.time()
         if now - self._last_autonomous_ts < _AUTONOMY_COOLDOWN_S:
             return
@@ -167,7 +186,6 @@ class ReactiveMind:
 
         memory_ctx = episode_memory.format_context()
         prompt = (
-            f"{memory_ctx}\n\n"
             f"{self._identity_context()}\n"
             f"当前画面变化：{frame['change_type']}，场景：{scene}。\n"
             f"规则层没有触发任何动作。\n"
@@ -181,9 +199,15 @@ class ReactiveMind:
         )
 
         try:
+            bundle = build_prompt(
+                "reactive", personality=get_system_prompt(), memory=memory_ctx,
+                device_state=prompt, memory_sources=("episode",), tool_version="go2-tools-v1",
+            )
+            self._last_prompt_metadata = bundle.metadata
+            logger.info("[Go2/Prompt] %s", bundle.metadata)
             resp = await get_text_llm().ainvoke([
-                SystemMessage(content=get_system_prompt()),
-                HumanMessage(content=prompt),
+                SystemMessage(content=bundle.system),
+                HumanMessage(content=bundle.human),
             ])
             content = re.sub(r"```(?:json)?\n?", "", resp.content.strip()).strip().rstrip("`")
             decision = json.loads(content)
@@ -205,7 +229,7 @@ class ReactiveMind:
         _publish_thought({"type": "think", "text": reason})
 
         if action:
-            await self._dispatch_action(action, reason, "自主响应")
+            await self._dispatch_action(action, reason, "自主响应", generation=generation)
         else:
             logger.info("[ReactiveMind] 决定不行动：%s", reason)
 

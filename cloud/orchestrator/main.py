@@ -6,6 +6,7 @@ import json
 import queue
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +45,22 @@ event_queue: queue.Queue = queue.Queue()
 _connected  = False
 _announced  = False
 _control_replay_guard = NonceReplayGuard()
+# A long Go2 HTTP task must not stall MQTT status/result processing. Keep
+# orchestration serial so physical actions from separate intents do not race.
+_intent_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssm-intent")
+
+
+def _run_intent(session_id: str, graph_input: dict) -> None:
+    current = state.get_session(session_id)
+    expires_at = graph_input.get("expires_at")
+    if current is None or (expires_at is not None and expires_at <= time.time()):
+        logger.info("[Main] discarded stale intent session=%s", session_id)
+        return
+    try:
+        orchestrator.invoke(graph_input)
+        logger.info("[Main] ── 编排图完成 session=%s ──", session_id)
+    except Exception as exc:
+        logger.exception("[Main] 编排图异常 session=%s: %s", session_id, exc)
 
 
 def on_connect(client, userdata, flags, rc):
@@ -219,8 +236,8 @@ while True:
         if trigger == "intent":
             session_id = event.get("session_id", "")
             logger.info("[Main] ── 编排图启动 session=%s ──", session_id)
-            try:
-                orchestrator.invoke({
+            _intent_worker.submit(
+                _run_intent, session_id, {
                     "session_id":   session_id,
                     "actor":        event["payload"]["actor"],
                     "persist":      event["payload"]["persist"],
@@ -228,6 +245,7 @@ while True:
                     "issued_at":    event["payload"]["issued_at"],
                     "expires_at":   event["payload"].get("expires_at"),
                     "user_msg":     event["payload"]["user_msg"],
+                    "event_id":     event["payload"].get("event_id", ""),
                     "requirements": [],
                     "route":         event["payload"].get("intent_hint", ""),
                     "planned_tasks": [],
@@ -235,10 +253,8 @@ while True:
                     "task_results":  {},
                     "response_text": "",
                     "early_exit":    False,
-                })
-                logger.info("[Main] ── 编排图完成 session=%s ──", session_id)
-            except Exception as e:
-                logger.error("[Main] 编排图异常: %s", e)
+                },
+            )
             continue
 
         if trigger == "session_ended":

@@ -10,6 +10,12 @@
 
 参考资料是第三方仓库 `liuup/claude-code-analysis` 对 Claude Code 的静态分析：[Memory](https://github.com/liuup/claude-code-analysis/blob/main/analysis/04-agent-memory.md)、[Skills](https://github.com/liuup/claude-code-analysis/blob/main/analysis/04c-skills-implementation.md)、[Tool Call](https://github.com/liuup/claude-code-analysis/blob/main/analysis/04b-tool-call-implementation.md)、[Prompt](https://github.com/liuup/claude-code-analysis/blob/main/analysis/04g-prompt-management.md)。这些文章用于提炼设计原则，Go2 的行为和接口以本仓库代码为准。
 
+### 与 Claude Code 的对照边界
+
+对照的是职责划分和执行治理，不是目录名逐个照搬。Claude Code 官方把常驻上下文、按需加载的 Skills、外部工具连接、子智能体和事件钩子作为不同扩展点；其 Skill 主要是按需提供给模型的 Markdown 知识或工作流。[官方扩展说明](https://code.claude.com/docs/en/features-overview) Go2 的 `reactive`、`free_explore` 是长期运行的自主模式；Go2 未来的内部 Skill 是可复用的任务流程；Agent Card 的 `skills` 又是对外 API 入口。这三者用途不同，不能因 Claude Code 有 `skills/` 就把 Go2 的模式也放进去。
+
+Go2 与 Claude Code 可比较的部分是：工具声明和执行、记忆召回、prompt 组装、可复用工作流。Go2 特有的 WebRTC 连接、运动控制、导航闭环、持续自主模式和 MQTT/HTTP 双面接口，应按机器狗运行需要组织，不套用 Claude Code 的 Shell/MCP 插件结构。
+
 ### 当前基线
 
 | 方面 | 当前实现 | 可验证的问题 |
@@ -32,7 +38,7 @@
 
 | 职责 | 判断标准 | 现有能力的归位 |
 |---|---|---|
-| 底层服务 | 持续提供数据或封装设备算法，不决定一个用户目标的完整步骤 | `vision.py` 负责画面检测与分发；`identity.py` 负责识别状态和人员 provider；`navigation/navigator.py` 负责路径与运动闭环；memory 负责存取。视觉、身份代码从当前 `skills/` 归入感知/身份服务。 |
+| 底层服务 | 持续提供数据或封装设备算法，不决定一个用户目标的完整步骤 | `vision.py` 负责画面检测与分发；`identity.py` 负责识别状态和人员 provider；`navigation/navigator.py` 负责路径与运动闭环；memory 负责存取。视觉、身份代码从当前 `skills/` 归入 `agentcore/perception/`。 |
 | Tool | 一次可校验、可执行、可报告结果的操作；可以调用复杂的底层服务 | `go2_sport`、`go2_observe`、`go2_recognize_person`、`go2_navigate_to`、`go2_status` 等。简单指令可以直接选 tool。 |
 | 自主 Mode | 长期运行、按设备状态和环境事件持续决策，由模式开关控制启停 | `ReactiveMind` 负责 `reactive` 的视觉变化、规则/LLM 决策和冷却；`Drive` 负责 `free_explore` 的动机状态机、探索和社交决策。分别迁入 `agentcore/mode/reactive.py`、`agentcore/mode/free_explore.py`；`manual` 是关闭自主决策的模式，无需单独大脑。 |
 | 内部 Skill | 一个可按需调用、可复用且有结束条件的目标流程；可多次调用 tools | 本期不强行把现有模式改造成 Skill，也不预设首批 Skill；以后出现经验证的多步任务再加入。 |
@@ -45,6 +51,30 @@ Agent Card 的协议字段继续用 `skills`：A2A 规范中的 [`AgentSkill`](h
 例一：编排器选 Card 的 `go2_navigate`，Go2 调用 `go2_navigate_to` tool，tool 再调用导航器。这是一次明确操作，不必额外套 Skill。例二：`reactive` 模式收到视觉变化，其独立大脑判断规则与冷却、选择动作，再调用 `go2_sport` 或 `go2_move` tool。例三：`free_explore` 模式的大脑在多轮观察、导航、社交和用户中断之间推进自主运行。
 
 现有 `skills/` 是历史目录名：`vision.py`、`identity.py` 是服务，`reactive.py` 是模式大脑；另一个模式大脑目前放在 `navigation/drive.py`。Task 3 让目录和职责对齐；导航算法仍留在 `navigation/`。只有可独立复用的有界任务才放进未来的 `skills/`，本期不保留空目录占位。
+
+### Go2 目标目录与迁移边界
+
+```text
+cloud/go2/
+├── agent.py                 # Go2 对话入口和图装配；规划、回复调用下方模块
+├── router.py                # HTTP 路由与依赖装配
+├── card.py                  # Agent Card 构建与控制面发布
+├── control.py / execution.py / paths.py
+├── agentcore/
+│   ├── mode/                # reactive.py、free_explore.py：两个独立自主大脑
+│   ├── perception/          # vision.py、identity.py：感知与身份状态服务
+│   ├── tools/               # 工具实现、声明 registry.py、统一 executor.py
+│   ├── memory/              # episode.py、spatial.py、daily_summary.py、recall.py
+│   ├── prompts.py           # 稳定规则与各任务模板的组装入口
+│   ├── llm.py               # 文本/视觉模型客户端配置
+│   ├── rules.py             # 视觉触发规则的存取与匹配
+│   └── soul.py              # 性格特质与演化
+├── connection/             # WebRTC、FSM、传感器、视频
+├── navigation/             # 寻路、地图、导航闭环；不放自主模式大脑
+└── data/                   # 运行期记忆/规则/性格；路径由 GO2_DATA_DIR 配置
+```
+
+这是一张职责图，不要求一次性搬完。当前 `connection/`、`navigation/` 的领域划分，`memory/` 的存储目录，以及通过 `GO2_DATA_DIR` 配置运行数据的位置都已经合理，优先保留。当前 `tools.py` 还混有 LLM 客户端和规则存取，应拆到各自模块；`agent.py` 的普通/SSE 执行应复用同一执行链；`router.py` 约 1,095 行，同时装配 Card、连接、运动、导航、视觉和对话接口，先抽 Card 构建/发布，其他路由按维护需要再拆。迁移时保持公开 HTTP 路径、Card 字段和现有导入调用的行为可验证。
 
 ### 训练成果怎样沉淀
 
@@ -85,9 +115,10 @@ Card 的 `skills` 是**对外入口白名单**，不自动枚举内部 `skills/`
 
 ### Task 1：统一工具声明与执行链（最高优先级）
 
-**预计文件：**新增 `cloud/go2/agentcore/tools/registry.py`、`executor.py`；修改 `tools.py`、`agent.py`，必要时修改 `router.py` 和对应测试。
+**预计文件：**新增 `cloud/go2/agentcore/tools/registry.py`、`executor.py`、`agentcore/llm.py`、`agentcore/rules.py`；修改 `tools.py`、`agent.py`、`soul.py`、`memory/daily_summary.py`，必要时修改 `router.py` 和对应测试。
 
 - [ ] 定义每个工具的唯一声明：名称、描述、参数 schema、可用角色、是否写入持久状态、是否运动、超时、返回值归一规则。先覆盖现有 12 个工具，不扩充能力。
+- [ ] 将 `tools.py` 中的 `get_text_llm`、`get_vision_llm` 移到 `agentcore/llm.py`；将 `load_rules`、`save_rules`、`check_rules`、`record_rule_completion` 移到 `agentcore/rules.py`。工具实现仍留在 `tools/`，按运动/感知/导航等现有职责分组，避免把模型配置和规则存储误认为基础 Tool。
 - [ ] 由声明生成 planner 可见的工具描述，并校验 `_SKILL_TO_TOOL` 的目标；未知 `skill_id` 明确返回错误，不让它进入未知工具执行分支。
 - [ ] 执行流程固定为：查工具 → 校验参数类型与必填项 → 检查 `ExecutionContext` 权限 → 检查设备连接、运动租约及所需 FSM 条件 → 限时调用 → 将结果归一为结构化状态 → 记录审计信息。底层 `require_admin`、`require_persist` 和设备约束继续作为最终防线。
 - [ ] 普通对话和 SSE 共用此执行函数；`reactive`、`free_explore` 两个模式大脑直接触发的运动工具也经过相同的运动前置条件和结果归一。设备页 FSM 按钮与摇杆仍走现有命令入口，但复用同一底层运动校验与租约约束；摇杆不进入 LLM 工具规划。保持动作串行，不为运动工具开启并发。
@@ -123,12 +154,13 @@ Card 的 `skills` 是**对外入口白名单**，不自动枚举内部 `skills/`
 
 ### Task 3：按「服务 / Tool / Mode / Skill / Agent Card skill」归位现有代码
 
-**预计文件：**将 `agentcore/skills/vision.py`、`identity.py` 归入 `agentcore/services/`；将 `agentcore/skills/reactive.py`、`navigation/drive.py` 中的两个模式大脑归入 `agentcore/mode/reactive.py`、`agentcore/mode/free_explore.py`；新增 `cloud/go2/card_skills.py` 或等价声明表；修改导入、`agent.py`、`router.py` 和相关测试。分小步迁移，保持每一步可导入、可运行。
+**预计文件：**将 `agentcore/skills/vision.py`、`identity.py` 归入 `agentcore/perception/`；将 `agentcore/skills/reactive.py`、`navigation/drive.py` 中的两个模式大脑归入 `agentcore/mode/reactive.py`、`agentcore/mode/free_explore.py`；新增 `cloud/go2/card.py`（含 Card skill 白名单或引用独立声明表）；修改导入、`agent.py`、`router.py` 和相关测试。分小步迁移，保持每一步可导入、可运行。
 
-- [ ] 先把视觉检测和身份状态明确为底层服务，更新引用它们的导入；导航器、记忆和设备连接继续留在各自的领域目录。只改归属和名称，不改识别阈值与行为。
+- [ ] 先把视觉检测和身份状态明确为 `perception/` 底层服务，更新引用它们的导入；导航器、记忆和设备连接继续留在各自的领域目录。只改归属和名称，不改识别阈值与行为。
 - [ ] 建立 `agentcore/mode/`：迁移 `ReactiveMind` 为 `reactive` 模式大脑，迁移 `Drive` 为 `free_explore` 模式大脑；它们保留各自的触发、状态、LLM 决策和生命周期。`manual` 只关闭自主决策；`router.py` 的模式切换继续统一管理启停。导航路径规划和运动闭环继续留在 `navigation/`。
 - [ ] 把两个模式大脑中有物理副作用的动作接到 Task 1 的 tool executor；视觉帧、身份快照、记忆仍作为输入数据。用户中断、模式切换和设备断开都能终止后续动作。`agentcore/skills/` 本期不放这两个模式，也不为占位保留空目录。
 - [ ] 建立显式的 Card skill 白名单，引用 Task 1 的 tool 声明，不复制参数定义。保留 4 个现有 ID：`go2_chat → Planner`，`go2_sport → go2_sport`，`go2_navigate → go2_navigate_to`，`go2_recognize_person → go2_recognize_person`；运动校验完成后增加一个 `go2_move → go2_move`，以方向、速度、时长为参数。Agent Card 从白名单生成 `skills`；收到 `skill_id` 时从同处查入口并校验参数。两个自主 Mode 不自动进入 Card。
+- [ ] 将 `router.py` 中的 Card 构建与 MQTT 控制面发布抽入 `card.py`，路由只负责 HTTP 请求和模式/连接装配；保持 retained card/status 的原有发布时机。暂不为了目录对称拆分全部 HTTP 端点。
 - [ ] 用 Task 0 的运动样例核对编排器能否选择 `go2_move`，以及 Go2 能否把「前进 2 秒」转成受控移动；对「移动两步」不能精确执行时必须澄清。
 - [ ] 自然语言 Planner 和两个 Mode 大脑可选择内部 tools。以后若某个用户目标确实需要可独立调用、可复用的多 tool 流程，再把它加入内部 Skill 层，并决定是否在 Card 公布。
 

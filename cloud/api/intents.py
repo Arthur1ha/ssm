@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import urllib.error
@@ -457,7 +458,13 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         message = str(params.get("message") or "").strip()
         if not message:
             raise HTTPException(status_code=400, detail="chat requires message")
-        return await _internal_request("/api/go2/chat", "POST", session, {"message": message})
+        task_id = str(params.get("task_id") or ("go2_" + uuid.uuid4().hex))
+        if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+            raise HTTPException(status_code=400, detail="invalid task_id")
+        return await _internal_request("/api/go2/chat", "POST", session, {
+            "message": message, "task_id": task_id,
+            "deadline": time.time() + 90,
+        })
 
     canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "RECOGNIZE_PERSON", "STOP"} else action
     ensure_go2_action(canonical)
@@ -494,6 +501,8 @@ async def create_command(
             audit_event("go2_asset_updated", session, action=req.action)
         if req.action.upper() == "STOP":
             audit_event("emergency_stop", session, reason="device_state_machine")
+        if isinstance(result, dict) and result.get("result") == "executing":
+            response.status_code = status.HTTP_202_ACCEPTED
         return {"ok": True, "result": result}
 
     if req.action.lower() == "set_mode":
@@ -523,6 +532,20 @@ async def create_command(
     task_id = _dispatch_mqtt_task(unit_id, req.action, req.params, session)
     response.status_code = status.HTTP_202_ACCEPTED
     return {"accepted": True, "status": "dispatched", "task_id": task_id}
+
+
+@router.get("/api/commands/go2/tasks/{task_id}")
+async def get_go2_command_task(task_id: str, session: dict[str, Any] = Depends(require_session)):
+    if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        raise HTTPException(status_code=400, detail="invalid task_id")
+    return await _internal_request(f"/api/go2/tasks/{task_id}", "GET", session)
+
+
+@router.post("/api/commands/go2/tasks/{task_id}/cancel")
+async def cancel_go2_command_task(task_id: str, session: dict[str, Any] = Depends(require_csrf)):
+    if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        raise HTTPException(status_code=400, detail="invalid task_id")
+    return await _internal_request(f"/api/go2/tasks/{task_id}/cancel", "POST", session, {})
 
 
 @router.post("/api/emergency-stop")

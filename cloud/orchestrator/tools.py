@@ -7,7 +7,7 @@
 import json
 import os
 import time as _time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -101,19 +101,56 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
         "X-SSM-Persist": "true" if persist is True else "false",
         "X-SSM-Space-Id": str(body.get("space_id", "main")),
     }
-    resp = requests.post(url, json=body, headers=headers, timeout=timeout,
-                         allow_redirects=False,
-                         proxies={"http": None, "https": None})
-    if resp.is_redirect:
-        raise RuntimeError("refusing redirected internal HTTP request")
-    resp.raise_for_status()
+    deadline = _time.monotonic() + timeout
+    task_id = str(body.get("task_id") or "")
     try:
-        data = resp.json()
-    except ValueError:
-        return {"result": "error", "error": "invalid_response"}
-    if isinstance(data, dict) and "result" not in data:
-        data = {**data, "result": "error", "error": data.get("error") or "missing_execution_result"}
-    return data if isinstance(data, dict) else {"result": "error", "error": "invalid_response"}
+        resp = requests.post(url, json=body, headers=headers, timeout=min(25, timeout),
+                             allow_redirects=False,
+                             proxies={"http": None, "https": None})
+    except requests.exceptions.Timeout:
+        if not (task_id and endpoint == "/api/go2/chat"):
+            raise
+        # The original POST may still be executing. Query its server-owned ID;
+        # never resend a motion-producing request after a client timeout.
+        resp = None
+    if resp is not None:
+        if resp.is_redirect:
+            raise RuntimeError("refusing redirected internal HTTP request")
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            return {"result": "error", "error": "invalid_response"}
+        if not isinstance(data, dict):
+            return {"result": "error", "error": "invalid_response"}
+        if data.get("result") != "executing":
+            if "result" not in data:
+                return {**data, "result": "error", "error": data.get("error") or "missing_execution_result"}
+            return data
+        if endpoint != "/api/go2/chat":
+            return data
+        task_id = str(data.get("task_id") or task_id)
+    if not task_id:
+        return {"result": "error", "error": "missing_task_id"}
+    query_url = f"{GO2_API_BASE}/api/go2/tasks/{quote(task_id, safe='')}"
+    while _time.monotonic() < deadline:
+        remaining = deadline - _time.monotonic()
+        try:
+            current = requests.get(query_url, headers=headers, timeout=min(10, remaining),
+                                   allow_redirects=False, proxies={"http": None, "https": None})
+            if current.is_redirect:
+                raise RuntimeError("refusing redirected internal HTTP request")
+            if current.status_code != 404:
+                current.raise_for_status()
+                data = current.json()
+                if not isinstance(data, dict):
+                    return {"result": "error", "task_id": task_id, "error": "invalid_response"}
+                if data.get("result") != "executing":
+                    return data
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            pass
+        _time.sleep(min(1.0, max(0.0, deadline - _time.monotonic())))
+    return {"result": "executing", "task_id": task_id}
 
 
 def do_cleanup_go2_session(session_id: str, actor: str = "visitor") -> dict:

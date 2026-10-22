@@ -15,6 +15,7 @@ import re
 import json
 import time as _time
 import logging
+import uuid
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TypedDict
@@ -156,6 +157,7 @@ class OrchestratorState(TypedDict):
     issued_at:     float
     expires_at:    float | None
     user_msg:      str
+    event_id:      str
     requirements:  list   # NLU 结果，可选，默认 []
     route:         str    # "act" / "chat" / "define_rule" / "discover_devices"，由 Planner 分类，默认 ""
     planned_tasks: list   # [{unit_id, skill_id, task_id, params}]
@@ -273,7 +275,9 @@ def _parse_planner_output(content: str) -> dict:
 
 
 def _http_timeout_for(card: dict, skill_id: str) -> float:
-    """按 skill tag 决定 HTTP 超时：含 navigation → 30s，其余 → 10s。"""
+    """Go2 任务可跨同步窗口运行；外层预算覆盖服务端 90 秒截止时间。"""
+    if card.get("unit_id") == "go2":
+        return 95
     for skill in card.get("skills", []):
         if skill.get("id") == skill_id:
             if "navigation" in skill.get("tags", []):
@@ -455,10 +459,11 @@ def _make_planner_node(llm):
             if not any(s.get("id") == skill_id for s in card.get("skills", [])):
                 logger.warning("[Planner] 丢弃 %s 未知 skill_id: %s", unit_id, skill_id)
                 continue
+            request_id = state.get("event_id") or uuid.uuid4().hex[:12]
             tasks.append({
                 "unit_id":  unit_id,
                 "skill_id": skill_id,
-                "task_id":  f"{session_id}_t{i}",
+                "task_id":  f"{request_id}_t{i}",
                 "params":   t.get("params", {}),
             })
 
@@ -627,6 +632,8 @@ def _make_dispatcher_node():
                     "message":    message,
                     "skill_id":   task["skill_id"],
                     "params":     task["params"],
+                    "task_id":    task["task_id"],
+                    "deadline":   _time.time() + 90,
                 }
                 timeout = _http_timeout_for(card, task["skill_id"])
                 if executor is None:
@@ -749,6 +756,19 @@ def _make_responder_node(llm):
             )
             _append_history(session_id, state["user_msg"], permission_reply)
             return {**state, "response_text": permission_reply}
+
+        clarification = next(
+            (r.get("question") for r in results.values()
+             if r.get("result") == "needs_clarification" and r.get("question")),
+            "",
+        )
+        if clarification:
+            _t.do_publish_feedback(
+                session_id, "partial", clarification,
+                status="needs_clarification", task_results=results,
+            )
+            _append_history(session_id, state["user_msg"], clarification)
+            return {**state, "response_text": clarification}
 
         statuses = [r.get("result", "timeout") for r in results.values()]
         if any(s in ("accepted", "executing") for s in statuses):
