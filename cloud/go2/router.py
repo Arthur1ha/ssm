@@ -29,7 +29,7 @@ from cloud.go2.execution import (
 )
 from cloud.go2.card import (
     GO2_CARD_TOPIC, GO2_STATUS_TOPIC, _build_go2_card, _publish_go2_card,
-    _publish_go2_status, _clear_go2_card,
+    _publish_go2_status, _publish_go2_state, _clear_go2_card,
 )
 
 # MQTT 客户端，由 api/main.py 通过 init_mqtt() 注入
@@ -246,15 +246,18 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
         global _autonomy_mode, _connect_task
         _connect_task = None
         if t.cancelled():
-            _publish_go2_status(False)
+            _publish_go2_state()
+            _publish_go2_status()
             return
         if t.exception():
             go2._last_error = str(t.exception())
             _publish_go2_card()
-            _publish_go2_status(False)
+            _publish_go2_state()
+            _publish_go2_status()
             return
 
         _publish_go2_card()
+        _publish_go2_state()
         _publish_go2_status()
 
         # 默认完全遥控，但已启用的身份消费者仍保持视觉检测。
@@ -266,7 +269,7 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
 
         # Connection is operational state, not permission to overwrite Home.
 
-    _publish_go2_status(False)
+    _publish_go2_status()
     _connect_task = asyncio.create_task(go2.connect(email, password, serial, region))
     _connect_task.add_done_callback(_on_connect_done)
     return {"status": "connecting"}
@@ -281,7 +284,8 @@ async def go2_disconnect(context: ExecutionContext = Depends(require_service_con
     _configure_vision_consumers("manual")
     _autonomy_mode   = "manual"
     _publish_go2_card()
-    _publish_go2_status(False)
+    _publish_go2_state()
+    _publish_go2_status()
     return {"status": "disconnected"}
 
 

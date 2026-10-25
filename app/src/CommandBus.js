@@ -79,13 +79,13 @@ const commandBus = {
 
   // Serialize joystick writes, coalescing movement samples. A release always follows the in-flight sample.
   _velocities: new Map(),
-  velocity(unitId, params, report) {
+  velocity(unitId, action, params, report) {
     let entry = this._velocities.get(unitId);
     if (!entry) {
       entry = { next: null, running: false };
       this._velocities.set(unitId, entry);
     }
-    entry.next = { params, report };
+    entry.next = { action, params, report };
     if (entry.running) return;
     entry.running = true;
     const drain = async () => {
@@ -93,7 +93,7 @@ const commandBus = {
         while (entry.next) {
           const item = entry.next;
           entry.next = null;
-          const result = await this.command(unitId, 'velocity', item.params);
+          const result = await this.command(unitId, item.action, item.params);
           item.report(result);
         }
       } finally { entry.running = false; }

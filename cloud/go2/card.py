@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from copy import deepcopy
+from cloud.cards.validation import normalize_card
 
 from cloud.go2.connection import go2
 
@@ -19,30 +20,35 @@ CARD_SKILLS = {
     "go2_chat": {
         "tool_name": None,
         "name": "对话 / 自然语言控制",
+        "description": "通过自然语言与机器狗对话或下达任务",
         "tags": ["conversation", "robot"],
         "invoke": {"action": "CHAT"},
     },
     "go2_sport": {
         "tool_name": "go2_sport",
         "name": "预定义动作",
+        "description": "执行机器狗预定义动作",
         "tags": ["motion", "robot"],
         "invoke": {"action": "SPORT"},
     },
     "go2_navigate": {
         "tool_name": "go2_navigate_to",
         "name": "导航到命名地点",
+        "description": "导航到已保存的地点",
         "tags": ["navigation", "robot"],
         "invoke": {"action": "NAVIGATE"},
     },
     "go2_recognize_person": {
         "tool_name": "go2_recognize_person",
         "name": "识别面前的人",
+        "description": "识别摄像头视野中的人物",
         "tags": ["vision", "identity", "robot"],
         "invoke": {"action": "RECOGNIZE_PERSON"},
     },
     "go2_move": {
         "tool_name": "go2_move",
         "name": "短距离定时移动",
+        "description": "按方向与时长移动一段距离",
         "tags": ["motion", "robot"],
         "invoke": {"action": "MOVE"},
     },
@@ -86,7 +92,6 @@ def init_mqtt(client) -> None:
 
 def _on_go2_state_change() -> None:
     _publish_go2_state()
-    _publish_go2_status(force=False)
 
 
 def _publish_go2_state() -> None:
@@ -137,6 +142,8 @@ def _go2_state_machine() -> dict:
             "action": "STOP", "params": {}, "safety": True,
         })
     return {
+        "state_field": "fsm_state",
+        "connection_field": "connected",
         "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
         "transitions": transitions,
         "initial": "offline",
@@ -169,13 +176,15 @@ def _build_go2_card() -> dict:
     card 只含能力，不含 volatile state；online/status 表示真实 WebRTC 连接状态，
     FSM/动作等动态状态经 HTTP /api/go2/* 实时获取。
     """
-    return {
+    card = {
+        "card_schema_version": 1,
+        "version": "1",
         "unit_id": "go2",
         "device_id": "go2",
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",
-        "online": bool(go2.is_connected),
+        "online": False,
         "transport": {
             "kind": "http",
             "endpoint": "/api/go2/chat",
@@ -196,6 +205,7 @@ def _build_go2_card() -> dict:
             ],
             "get": "/api/go2/autonomy",
             "set": "/api/go2/autonomy",
+            "set_action": "set_mode",
         }],
         "telemetry": [
             {"key": "fsm_state",   "label": "动作状态"},
@@ -205,18 +215,21 @@ def _build_go2_card() -> dict:
         "widgets": [
             {
                 "type": "connection",
-                "states": ["offline", "connecting"],
+                "states": [],
                 "placement": "controls",
                 "order": 0,
                 "endpoint": "/api/go2/connection",
                 "status_endpoint": "/api/go2/connection",
+                "connect_action": "connect",
+                "disconnect_action": "disconnect",
                 "auto_connect": True,
-                "visible": False,
+                "visible": True,
             },
-            {"type": "video", "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "placement": "media", "order": 10, "endpoint": "/api/go2/video"},
-            {"type": "joystick", "states": ["moving"], "placement": "controls", "order": 20, "endpoint": "/api/go2/velocity"},
+            {"type": "video", "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "placement": "media", "order": 10, "endpoint": "/api/go2/video", "requires_connection": True, "preview_only": True},
+            {"type": "joystick", "states": ["moving"], "placement": "controls", "order": 20, "action": "velocity"},
         ],
     }
+    return normalize_card(card)
 
 
 def _publish_go2_card() -> None:
@@ -236,13 +249,13 @@ def _publish_go2_card() -> None:
 
 
 def _publish_go2_status(online: bool | None = None, *, force: bool = True) -> None:
-    """发布 Go2 真实连接状态（retained，API 进程 LWT 会兜底置 offline）。"""
+    """发布控制面服务在线状态；WebRTC 连接由 state.connected 表示。"""
     if _mqtt_client is None:
         return
     try:
         global _last_status_online
         if online is None:
-            online = bool(go2.is_connected)
+            online = True
         if not force and online == _last_status_online:
             return
         _mqtt_client.publish(GO2_STATUS_TOPIC, "online" if online else "offline", retain=True, qos=1)

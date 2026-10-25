@@ -77,7 +77,7 @@ class CardRegistry:
             with self._lock:
                 self._states[unit_id] = state
                 if unit_id in self._cards:
-                    self._cards[unit_id]["state"] = state
+                    self._cards[unit_id]["state"] = self._normalize_runtime_state(unit_id, state)
             return
 
         # status：父设备/设备级在线状态（含 LWT），按 unit_id 或 parent_id 匹配
@@ -125,7 +125,7 @@ class CardRegistry:
                         else:
                             card["online"] = False
                         if card["unit_id"] in self._states:
-                            card["state"] = self._states[card["unit_id"]]
+                            card["state"] = self._normalize_runtime_state(card["unit_id"], self._states[card["unit_id"]], card)
                         self._cards[card["unit_id"]] = card
                     logger.info("[CardRegistry] Stored card (self-described): %s", card["unit_id"])
                 except Exception as exc:
@@ -166,11 +166,22 @@ class CardRegistry:
                     else:
                         card["online"] = False
                     if card["unit_id"] in self._states:
-                        card["state"] = self._states[card["unit_id"]]
+                        card["state"] = self._normalize_runtime_state(card["unit_id"], self._states[card["unit_id"]], card)
                     self._cards[card["unit_id"]] = card
                 logger.info("[CardRegistry] Stored card (from manifest): %s", card["unit_id"])
             except Exception as exc:
                 logger.warning("[CardRegistry] Failed to build card from manifest: %s", exc)
+
+    def _normalize_runtime_state(self, unit_id: str, state: dict, card: AgentCard | None = None) -> dict:
+        """Translate old LED retained values only when a three-state Card is active."""
+        active = card or self._cards.get(unit_id)
+        sm = active.get("state_machine", {}) if active else {}
+        if (sm.get("state_field") == "ism" and set(sm.get("states", [])) == {"OFF", "ON", "BLINKING"}):
+            aliases = {"BRIGHT": "ON", "DIM": "ON", "COLOR": "ON", "BLINK": "BLINKING"}
+            observed = state.get("ism")
+            if observed in aliases:
+                return {**state, "ism": aliases[observed]}
+        return state
 
     def get_all_cards(self) -> dict[str, AgentCard]:
         """返回当前注册表的浅拷贝，防止调用方修改内部状态。"""

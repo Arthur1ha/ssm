@@ -58,6 +58,8 @@ cloud/space/space.json
 !cloud/go2/tests/test_mode_runtime.py
 
 # Peer request and discovery regression tests are part of this implementation.
+!cloud/cards/tests/
+!cloud/cards/tests/test_contract_v1.py
 !cloud/peers/tests/
 !cloud/peers/tests/test_gateway.py
 !cloud/peers/tests/test_view.py

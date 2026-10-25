@@ -24,7 +24,7 @@ class StateView(TypedDict):
 
     label: str
     description: str
-    type: Literal["light_ring", "robot_pose", "generic"]
+    type: Literal["light_ring", "robot_pose", "image", "generic"]
     color: NotRequired[str]
     intensity: NotRequired[float]
     palette: NotRequired[list[str]]
@@ -37,6 +37,8 @@ class StateMachine(TypedDict):
     """智能体静态状态机拓扑。不含当前态——当前态由实时通道提供。"""
 
     states: list[str]
+    state_field: str
+    connection_field: NotRequired[str]
     transitions: list[FsmTransition]
     initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
     views: NotRequired[dict[str, StateView]]  # 状态语义与预览；前端不按设备类型硬编码
@@ -58,6 +60,7 @@ class SkillDef(TypedDict):
 
     id: str
     name: str
+    description: str
     tags: list[str]
     params_schema: dict   # JSON Schema object
     invoke: SkillInvoke
@@ -93,6 +96,7 @@ class ModeAxis(TypedDict):
     id: str             # 轴标识，如 "autonomy"
     label: str          # 轴名，如 "自主性"
     options: list[ModeOption]
+    set_action: NotRequired[str]
     get: NotRequired[str]        # http: GET 端点，返回 {mode}
     set: NotRequired[str]        # http: PUT 端点，body 发 {mode: value}
     get_topic: NotRequired[str]  # mqtt: 读当前值的 topic
@@ -110,7 +114,7 @@ class TelemetryField(TypedDict):
 class Widget(TypedDict):
     """态内富控件声明，type 为 PWA 内置实现的有限集合。"""
 
-    type: Literal["connection", "joystick", "video", "map", "color_swatches", "led_color"]
+    type: Literal["connection", "joystick", "video", "color_swatches", "led_color"]
     states: list[str]            # 在哪些状态下显示（空=全程）
     placement: NotRequired[Literal["media", "controls"]]  # 语义区域，前端按屏幕尺寸排版
     order: NotRequired[int]      # 同一区域内的显示顺序
@@ -119,6 +123,10 @@ class Widget(TypedDict):
     auto_connect: NotRequired[bool]
     visible: NotRequired[bool]
     action: NotRequired[str]
+    connect_action: NotRequired[str]
+    disconnect_action: NotRequired[str]
+    requires_connection: NotRequired[bool]
+    preview_only: NotRequired[bool]
     channels: NotRequired[list[str]]
     swatches: NotRequired[list[dict]]
 
@@ -132,6 +140,8 @@ class AgentCard(TypedDict):
     """
 
     unit_id: str                # 唯一标识：寻址/topic/注册表 key/URL 都用它
+    card_schema_version: NotRequired[int]
+    version: NotRequired[str]
     device_id: NotRequired[str] # 物理设备/节点 ID；多 unit 设备共享同一 device_id
     parent_id: NotRequired[str] # 父设备 device_id，用于按 status 继承在线状态
     name: str
@@ -140,6 +150,7 @@ class AgentCard(TypedDict):
     online: bool
     transport: Transport
     services: NotRequired[dict[str, str]]  # 云端 API 能力（如 chat_endpoint），不属于设备 transport
+    tags: NotRequired[list[str]]
     skills: list[SkillDef]
     state: dict        # 动态状态，初始为空
     state_machine: NotRequired[StateMachine]   # 静态拓扑，无此字段则前端回退富页

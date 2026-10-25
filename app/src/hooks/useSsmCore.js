@@ -56,22 +56,27 @@ function useSsmCore() {
       if (!['device', 'card', 'status', 'state', 'event'].includes(kind)) return;
       const unitId = payload.unit_id || payload.agent_id;
       if (!unitId) return;
+      const isCardUpdate = Object.prototype.hasOwnProperty.call(payload, 'card');
+      if (isCardUpdate) {
+        ++refreshSeqRef.current;
+        setLoadingAgents(false);
+      }
       setAgents(previous => {
         const card = payload.card && typeof payload.card === 'object' ? payload.card : null;
-        const merged = previous
-          .filter(device => !(card && device.unit_id === card.device_id && card.unit_id !== card.device_id))
-          .map(device => {
-            if (device.unit_id !== unitId) return device;
-            return {
-              ...device,
-              ...(card || {}),
-              _online: payload.online ?? card?.online ?? device._online,
-            };
-          });
-        return merged;
+        if (isCardUpdate) {
+          const kept = previous.filter(device => device.unit_id !== unitId
+            && !(card && device.unit_id === card.device_id && card.unit_id !== card.device_id));
+          return card ? [...kept, { ...card, _online: payload.online ?? card.online ?? false }] : kept;
+        }
+        return previous.map(device => device.unit_id === unitId || device.device_id === unitId || device.parent_id === unitId
+          ? { ...device, _online: payload.online ?? device._online }
+          : device);
       });
-      if (payload.card?.state) {
-        setUnitData(previous => mergeDeviceState(previous, unitId, payload.card.state));
+      if (isCardUpdate) {
+        setUnitData(previous => payload.card
+          ? { ...previous, [unitId]: { ...(previous[unitId] || {}), state: payload.card.state || {} } }
+          : Object.fromEntries(Object.entries(previous).filter(([id]) => id !== unitId)));
+        refreshAgents();
       }
       if (payload.state || payload.event) {
         setUnitData(previous => {
@@ -91,7 +96,7 @@ function useSsmCore() {
       apiClient.removeEventListener('events-error', disconnectedHandler);
       apiClient.removeEventListener('server-event', serverEventHandler);
     };
-  }, []);
+  }, [refreshAgents]);
 
   return { connected, agents, loadingAgents, agentsError, unitData, refreshAgents };
 }

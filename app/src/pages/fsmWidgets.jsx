@@ -1,20 +1,20 @@
 /* fsmWidgets — 按 card.widgets 声明组合当前状态的富控件。 */
-function ConnectionWidget({ widget, unitId, actor }) {
+function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connectionField, onlineConnection }) {
   const { useEffect, useState, useCallback, useRef } = React;
-  const endpoint = widget.endpoint || '/api/go2/connection';
-  const statusEndpoint = widget.status_endpoint || endpoint;
-  const [status, setStatus] = useState({ connected: false, fsm_state: 'offline', error: '' });
+  const statusEndpoint = widget.status_endpoint || widget.endpoint;
+  const [status, setStatus] = useState({ connected: false, fsm_state: '', error: '' });
   const [busy, setBusy] = useState(false);
   const [checked, setChecked] = useState(false);
   const connectRequestedRef = useRef(false);
 
   const refresh = useCallback(() => {
+    if (!statusEndpoint?.startsWith('/api/')) return;
     fetch(statusEndpoint)
       .then(r => r.json())
       .then(d => {
         setStatus({
-          connected: d.connected === true,
-          fsm_state: d.fsm_state || (d.connected ? 'standing' : 'offline'),
+          connected: (connectionField ? d[connectionField] : d.connected) === true,
+          fsm_state: (stateField ? d[stateField] : d.fsm_state) || '',
           error: d.error || '',
         });
         setChecked(true);
@@ -28,18 +28,16 @@ function ConnectionWidget({ widget, unitId, actor }) {
         }));
         setChecked(true);
       });
-  }, [statusEndpoint]);
+  }, [statusEndpoint, stateField, connectionField]);
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 1500);
-    return () => clearInterval(id);
   }, [refresh]);
 
   const connect = useCallback(() => {
     if (busy) return;
     setBusy(true);
-    commandBus.command(unitId, 'connect', {})
+    commandBus.command(unitId, widget.connect_action || 'connect', {})
       .then(data => {
         if (data.result === 'error') throw new Error(data.error || '连接失败');
         setStatus(prev => ({ ...prev, fsm_state: 'connecting', error: '' }));
@@ -50,19 +48,22 @@ function ConnectionWidget({ widget, unitId, actor }) {
         error: err?.message || '连接请求没有送达，请检查 API 端口和 Go2 配置。',
       })))
       .finally(() => setBusy(false));
-  }, [busy, endpoint, refresh]);
+  }, [busy, widget.connect_action, refresh]);
 
   const disconnect = () => {
     if (busy) return;
     setBusy(true);
-    commandBus.command(unitId, 'disconnect', {})
+    commandBus.command(unitId, widget.disconnect_action || 'disconnect', {})
       .then(() => setTimeout(refresh, 400))
       .catch(() => setStatus(prev => ({ ...prev, error: '断开请求失败。' })))
       .finally(() => setBusy(false));
   };
 
-  const connected = status.connected === true;
-  const connecting = status.fsm_state === 'connecting' || busy;
+  const connected = connectionField
+    ? (liveState?.[connectionField] ?? status.connected)
+    : onlineConnection;
+  const state = (stateField ? liveState?.[stateField] : undefined) || status.fsm_state;
+  const connecting = state === 'connecting' || busy;
 
   useEffect(() => {
     if (!checked || !widget.auto_connect || connected || connecting || connectRequestedRef.current) return;
@@ -94,7 +95,7 @@ function ConnectionWidget({ widget, unitId, actor }) {
           letterSpacing: '0.08em',
           fontFamily: 'var(--font-mono)',
         }}>
-          {(status.fsm_state || 'offline').toUpperCase()}
+          {(state || '状态待同步').toUpperCase()}
         </div>
         <div className="feedback-button"><button
           className="btn"
@@ -108,7 +109,7 @@ function ConnectionWidget({ widget, unitId, actor }) {
             cursor: connecting || (connected && actor !== 'admin') ? 'default' : 'pointer',
           }}
         >
-          {connecting ? '连接中...' : (connected ? (actor === 'admin' ? '断开' : '已连接') : '连接机器狗')}
+          {connecting ? '连接中...' : (connected ? (actor === 'admin' ? '断开' : '已连接') : '连接')}
         </button>
         {status.error && <small className="action-feedback action-feedback--error" role="status" title={status.error}>{status.error}</small>}
         </div>
@@ -147,7 +148,7 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   };
 
   useEffect(() => {
-    if (!['ON', 'BRIGHT', 'DIM', 'COLOR'].includes(ledState?.ism)) return;
+    if (!ledState || !Object.keys(ledState).length) return;
     const deviceColor = readDeviceColor();
     const hsv = window.ssmColor.rgbToHsv(deviceColor.r, deviceColor.g, deviceColor.b);
     const next = { hue: hsv.h, saturation: hsv.s, brightness: deviceColor.brightness };
@@ -159,7 +160,7 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
     draftRef.current = next;
     setDraft(next);
     lastSent.current = JSON.stringify(deviceColor);
-  }, [ledState?.r, ledState?.g, ledState?.b, ledState?.brightness, ledState?.ism]);
+  }, [ledState?.r, ledState?.g, ledState?.b, ledState?.brightness]);
 
   useEffect(() => () => {
     clearTimeout(sendTimer.current);
@@ -180,7 +181,7 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
     if (key === lastSent.current) return;
     sending.current = true;
     lastSent.current = key;
-    const result = await commandBus.mqtt(unitId, widget.action || 'SET_COLOR', next);
+    const result = await commandBus.command(unitId, widget.action, next);
     sending.current = false;
     if (result?.result === 'error' || result?.result === 'timeout') {
       retryAfter.current = Date.now() + 1000;
@@ -311,7 +312,7 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   </div>;
 }
 
-function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor', ledState = null) {
+function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor', liveState = null, stateField = '', connectionField = '', onlineConnection = false) {
   if (!widgets || !widgets.length) return null;
 
   const VirtualJoystick = window.VirtualJoystick;
@@ -321,33 +322,33 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
   if (!active.length) return null;
 
-  const sendVelocity = (_endpoint, vx, vy, vyaw) => commandBus.velocity(
-    unitId, { vx, vy, vyaw }, result => {
+  const sendVelocity = (action, vx, vy, vyaw) => commandBus.velocity(
+    unitId, action, { vx, vy, vyaw }, result => {
       if (result?.result !== 'accepted' && result?.result !== 'ok') report(result);
     },
   );
 
   const nodes = active.map((w, idx) => {
     if (w.type === 'led_color' || w.type === 'color_swatches') {
-      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report} ledState={ledState}/>;
+      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report} ledState={liveState}/>;
     }
     if (w.type === 'connection') {
-      return <ConnectionWidget key={'conn' + idx} widget={w} unitId={unitId} actor={actor}/>;
+      return <ConnectionWidget key={'conn' + idx} widget={w} unitId={unitId} actor={actor} liveState={liveState} stateField={stateField} connectionField={connectionField} onlineConnection={onlineConnection}/>;
     }
     if (w.type === 'joystick' && VirtualJoystick) {
-      const ep = w.endpoint || '/api/go2/velocity';
+      const action = w.action;
       return (
         <div key={'joy' + idx} className="device-joysticks">
           <VirtualJoystick label="移动" radius={36} disabled={false}
-            onMove={(dx, dy) => sendVelocity(ep, +(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
-            onStop={() => sendVelocity(ep, 0, 0, 0)}/>
+            onMove={(dx, dy) => sendVelocity(action, +(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
+            onStop={() => sendVelocity(action, 0, 0, 0)}/>
           <VirtualJoystick label="转向" radius={36} disabled={false}
-            onMove={(dx) => sendVelocity(ep, 0, 0, +(-dx * 0.8).toFixed(2))}
-            onStop={() => sendVelocity(ep, 0, 0, 0)}/>
+            onMove={(dx) => sendVelocity(action, 0, 0, +(-dx * 0.8).toFixed(2))}
+            onStop={() => sendVelocity(action, 0, 0, 0)}/>
         </div>
       );
     }
-    if (w.type === 'video' && VideoCanvas) {
+    if (w.type === 'video' && VideoCanvas && w.endpoint?.startsWith('/api/')) {
       return (
         <div key={'cam' + idx} className="device-state-video" style={{ aspectRatio: '16/9', background: '#0a0c14',
           border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
@@ -356,7 +357,7 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
         </div>
       );
     }
-    return null;
+    return <span key={'unsupported' + idx} className="device-widget-unsupported">控件不可用：{w.type}</span>;
   }).filter(Boolean);
 
   if (!nodes.length) return null;

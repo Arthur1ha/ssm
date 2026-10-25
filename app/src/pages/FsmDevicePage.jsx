@@ -5,21 +5,30 @@
 function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const { useState, useEffect, useRef } = React;
 
-  /* ── Card 拓扑：优先用 device prop（来自 registry，无需等待 fetch） ── */
-  const [sm, setSm]                 = useState(device?.state_machine || null);
-  const [transport, setTransport]   = useState(device?.transport || null);
-  const [cardLoaded, setCardLoaded] = useState(!!(device?.state_machine || device?.transport));
-
-  /* ── HTTP 设备实时状态 ── */
-  const [sseState, setSseState] = useState(null);
-  const [sseConnected, setSseConnected] = useState(false);
-  const esRef = useRef(null);
+  /* Card from /api/devices and SSE is authoritative. Fetch only fills a missing snapshot. */
+  const [fetchedCard, setFetchedCard] = useState(null);
+  const card = device?.transport || device?.state_machine ? device
+    : fetchedCard?.unit_id === unitId ? fetchedCard : device;
+  const sm = card?.state_machine || null;
+  const transport = card?.transport || null;
+  const cardLoaded = !!card;
+  const [streamState, setStreamState] = useState(null);
   const [previewState, setPreviewState] = useState(null);
+
+  useEffect(() => {
+    if (device?.transport || device?.state_machine) return;
+    const controller = new AbortController();
+    fetch('/api/devices/' + encodeURIComponent(unitId) + '/agent', { signal: controller.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(c => { if (!controller.signal.aborted && c?.unit_id === unitId) setFetchedCard(c); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [unitId, device?.transport, device?.state_machine]);
 
   /* ── 对话 ── */
   const initialMsg = {
     role: 'assistant', agent: unitId,
-    text: `你好，我是 ${device?.name || unitId}，有什么可以帮你？`,
+    text: `你好，我是 ${card?.name || unitId}，有什么可以帮你？`,
   };
   const [messages, setMessages] = useState([initialMsg]);
   const [sending, setSending] = useState(false);
@@ -35,36 +44,27 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     return () => clearTimeout(timer);
   }, [execution]);
 
-  /* ── 模式轴 / 富控件 / 快捷指令（通用，由 card 驱动） ── */
-  const [modes, setModes]       = useState(device?.modes || []);
-  const [modeVals, setModeVals] = useState({});   // axis.id → 当前 value
-  const [widgets, setWidgets]   = useState(device?.widgets || []);
-  const [suggestions, setSuggestions] = useState(device?.suggestions || []);
-
-  // manifest/card 热更新后同步拓扑与控件（fetch 见下方 Agent Card effect）
-  useEffect(() => { if (device?.state_machine) setSm(device.state_machine); }, [device?.state_machine]);
-  useEffect(() => { if (device?.transport) setTransport(device.transport); }, [device?.transport]);
-  useEffect(() => { if (device?.modes) setModes(device.modes); }, [device?.modes]);
-  useEffect(() => { if (device?.widgets) setWidgets(device.widgets); }, [device?.widgets]);
-  useEffect(() => { if (device?.suggestions) setSuggestions(device.suggestions); }, [device?.suggestions]);
-
-  // 各轴拉当前值（http: GET 端点返回 {mode}）
-  // 用轴 id 拼接字符串作依赖，避免 setModes 产生新数组引用时重复 fetch
-  const modeIds = modes.map(a => a.id).join(',');
+  /* Every Card replacement, including removed fields, immediately replaces the UI. */
+  const modes = card?.modes || [];
+  const widgets = card?.widgets || [];
+  const suggestions = card?.suggestions || [];
+  const [modeVals, setModeVals] = useState({});
+  const modeIds = modes.map(axis => axis.id + ':' + axis.get).join(',');
   useEffect(() => {
+    let active = true;
+    setModeVals({});
     modes.forEach(axis => {
-      if (!axis.get) return;
-      fetch(axis.get)
-        .then(r => r.json())
-        .then(d => d.mode && setModeVals(prev => ({ ...prev, [axis.id]: d.mode })))
-        .catch(() => {});
+      if (!axis.get?.startsWith('/api/')) return;
+      fetch(axis.get).then(r => r.json()).then(d => {
+        if (active && d.mode) setModeVals(prev => ({ ...prev, [axis.id]: d.mode }));
+      }).catch(() => {});
     });
-  }, [modeIds]);
+    return () => { active = false; };
+  }, [unitId, modeIds]);
 
   const switchMode = (axis, value) => {
-    if (offline) return;
-    if (!axis.set) return;
-    commandBus.command(unitId, 'set_mode', { axis: axis.id, value }).then(result => {
+    if (offline || !axis.set_action && !axis.set) return;
+    commandBus.command(unitId, axis.set_action || 'set_mode', { axis: axis.id, value }).then(result => {
       if (result.mode === value) {
         setModeVals(prev => ({ ...prev, [axis.id]: value }));
         setExecution('模式已更新');
@@ -72,52 +72,37 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     });
   };
 
-  /* ── 后台刷新 Agent Card（prop 已提供初始值，fetch 仅作热更新） ── */
-  useEffect(() => {
-    fetch('/api/devices/' + unitId + '/agent')
-      .then(r => r.json())
-      .then(c => {
-        if (c.state_machine) setSm(c.state_machine);
-        if (c.transport)     setTransport(c.transport);
-        if (c.modes)         setModes(c.modes);
-        if (c.widgets)       setWidgets(c.widgets);
-        if (c.suggestions)   setSuggestions(c.suggestions);
-        setCardLoaded(true);
-      })
-      .catch(() => setCardLoaded(true));
-  }, [unitId]);
-
-  /* ── HTTP 设备：订阅 SSE 实时状态流 ── */
   useEffect(() => {
     const url = transport?.state_stream;
-    if (!url) return;
-    setSseConnected(false);
+    setStreamState(null);
+    if (!url || !url.startsWith('/api/')) return;
     const es = new EventSource(url);
-    esRef.current = es;
-    es.onmessage = e => {
+    es.onmessage = event => {
       try {
-        const d = JSON.parse(e.data);
-        if (d.fsm_state) setSseState(d.fsm_state);
-        setSseConnected(d.connected === true);
+        const state = JSON.parse(event.data);
+        if (state && typeof state === 'object') setStreamState(state);
       } catch (_) {}
     };
-    es.onerror = () => setSseConnected(false);
-    return () => { es.close(); esRef.current = null; };
-  }, [transport?.state_stream]);
+    return () => es.close();
+  }, [unitId, transport?.state_stream]);
 
-  /* ── 当前态 ── */
-  const isHttp  = transport?.kind === 'http';
-  const rawCurrent = isHttp
-    ? (sseState || sm?.initial || '')
-    : (liveState?.state?.ism || device?.state?.ism || sm?.initial || '');
-  const isLed = agentKind(device || { unit_id: unitId, name: unitId }) === 'led';
-  const ledState = liveState?.state || device?.state || {};
-  const ledInfo = isLed ? getLedStateInfo(ledState) : null;
-  // 兼容旧固件 retained 状态与新版三状态卡片的短暂交错。
-  const legacyLedStates = { BRIGHT: 'ON', DIM: 'ON', COLOR: 'ON', BLINK: 'BLINKING' };
-  const current = isLed && sm?.states?.includes('ON') && !sm.states.includes(rawCurrent)
-    ? (legacyLedStates[rawCurrent] || rawCurrent)
-    : rawCurrent;
+  const snapshot = liveState?.state || card?.state || {};
+  const runtimeState = streamState ? { ...snapshot, ...streamState } : snapshot;
+  const stateField = sm?.state_field || (!card?.card_schema_version
+    ? ('fsm_state' in runtimeState ? 'fsm_state' : 'ism' in runtimeState ? 'ism' : '') : '');
+  const connectionField = sm?.connection_field || (!card?.card_schema_version && 'connected' in runtimeState ? 'connected' : '');
+  const current = stateField ? runtimeState[stateField] || '' : '';
+  const connected = connectionField ? runtimeState[connectionField] === true : !!(card?._online ?? card?.online);
+  const offline = !(card?._online ?? card?.online);
+  const meta = getAgentMeta(card || { unit_id: unitId, name: unitId });
+  const ACCENT = meta.color;
+  const hasUserMsg = messages.some(m => m.role === 'user');
+  const visibleWidgets = widgets.filter(w => w.visible !== false
+    && (!w.states?.length || w.states.includes(current))
+    && (!w.requires_connection || connected)
+    && (!w.preview_only || previewState === current));
+  const hasBoardWidget = visibleWidgets.length > 0 || !!previewState;
+  const statusLabel = offline ? '离线' : `在线 · ${sm?.views?.[current]?.label || current || '状态待同步'}`;
 
   /* ── 派发 FSM 转移 ── */
   const fire = async trigger => {
@@ -153,20 +138,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       .finally(() => setSending(false));
   };
 
-  const meta    = getAgentMeta(device || { unit_id: unitId, name: unitId });
-  const ACCENT  = meta.color;
-  const offline = !device?._online;   // 离线：控制面板置灰、禁用交互
-  const isGo2 = unitId === 'go2' || device?.device_id === 'go2';
-  const go2Connected = isGo2 && !offline && sseConnected && current !== 'offline' && current !== 'connecting';
-  useEffect(() => { if (!go2Connected) setPreviewState(null); }, [go2Connected, unitId]);
-  const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
-  const hasUserMsg = messages.some(m => m.role === 'user');
-  const activeVisibleWidgets = widgets.filter(w => w.visible !== false
-    && (!w.states?.length || w.states.includes(current)));
-  const hasBoardWidget = isGo2
-    ? activeVisibleWidgets.some(w => w.type !== 'video') || (go2Connected && !!previewState)
-    : activeVisibleWidgets.length > 0;
-  const statusLabel = offline ? '离线' : `在线 · ${isLed && ledState.ism ? ledInfo.label : (sm?.views?.[current]?.label || current || '状态同步中')}`;
+  const isGo2 = unitId === 'go2' || card?.device_id === 'go2'; // dedicated asset settings only
+  useEffect(() => { setPreviewState(null); }, [unitId]);
+  const isOn = !!current && current !== sm?.initial;
 
   return (
     <div style={{
@@ -200,7 +174,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
             color: offline ? 'var(--color-text-dim)' : ACCENT,
             textShadow: (isOn && !offline) ? `0 0 12px ${ACCENT}80` : 'none',
             transition: 'text-shadow 0.4s',
-          }}>{device?.name || unitId}</div>
+          }}>{card?.name || unitId}</div>
         </div>
         <div className="device-header__status" title={statusLabel}>
           <i className={offline ? 'is-offline' : ''}/>
@@ -213,7 +187,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
-        <div className={`device-state-workspace${isGo2 ? ' device-state-workspace--go2' : ''}${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
+        <div className={`device-state-workspace${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
           filter: offline ? 'grayscale(1)' : 'none',
           opacity: offline ? 0.45 : 1,
           pointerEvents: offline ? 'none' : 'auto',
@@ -221,10 +195,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         }}>
           <FsmBoard unitId={unitId} sm={sm} current={current} widgets={widgets}
             onFire={fire} report={reportExecution} actor={actor} color={ACCENT}
-            liveState={ledState}
-            isGo2={isGo2} connected={go2Connected} selectedState={previewState}
+            liveState={runtimeState}
+            stateField={stateField} connectionField={connectionField}
+            connected={connected} selectedState={previewState}
             onSelectState={state => setPreviewState(previous => previous === state ? null : state)}
-            legacyLed={isLed && sm && !sm.states?.includes('ON')}/>
+            legacyLed={sm?.state_field === 'ism' && sm?.states?.includes('BRIGHT')}/>
         </div>
       )}
 
@@ -235,7 +210,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
-      <div className="device-chat-heading">与{device?.name || unitId}对话</div>
+      <div className="device-chat-heading">与{card?.name || unitId}对话</div>
       <ChatPanel
         messages={messages}
         thinking={sending}
@@ -277,7 +252,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
 }
 window.FsmDevicePage = FsmDevicePage;
 
-function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, legacyLed, isGo2, connected, selectedState, onSelectState }) {
+function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, stateField, connectionField, legacyLed, connected, selectedState, onSelectState }) {
   const { useState, useRef, useEffect } = React;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
@@ -290,18 +265,18 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     .sort((a, b) => (a.order ?? a._index) - (b.order ?? b._index));
   const placement = widget => widget.placement === 'media' || (!widget.placement && widget.type === 'video')
     ? 'media' : 'controls';
-  const mediaWidgets = visibleWidgets.filter(widget => placement(widget) === 'media'
-    && (!isGo2 || (connected && selectedState === current)));
-  const controlWidgets = visibleWidgets.filter(widget => placement(widget) === 'controls');
+  const displayed = visibleWidgets.filter(widget => (!widget.requires_connection || connected)
+    && (!widget.preview_only || selectedState === current));
+  const mediaWidgets = displayed.filter(widget => placement(widget) === 'media');
+  const controlWidgets = displayed.filter(widget => placement(widget) === 'controls');
   const hasColorControl = controlWidgets.some(widget => widget.type === 'led_color' || widget.type === 'color_swatches');
   const hiddenWidgets = activeWidgets.filter(widget => widget.visible === false);
-  const previewTarget = isGo2 ? selectedState : current;
+  const previewTarget = selectedState || current;
   const view = sm?.views?.[previewTarget];
-  const showPreview = (!isGo2 || connected && !!selectedState)
-    && view?.type === 'robot_pose' && !mediaWidgets.length;
+  const showPreview = !!view && !!selectedState && !mediaWidgets.length;
   const renderWidget = widget => <div key={`${widget.type}-${widget._index}`}
     className={`device-board__widget device-board__widget--${placement(widget)}`}>
-    {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState)}
+    {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState, stateField, connectionField, connected)}
   </div>;
   const safety = (sm?.transitions || []).find(t => t.src === current && t.safety && t.action);
 
@@ -353,13 +328,13 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
       <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})` }}>
         {sm ? <FsmGraph states={sm.states} transitions={sm.transitions} current={current}
           onFire={onFire} color={color} views={sm.views || {}} layout={sm.layout || {}}
-          onSelectState={isGo2 && connected ? onSelectState : undefined} selectedState={selectedState}
+          onSelectState={onSelectState} selectedState={selectedState}
           showSafety={false}/>
           : <div className="device-state-workspace__fallback">{current || '—'}</div>}
       </div>
     </div>
     {hiddenWidgets.map(widget => <React.Fragment key={`hidden-${widget._index}`}>
-      {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState)}
+      {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState, stateField, connectionField, connected)}
     </React.Fragment>)}
     {(mediaWidgets.length > 0 || controlWidgets.length > 0 || showPreview) && <div className={`device-board__widget-tray${hasColorControl ? ' device-board__widget-tray--color' : ''}`}>
       {mediaWidgets.map(renderWidget)}

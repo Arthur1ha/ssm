@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from cloud.cards.schema import AgentCard, SkillDef, StateMachine, Transport
+from cloud.cards.validation import normalize_card
 
 
 # ── 声明式技能映射表 ──────────────────────────────────────────────
@@ -17,6 +18,7 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
     "SET_COLOR": {
         "id": "set_light_color",
         "name": "设置灯光颜色",
+        "description": "设置灯环 RGB 颜色和亮度",
         "tags": ["actuator", "light"],
         "params_schema": {
             "type": "object",
@@ -33,6 +35,7 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
     "SET_STATE": {
         "id": "set_light_state",
         "name": "开关灯",
+        "description": "切换灯环的照明状态",
         "tags": ["actuator", "light"],
         "params_schema": {
             "type": "object",
@@ -46,6 +49,7 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
     "BLINK": {
         "id": "blink_light",
         "name": "闪烁灯光",
+        "description": "让灯环闪烁指定次数",
         "tags": ["actuator", "light"],
         "params_schema": {
             "type": "object",
@@ -62,6 +66,7 @@ CAPABILITY_SKILLS: dict[str, SkillDef] = {
     "PLAY": {
         "id": "play_sound",
         "name": "播放声音",
+        "description": "播放设备预置提示音",
         "tags": ["actuator", "sound"],
         "params_schema": {
             "type": "object",
@@ -109,6 +114,7 @@ _LED_EDGES = [
 
 FSM_DEFS: dict[str, StateMachine] = {
     "led": {
+        "state_field": "ism",
         "states": ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK", "ERROR"],
         "transitions": [
             {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t], "action": a, "params": p}
@@ -160,6 +166,7 @@ _NEW_LED_TRANSITIONS = [
 ]
 
 NEW_LED_FSM: StateMachine = {
+    "state_field": "ism",
     "states": ["OFF", "ON", "BLINKING"],
     "initial": "OFF",
     "transitions": [
@@ -197,6 +204,7 @@ _LED_MODES: list[dict] = [{
     ],
     "get": "/api/esp32/autonomy",
     "set": "/api/esp32/autonomy",
+    "set_action": "set_mode",
 }]
 
 MODE_DEFS: dict[str, list[dict]] = {"led": _LED_MODES}
@@ -262,7 +270,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     unit_id = manifest.get("unit_id", "")
     name = manifest.get("name", unit_id)
     agent_type = manifest.get("agent_type", "sensor")
-    description = manifest.get("description", "")
+    description = manifest.get("description") or f"{name} 智能体"
 
     transport: Transport = {
         "kind": "mqtt",
@@ -281,6 +289,8 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
             skills.append(skill)
 
     card = AgentCard(
+        card_schema_version=1,
+        version=str(manifest.get("version") or manifest.get("firmware_version") or "unknown"),
         unit_id=unit_id,
         device_id=manifest.get("parent_id") or unit_id,
         name=name,
@@ -292,6 +302,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         state={},
     )
     card["parent_id"] = manifest.get("parent_id", "")
+    card["tags"] = list(manifest.get("resource_tags") or manifest.get("tags") or [])
     fsm_key = _fsm_key(manifest)
     if fsm_key:
         if fsm_key == "led" and agent_type == "actuator":
@@ -308,8 +319,8 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         if widgets and "SET_COLOR" in capability_actions:
             card["widgets"] = _copy_widgets(widgets)
             if fsm_key == "led" and manifest.get("fsm_version") != 2:
-                card["widgets"][0]["states"] = ["ON", "BRIGHT", "DIM", "COLOR"]
-    return card
+                card["widgets"][0]["states"] = ["BRIGHT", "DIM", "COLOR"]
+    return normalize_card(card)
 
 
 def parse_card(payload: dict) -> AgentCard:
@@ -317,23 +328,4 @@ def parse_card(payload: dict) -> AgentCard:
 
     state_machine 字段若存在则原样透传（Go2 等设备自带拓扑描述）。
     """
-    unit_id = payload.get("unit_id")
-    if not isinstance(unit_id, str) or not unit_id:
-        raise ValueError("Agent Card requires unit_id")
-    card = AgentCard(
-        unit_id=unit_id,
-        device_id=payload.get("device_id") or payload.get("parent_id") or unit_id,
-        name=payload.get("name", ""),
-        description=payload.get("description", ""),
-        agent_type=payload.get("agent_type", ""),
-        online=payload.get("online", False),
-        transport=payload.get("transport", {"kind": "http"}),
-        skills=payload.get("skills", []),
-        state=payload.get("state", {}),
-    )
-    if "state_machine" in payload:
-        card["state_machine"] = payload["state_machine"]
-    for key in ("modes", "telemetry", "widgets", "suggestions", "services"):
-        if key in payload:
-            card[key] = payload[key]
-    return card
+    return normalize_card(payload)

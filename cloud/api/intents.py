@@ -280,7 +280,9 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
         elif message_type == "status":
             event["online"] = payload == "online"
         elif message_type == "state":
-            event["state"] = payload if isinstance(payload, dict) else {"value": payload}
+            # Registry applies version-bound runtime normalization before SSE.
+            event["state"] = card.get("state", {}) if card else (
+                payload if isinstance(payload, dict) else {"value": payload})
         elif message_type == "event":
             event["event"] = payload if isinstance(payload, dict) else {"value": payload}
         elif message_type == "thought":

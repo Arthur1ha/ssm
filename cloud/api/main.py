@@ -62,8 +62,9 @@ def _on_esp32_connect(client, userdata, flags, rc):
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
-        # Retained card 暴露 Go2 能力；status 只表达真实 WebRTC 连接状态。
+        # Card/status 表达服务发现；WebRTC 连接投影在独立 state 中。
         go2_router_module._publish_go2_card()
+        go2_router_module._publish_go2_state()
         go2_router_module._publish_go2_status()
         logger.info("[ESP32Agent MQTT] Connected and subscribed")
 
@@ -209,6 +210,7 @@ async def lifespan(app):
 
     yield
 
+    go2_router_module._publish_go2_status(False)
     _esp32_mqtt_client.loop_stop()
     _esp32_mqtt_client.disconnect()
     intents_module.init_mqtt(None)

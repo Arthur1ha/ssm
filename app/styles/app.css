@@ -160,8 +160,6 @@ body {
   overflow: hidden;
 }
 .device-state-workspace--expanded { height: clamp(440px, 62dvh, 560px); }
-.device-state-workspace--go2 { height: clamp(280px, 38dvh, 340px); }
-.device-state-workspace--go2.device-state-workspace--expanded { height: clamp(370px, 50dvh, 440px); }
 .device-board { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; background: var(--color-bg); }
 .device-board::before {
   content: ''; position: absolute; inset: 0;
@@ -188,9 +186,6 @@ body {
 .device-board__widget--media .device-state-video { width: min(100%, 210px); margin: 0 auto; }
 .device-board__widget--controls .device-joysticks { margin: 0; padding: 4px; }
 .device-board__widget--preview { width: min(100%, 180px); justify-self: center; }
-.device-state-workspace--go2 .device-board__widget--preview { width: min(100%, 146px); }
-.device-state-workspace--go2 .device-board__widget--preview .device-pose { max-height: 72px; }
-.device-state-workspace--go2 .device-board__widget--media .device-state-video { width: min(100%, 176px); }
 .device-board__footer { position: relative; z-index: 1; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 12px; background: var(--color-surface-1); }
 .device-led-controls { display: grid; justify-items: center; gap: 5px; width: 100%; margin-top: 0; }
 .device-led-controls__hint { color: var(--color-text-dim); font-size: 10px; }
@@ -253,6 +248,9 @@ body {
   font-size: 10px;
   line-height: 1.35;
 }
+.device-light-preview { display: grid; place-items: center; min-height: 98px; }
+.device-light-preview span { width: 58px; height: 58px; border: 5px solid var(--light-color); border-radius: 50%; box-shadow: 0 0 18px var(--light-color), inset 0 0 10px var(--light-color); }
+.device-widget-unsupported { color: var(--color-text-muted); font-size: 11px; }
 .device-state-video {
   margin-top: 8px;
   border: 1px solid var(--color-border);
@@ -268,8 +266,6 @@ body {
 @media (min-width: 700px) {
   .device-state-workspace { height: clamp(360px, 46dvh, 430px); }
   .device-state-workspace--expanded { height: clamp(440px, 62dvh, 560px); }
-  .device-state-workspace--go2 { height: clamp(280px, 38dvh, 340px); }
-  .device-state-workspace--go2.device-state-workspace--expanded { height: clamp(370px, 50dvh, 440px); }
   .device-board__widget-tray { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .device-board__widget:only-child { grid-column: 1 / -1; }
   .device-board__widget--controls:only-child { width: min(100%, 440px); justify-self: center; }
