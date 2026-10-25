@@ -101,15 +101,18 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     && (!w.states?.length || w.states.includes(current))
     && (!w.requires_connection || connected)
     && (!w.preview_only || previewState === current));
-  const hasBoardWidget = visibleWidgets.length > 0 || !!previewState;
+  const hasBoardWidget = visibleWidgets.some(widget => widget.type !== 'video');
   const statusLabel = offline ? '离线' : `在线 · ${sm?.views?.[current]?.label || current || '状态待同步'}`;
+  const hasActionPreview = (sm?.states || []).some(state => {
+    const type = sm?.views?.[state]?.type;
+    return type === 'robot_pose' || type === 'image';
+  });
+  const safetyTransitions = (sm?.transitions || []).filter(t => t.safety && t.action);
+  const safetyAction = safetyTransitions.find(t => t.src === current) || safetyTransitions[0];
 
   /* ── 派发 FSM 转移 ── */
-  const fire = async trigger => {
+  const dispatchTransition = async t => {
     if (offline) return;
-    const t = (sm?.transitions || []).find(
-      tr => tr.src === current && tr.trigger === trigger
-    );
     if (!t?.action) {
       setExecution(t?.hint || '当前状态不允许这个动作');
       return;
@@ -124,6 +127,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       reportExecution(result);
     }
   };
+  const fire = trigger => dispatchTransition((sm?.transitions || []).find(
+    t => t.src === current && t.trigger === trigger
+  ));
 
   /* ── 发送对话 ── */
   const handleSend = text => {
@@ -198,7 +204,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
             liveState={runtimeState}
             stateField={stateField} connectionField={connectionField}
             connected={connected} selectedState={previewState}
-            onSelectState={state => setPreviewState(previous => previous === state ? null : state)}
+            onSelectState={hasActionPreview
+              ? state => setPreviewState(previous => previous === state ? null : state)
+              : null}
             legacyLed={sm?.state_field === 'ism' && sm?.states?.includes('BRIGHT')}/>
         </div>
       )}
@@ -244,7 +252,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       </div>
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         modes={modes} modeVals={modeVals} onSwitchMode={switchMode}
-        offline={offline} isGo2={isGo2} actor={actor} unitId={unitId}
+        offline={offline} connected={connected} safetyAction={safetyAction}
+        onSafety={() => { setSettingsOpen(false); dispatchTransition(safetyAction); }}
+        isGo2={isGo2} actor={actor} unitId={unitId}
         onGo2Settings={() => setGo2AssetsOpen(true)}/>
       {actor === 'admin' && isGo2 && <Go2AssetsDrawer open={go2AssetsOpen} onClose={() => setGo2AssetsOpen(false)}/>}
     </div>
@@ -267,20 +277,20 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     ? 'media' : 'controls';
   const displayed = visibleWidgets.filter(widget => (!widget.requires_connection || connected)
     && (!widget.preview_only || selectedState === current));
-  const mediaWidgets = displayed.filter(widget => placement(widget) === 'media');
-  const controlWidgets = displayed.filter(widget => placement(widget) === 'controls');
+  const videoWidgets = displayed.filter(widget => widget.type === 'video');
+  const mediaWidgets = displayed.filter(widget => widget.type !== 'video' && placement(widget) === 'media');
+  const controlWidgets = displayed.filter(widget => widget.type !== 'video' && placement(widget) === 'controls');
   const hasColorControl = controlWidgets.some(widget => widget.type === 'led_color' || widget.type === 'color_swatches');
   const hiddenWidgets = activeWidgets.filter(widget => widget.visible === false);
   const previewTarget = selectedState || current;
   const view = sm?.views?.[previewTarget];
-  const showPreview = !!view && !!selectedState && !mediaWidgets.length;
+  const showPreview = connected && (view?.type === 'robot_pose' || view?.type === 'image');
   const renderWidget = widget => <div key={`${widget.type}-${widget._index}`}
     className={`device-board__widget device-board__widget--${placement(widget)}`}>
     {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState, stateField, connectionField, connected)}
   </div>;
-  const safety = (sm?.transitions || []).find(t => t.src === current && t.safety && t.action);
 
-  // A new state starts with the graph centered; widgets stay in document flow below it.
+  // A new state starts with the graph centered in its own draggable viewport.
   useEffect(() => {
     drag.current = null;
     pointers.current.clear();
@@ -323,37 +333,37 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
   return <div className="device-board" style={{ '--board-accent': color }}>
+    {(videoWidgets.length > 0 || showPreview) && <div className="device-board__media-row">
+      {videoWidgets.length > 0 && <div className="device-board__video">
+        {videoWidgets.map(renderWidget)}
+      </div>}
+      {showPreview && <div className="device-board__preview">
+        <StateVisual view={view} state={previewTarget} color={color}/>
+      </div>}
+    </div>}
     <div className="device-board__viewport"
       onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan}>
       <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})` }}>
         {sm ? <FsmGraph states={sm.states} transitions={sm.transitions} current={current}
           onFire={onFire} color={color} views={sm.views || {}} layout={sm.layout || {}}
-          onSelectState={onSelectState} selectedState={selectedState}
-          showSafety={false}/>
+          onSelectState={onSelectState} selectedState={selectedState}/>
           : <div className="device-state-workspace__fallback">{current || '—'}</div>}
       </div>
     </div>
     {hiddenWidgets.map(widget => <React.Fragment key={`hidden-${widget._index}`}>
       {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState, stateField, connectionField, connected)}
     </React.Fragment>)}
-    {(mediaWidgets.length > 0 || controlWidgets.length > 0 || showPreview) && <div className={`device-board__widget-tray${hasColorControl ? ' device-board__widget-tray--color' : ''}`}>
+    {(mediaWidgets.length > 0 || controlWidgets.length > 0) && <div className={`device-board__widget-tray${hasColorControl ? ' device-board__widget-tray--color' : ''}`}>
       {mediaWidgets.map(renderWidget)}
-      {showPreview && <div className="device-board__widget device-board__widget--media device-board__widget--preview">
-        <StateVisual view={view} state={previewTarget} color={color}/>
-      </div>}
       {controlWidgets.map(renderWidget)}
     </div>}
-    {(legacyLed || safety) && <div className="device-board__footer">
-      {legacyLed && <span className="device-board__legacy">旧版状态机 · 固件待更新</span>}
-      {safety && <button type="button" className="fsm-safety-edge device-board__safety"
-        onClick={() => onFire(safety.trigger)} aria-label={`${safety.label}，${sm?.views?.[current]?.label || current}到${sm?.views?.[safety.dst]?.label || safety.dst}`}>
-        <span>{sm?.views?.[current]?.label || current}</span><b>── {safety.label} ──▶</b><span>{sm?.views?.[safety.dst]?.label || safety.dst}</span>
-      </button>}
+    {legacyLed && <div className="device-board__footer">
+      <span className="device-board__legacy">旧版状态机 · 固件待更新</span>
     </div>}
   </div>;
 }
 
-function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, isGo2, actor, unitId, onGo2Settings }) {
+function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, actor, unitId, onGo2Settings }) {
   const panelRef = React.useRef(null);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
@@ -382,6 +392,8 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
     <div className="device-settings-scrim" onClick={onClose}/>
     <section ref={panelRef} className="device-settings-panel" role="dialog" aria-modal="true" aria-label="设备设置">
       <header><h2>设备设置</h2><button type="button" className="btn" onClick={onClose} aria-label="关闭设备设置"><Icon name="x" size={15}/></button></header>
+      {safetyAction && <button type="button" className="btn btn--danger device-settings-safety"
+        onClick={onSafety} disabled={offline || !connected}>{safetyAction.label}</button>}
       {actor === 'admin' && modes.map(axis => <section key={axis.id} className="device-settings-axis">
         <h3>{axis.label}</h3>
         <div>{axis.options.map(option => <button type="button" key={option.value}

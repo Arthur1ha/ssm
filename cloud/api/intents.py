@@ -28,6 +28,7 @@ from cloud.mqtt_signing import MqttSignatureError, sign_message
 from cloud.space.registry import DEFAULT_SPACE_ID, card_device_id, get_space_registry
 
 logger = logging.getLogger(__name__)
+device_chat_logger = logging.getLogger("cloud.esp32.chat")
 router = APIRouter(tags=["gateway"])
 
 _mqtt_client = None
@@ -380,6 +381,10 @@ def _valid_lamp_params(action: str, params: Any) -> bool:
 def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
     agent.mark_user_command(unit_id)
     planned = agent.handle_user_text(message, persist=session["actor"] == "admin")
+    device_chat_logger.info(
+        "[DeviceChat/Plan] unit=%s session=%s plan=%s",
+        unit_id, session["session_id"], json.dumps(planned, ensure_ascii=False),
+    )
     if not isinstance(planned, dict):
         return {"result": "ok", "reply": str(planned)}
     if planned.get("llm_available") is False:
@@ -437,7 +442,24 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any])
     agent = get_agent()
     if agent is None:
         raise HTTPException(status_code=503, detail="ESP32 agent is unavailable")
-    return await asyncio.to_thread(_run_lamp_chat, agent, unit_id, message, session)
+    device_chat_logger.info(
+        "[DeviceChat/User] unit=%s session=%s text=%s",
+        unit_id, session["session_id"], json.dumps(message, ensure_ascii=False),
+    )
+    try:
+        result = await asyncio.to_thread(_run_lamp_chat, agent, unit_id, message, session)
+    except Exception:
+        device_chat_logger.exception(
+            "[DeviceChat/Error] unit=%s session=%s", unit_id, session["session_id"],
+        )
+        raise
+    device_chat_logger.info(
+        "[DeviceChat/Reply] unit=%s session=%s result=%s text=%s task=%s",
+        unit_id, session["session_id"], result.get("result", "ok"),
+        json.dumps(result.get("reply", ""), ensure_ascii=False),
+        result.get("task_id") or result.get("request_id") or "-",
+    )
+    return result
 
 
 async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, Any]) -> Any:

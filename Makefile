@@ -98,6 +98,8 @@ ps:
 
 logs:
 	@echo "=== API ===" && tail -20 logs/api.log 2>/dev/null || echo "(no log)"
+	@echo "=== ESP32 ===" && tail -20 logs/esp32.log 2>/dev/null || echo "(no log)"
+	@echo "=== Go2 events / chat ===" && grep -v '\[Go2/Status\]' logs/go2.log 2>/dev/null | tail -20 || echo "(no log)"
 	@echo "=== Orchestrator ===" && tail -20 logs/orchestrator.log 2>/dev/null || echo "(no log)"
 	@echo "=== PWA ===" && tail -5 logs/pwa.log 2>/dev/null || echo "(no log)"
 	@echo "=== tunnel ===" && tail -5 logs/tunnel.log 2>/dev/null || echo "(no log)"
@@ -114,11 +116,11 @@ trace:
 	done
 
 go2-logs:
-	@tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text -v "\[Go2/Status\]"
+	@tail -F $(LOG_DIR)/go2.log | grep --line-buffered --text -v "\[Go2/Status\]"
 
 go2-state:
-	@tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text "\[Go2/Status\]"
+	@tail -F $(LOG_DIR)/go2.log | grep --line-buffered --text "\[Go2/Status\]"
 
 go2-logs-window:
-	@tmux new-window -n go2-events "tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text -v '\\[Go2/Status\\]'"
-	@tmux new-window -n go2-state  "tail -f $(LOG_DIR)/go2.log | grep --line-buffered --text '\\[Go2/Status\\]'"
+	@tmux list-windows -F '#{window_name}' | grep -Fxq go2-events || tmux new-window -n go2-events 'make -C $(SSM_DIR) go2-logs'
+	@tmux list-windows -F '#{window_name}' | grep -Fxq go2-state || tmux new-window -n go2-state 'make -C $(SSM_DIR) go2-state'

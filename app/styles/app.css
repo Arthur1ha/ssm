@@ -145,13 +145,8 @@ body {
 .fsm-graph__edge.is-automatic { pointer-events: none; opacity: .55; }
 .fsm-graph__edge:focus-visible, .fsm-graph__node:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .fsm-graph-wrap { width: 100%; min-height: 0; display: flex; flex-direction: column; align-items: center; }
-.fsm-graph__hint { margin-top: -5px; color: var(--color-text-dim); font-size: 10px; white-space: nowrap; }
-.fsm-safety-edge { width: min(100%, 340px); min-height: 38px; margin: -4px 0 3px; padding: 5px 9px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--color-danger-border); border-radius: 8px; background: var(--color-danger-dim); color: var(--color-danger); font-family: var(--font-sans); cursor: pointer; }
-.fsm-safety-edge span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-muted); font-size: 9px; }
-.fsm-safety-edge b { flex: 0 0 auto; font-size: 10px; }
-.fsm-safety-edge:focus-visible { outline: 2px solid var(--color-danger); outline-offset: 2px; }
 
-/* Card 驱动的设备白板：状态图独立，媒体和控件按声明进入自适应托盘。 */
+/* Card 驱动的设备白板：状态图居中，视频与预览在上角，其余控件进入托盘。 */
 .device-state-workspace {
   flex-shrink: 0;
   height: clamp(360px, 46dvh, 430px);
@@ -170,7 +165,7 @@ body {
 .device-board__viewport { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; touch-action: none; cursor: grab; }
 .device-board__viewport:active { cursor: grabbing; }
 .device-board__canvas {
-  position: absolute; top: 50%; left: 50%; width: min(70vw, 23dvh, 230px);
+  position: absolute; top: 50%; left: 50%; width: min(78vw, 32dvh, 260px);
   transform-origin: center center; will-change: transform;
 }
 .device-board .fsm-graph-wrap { position: relative; width: 100%; }
@@ -183,12 +178,25 @@ body {
 }
 .device-board__widget-tray--color { max-height: 60%; }
 .device-board__widget { min-width: 0; }
-.device-board__widget--media .device-state-video { width: min(100%, 210px); margin: 0 auto; }
 .device-board__widget--controls .device-joysticks { margin: 0; padding: 4px; }
-.device-board__widget--preview { width: min(100%, 180px); justify-self: center; }
+.device-board__media-row {
+  position: relative; z-index: 1; display: flex; align-items: flex-start;
+  gap: 12px; padding: 12px 12px 0; flex: 0 0 auto;
+}
+.device-board__video, .device-board__preview {
+  flex: 0 0 auto; width: clamp(96px, 28vw, 136px);
+  aspect-ratio: 16 / 9; pointer-events: none;
+}
+.device-board__preview { margin-left: auto; }
+.device-board__video .device-board__widget,
+.device-board__video .device-state-video,
+.device-board__preview .device-state-visual { width: 100%; height: 100%; }
+.device-board__video .device-state-video { margin: 0; }
+.device-board__preview .device-state-visual { display: flex; flex-direction: column; }
+.device-board__preview .device-state-visual__eyebrow { flex: 0 0 auto; padding: 4px 6px 0; font-size: 9px; }
+.device-board__preview .device-pose { flex: 1 1 auto; min-height: 0; max-height: none; }
 .device-board__footer { position: relative; z-index: 1; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 12px; background: var(--color-surface-1); }
 .device-led-controls { display: grid; justify-items: center; gap: 5px; width: 100%; margin-top: 0; }
-.device-led-controls__hint { color: var(--color-text-dim); font-size: 10px; }
 .device-led-controls__layout { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; justify-content: center; gap: 12px; width: 100%; }
 .device-led-controls__picker { display: grid; place-items: center; }
 .device-led-controls__wheel {
@@ -216,7 +224,6 @@ body {
   .device-led-controls__presets button { padding-inline: 4px; font-size: 9px; }
 }
 .device-board__legacy { color: var(--color-text-muted); font-size: 10px; }
-.device-board__safety { margin: 0; }
 .device-state-workspace__fallback {
   padding: 28px 9px;
   color: var(--color-accent);
@@ -242,14 +249,6 @@ body {
   max-height: 112px;
   object-fit: contain;
 }
-.device-state-visual__description {
-  padding: 0 9px 9px;
-  color: var(--color-text-muted);
-  font-size: 10px;
-  line-height: 1.35;
-}
-.device-light-preview { display: grid; place-items: center; min-height: 98px; }
-.device-light-preview span { width: 58px; height: 58px; border: 5px solid var(--light-color); border-radius: 50%; box-shadow: 0 0 18px var(--light-color), inset 0 0 10px var(--light-color); }
 .device-widget-unsupported { color: var(--color-text-muted); font-size: 11px; }
 .device-state-video {
   margin-top: 8px;
@@ -381,6 +380,8 @@ body {
 .device-settings-panel header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--color-border); }
 .device-settings-panel header h2 { color: var(--color-text); font-size: 17px; }
 .device-settings-panel header .btn { width: 32px; height: 32px; padding: 0; justify-content: center; }
+.device-settings-safety { width: 100%; min-height: 48px; margin-top: 12px; justify-content: center; font-weight: 700; }
+.device-settings-safety:hover:not(:disabled) { background: var(--color-danger-dim); filter: brightness(1.2); }
 .device-settings-axis { padding: 15px 0 3px; }
 .device-settings-axis h3 { margin-bottom: 8px; color: var(--color-text-muted); font-size: 12px; }
 .device-settings-axis > div { display: grid; gap: 7px; }
@@ -394,6 +395,7 @@ body {
 .device-settings-go2 strong, .device-settings-card strong { font-size: 12px; }
 .device-settings-go2 small, .device-settings-card small { color: var(--color-text-dim); font-size: 10px; }
 .device-settings-panel button:focus-visible, .device-settings-panel a:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.device-settings-panel .device-settings-safety:focus-visible { outline-color: var(--color-danger); }
 @media (min-width: 700px) { .device-settings-panel { left: 50%; right: auto; width: 480px; transform: translateX(-50%); } }
 
 .drawer-mask { position: fixed; inset: 0; z-index: 230; pointer-events: none; opacity: 0; background: rgba(0,0,0,.68); transition: opacity .25s; }

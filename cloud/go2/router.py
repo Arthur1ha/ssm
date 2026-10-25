@@ -373,7 +373,8 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     from unitree_webrtc_connect.constants import SPORT_CMD
-    if cmd not in SPORT_CMD:
+    # EnterMoveControl only enters the local FSM; it has no SPORT_MOD command ID.
+    if cmd != "EnterMoveControl" and cmd not in SPORT_CMD:
         raise HTTPException(status_code=400, detail=f"Unknown command: {cmd}")
     _check_direct_motion(cmd, req.params or {}, context)
     _cancel_pending_peer_requests(context)

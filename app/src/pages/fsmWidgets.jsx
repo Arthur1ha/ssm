@@ -260,7 +260,6 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   const markerY = 50 - Math.cos(wheelAngle) * draft.saturation * 43;
 
   return <div className="device-led-controls">
-    <span className="device-led-controls__hint">点按或拖动色盘选颜色</span>
     <div className="device-led-controls__layout">
     <div className="device-led-controls__picker">
       <div ref={wheelRef} className="device-led-controls__wheel" role="slider" tabIndex={0}

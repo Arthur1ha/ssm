@@ -1,5 +1,5 @@
 /* FsmGraph — 当前状态的可用转换以连线呈现，点击连线即可执行。 */
-function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelectState, selectedState, color = '#C8FF3E', views = {}, layout = {}, showSafety = true }) {
+function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelectState, selectedState, color = '#C8FF3E', views = {}, layout = {} }) {
   const { useMemo } = React;
 
   /* hex → "r,g,b" 供 rgba() 使用 */
@@ -15,6 +15,7 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
   const CX = W / 2, CY = H / 2;
   const LAYOUT_R = 88;
   const NODE_R = 27;
+  const outgoing = transitions.filter(t => t.src === current && t.dst !== current && !t.safety);
 
   const pos = useMemo(() => {
     const map = {};
@@ -34,8 +35,6 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
     return map;
   }, [states, layout]);
 
-  const outgoing  = transitions.filter(t => t.src === current && t.dst !== current && !t.safety);
-  const safetyEdges = transitions.filter(t => t.src === current && t.safety && t.action);
   const reachable = new Set(outgoing.filter(t => t.action).map(t => t.dst));
 
   if (states.length === 0) return null;
@@ -114,7 +113,6 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
           </g>
         );
       })}
-
       {/* ── 状态节点 ── */}
       {states.map(s => {
         const p = pos[s];
@@ -178,11 +176,6 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
         );
       })}
     </svg>
-    {onSelectState && <span className="fsm-graph__hint">点状态预览 · 可达状态执行</span>}
-    {showSafety && safetyEdges.map(t => <button type="button" key={t.trigger} className="fsm-safety-edge"
-      onClick={() => fire(t.trigger)} aria-label={`${t.label}，${views[current]?.label || current}到${views[t.dst]?.label || t.dst}`}>
-      <span>{views[current]?.label || current}</span><b>── {t.label} ──▶</b><span>{views[t.dst]?.label || t.dst}</span>
-    </button>)}
     </div>
   );
 }

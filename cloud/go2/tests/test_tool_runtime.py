@@ -178,6 +178,66 @@ async def test_invalid_planner_json_is_error_not_empty_plan(monkeypatch, robot):
 
 
 @pytest.mark.asyncio
+async def test_single_peer_tool_object_is_planned_without_dispatch(monkeypatch, robot):
+    call = ('{"tool":"request_peer_skill","params":{'
+            '"target_unit_id":"esp32_desk_led","skill_id":"set_light_state",'
+            '"params":{"state":"OFF"}}}')
+    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content=call)))
+    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
+    state = await agent.planner_node(_state(user_msg="关掉灯"))
+    assert state["planned_tools"] == [{
+        "tool": "request_peer_skill",
+        "params": {"target_unit_id": "esp32_desk_led", "skill_id": "set_light_state",
+                   "params": {"state": "OFF"}},
+    }]
+    robot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_peer_params_array_is_wrapped_as_tool_call(monkeypatch, robot):
+    # This is the shape the live model returned for "帮我把灯打开".
+    content = ('[{"target_unit_id":"esp32_desk_led","skill_id":"set_light_state",'
+               '"params":{"state":"ON"},"request_id":"open_light_20260711_001"}]')
+    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content=content)))
+    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
+    state = await agent.planner_node(_state(user_msg="帮我把灯打开"))
+    assert state["planned_tools"] == [{"tool": "request_peer_skill", "params": {
+        "target_unit_id": "esp32_desk_led", "skill_id": "set_light_state",
+        "params": {"state": "ON"}, "request_id": "open_light_20260711_001",
+    }}]
+    robot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_peer_reply_prompt_uses_personality_and_confirmed_result(monkeypatch):
+    result = [{"tool": "request_peer_skill", "result": {
+        "result": "ok", "request_id": "req_internal_1",
+        "target_unit_id": "esp32_desk_led", "task_id": "req_internal_1",
+    }}]
+    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content="汪，灯已经弄好啦。")))
+    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
+    monkeypatch.setattr(agent, "get_system_prompt", lambda: "好奇、活泼的小狗")
+    reply, available = await agent._generate_response("帮我把灯打开", "", result)
+    messages = model.ainvoke.await_args.args[0]
+    assert available and reply == "汪，灯已经弄好啦。"
+    assert "好奇、活泼的小狗" in messages[1].content
+    assert '"overall_result": "ok"' in messages[1].content
+    assert "req_internal_1" not in messages[1].content
+    assert "esp32_desk_led" not in messages[1].content
+    assert "不要把 ok 说成尚未确认" in messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_peer_reply_does_not_repeat_unconfirmed_claim_or_internal_id(monkeypatch):
+    result = [{"tool": "request_peer_skill", "result": {"result": "ok"}}]
+    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(
+        content="请求编号 req_internal_1 已发送，但还没得到完成确认。")))
+    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
+    reply, available = await agent._generate_response("把灯打开", "", result)
+    assert available and reply == "汪，交给我的事已经办妥啦。"
+
+
+@pytest.mark.asyncio
 async def test_tool_call_limit_is_enforced(monkeypatch, robot):
     calls = '[{"tool":"go2_status"},{"tool":"go2_status"},{"tool":"go2_status"},{"tool":"go2_status"}]'
     model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content=calls)))

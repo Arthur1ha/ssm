@@ -306,6 +306,25 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
         }
     try:
         tools_raw = json.loads(content)
+        # Some compatible chat models return one call as an object even when
+        # the prompt asks for an array. Keep the same validation path.
+        if isinstance(tools_raw, dict):
+            tools_raw = [tools_raw]
+        if isinstance(tools_raw, list):
+            normalized = []
+            for call in tools_raw:
+                # A peer request sometimes arrives as its parameters without
+                # the tool envelope. Only this complete, known schema is safe
+                # to identify; execution still passes through the tool gateway.
+                if (isinstance(call, dict) and "tool" not in call
+                        and {"target_unit_id", "skill_id", "params"} <= set(call)
+                        and set(call) <= {"target_unit_id", "skill_id", "params", "request_id"}
+                        and isinstance(call["target_unit_id"], str)
+                        and isinstance(call["skill_id"], str)
+                        and isinstance(call["params"], dict)):
+                    call = {"tool": "request_peer_skill", "params": call}
+                normalized.append(call)
+            tools_raw = normalized
         if not isinstance(tools_raw, list) or any(
             not isinstance(t, dict) or not isinstance(t.get("tool"), str)
             or not isinstance(t.get("params", {}), dict) for t in tools_raw
@@ -315,6 +334,9 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
             raise ValueError("tool_call_limit_exceeded")
     except (ValueError, json.JSONDecodeError) as exc:
         error = "tool_call_limit_exceeded" if str(exc) == "tool_call_limit_exceeded" else "invalid_planner_json"
+        logger.warning("[Go2/Plan/Error] session=%s reason=%s detail=%s output=%s",
+                       state["session_id"], error, str(exc),
+                       json.dumps(content[:2000], ensure_ascii=False))
         return {**state, "planned_tools": [], "response_text": "我暂时无法可靠解析这个指令，请换种说法。",
                 "early_exit": True, "error": error, "result_override": "error"}
     planned = tools_raw
@@ -331,8 +353,27 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
                 "tool_results": [], "response_text": _permission_reply(denial),
                 "early_exit": True, "error": denial,
             }
-    logger.info("[Go2/Agent] planned tool_count=%d", len(planned))
+    logger.info("[Go2/Plan] session=%s tools=%s", state["session_id"],
+                json.dumps(planned, ensure_ascii=False))
     return {**state, "memory_context": memory_context, "planned_tools": planned, "early_exit": False}
+
+
+def _responder_results(results: list) -> str:
+    """Keep confirmed peer outcomes while hiding transport bookkeeping from Go2's reply."""
+    visible = []
+    for item in results:
+        if item.get("tool") == "request_peer_skill" and isinstance(item.get("result"), dict):
+            outcome = item["result"]
+            detail = {"result": outcome.get("result", "error")}
+            if detail["result"] == "ok":
+                detail["completion"] = "目标设备已反馈执行成功"
+            if outcome.get("error"):
+                detail["error"] = outcome["error"]
+            visible.append({"operation": "同伴设备动作", "outcome": detail})
+        else:
+            visible.append(item)
+    return json.dumps({"overall_result": _execution_status(results), "steps": visible},
+                      ensure_ascii=False, default=str)
 
 
 async def _generate_response(user_msg: str, memory_context: str, results: list) -> tuple[str, bool]:
@@ -351,14 +392,21 @@ async def _generate_response(user_msg: str, memory_context: str, results: list) 
         return replies.get(status, "动作未能完成，请查看设备状态后重试。"), True
     prompt = build_prompt("responder", personality=get_system_prompt(),
                           user_input=user_msg, memory=memory_context,
-                          tool_results=results)
+                          tool_results=_responder_results(results))
     logger.info("[Go2/Prompt] %s", prompt.metadata)
     try:
         resp = await get_text_llm().ainvoke([
             SystemMessage(content=prompt.system),
             HumanMessage(content=prompt.human),
         ])
-        return resp.content.strip(), True
+        reply = resp.content.strip()
+        if any(item.get("tool") == "request_peer_skill" for item in results) and (
+            re.search(r"(?:尚未|还没|未能|没有).{0,18}(?:确认|完成)", reply)
+            or re.search(r"(?:request_id|task_id|unit_id|ESP32|请求编号|灯控模块)", reply, re.I)
+        ):
+            logger.warning("[Go2/Reply] peer completion reply contradicted result or exposed internals")
+            return "汪，交给我的事已经办妥啦。", True
+        return reply, True
     except Exception as exc:
         logger.warning("[Go2/Agent] response llm error: %s", type(exc).__name__)
         if results:
@@ -379,6 +427,8 @@ async def _execute_calls(state: Go2AgentState, context: ExecutionContext):
         else:
             result = await execute_tool(name, params, context=context)
         item = {"tool": name, "result": result}
+        logger.info("[Go2/Tool] session=%s tool=%s status=%s error=%s",
+                    state["session_id"], name, result.get("result"), result.get("error", "-"))
         yield item
         if spec and spec.motion and result["result"] == "accepted" and not is_stop:
             accepted_motion = True
@@ -451,6 +501,8 @@ async def run_agent(
     若提供 skill_id，planner_node 将跳过 LLM 规划直接路由到对应工具。
     """
     context = context or ExecutionContext(session_id, SYSTEM_CONTEXT.actor, True)
+    logger.info("[Go2/Chat/User] session=%s text=%s", session_id,
+                json.dumps(message, ensure_ascii=False))
     with use_context(context):
         episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
         try:
@@ -472,6 +524,8 @@ async def run_agent(
         })
         except Exception as exc:
             logger.warning("[Go2/Agent] run_agent error: %s", type(exc).__name__)
+            logger.info("[Go2/Chat/Reply] session=%s result=error text=%s", session_id,
+                        json.dumps(GO2_AGENT_UNAVAILABLE_REPLY, ensure_ascii=False))
             return {
                 "result": "error",
                 "response": GO2_AGENT_UNAVAILABLE_REPLY,
@@ -486,6 +540,8 @@ async def run_agent(
     if state["response_text"] and not state.get("early_exit"):
         _publish_thought({"type": "think", "text": state["response_text"]})
     result = state.get("result_override") or ("error" if state.get("error") else _execution_status(state["tool_results"]))
+    logger.info("[Go2/Chat/Reply] session=%s result=%s text=%s", session_id, result,
+                json.dumps(state["response_text"], ensure_ascii=False))
     return {
         "result":        result,
         "response":      state["response_text"],
@@ -501,6 +557,8 @@ async def run_agent(
 async def run_agent_stream(session_id: str, message: str, context: ExecutionContext | None = None):
     """逐步执行并 yield 事件 dict，供 SSE 流式端点使用。"""
     context = context or ExecutionContext(session_id, SYSTEM_CONTEXT.actor, True)
+    logger.info("[Go2/Chat/User] session=%s text=%s", session_id,
+                json.dumps(message, ensure_ascii=False))
     with use_context(context):
         episode_memory.add(EventType.USER_COMMAND, f"用户指令：{message}")
 
@@ -524,6 +582,9 @@ async def run_agent_stream(session_id: str, message: str, context: ExecutionCont
     state = await planner_node(base_state)
 
     if state.get("early_exit"):
+        logger.info("[Go2/Chat/Reply] session=%s result=%s text=%s", session_id,
+                    state.get("result_override") or ("error" if state.get("error") else "ok"),
+                    json.dumps(state["response_text"], ensure_ascii=False))
         yield {"type": "response", "text": state["response_text"]}
         yield {"type": "done", "result": state.get("result_override") or
                ("error" if state.get("error") else "ok"),
@@ -540,6 +601,8 @@ async def run_agent_stream(session_id: str, message: str, context: ExecutionCont
 
     response_text, _ = await _generate_response(message, state.get("memory_context", ""), results)
     logger.info("[Go2/Agent] response_chars=%d", len(response_text))
+    logger.info("[Go2/Chat/Reply] session=%s result=%s text=%s", session_id,
+                _execution_status(results), json.dumps(response_text, ensure_ascii=False))
     with use_context(context):
         episode_memory.add(EventType.AGENT_RESPONSE, f"Go2 回复：{response_text}")
     if not context.persist:

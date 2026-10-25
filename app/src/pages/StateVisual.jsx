@@ -45,21 +45,17 @@ function StateVisual({ view, state, color }) {
   const label = view.label || state;
   let visual = null;
   if (view.type === 'robot_pose') visual = <RobotPoseVisual pose={view.pose} label={label}/>;
-  if (view.type === 'light_ring') visual = <div className="device-light-preview" role="img" aria-label={`${label}灯光预览`}>
-    <span style={{ '--light-color': view.color || '#fff', opacity: view.intensity ?? 1 }}/>
-  </div>;
   const imageSrc = typeof view.src === 'string' && view.src.startsWith('/')
     && !view.src.startsWith('//') && !view.src.includes('\\')
     && !view.src.includes('#') && !view.src.split('?')[0].split('/').includes('..');
   if (view.type === 'image' && imageSrc) {
     visual = <img className="device-pose" src={view.src} alt={`${label}预设图`}/>;
   }
-  if (!visual) visual = <div className="device-state-visual__description">{view.description || label}</div>;
+  if (!visual) return null;
   return (
     <div className="device-state-visual" style={{ color }}>
-      <div className="device-state-visual__eyebrow">动作预设 · {label}</div>
+      <div className="device-state-visual__eyebrow">动作预览</div>
       {visual}
-      {view.description && <div className="device-state-visual__description">{view.description}</div>}
     </div>
   );
 }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-PROMPT_VERSION = "go2-runtime-v1"
+PROMPT_VERSION = "go2-runtime-v2"
 DEFAULT_PROMPT_BUDGET_CHARS = 12000
 
 _FIXED_RULES = (
@@ -30,8 +30,12 @@ _TASK_RULES = {
         "只输出 JSON 工具调用数组；无需工具时输出 []。"
     ),
     "responder": (
-        "用 Go2 的第一人称简洁回复。根据工具的结构化状态陈述结果；无相关记忆时说不知道。"
-        "不要将 accepted、executing、timeout 当作已完成。"
+        "你正在以 Go2 的身份对用户说话。参考【性格表达】的语气和形象，"
+        "用自然的第一人称口语回答；不要写成客服答复或系统执行报告。"
+        "简单动作通常只回复一两句。除非用户明确询问技术细节，不说工具名、模块名、unit_id、request_id 或 task_id。"
+        "根据工具的结构化状态陈述结果：ok 表示目标已确认完成，可以直接说完成；"
+        "accepted、executing、timeout 都不能说成已完成，也不要把 ok 说成尚未确认。"
+        "无相关记忆时说不知道。性格表达只影响说话方式，不改变这些事实与安全约束。"
     ),
     "reactive": (
         "基于当前视觉变化和冷却状态选择一个允许的姿态或转向动作，也可以不行动。"
