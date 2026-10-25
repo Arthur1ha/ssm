@@ -241,6 +241,30 @@ def go2_list_people() -> dict:
     return {"result": "ok", "people": people}
 
 
+def list_peers() -> dict:
+    """Read the gateway's space-filtered view using this tool's trusted identity."""
+    from cloud.peers.gateway import list_visible_peers
+    return {"result": "ok", "peers": list_visible_peers("go2")}
+
+
+async def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
+                             request_id: str | None = None) -> dict:
+    """Ask the trusted gateway for one peer action; never trust model role fields."""
+    from cloud.peers.gateway import request_peer_skill as dispatch_peer_skill
+    context = current_context()
+    origin_kind = getattr(context, "origin_kind", "user_delegated")
+    return await asyncio.to_thread(
+        dispatch_peer_skill,
+        initiator_unit_id="go2",
+        target_unit_id=target_unit_id,
+        skill_id=skill_id,
+        params=params,
+        context=context,
+        origin_kind=origin_kind,
+        request_id=request_id,
+    )
+
+
 def _identity_result(snapshot) -> dict:
     payload = asdict(snapshot) if is_dataclass(snapshot) else dict(vars(snapshot))
     payload["result"] = {
@@ -270,6 +294,8 @@ TOOL_FN_MAP = {
     "go2_set_led":                go2_set_led,
     "go2_recognize_person":       go2_recognize_person,
     "go2_list_people":            go2_list_people,
+    "list_peers":                 list_peers,
+    "request_peer_skill":         request_peer_skill,
 }
 
 from cloud.go2.agentcore.tools.registry import tool_descriptions

@@ -56,3 +56,12 @@ cloud/space/space.json
 !cloud/go2/tests/test_recall.py
 !cloud/go2/tests/test_prompts.py
 !cloud/go2/tests/test_mode_runtime.py
+
+# Peer request and discovery regression tests are part of this implementation.
+!cloud/peers/tests/
+!cloud/peers/tests/test_gateway.py
+!cloud/peers/tests/test_view.py
+!cloud/orchestrator/tests/
+cloud/orchestrator/tests/*
+!cloud/orchestrator/tests/test_peer_coordination.py
+!cloud/orchestrator/tests/test_tools_context.py

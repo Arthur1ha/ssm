@@ -45,6 +45,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", _schema({"color": _string(enum=["white", "red", "yellow", "blue", "green", "cyan", "purple"], default="white"), "duration": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 60}}), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
         ToolSpec("go2_list_people", "列出空间人员库", _schema({}), roles=("admin",), timeout_s=5),
+        ToolSpec("list_peers", "查询当前空间其他智能体的在线状态与公开技能；请求协作前先查询", _schema({}), timeout_s=5),
+        ToolSpec("request_peer_skill", "请求同伴执行公开技能，等待最终结果；只有 ok 表示目标完成，失败后不要执行依赖动作", _schema({
+            "target_unit_id": _string(minLength=1),
+            "skill_id": _string(minLength=1),
+            "params": {"type": "object"},
+            "request_id": _string(minLength=1, maxLength=100),
+        }, ("target_unit_id", "skill_id", "params")), timeout_s=35),
     )
 }
 

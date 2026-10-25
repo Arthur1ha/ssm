@@ -1,6 +1,7 @@
 """Go2 tool boundary regression tests; no robot or remote model is used."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -43,7 +44,7 @@ def robot(monkeypatch):
 @pytest.mark.asyncio
 async def test_registry_covers_all_implementations():
     from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP
-    assert len(TOOL_REGISTRY) == 12
+    assert len(TOOL_REGISTRY) == 14
     assert set(TOOL_REGISTRY) == set(TOOL_FN_MAP)
 
 
@@ -86,6 +87,78 @@ async def test_accepted_motion_blocks_next_motion(robot):
     results = [item async for item in agent._execute_calls(state, ADMIN)]
     assert [item["result"]["result"] for item in results] == ["accepted", "blocked"]
     robot.assert_awaited_once_with("Hello")
+
+
+@pytest.mark.asyncio
+async def test_peer_request_waits_for_final_ok_before_dependent_action(monkeypatch, robot):
+    from cloud.go2.agentcore.tools import tools as tool_impl
+
+    async def peer_result(*_args, **_kwargs):
+        return {"result": "timeout", "request_id": "peer-1"}
+
+    monkeypatch.setitem(tool_impl.TOOL_FN_MAP, "request_peer_skill", peer_result)
+    state = _state(planned_tools=[
+        {"tool": "request_peer_skill", "params": {
+            "target_unit_id": "esp32_desk_led", "skill_id": "set_state", "params": {"state": "ON"},
+        }},
+        {"tool": "go2_sport", "params": {"cmd": "Hello"}},
+    ])
+    results = [item async for item in agent._execute_calls(state, ADMIN)]
+    assert [item["result"]["result"] for item in results] == ["timeout"]
+    robot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_peer_tool_rejects_non_object_params_before_dispatch(robot):
+    result = await execute_tool("request_peer_skill", {
+        "target_unit_id": "esp32_desk_led", "skill_id": "set_state", "params": "ON",
+    }, context=VISITOR)
+    assert result == {"result": "rejected", "error": "invalid_params", "message": "params must be object"}
+
+
+@pytest.mark.asyncio
+async def test_peer_tool_uses_trusted_go2_context(monkeypatch, robot):
+    from cloud.peers import gateway
+    from cloud.go2.agentcore.tools import tools as tool_impl
+
+    calls = []
+
+    def fake_request(**kwargs):
+        calls.append(kwargs)
+        return {"result": "ok", "request_id": "peer-test"}
+
+    monkeypatch.setattr(gateway, "request_peer_skill", fake_request)
+    async def inline_call(fn, **kwargs):
+        return fn(**kwargs)
+    monkeypatch.setattr(tool_impl.asyncio, "to_thread", inline_call)
+    delegated = ExecutionContext("visitor-session", "visitor", False,
+                                 origin_kind="user_delegated", expires_at=int(time.time()) + 60)
+    result = await execute_tool("request_peer_skill", {
+        "target_unit_id": "esp32_desk_led", "skill_id": "set_state", "params": {"state": "ON"},
+        "request_id": "same-request",
+    }, context=delegated)
+    assert result["result"] == "ok"
+    assert calls[0]["initiator_unit_id"] == "go2"
+    assert calls[0]["context"] is delegated
+    assert calls[0]["origin_kind"] == "user_delegated"
+    assert calls[0]["request_id"] == "same-request"
+
+
+def test_direct_user_takeover_cancels_only_go2_initiated_queue(monkeypatch):
+    from cloud.go2 import router
+    from cloud.peers import gateway
+
+    calls = []
+    monkeypatch.setattr(gateway, "cancel_pending", lambda **kwargs: calls.append(kwargs))
+    router._cancel_pending_peer_requests(ExecutionContext("user-1", "visitor", False))
+    router._cancel_pending_peer_requests(ExecutionContext(
+        "mode-1", "agent", False, origin_kind="agent_autonomous"
+    ))
+    router._cancel_pending_peer_requests(ExecutionContext(
+        "system", "admin", True, origin_kind="system"
+    ))
+    assert calls == [{"initiator_unit_id": "go2", "origin_kind": "agent_autonomous",
+                      "reason": "user_takeover"}]
 
 
 @pytest.mark.asyncio

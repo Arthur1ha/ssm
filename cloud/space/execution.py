@@ -21,9 +21,11 @@ class ExecutionContext:
     actor: str
     persist: bool
     space_id: str = "main"
+    origin_kind: str = "user_delegated"
+    expires_at: int = 0
 
 
-SYSTEM_CONTEXT = ExecutionContext("system", "admin", True)
+SYSTEM_CONTEXT = ExecutionContext("system", "admin", True, origin_kind="system")
 _current_context: contextvars.ContextVar[ExecutionContext] = contextvars.ContextVar(
     "space_execution_context", default=SYSTEM_CONTEXT
 )
@@ -63,6 +65,8 @@ async def require_service_context(
     x_ssm_actor: str | None = Header(default=None),
     x_ssm_persist: str | None = Header(default=None),
     x_ssm_space_id: str = Header(default="main"),
+    x_ssm_origin_kind: str = Header(default="user_delegated"),
+    x_ssm_expires_at: str | None = Header(default=None),
 ) -> ExecutionContext:
     """Authenticate an internal call and normalize its trusted context."""
     expected = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
@@ -76,12 +80,26 @@ async def require_service_context(
         raise HTTPException(status_code=400, detail="invalid actor context")
     if x_ssm_space_id != "main":
         raise HTTPException(status_code=400, detail="invalid space context")
+    # Direct in-process callers may omit newly added FastAPI Header arguments;
+    # in that case Python passes the Header marker rather than its default.
+    if not isinstance(x_ssm_origin_kind, str):
+        x_ssm_origin_kind = "user_delegated"
+    if not isinstance(x_ssm_expires_at, str):
+        x_ssm_expires_at = None
+    if x_ssm_origin_kind not in {"user_delegated", "agent_autonomous"}:
+        raise HTTPException(status_code=400, detail="invalid origin context")
+    try:
+        expires_at = int(x_ssm_expires_at or 0)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid session expiry") from exc
 
     requested_persist = str(x_ssm_persist or "").lower() in {"1", "true", "yes"}
     # Role is authoritative: a compromised/buggy caller cannot make a visitor
     # persistent merely by toggling one header.
     persist = x_ssm_actor == "admin" and requested_persist
-    return ExecutionContext(x_ssm_session_id, x_ssm_actor, persist, "main")
+    if x_ssm_origin_kind == "agent_autonomous":
+        return ExecutionContext(x_ssm_session_id, "visitor", False, "main", "agent_autonomous", expires_at)
+    return ExecutionContext(x_ssm_session_id, x_ssm_actor, persist, "main", "user_delegated", expires_at)
 
 
 async def require_authenticated_read(request: Request):
@@ -93,6 +111,8 @@ async def require_authenticated_read(request: Request):
             x_ssm_actor=request.headers.get("X-SSM-Actor"),
             x_ssm_persist=request.headers.get("X-SSM-Persist"),
             x_ssm_space_id=request.headers.get("X-SSM-Space-Id", "main"),
+            x_ssm_origin_kind=request.headers.get("X-SSM-Origin-Kind", "user_delegated"),
+            x_ssm_expires_at=request.headers.get("X-SSM-Expires-At"),
         )
     from cloud.api.auth import require_session
     return await require_session(request)

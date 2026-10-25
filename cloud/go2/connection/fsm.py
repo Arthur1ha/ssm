@@ -44,6 +44,11 @@ class Go2FSM:
     def fsm_state(self, new: str) -> None:
         if new != self._fsm_state:
             logger.info("[Go2/FSM] %s → %s", self._fsm_state, new)
+            self._fsm_state = new
+            publisher = getattr(self, "_peer_state_callback", None)
+            if publisher is not None:
+                publisher()
+            return
         self._fsm_state = new
 
     @property

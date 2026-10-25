@@ -1,5 +1,5 @@
 /* FsmGraph — 当前状态的可用转换以连线呈现，点击连线即可执行。 */
-function FsmGraph({ states = [], transitions = [], current = '', onFire, color = '#C8FF3E', views = {}, layout = {}, showSafety = true }) {
+function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelectState, selectedState, color = '#C8FF3E', views = {}, layout = {}, showSafety = true }) {
   const { useMemo } = React;
 
   /* hex → "r,g,b" 供 rgba() 使用 */
@@ -60,10 +60,10 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
   };
 
   const fire = trigger => onFire && onFire(trigger);
-  const onKey = trigger => event => {
+  const onKey = action => event => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      fire(trigger);
+      action();
     }
   };
 
@@ -100,7 +100,7 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
             role={t.action ? 'button' : undefined} tabIndex={t.action ? 0 : undefined}
             aria-label={t.action ? `${views[current]?.label || current}，${t.label}，切换到${views[t.dst]?.label || t.dst}` : undefined}
             onClick={t.action ? () => fire(t.trigger) : undefined}
-            onKeyDown={t.action ? onKey(t.trigger) : undefined}>
+            onKeyDown={t.action ? onKey(() => fire(t.trigger)) : undefined}>
             <title>{t.label} → {views[t.dst]?.label || t.dst}</title>
             <path d={arc.d} fill="none" stroke="transparent" strokeWidth={18}/>
             <path d={arc.d} fill="none" stroke={color} strokeWidth={1.8}
@@ -139,14 +139,26 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
           : [];
         const trigger = singleArc.length === 1 ? singleArc[0].trigger : null;
         const label = views[s]?.label || s;
+        const selectPreview = typeof onSelectState === 'function';
+        const nodeAction = selectPreview
+          ? () => { onSelectState(s); if (trigger) fire(trigger); }
+          : trigger ? () => fire(trigger) : null;
+        const isSelected = selectPreview && selectedState === s;
 
         return (
-          <g key={s} className={`fsm-graph__node${trigger ? ' is-reachable' : ''}`}
-            role={trigger ? 'button' : undefined} tabIndex={trigger ? 0 : undefined}
-            aria-label={trigger ? `${label}，${singleArc[0].label}` : label}
-            onClick={trigger ? () => fire(trigger) : undefined}
-            onKeyDown={trigger ? onKey(trigger) : undefined}>
+          <g key={s} className={`fsm-graph__node${trigger ? ' is-reachable' : ''}${selectPreview ? ' is-previewable' : ''}`}
+            role={nodeAction ? 'button' : undefined} tabIndex={nodeAction ? 0 : undefined}
+            aria-label={selectPreview
+              ? `${label}，${trigger ? `${singleArc[0].label}并` : ''}查看预览`
+              : trigger ? `${label}，${singleArc[0].label}` : label}
+            aria-pressed={selectPreview ? isSelected : undefined}
+            onClick={nodeAction || undefined}
+            onKeyDown={nodeAction ? onKey(nodeAction) : undefined}>
             <title>{label}{isCurrent ? '（当前状态）' : ''}</title>
+            {isSelected && (
+              <circle cx={p.x} cy={p.y} r={NODE_R + 5}
+                fill="none" stroke={color} strokeWidth="1" opacity="0.85"/>
+            )}
             {isCurrent && (
               <circle cx={p.x} cy={p.y} r={NODE_R + 9}
                 fill="none" stroke={color} strokeWidth="0.6" opacity="0.2"/>
@@ -166,6 +178,7 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, color =
         );
       })}
     </svg>
+    {onSelectState && <span className="fsm-graph__hint">点状态预览 · 可达状态执行</span>}
     {showSafety && safetyEdges.map(t => <button type="button" key={t.trigger} className="fsm-safety-edge"
       onClick={() => fire(t.trigger)} aria-label={`${t.label}，${views[current]?.label || current}到${views[t.dst]?.label || t.dst}`}>
       <span>{views[current]?.label || current}</span><b>── {t.label} ──▶</b><span>{views[t.dst]?.label || t.dst}</span>

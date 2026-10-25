@@ -12,7 +12,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
 
   /* ── HTTP 设备实时状态 ── */
   const [sseState, setSseState] = useState(null);
+  const [sseConnected, setSseConnected] = useState(false);
   const esRef = useRef(null);
+  const [previewState, setPreviewState] = useState(null);
 
   /* ── 对话 ── */
   const initialMsg = {
@@ -89,14 +91,17 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   useEffect(() => {
     const url = transport?.state_stream;
     if (!url) return;
+    setSseConnected(false);
     const es = new EventSource(url);
     esRef.current = es;
     es.onmessage = e => {
       try {
         const d = JSON.parse(e.data);
         if (d.fsm_state) setSseState(d.fsm_state);
+        setSseConnected(d.connected === true);
       } catch (_) {}
     };
+    es.onerror = () => setSseConnected(false);
     return () => { es.close(); esRef.current = null; };
   }, [transport?.state_stream]);
 
@@ -152,10 +157,15 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const ACCENT  = meta.color;
   const offline = !device?._online;   // 离线：控制面板置灰、禁用交互
   const isGo2 = unitId === 'go2' || device?.device_id === 'go2';
+  const go2Connected = isGo2 && !offline && sseConnected && current !== 'offline' && current !== 'connecting';
+  useEffect(() => { if (!go2Connected) setPreviewState(null); }, [go2Connected, unitId]);
   const isOn    = current && current !== 'OFF' && current !== 'IDLE';  // 设备活跃态（发光）
   const hasUserMsg = messages.some(m => m.role === 'user');
-  const hasBoardWidget = widgets.some(w => w.visible !== false
+  const activeVisibleWidgets = widgets.filter(w => w.visible !== false
     && (!w.states?.length || w.states.includes(current)));
+  const hasBoardWidget = isGo2
+    ? activeVisibleWidgets.some(w => w.type !== 'video') || (go2Connected && !!previewState)
+    : activeVisibleWidgets.length > 0;
   const statusLabel = offline ? '离线' : `在线 · ${isLed && ledState.ism ? ledInfo.label : (sm?.views?.[current]?.label || current || '状态同步中')}`;
 
   return (
@@ -203,7 +213,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
-        <div className={`device-state-workspace${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
+        <div className={`device-state-workspace${isGo2 ? ' device-state-workspace--go2' : ''}${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
           filter: offline ? 'grayscale(1)' : 'none',
           opacity: offline ? 0.45 : 1,
           pointerEvents: offline ? 'none' : 'auto',
@@ -212,6 +222,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
           <FsmBoard unitId={unitId} sm={sm} current={current} widgets={widgets}
             onFire={fire} report={reportExecution} actor={actor} color={ACCENT}
             liveState={ledState}
+            isGo2={isGo2} connected={go2Connected} selectedState={previewState}
+            onSelectState={state => setPreviewState(previous => previous === state ? null : state)}
             legacyLed={isLed && sm && !sm.states?.includes('ON')}/>
         </div>
       )}
@@ -265,7 +277,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
 }
 window.FsmDevicePage = FsmDevicePage;
 
-function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, legacyLed }) {
+function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, legacyLed, isGo2, connected, selectedState, onSelectState }) {
   const { useState, useRef, useEffect } = React;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
@@ -278,11 +290,15 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     .sort((a, b) => (a.order ?? a._index) - (b.order ?? b._index));
   const placement = widget => widget.placement === 'media' || (!widget.placement && widget.type === 'video')
     ? 'media' : 'controls';
-  const mediaWidgets = visibleWidgets.filter(widget => placement(widget) === 'media');
+  const mediaWidgets = visibleWidgets.filter(widget => placement(widget) === 'media'
+    && (!isGo2 || (connected && selectedState === current)));
   const controlWidgets = visibleWidgets.filter(widget => placement(widget) === 'controls');
+  const hasColorControl = controlWidgets.some(widget => widget.type === 'led_color' || widget.type === 'color_swatches');
   const hiddenWidgets = activeWidgets.filter(widget => widget.visible === false);
-  const view = sm?.views?.[current];
-  const showPreview = view?.type === 'robot_pose' && !mediaWidgets.length;
+  const previewTarget = isGo2 ? selectedState : current;
+  const view = sm?.views?.[previewTarget];
+  const showPreview = (!isGo2 || connected && !!selectedState)
+    && view?.type === 'robot_pose' && !mediaWidgets.length;
   const renderWidget = widget => <div key={`${widget.type}-${widget._index}`}
     className={`device-board__widget device-board__widget--${placement(widget)}`}>
     {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState)}
@@ -337,6 +353,7 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
       <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})` }}>
         {sm ? <FsmGraph states={sm.states} transitions={sm.transitions} current={current}
           onFire={onFire} color={color} views={sm.views || {}} layout={sm.layout || {}}
+          onSelectState={isGo2 && connected ? onSelectState : undefined} selectedState={selectedState}
           showSafety={false}/>
           : <div className="device-state-workspace__fallback">{current || '—'}</div>}
       </div>
@@ -344,10 +361,10 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     {hiddenWidgets.map(widget => <React.Fragment key={`hidden-${widget._index}`}>
       {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState)}
     </React.Fragment>)}
-    {(mediaWidgets.length > 0 || controlWidgets.length > 0 || showPreview) && <div className="device-board__widget-tray">
+    {(mediaWidgets.length > 0 || controlWidgets.length > 0 || showPreview) && <div className={`device-board__widget-tray${hasColorControl ? ' device-board__widget-tray--color' : ''}`}>
       {mediaWidgets.map(renderWidget)}
       {showPreview && <div className="device-board__widget device-board__widget--media device-board__widget--preview">
-        <StateVisual view={view} state={current} color={color}/>
+        <StateVisual view={view} state={previewTarget} color={color}/>
       </div>}
       {controlWidgets.map(renderWidget)}
     </div>}

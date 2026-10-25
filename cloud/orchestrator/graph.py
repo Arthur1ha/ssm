@@ -16,6 +16,7 @@ import json
 import time as _time
 import logging
 import uuid
+import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TypedDict
@@ -33,6 +34,23 @@ from cloud.space.registry import (
 )
 
 logger = logging.getLogger("orchestrator")
+_peer_cancel_lock = threading.Lock()
+_cancelled_peer_requests: set[str] = set()
+
+
+def cancel_peer_coordination(request_id: str) -> None:
+    with _peer_cancel_lock:
+        _cancelled_peer_requests.add(request_id)
+
+
+def peer_coordination_cancelled(request_id: str) -> bool:
+    with _peer_cancel_lock:
+        return request_id in _cancelled_peer_requests
+
+
+def clear_peer_coordination(request_id: str) -> None:
+    with _peer_cancel_lock:
+        _cancelled_peer_requests.discard(request_id)
 
 
 # ── 编排器自身人格 ───────────────────────────────────────────────
@@ -165,6 +183,9 @@ class OrchestratorState(TypedDict):
     task_results:  dict   # task_id → result payload
     response_text: str
     early_exit:    bool    # True = feedback 已发出，跳过后续节点
+    origin_kind:   str    # 仅内部同伴入口填写；普通用户意图为空
+    peer_request_id: str
+    origin_session_id: str | None  # 同伴委托的原用户会话；自主请求为空
 
 
 # ── prompt 构建 ──────────────────────────────────────────────────
@@ -368,6 +389,14 @@ def _make_planner_node(llm):
             actor=state.get("actor", "admin"),
             persist=state.get("persist", True),
         )
+        if state.get("origin_kind"):
+            prompt += (
+                "\n这是已验证的智能体同伴协调请求。只规划当前空间内公开、非持久的即时技能，"
+                "按 tasks 数组顺序执行；不要创建规则、写记忆或配置模式。"
+                "若没有安全且可执行的任务，请返回 route=chat 并说明原因。"
+            )
+            if state["origin_kind"] == "agent_autonomous":
+                prompt += "自主来源仅可协调灯的即时开关或 Go2 原地 Hello；不可安排位移、其他运动或持久操作。"
 
         try:
             resp = llm.invoke([HumanMessage(content=prompt)])
@@ -565,6 +594,9 @@ def _make_dispatcher_node():
                 "抱歉，我没找到合适的智能体来完成这个请求。")
             return {**state, "early_exit": True}
 
+        if state.get("origin_kind"):
+            return _dispatch_peer_tasks_sequential(state)
+
         _t.do_publish_feedback(session_id, "executing", "正在执行...")
 
         results = dict(state.get("task_results", {}))
@@ -629,6 +661,8 @@ def _make_dispatcher_node():
                     "actor":     state.get("actor", "admin"),
                     "persist":   state.get("persist", True),
                     "space_id":  state.get("space_id", DEFAULT_SPACE_ID),
+                    "origin_kind": "user_delegated",
+                    "expires_at": state.get("expires_at"),
                     "message":    message,
                     "skill_id":   task["skill_id"],
                     "params":     task["params"],
@@ -670,6 +704,120 @@ def _make_dispatcher_node():
         return {**state, "task_results": results}
 
     return dispatcher_node
+
+
+def _dispatch_peer_tasks_sequential(state: OrchestratorState) -> OrchestratorState:
+    """Execute a peer coordination plan in order; halt on any unconfirmed step."""
+    session_id = state["session_id"]
+    results = dict(state.get("task_results", {}))
+    for task in state.get("planned_tasks", []):
+        task_id = task["task_id"]
+        if peer_coordination_cancelled(state.get("peer_request_id", "")):
+            results[task_id] = {"result": "cancelled", "task_id": task_id,
+                                "error": "higher_priority_user_request"}
+            logger.info("[Peer] request=%s task=%s cancelled before dispatch",
+                        state.get("peer_request_id"), task_id)
+            break
+        if _time.time() >= (state.get("expires_at") or 0):
+            results[task_id] = {"result": "timeout", "task_id": task_id}
+            break
+        card = _t._registry.get_card(task["unit_id"]) if _t._registry else None
+        skill = next((s for s in card.get("skills", []) if s.get("id") == task["skill_id"]), None) if card else None
+        if not card or not card.get("online", False) or not skill:
+            results[task_id] = {"result": "blocked", "task_id": task_id,
+                                "error": "target_offline_or_skill_unavailable"}
+            break
+        if _skill_requires_persistence(skill):
+            results[task_id] = {"result": "blocked", "task_id": task_id,
+                                "error": "permission_denied"}
+            break
+        if not isinstance(task.get("params"), dict):
+            results[task_id] = {"result": "blocked", "task_id": task_id,
+                                "error": "invalid_skill_parameters"}
+            break
+        kind = card.get("transport", {}).get("kind")
+        # Coordination is intentionally limited to the first verified loop:
+        # lamp ON/OFF and Go2's stationary Hello. In particular, another
+        # go2_chat call would make a second delegation hop.
+        light_switch = (kind == "mqtt" and "light" in skill.get("tags", [])
+                        and skill.get("invoke", {}).get("action") == "SET_STATE"
+                        and task["params"].get("state") in {"ON", "OFF"})
+        greeting = (kind == "http" and task["unit_id"] == "go2"
+                    and task["skill_id"] == "go2_sport"
+                    and task["params"].get("cmd") == "Hello")
+        if not (light_switch or greeting):
+            results[task_id] = {"result": "blocked", "task_id": task_id,
+                                "error": "coordination_skill_denied"}
+            break
+        try:
+            from cloud.peers.gateway import validate_skill_params
+            skill = validate_skill_params(card, task["skill_id"], task["params"])
+        except (ValueError, PermissionError) as exc:
+            results[task_id] = {"result": "blocked", "task_id": task_id,
+                                "error": str(exc)[:120]}
+            break
+        logger.info("[Peer] request=%s task=%s dispatch target=%s skill=%s transport=%s",
+                    state.get("peer_request_id"), task_id, task["unit_id"],
+                    task["skill_id"], kind)
+        if kind == "mqtt":
+            _t.do_publish_task(
+                task["unit_id"], task_id, skill.get("invoke", {}).get("action", ""),
+                task["params"], session_id,
+                context={"actor": state["actor"], "persist": False,
+                         "space_id": state["space_id"],
+                         "source": "peer_autonomous" if state.get("origin_kind") == "agent_autonomous"
+                                   else "peer_delegated"},
+            )
+            deadline = min(_time.monotonic() + 20, _time.monotonic() + max(0, state["expires_at"] - _time.time()))
+            result = None
+            while _time.monotonic() < deadline:
+                result = _t._state.get_task_result(task_id, session_id)
+                if result and result.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+                    break
+                _time.sleep(0.2)
+            if not result or result.get("result") not in ("ok", "blocked", "error", "cancelled", "timeout"):
+                result = {"result": "timeout", "task_id": task_id,
+                          "error": "result_not_confirmed"}
+        elif kind == "http":
+            endpoint = card.get("transport", {}).get("endpoint", "")
+            message = (task["params"].get("message") or state["user_msg"])
+            delegated = state.get("origin_kind") == "user_delegated"
+            body = {
+                "session_id": (state.get("origin_session_id") or session_id) if delegated else session_id,
+                "origin_session_id": state.get("origin_session_id") if delegated else None,
+                "origin_kind": state["origin_kind"],
+                "expires_at": state["expires_at"],
+                "actor": state["actor"] if delegated else "visitor", "persist": False,
+                "space_id": state["space_id"], "message": message,
+                "skill_id": task["skill_id"], "params": task["params"],
+                "task_id": task_id, "deadline": min(_time.time() + 90, state["expires_at"]),
+            }
+            try:
+                timeout = min(_http_timeout_for(card, task["skill_id"]),
+                              max(0.1, state["expires_at"] - _time.time()))
+                result = _t.do_http_dispatch(endpoint, body, timeout)
+            except (TimeoutError, concurrent.futures.TimeoutError,
+                    _t.requests.exceptions.Timeout):
+                result = {"result": "timeout", "task_id": task_id}
+            except Exception as exc:
+                logger.warning("[Peer] HTTP dispatch error task=%s: %s", task_id, exc)
+                result = {"result": "error", "task_id": task_id,
+                          "error": "dispatch_failed"}
+        else:
+            result = {"result": "error", "task_id": task_id,
+                      "error": "unknown_transport"}
+        results[task_id] = {**result, "task_id": task_id, "session_id": session_id}
+        logger.info("[Peer] request=%s task=%s result=%s",
+                    state.get("peer_request_id"), task_id, result.get("result"))
+        if result.get("result") != "ok":
+            break
+    for task in state.get("planned_tasks", []):
+        if task["task_id"] not in results:
+            results[task["task_id"]] = {
+                "result": "cancelled", "task_id": task["task_id"],
+                "session_id": session_id, "error": "dependency_not_confirmed",
+            }
+    return {**state, "task_results": results}
 
 
 def _make_evaluator_node():
@@ -869,3 +1017,73 @@ def build_orchestrator():
     g.add_edge("discovery",    END)
 
     return g.compile()
+
+
+def run_peer_coordination(orchestrator, trusted_request: dict) -> dict:
+    """Run one signed peer request and return a private correlated result."""
+    request_id = trusted_request["request_id"]
+    session_id = f"peer_{request_id}"
+    now = _time.time()
+    base = {
+        "request_id": request_id,
+        "initiator_unit_id": trusted_request["initiator_unit_id"],
+        "target_unit_id": trusted_request["target_unit_id"],
+        "task_results": {},
+        "ts": int(now),
+    }
+    if trusted_request["expires_at"] <= now:
+        return {**base, "result": "timeout", "response": "请求已过期。"}
+    if peer_coordination_cancelled(request_id):
+        return {**base, "result": "cancelled", "response": "用户请求已接管。"}
+    if trusted_request["origin_kind"] == "agent_autonomous":
+        actor = "agent"
+    else:
+        actor = trusted_request["actor"]
+    graph_input = {
+        "session_id": session_id,
+        "actor": actor,
+        "persist": False,
+        "space_id": trusted_request["space_id"],
+        "issued_at": trusted_request["issued_at"],
+        "expires_at": trusted_request["expires_at"],
+        "user_msg": trusted_request["params"]["message"],
+        "event_id": request_id,
+        "requirements": [], "route": "", "planned_tasks": [], "rule": {},
+        "task_results": {}, "response_text": "", "early_exit": False,
+        "origin_kind": trusted_request["origin_kind"],
+        "origin_session_id": trusted_request["origin_session_id"],
+        "peer_request_id": request_id,
+        "origin_session_id": trusted_request["origin_session_id"],
+    }
+    try:
+        if _t._state is not None:
+            _t._state.register_session(graph_input)
+        with _t.peer_feedback_scope():
+            completed = orchestrator.invoke(graph_input)
+        tasks = completed.get("planned_tasks") or []
+        results = completed.get("task_results") or {}
+        statuses = [results.get(task["task_id"], {}).get("result", "error") for task in tasks]
+        if not tasks or not statuses:
+            status = "cancelled" if peer_coordination_cancelled(request_id) else "blocked"
+        elif all(value == "ok" for value in statuses):
+            status = "ok"
+        elif any(value in ("accepted", "executing") for value in statuses):
+            status = "executing"
+        else:
+            status = next((value for value in statuses if value != "ok"), "error")
+            if status not in {"blocked", "error", "timeout", "cancelled"}:
+                status = "error"
+        return {
+            **base, "result": status,
+            "response": completed.get("response_text") or "",
+            "task_results": results,
+            "ts": int(_time.time()),
+        }
+    except Exception:
+        logger.exception("[Peer] coordination failed request=%s", request_id)
+        return {**base, "result": "error", "response": "协调执行失败。",
+                "ts": int(_time.time())}
+    finally:
+        clear_session_context(session_id)
+        if _t._state is not None:
+            _t._state.clear_session(session_id)

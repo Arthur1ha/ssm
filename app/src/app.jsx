@@ -153,9 +153,8 @@ function App({ session, logout, refreshSession }) {
             </div>
           )}
           {hasDevices && <>
-            <SpaceOverview spaceName={session.space_name} agents={agents} unitData={unitData}
+            <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
               connected={connected} recentEvents={recentEvents}/>
-            <DevicesScreen agents={agents} unitData={unitData}/>
           </>}
           {!loadingAgents && !agentsError && !hasDevices &&
             <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}

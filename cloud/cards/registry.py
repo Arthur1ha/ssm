@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 
 from cloud.cards.builder import build_card_from_manifest, parse_card
 from cloud.cards.schema import AgentCard
@@ -28,6 +29,7 @@ class CardRegistry:
         self._cards: dict[str, AgentCard] = {}
         self._states: dict[str, dict] = {}
         self._statuses: dict[str, bool] = {}
+        self._status_seen_at: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def subscribe(self, client) -> None:
@@ -84,6 +86,7 @@ class CardRegistry:
             online = (raw.strip() == b"online")
             with self._lock:
                 self._statuses[device_id] = online
+                self._status_seen_at[device_id] = time.time()
                 for c in self._cards.values():
                     if (
                         c.get("unit_id") == device_id
@@ -110,16 +113,17 @@ class CardRegistry:
                             self._cards.pop(unit_id, None)
                         return
                     card = parse_card(data)
+                    if card["unit_id"] != unit_id:
+                        raise ValueError("card unit_id does not match MQTT topic")
                     with self._lock:
-                        # 保留已知 online（status 可能先于 card 到达，且是在线真相）
-                        prev = self._cards.get(card["unit_id"])
+                        # status/LWT 是在线真相；card 自身的 online 字段不是证明。
                         status_id = card.get("device_id") or card.get("parent_id") or card["unit_id"]
                         if status_id in self._statuses:
                             card["online"] = self._statuses[status_id]
                         elif card["unit_id"] in self._statuses:
                             card["online"] = self._statuses[card["unit_id"]]
-                        elif prev is not None and "online" in prev:
-                            card["online"] = prev["online"]
+                        else:
+                            card["online"] = False
                         if card["unit_id"] in self._states:
                             card["state"] = self._states[card["unit_id"]]
                         self._cards[card["unit_id"]] = card
@@ -139,24 +143,28 @@ class CardRegistry:
                 return
             try:
                 data = json.loads(raw)
-                # 感知输入与系统节点不生成独立 Agent Card。
-                if data.get("agent_type") in ("sensor", "decision"):
+                # 传感器不生成卡；旧的 decision manifest 只用于兼容，
+                # 新编排器卡由 retained card topic 提供，不能在此删除。
+                if data.get("agent_type") == "decision":
+                    return
+                if data.get("agent_type") == "sensor":
                     with self._lock:
                         self._cards.pop(unit_id, None)
                     return
                 if data.get("hw_platform") == "cloud":
                     return
                 card = build_card_from_manifest(data)
+                if card["unit_id"] != unit_id:
+                    raise ValueError("manifest unit_id does not match MQTT topic")
                 with self._lock:
-                    # 保留已知 online（status 可能先于 manifest 到达，且是在线真相）
-                    prev = self._cards.get(card["unit_id"])
+                    # status/LWT 是在线真相；manifest 不是在线证明。
                     status_id = card.get("device_id") or card.get("parent_id") or card["unit_id"]
                     if status_id in self._statuses:
                         card["online"] = self._statuses[status_id]
                     elif card["unit_id"] in self._statuses:
                         card["online"] = self._statuses[card["unit_id"]]
-                    elif prev is not None and "online" in prev:
-                        card["online"] = prev["online"]
+                    else:
+                        card["online"] = False
                     if card["unit_id"] in self._states:
                         card["state"] = self._states[card["unit_id"]]
                     self._cards[card["unit_id"]] = card
@@ -174,6 +182,12 @@ class CardRegistry:
         with self._lock:
             card = self._cards.get(unit_id)
             return dict(card) if card is not None else None
+
+    def get_runtime_snapshot(self) -> tuple[dict[str, AgentCard], dict[str, float]]:
+        """Return a coherent copy of cards and status observation times for peer projection."""
+        with self._lock:
+            return ({unit_id: dict(card) for unit_id, card in self._cards.items()},
+                    dict(self._status_seen_at))
 
 
 # module-level 单例，供所有模块共享同一实例

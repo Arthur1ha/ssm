@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import replace
 from enum import Enum
 from typing import Optional
 
@@ -534,7 +535,7 @@ class Drive:
         self._last_engaging_ts = time.time()
         self._task             = asyncio.create_task(self._run_loop())
         self.owner_session_id  = owner_session_id
-        self._context = context or SYSTEM_CONTEXT
+        self._context = replace(context or SYSTEM_CONTEXT, origin_kind="agent_autonomous")
         self.user_interrupt = False
         logger.info("[Drive] 内驱动循环已启动")
 

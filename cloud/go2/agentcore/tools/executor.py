@@ -41,6 +41,7 @@ def validate_params(schema: dict, params: object) -> dict:
         kind = definition["type"]
         valid = (isinstance(value, str) if kind == "string" else
                  isinstance(value, int) and not isinstance(value, bool) if kind == "integer" else
+                 isinstance(value, dict) if kind == "object" else
                  isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value))
         if not valid:
             raise ValueError(f"{key} must be {kind}")
@@ -48,7 +49,9 @@ def validate_params(schema: dict, params: object) -> dict:
             raise ValueError(f"{key} must be one of {definition['enum']}")
         if kind == "string" and len(value.strip()) < definition.get("minLength", 0):
             raise ValueError(f"{key} is too short")
-        if kind != "string":
+        if kind == "string" and "maxLength" in definition and len(value) > definition["maxLength"]:
+            raise ValueError(f"{key} is too long")
+        if kind in {"integer", "number"}:
             if "minimum" in definition and value < definition["minimum"]:
                 raise ValueError(f"{key} is below minimum")
             if "exclusiveMinimum" in definition and value <= definition["exclusiveMinimum"]:

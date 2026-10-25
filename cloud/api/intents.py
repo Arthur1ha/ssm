@@ -90,6 +90,8 @@ def _internal_headers(session: dict[str, Any]) -> dict[str, str]:
         "X-SSM-Actor": context["actor"],
         "X-SSM-Persist": "true" if context["persist"] else "false",
         "X-SSM-Space-Id": context["space_id"],
+        "X-SSM-Origin-Kind": "user_delegated",
+        "X-SSM-Expires-At": str(context["expires_at"]),
     }
 
 
@@ -374,11 +376,33 @@ def _valid_lamp_params(action: str, params: Any) -> bool:
 
 
 def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
+    agent.mark_user_command(unit_id)
     planned = agent.handle_user_text(message, persist=session["actor"] == "admin")
     if not isinstance(planned, dict):
         return {"result": "ok", "reply": str(planned)}
     if planned.get("llm_available") is False:
         return {"result": "error", **planned}
+    if planned.get("type") == "peer":
+        from cloud.peers.gateway import request_peer_skill
+        from cloud.space.execution import ExecutionContext
+
+        context = ExecutionContext(
+            session["session_id"], session["actor"], False, DEFAULT_SPACE_ID,
+            "user_delegated", int(session["expires_at"]),
+        )
+        result = request_peer_skill(
+            initiator_unit_id=unit_id,
+            target_unit_id=planned.get("target_unit_id", ""),
+            skill_id=planned.get("skill_id", ""),
+            params=planned.get("params", {}),
+            context=context,
+            origin_kind="user_delegated",
+        )
+        if result.get("result") == "ok":
+            return {"result": "ok", "reply": planned.get("reply") or "同伴任务完成了。",
+                    "request_id": result["request_id"]}
+        return {"result": result.get("result", "error"), "reply": "同伴没有确认完成这项任务。",
+                "error": result.get("error"), "request_id": result.get("request_id")}
     if planned.get("type") != "act":
         return {"result": "ok", **planned}
 
@@ -488,6 +512,8 @@ async def create_command(
 ):
     if "/" in unit_id or not unit_id.strip():
         raise HTTPException(status_code=400, detail="invalid unit id")
+    from cloud.peers.gateway import cancel_pending
+    cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     if unit_id == "go2":
         try:
             result = await _dispatch_go2(req.action, req.params, session)
@@ -550,6 +576,8 @@ async def cancel_go2_command_task(task_id: str, session: dict[str, Any] = Depend
 
 @router.post("/api/emergency-stop")
 async def emergency_stop(session: dict[str, Any] = Depends(require_csrf)):
+    from cloud.peers.gateway import cancel_pending
+    cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     result = await _internal_request("/api/go2/stop", "POST", session, {})
     audit_event("emergency_stop", session, reason="user_request")
     return {"ok": True, "result": result}
@@ -593,6 +621,8 @@ async def end_session(session: dict[str, Any], reason: str) -> None:
         return
     _ended_sessions[session_id] = now
     _cancel_cleanup_task(session_id)
+    from cloud.peers.gateway import cancel_pending
+    cancel_pending(session_id=session_id, reason="session_ended")
     context = _context(session)
     payload = {"context": context, "reason": reason}
     if _mqtt_client is not None:

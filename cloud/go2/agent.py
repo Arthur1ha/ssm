@@ -67,6 +67,7 @@ class Go2AgentState(TypedDict):
     error:          str
     actor:          str
     persist:        bool
+    execution_context: ExecutionContext
 
 
 _session_history: dict[str, deque[dict[str, str]]] = {}
@@ -138,6 +139,27 @@ def _identity_context() -> str:
     if current.status == "unknown":
         return "当前人物：陌生人"
     return "当前人物：未识别"
+
+
+def _peer_context() -> str:
+    """Expose only the gateway's bounded public peer snapshot to planning."""
+    try:
+        from cloud.peers.gateway import list_visible_peers
+        peers = list_visible_peers("go2")
+    except Exception as exc:
+        logger.warning("[Go2/Agent] peer snapshot unavailable: %s", type(exc).__name__)
+        return "同伴视图暂不可用"
+    summary = []
+    for peer in peers[:8]:
+        summary.append({
+            "unit_id": peer.get("unit_id"),
+            "online": peer.get("online"),
+            "skills": [
+                {"id": skill.get("id"), "params_schema": skill.get("params_schema", {})}
+                for skill in peer.get("skills", [])[:12]
+            ],
+        })
+    return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
 
 
 def _cached_identity_reply(user_msg: str) -> str:
@@ -259,8 +281,8 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     logger.info("[Go2/Agent] planning session=%s message_chars=%d", state["session_id"], len(state["user_msg"]))
     prompt = build_prompt(
         "planner", personality=get_system_prompt(), user_input=state["user_msg"], memory=memory_context,
-        tools=tool_descriptions(), device_state=f"fsm={getattr(go2, 'fsm_state', 'unknown')}",
-        memory_sources=recalled.sources, tool_version="go2-tools-v1",
+        tools=tool_descriptions(), device_state=f"fsm={getattr(go2, 'fsm_state', 'unknown')}; peers={_peer_context()}",
+        memory_sources=recalled.sources, tool_version="go2-tools-v2",
     )
     logger.info("[Go2/Prompt] %s", prompt.metadata)
     try:
@@ -360,7 +382,7 @@ async def _execute_calls(state: Go2AgentState, context: ExecutionContext):
         yield item
         if spec and spec.motion and result["result"] == "accepted" and not is_stop:
             accepted_motion = True
-        if result["result"] not in ("ok", "accepted"):
+        if result["result"] not in ("ok", "accepted") or (name == "request_peer_skill" and result["result"] != "ok"):
             break
 
 
@@ -368,7 +390,9 @@ async def executor_node(state: Go2AgentState) -> Go2AgentState:
     if state.get("early_exit"):
         return state
 
-    context = ExecutionContext(state["session_id"], state.get("actor", "admin"), state.get("persist", True))
+    context = state.get("execution_context") or ExecutionContext(
+        state["session_id"], state.get("actor", "admin"), state.get("persist", True)
+    )
     results = [item async for item in _execute_calls(state, context)]
 
     response_text, reply_llm_available = await _generate_response(
@@ -444,6 +468,7 @@ async def run_agent(
             "error":          "",
             "actor":          context.actor,
             "persist":        context.persist,
+            "execution_context": context,
         })
         except Exception as exc:
             logger.warning("[Go2/Agent] run_agent error: %s", type(exc).__name__)

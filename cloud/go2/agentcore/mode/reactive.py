@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import replace
 from typing import Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -69,7 +70,7 @@ class ReactiveMind:
         self._generation += 1
         self._active = active
         if context is not None:
-            self._context = context
+            self._context = replace(context, origin_kind="agent_autonomous")
 
     @property
     def last_decision(self) -> Optional[dict]:

@@ -213,12 +213,9 @@ _LED_SUGGESTIONS: list[str] = [
 SUGGESTION_DEFS: dict[str, list[str]] = {"led": _LED_SUGGESTIONS}
 
 _LED_COLOR_SWATCHES: list[dict] = [
-    {"label": "暖黄", "r": 255, "g": 200, "b": 80,  "brightness": 180},
-    {"label": "白色", "r": 255, "g": 255, "b": 255, "brightness": 180},
-    {"label": "红色", "r": 255, "g": 0,   "b": 0,   "brightness": 180},
-    {"label": "绿色", "r": 0,   "g": 255, "b": 0,   "brightness": 180},
-    {"label": "蓝色", "r": 0,   "g": 80,  "b": 255, "brightness": 180},
-    {"label": "紫色", "r": 180, "g": 0,   "b": 255, "brightness": 180},
+    {"label": "暖白", "r": 255, "g": 226, "b": 190, "brightness": 180},
+    {"label": "自然白", "r": 255, "g": 248, "b": 235, "brightness": 180},
+    {"label": "冷白", "r": 220, "g": 235, "b": 255, "brightness": 180},
 ]
 
 _LED_WIDGETS: list[dict] = [{
@@ -227,7 +224,6 @@ _LED_WIDGETS: list[dict] = [{
     "placement": "controls",
     "order": 10,
     "action": "SET_COLOR",
-    "channels": ["r", "g", "b", "brightness"],
     "swatches": _LED_COLOR_SWATCHES,
 }]
 

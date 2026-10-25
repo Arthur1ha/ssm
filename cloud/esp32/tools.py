@@ -46,7 +46,27 @@ TOOL_DESCRIPTIONS = """可用工具（系统自动注入目标灯单元 ID）：
 - set_led_color(r, g, b, brightness): 设置 LED 颜色，r/g/b/brightness 均为 0-255 整数
 - blink_led(r, g, b, count): 闪烁 LED，r/g/b 为 0-255 整数，count 为 1-20
 - speak(text): 播报中文语音，text 简洁不超过两句
+- list_peers(): 查询同一空间的在线同伴、技能和简要状态
+- request_peer_skill(target_unit_id, skill_id, params, request_id 可选): 请求同伴的公开技能；结果不是 ok 时停止后续动作。超时后用同一 request_id 查询，不重复执行。仅可请求网关允许的即时技能
 无需任何动作时输出 []"""
+
+
+def list_peers(unit_id: str = "esp32_desk_led") -> list[dict]:
+    from cloud.peers.gateway import list_visible_peers
+    return list_visible_peers(unit_id)
+
+
+def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
+                       unit_id: str = "esp32_desk_led", context=None,
+                       origin_kind: str = "agent_autonomous",
+                       request_id: str | None = None) -> dict:
+    from cloud.peers.gateway import request_peer_skill as request
+    from cloud.space.execution import ExecutionContext
+    context = context or ExecutionContext("lamp-autonomous", "agent", False,
+                                          origin_kind="agent_autonomous")
+    return request(initiator_unit_id=unit_id, target_unit_id=target_unit_id,
+                   skill_id=skill_id, params=params, context=context,
+                   origin_kind=origin_kind, request_id=request_id)
 
 
 def set_led_state(unit_id: str, state: str) -> str:
@@ -83,4 +103,6 @@ TOOL_FN_MAP: dict = {
     "set_led_color": set_led_color,
     "blink_led": blink_led,
     "speak": speak,
+    "list_peers": list_peers,
+    "request_peer_skill": request_peer_skill,
 }

@@ -2,13 +2,16 @@
 
 import json
 import logging
+import time
 from copy import deepcopy
 
 from cloud.go2.connection import go2
 
 GO2_CARD_TOPIC = "ssm/agents/go2/card"
 GO2_STATUS_TOPIC = "ssm/agents/go2/status"
+GO2_STATE_TOPIC = "ssm/agents/go2/state"
 _mqtt_client = None
+_last_status_online: bool | None = None
 
 # Only these externally meaningful goals are advertised to the orchestrator.
 # Internal tools and autonomous modes remain private to the Go2 agent.
@@ -78,6 +81,28 @@ def card_skills() -> list[dict]:
 def init_mqtt(client) -> None:
     global _mqtt_client
     _mqtt_client = client
+    go2._peer_state_callback = _on_go2_state_change
+
+
+def _on_go2_state_change() -> None:
+    _publish_go2_state()
+    _publish_go2_status(force=False)
+
+
+def _publish_go2_state() -> None:
+    """Publish a bounded runtime snapshot, separate from the static card."""
+    if _mqtt_client is None:
+        return
+    try:
+        state = {
+            "unit_id": "go2",
+            "connected": bool(go2.is_connected),
+            "fsm_state": go2.fsm_state,
+            "ts": time.time(),
+        }
+        _mqtt_client.publish(GO2_STATE_TOPIC, json.dumps(state), retain=True, qos=1)
+    except Exception as exc:
+        logging.warning("[Go2] 发布 state 失败: %s", exc)
 
 
 _GO2_FSM_LABELS = {
@@ -210,14 +235,18 @@ def _publish_go2_card() -> None:
         logging.error("[Go2] 发布 card 失败: %s", exc)
 
 
-def _publish_go2_status(online: bool | None = None) -> None:
+def _publish_go2_status(online: bool | None = None, *, force: bool = True) -> None:
     """发布 Go2 真实连接状态（retained，API 进程 LWT 会兜底置 offline）。"""
     if _mqtt_client is None:
         return
     try:
+        global _last_status_online
         if online is None:
             online = bool(go2.is_connected)
+        if not force and online == _last_status_online:
+            return
         _mqtt_client.publish(GO2_STATUS_TOPIC, "online" if online else "offline", retain=True, qos=1)
+        _last_status_online = online
         logging.info("[Go2] status → %s", "online" if online else "offline")
     except Exception as exc:
         logging.error("[Go2] 发布 status 失败: %s", exc)

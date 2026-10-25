@@ -75,13 +75,24 @@ class ESP32Agent:
         if mode not in _VALID_AUTONOMY_MODES:
             raise ValueError(f"未知自主模式: {mode}")
         self._autonomy_mode = mode
+        if mode == "manual":
+            from cloud.peers.gateway import cancel_pending
+            cancel_pending(initiator_unit_id=self._find_led_unit(),
+                           origin_kind="agent_autonomous", reason="mode_changed")
         if mode == "reactive":
             self._last_reason_sig = None   # 切回自主时清签名，立刻按当前情境评估一次
+        else:
+            self._user_hold_until = 0.0
         logger.info("autonomy mode → %s", mode)
 
     def mark_user_command(self, unit_id: str) -> None:
-        """收到非自身发出的命令时调用，开启自主层让位窗口。"""
+        """自主模式收到外部命令时，开启让位窗口。"""
+        if self._autonomy_mode != "reactive":
+            return
         self._user_hold_until = time.time() + USER_HOLD_TTL
+        from cloud.peers.gateway import cancel_pending
+        cancel_pending(initiator_unit_id=unit_id, origin_kind="agent_autonomous",
+                       reason="user_takeover")
         logger.info("user command on %s → 自主层让位 %ds", unit_id, USER_HOLD_TTL)
 
     def wait_task_result(self, task_id: str, timeout: float = 20.0) -> dict:
@@ -131,20 +142,28 @@ class ESP32Agent:
     def handle_user_text(self, text: str, *, persist: bool = True) -> str | dict:
         """理解设备页文本：即时控灯、调教或闲聊；实际动作由 API 派发。"""
         from cloud.esp32.memory import taught
+        try:
+            peer_view = _tools.list_peers(self._find_led_unit())
+        except Exception:
+            peer_view = []
         prompt = (
             f"{AGENT_PERSONA}\n"
             "用户对你说了一句话。把当前要执行的灯光指令分类为 act；"
-            "教你以后遇到某情境再做某事分类为 teach；其他问题或闲聊分类为 chat。\n"
+            "教你以后遇到某情境再做某事分类为 teach；明确让其他智能体做事分类为 peer；其他问题或闲聊分类为 chat。\n"
             "act 只能使用以下动作：SET_STATE 开关灯，params.state 为 ON 或 OFF；"
             "SET_COLOR 调色或调亮度，params 含 r、g、b（0-255 整数）和 brightness（0-255 整数）；"
             "BLINK 闪烁，params.count 为 1-20 整数，可选 r、g、b。"
             "用户只要求改变亮度时，请保留当前 RGB；只要求改变颜色时，请保留当前亮度。\n"
             f"当前灯状态：{json.dumps(self._state.actuator_snapshot(), ensure_ascii=False)}\n"
+            f"同空间同伴（仅列公开技能）：{json.dumps(peer_view, ensure_ascii=False)}\n"
+            "peer 只可选择当前在线同伴卡中已有的技能；请求 Go2 打招呼时用 go2_sport 和 params.cmd=Hello。"
+            "不得推测动作已完成，执行结果由系统返回。\n"
             f"用户说：{text}\n\n"
             "只输出 JSON，不含代码块：\n"
-            '{"type": "act|teach|chat", "action": "act 时填 SET_STATE|SET_COLOR|BLINK", '
+            '{"type": "act|teach|peer|chat", "action": "act 时填 SET_STATE|SET_COLOR|BLINK", '
             '"params": {}, "trigger": "teach 时填未来情境", '
-            '"behavior": "teach 时填未来行为", "reply": "简短回复；act 时仅在执行成功后展示"}\n'
+            '"behavior": "teach 时填未来行为", "target_unit_id": "peer 时填目标单元", '
+            '"skill_id": "peer 时填卡中的技能 ID", "reply": "简短回复；act/peer 时仅在执行成功后展示"}\n'
             '例："打开灯" → {"type":"act","action":"SET_STATE","params":{"state":"ON"},'
             '"reply":"行吧，给你开了。"}；'
             '"调成红色" → {"type":"act","action":"SET_COLOR",'
@@ -171,6 +190,14 @@ class ESP32Agent:
                 "action": str(data.get("action") or "").upper(),
                 "params": data.get("params"),
                 "reply": data.get("reply") or "行吧，照你说的办了。",
+            }
+        if data.get("type") == "peer":
+            return {
+                "type": "peer",
+                "target_unit_id": str(data.get("target_unit_id") or ""),
+                "skill_id": str(data.get("skill_id") or ""),
+                "params": data.get("params") if isinstance(data.get("params"), dict) else {},
+                "reply": data.get("reply") or "同伴任务完成了。",
             }
         if data.get("type") == "teach" and data.get("trigger") and data.get("behavior"):
             if not persist:
@@ -315,6 +342,10 @@ class ESP32Agent:
         else:
             taught_str = ""
 
+        try:
+            peer_view = _tools_mod.list_peers(self._find_led_unit())
+        except Exception:
+            peer_view = []
         prompt = (
             f"{AGENT_PERSONA}\n"
             "你负责控制桌面 LED 灯，根据当前传感器观测自主决定是否采取行动。\n\n"
@@ -323,6 +354,7 @@ class ESP32Agent:
             "sound_detected（近 5 秒内是否有声音）、led_state（当前灯状态）、"
             "led_config（当前 RGB、亮度、闪烁次数）、time_period（时段）\n\n"
             f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
+            f"当前同伴：{json.dumps(peer_view, ensure_ascii=False)}\n\n"
             f"{history_lines}"
             f"{hints_str}{taught_str}\n\n"
             "根据观测自主判断，输出 JSON 数组，无需任何动作时输出 []，不含代码块或解释。\n"
@@ -382,6 +414,23 @@ class ESP32Agent:
             logger.warning("unknown tool: %s", tool_name)
             return False
         try:
+            if tool_name == "list_peers":
+                _tools_mod.list_peers(led_unit)
+                return True
+            if tool_name == "request_peer_skill":
+                if not isinstance(params.get("params"), dict):
+                    return False
+                result = _tools_mod.request_peer_skill(
+                    target_unit_id=str(params.get("target_unit_id") or ""),
+                    skill_id=str(params.get("skill_id") or ""),
+                    params=params["params"], unit_id=led_unit,
+                    request_id=params.get("request_id"),
+                )
+                if result.get("result") != "ok":
+                    logger.warning("peer request did not complete: %s", result)
+                    return False
+                self._last_act_ts = time.time()
+                return True
             task_id = fn(**params)
             if tool_name in ("set_led_state", "set_led_color", "blink_led"):
                 # Real tools return an auto_* task id and must await the edge result.
@@ -503,10 +552,17 @@ class ESP32Agent:
                 rule_sig = tuple((r.get("id"), r.get("trigger"), r.get("behavior"), r.get("enabled"))
                                  for r in _taught.list_all())
                 led_config = sense.get("led_config") or {}
+                try:
+                    peers = _tools.list_peers(self._find_led_unit())
+                except Exception:
+                    peers = []
+                peer_sig = tuple((peer.get("unit_id"), peer.get("online"),
+                                  (peer.get("state_summary") or {}).get("fsm_state"))
+                                 for peer in peers)
                 sig = (sense["light_level"], sense["time_period"],
                        sense["sound_detected"], sense["led_state"],
                        tuple(led_config.get(k) for k in ("r", "g", "b", "brightness", "count")),
-                       rule_sig)
+                       rule_sig, peer_sig)
                 if sig == self._last_reason_sig:
                     logger.debug("no material change %s, skip LLM", sig)
                     continue

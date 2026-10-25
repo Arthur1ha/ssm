@@ -30,7 +30,8 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
 | `ssm/agents/{unit_id}/manifest` | ESP32 智能体（当前为灯） | `{"unit_id": "...", "parent_id":"...", "agent_type": "actuator", "tags":[...], "capabilities": [...], "ts": ...}`；灯的新版 manifest 带 `"fsm_version":2`，云端据此选择卡片；空 payload = 单元缺席或撤销旧声明。传感器不再发布非空 manifest；新固件启动/重连时发送一次空 retained payload 清理旧声明，云端发现层也忽略旧传感器 manifest。 |
-| `ssm/agents/{unit_id}/card` | Go2（retained）| 完整 AgentCard JSON；空 payload = 离线移除 |
+| `ssm/agents/{unit_id}/card` | Go2 / 云端编排器（retained）| 完整 AgentCard JSON；空 payload = 撤销能力声明。编排器使用内部 `unit_id=cloud_orchestrator`、`agent_type=decision`，仅进入同伴视图，不进入物理设备列表 |
+| `ssm/agents/cloud_orchestrator/status` | 云端编排器（retained + LWT） | `"online"` 或 `"offline"`；同伴请求可用性以此为准，不能以保留的 card 推断在线 |
 
 ### 设备状态（retained）
 
@@ -65,6 +66,18 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 | `ssm/feedback/{session_id}` | Cloud | `{"session_id":"...","stage":"planning\|ack\|executing\|done\|partial\|failed\|denied","text":"...","status":"ok\|denied","ts":...}`；API/SSE 只向同一会话转发 |
 | `ssm/decision/active` | Cloud | `"true"` 或 `"false"` |
 | `ssm/rules/{device_id}` | Cloud（retained）| `[{"id":"...","en":true,"trig":{...},"act":{...}}]` |
+
+### 智能体同伴协调请求（内部，非 retained）
+
+同伴对灯和 Go2 的单技能请求由 API 可信网关校验后走各自现有 MQTT task/result 或 HTTP 数据面。仅请求编排器的 `coordinate_request` 使用下列独立主题；不得伪装为 `ssm/intent/{session_id}`。请求与结果均使用与 intent 相同的 `_mqtt_auth` HMAC 封套签名（签名绑定 topic、规范化 payload、时间戳和 nonce），接收方校验签名、重放和有效期。Broker ACL 应只允许 API 账号发布 request、编排器账号发布 result；禁止终端直接发布。service token 不进入 MQTT payload。
+
+编排器收到已验证的用户 intent 时取消尚未派发的自主协调步骤。已送达设备的动作仍按目标回执和自身停止能力处理。
+
+| Topic | 发布者 | 格式 |
+|-------|--------|------|
+| `ssm/peer/request/{request_id}` | FastAPI（内部，QoS 1） | `{"request_id":"...","initiator_unit_id":"go2|esp32_desk_led","target_unit_id":"cloud_orchestrator","skill_id":"coordinate_request","params":{"message":"..."},"origin_kind":"user_delegated|agent_autonomous","origin_session_id":"...|null","actor":"admin|visitor|agent","persist":false,"space_id":"main","issued_at":... ,"expires_at":... ,"_mqtt_auth":{...}}`。发起者、角色、空间和委托来源均由 API 可信上下文填入，模型传值不可信；单跳委托，编排器执行过程中不能在同一链转发同伴请求 |
+| `ssm/peer/result/{request_id}` | 云端编排器（内部，QoS 1） | `{"request_id":"...","initiator_unit_id":"...","target_unit_id":"cloud_orchestrator","result":"ok|blocked|error|timeout|cancelled|executing","response":"...","task_results":{},"ts":...,"_mqtt_auth":{...}}`。`executing` 不是完成；Go2 的设备 `accepted` 也不可折算成 `ok`。同一 `request_id` 重复投递不得重复执行物理动作，超时查询已登记结果，不盲目重发 |
+| `ssm/peer/cancel/{request_id}` | FastAPI（内部，QoS 1） | `{"request_id":"...","reason":"user_takeover|session_ended|mode_changed|target_offline","ts":...,"_mqtt_auth":{...}}`。仅取消尚未派发的后续协调步骤；已送达的物理动作由目标设备处理 |
 
 ### 拟人化表达（桌面灯智能体 / Go2）
 

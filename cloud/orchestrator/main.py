@@ -6,6 +6,7 @@ import json
 import queue
 import time
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(
@@ -25,11 +26,14 @@ import paho.mqtt.client as mqtt_lib
 from shared_state import SharedState
 from cloud.cards.registry import CardRegistry
 import tools as agent_tools
-from graph import build_orchestrator, clear_session_context
-from cloud.mqtt_signing import NonceReplayGuard
+from graph import (build_orchestrator, cancel_peer_coordination,
+                   clear_peer_coordination, clear_session_context, run_peer_coordination)
+from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message
 from trusted_context import (
     TrustedContextError,
     parse_trusted_intent,
+    parse_trusted_peer_cancel,
+    parse_trusted_peer_request,
     parse_trusted_session_end,
 )
 
@@ -37,7 +41,7 @@ BROKER_HOST   = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
 BROKER_PORT   = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 BROKER_USER   = os.getenv("MQTT_ORCHESTRATOR_USER") or os.getenv("MQTT_USER", "")
 BROKER_PASSWD = os.getenv("MQTT_ORCHESTRATOR_PASSWORD") or os.getenv("MQTT_PASSWORD", "")
-ORCHESTRATOR_ID = os.getenv("ORCHESTRATOR_ID", "cloud_orchestrator")
+ORCHESTRATOR_ID = "cloud_orchestrator"
 
 state = SharedState()
 registry = CardRegistry()   # 编排器进程自有 CardRegistry（MQTT retained 保证与 api 同源）
@@ -45,9 +49,15 @@ event_queue: queue.Queue = queue.Queue()
 _connected  = False
 _announced  = False
 _control_replay_guard = NonceReplayGuard()
+_peer_results: dict[str, dict] = {}
+_peer_pending: set[str] = set()
+_peer_contexts: dict[str, dict] = {}
+_peer_lock = threading.Lock()
+_last_decision_state_at = 0.0
 # A long Go2 HTTP task must not stall MQTT status/result processing. Keep
 # orchestration serial so physical actions from separate intents do not race.
 _intent_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssm-intent")
+_peer_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssm-peer")
 
 
 def _run_intent(session_id: str, graph_input: dict) -> None:
@@ -63,11 +73,69 @@ def _run_intent(session_id: str, graph_input: dict) -> None:
         logger.exception("[Main] 编排图异常 session=%s: %s", session_id, exc)
 
 
+def _publish_peer_result(client, request_id: str, result: dict) -> None:
+    payload = {**result, "request_id": request_id, "ts": time.time()}
+    topic = f"ssm/peer/result/{request_id}"
+    try:
+        signed = sign_message(topic, payload)
+    except MqttSignatureError as exc:
+        logger.error("[Peer] cannot sign result request=%s reason=%s", request_id, exc)
+        return
+    client.publish(topic, json.dumps(signed, ensure_ascii=False), qos=1)
+
+
+def _run_peer_request(client, trusted: dict) -> None:
+    request_id = trusted["request_id"]
+    try:
+        if trusted.get("expires_at", 0) <= time.time():
+            result = {"result": "timeout", "error": "request_expired"}
+        else:
+            result = run_peer_coordination(orchestrator, trusted)
+            if not isinstance(result, dict) or result.get("result") not in {
+                "ok", "blocked", "error", "timeout", "cancelled", "accepted", "executing"
+            }:
+                result = {"result": "error", "error": "invalid_coordination_result"}
+    except Exception:
+        logger.exception("[Peer] coordination failed request=%s", request_id)
+        result = {"result": "error", "error": "coordination_failed"}
+    result = {"initiator_unit_id": trusted["initiator_unit_id"],
+              "target_unit_id": trusted["target_unit_id"], **result}
+    with _peer_lock:
+        _peer_pending.discard(request_id)
+        _peer_contexts.pop(request_id, None)
+        _peer_results[request_id] = result
+        if len(_peer_results) > 1000:
+            _peer_results.pop(next(iter(_peer_results)))
+    _publish_peer_result(client, request_id, result)
+    logger.info("[Peer] request=%s completed result=%s tasks=%d",
+                request_id, result.get("result"), len(result.get("task_results") or {}))
+    clear_peer_coordination(request_id)
+
+
 def on_connect(client, userdata, flags, rc):
     global _connected
     logger.info("[MQTT] Connected (rc=%s)", rc)
     if rc == 0:
         _connected = True
+        if _presence_client.is_connected():
+            _presence_client.publish(
+                f"ssm/agents/{ORCHESTRATOR_ID}/status", "online", qos=1, retain=True
+            )
+
+
+def _on_presence_connect(client, userdata, flags, rc):
+    if rc == 0 and _connected:
+        client.publish(f"ssm/agents/{ORCHESTRATOR_ID}/status", "online", qos=1, retain=True)
+
+
+def _publish_decision_state(client) -> None:
+    global _last_decision_state_at
+    _last_decision_state_at = time.time()
+    client.publish(
+        f"ssm/agents/{ORCHESTRATOR_ID}/state",
+        json.dumps({"unit_id": ORCHESTRATOR_ID, "ism": "ACTIVE", "ts": _last_decision_state_at}),
+        qos=1, retain=True,
+    )
 
 
 def _subscribe_and_announce(client):
@@ -78,10 +146,38 @@ def _subscribe_and_announce(client):
         ("ssm/intent/+",        0),
         ("ssm/result/+/+",      0),
         ("ssm/session/+/ended", 0),
+        ("ssm/peer/request/+", 0),
+        ("ssm/peer/cancel/+", 0),
     ])
     # card 和 manifest topic 由 CardRegistry 统一订阅
     registry.subscribe(client)
     client.publish("ssm/decision/active", "true", retain=True)
+    client.publish(
+        f"ssm/agents/{ORCHESTRATOR_ID}/card",
+        json.dumps({
+            "unit_id": ORCHESTRATOR_ID,
+            "device_id": ORCHESTRATOR_ID,
+            "name": "云端编排器",
+            "description": "协调空间内智能体任务",
+            "agent_type": "decision",
+            "online": False,
+            "transport": {"kind": "mqtt"},
+            "skills": [{
+                "id": "coordinate_request",
+                "name": "跨设备协调",
+                "tags": ["coordination"],
+                "params_schema": {
+                    "type": "object", "required": ["message"],
+                    "properties": {"message": {"type": "string", "minLength": 1}},
+                    "additionalProperties": False,
+                },
+                "invoke": {"action": "COORDINATE"},
+            }],
+            "state": {},
+        }, ensure_ascii=False),
+        qos=1,
+        retain=True,
+    )
     client.publish(
         f"ssm/agents/{ORCHESTRATOR_ID}/manifest",
         json.dumps({
@@ -96,8 +192,7 @@ def _subscribe_and_announce(client):
         }),
         retain=False,
     )
-    client.publish(f"ssm/agents/{ORCHESTRATOR_ID}/state",
-                   json.dumps({"ism": "ACTIVE", "ts": time.time()}), retain=False)
+    _publish_decision_state(client)
     logger.info("[MQTT] Subscribed and announced as %s", ORCHESTRATOR_ID)
 
 
@@ -117,6 +212,47 @@ def on_message(client, userdata, msg):
         return
 
     parts = topic.split("/")
+
+    if len(parts) == 4 and parts[:3] == ["ssm", "peer", "cancel"]:
+        try:
+            cancellation = parse_trusted_peer_cancel(
+                payload, parts[3], replay_guard=_control_replay_guard
+            )
+        except TrustedContextError as exc:
+            logger.warning("[Peer] rejected cancellation request=%s reason=%s", parts[3], exc)
+            return
+        with _peer_lock:
+            completed = cancellation["request_id"] in _peer_results
+        if not completed:
+            cancel_peer_coordination(cancellation["request_id"])
+            logger.info("[Peer] request=%s cancellation received reason=%s",
+                        cancellation["request_id"], cancellation["reason"])
+        return
+
+    if len(parts) == 4 and parts[:3] == ["ssm", "peer", "request"]:
+        try:
+            trusted = parse_trusted_peer_request(
+                payload, parts[3], replay_guard=_control_replay_guard
+            )
+        except TrustedContextError as exc:
+            logger.warning("[Peer] rejected request=%s reason=%s", parts[3], exc)
+            return
+        request_id = trusted["request_id"]
+        with _peer_lock:
+            result = _peer_results.get(request_id)
+            pending = request_id in _peer_pending
+            if result is None and not pending:
+                _peer_pending.add(request_id)
+                _peer_contexts[request_id] = trusted
+        if result is not None:
+            logger.info("[Peer] request=%s duplicate returning cached result=%s",
+                        request_id, result.get("result"))
+            _publish_peer_result(client, request_id, result)
+        elif not pending:
+            logger.info("[Peer] request=%s accepted from=%s origin=%s",
+                        request_id, trusted["initiator_unit_id"], trusted["origin_kind"])
+            _peer_worker.submit(_run_peer_request, client, trusted)
+        return
 
     # ssm/agents/{unit_id}/{msg_type}
     if len(parts) == 4 and parts[0] == "ssm" and parts[1] == "agents":
@@ -143,6 +279,11 @@ def on_message(client, userdata, msg):
             logger.warning("[Intent] rejected topic_session=%s reason=%s", parts[2], exc)
             return
         session_id = trusted["session_id"]
+        with _peer_lock:
+            autonomous_requests = [request_id for request_id, context in _peer_contexts.items()
+                                   if context.get("origin_kind") == "agent_autonomous"]
+        for request_id in autonomous_requests:
+            cancel_peer_coordination(request_id)
         state.register_session(trusted)
         logger.info("[Intent] accepted session=%s actor=%s persist=%s",
                     session_id, trusted["actor"], trusted["persist"])
@@ -164,6 +305,11 @@ def on_message(client, userdata, msg):
         except TrustedContextError as exc:
             logger.warning("[Session] rejected cleanup session=%s reason=%s", parts[2], exc)
             return
+        with _peer_lock:
+            delegated_requests = [request_id for request_id, context in _peer_contexts.items()
+                                  if context.get("origin_session_id") == cleanup["session_id"]]
+        for request_id in delegated_requests:
+            cancel_peer_coordination(request_id)
         event_queue.put({"trigger": "session_ended", "session_id": cleanup["session_id"]})
         return
 
@@ -184,6 +330,10 @@ def on_disconnect(client, userdata, rc):
     global _connected, _announced
     _connected = False
     _announced = False
+    if _presence_client.is_connected():
+        _presence_client.publish(
+            f"ssm/agents/{ORCHESTRATOR_ID}/status", "offline", qos=1, retain=True
+        )
     logger.info("[MQTT] Disconnected (rc=%s), reconnecting...", rc)
 
 
@@ -195,11 +345,21 @@ mqtt_client.on_connect    = on_connect
 mqtt_client.on_message    = on_message
 mqtt_client.on_disconnect = on_disconnect
 
+# The legacy active topic has its own LWT. A second lightweight connection
+# gives the internal card a status/LWT without changing ESP32 offline fallback.
+_presence_client = mqtt_lib.Client(client_id=f"{ORCHESTRATOR_ID}_presence", clean_session=True)
+_presence_client.username_pw_set(BROKER_USER, BROKER_PASSWD)
+_presence_client.will_set(f"ssm/agents/{ORCHESTRATOR_ID}/status", "offline", qos=1, retain=True)
+_presence_client.reconnect_delay_set(min_delay=5, max_delay=30)
+_presence_client.on_connect = _on_presence_connect
+
 agent_tools.init(state, mqtt_client, registry)
 orchestrator = build_orchestrator()
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
 mqtt_client.loop_start()
+_presence_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
+_presence_client.loop_start()
 logger.info("[Main] Connecting to broker %s:%s...", BROKER_HOST, BROKER_PORT)
 logger.info("[Main] 编排器就绪，等待 MQTT 事件...")
 
@@ -221,6 +381,8 @@ while True:
     if _connected and not _announced:
         _subscribe_and_announce(mqtt_client)
         _announced = True
+    if _connected and _announced and time.time() - _last_decision_state_at >= 30:
+        _publish_decision_state(mqtt_client)
 
     for expired_session_id in state.expired_session_ids():
         _cleanup_session(expired_session_id)

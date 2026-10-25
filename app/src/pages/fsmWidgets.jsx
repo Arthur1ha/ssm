@@ -120,13 +120,18 @@ function ConnectionWidget({ widget, unitId, actor }) {
 function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   const { useState, useEffect, useRef } = React;
   const swatches = widget.swatches || [];
-  const channelLabels = { r: '红色', g: '绿色', b: '蓝色', brightness: '亮度' };
-  const initial = () => ({
-    r: ledState?.r ?? 255, g: ledState?.g ?? 255,
-    b: ledState?.b ?? 255, brightness: ledState?.brightness ?? 180,
+  const readDeviceColor = () => ({
+    r: Number(ledState?.r ?? 255), g: Number(ledState?.g ?? 255),
+    b: Number(ledState?.b ?? 255), brightness: Number(ledState?.brightness ?? 180),
   });
+  const initial = () => {
+    const color = readDeviceColor();
+    const hsv = window.ssmColor.rgbToHsv(color.r, color.g, color.b);
+    return { hue: hsv.h, saturation: hsv.s, brightness: color.brightness };
+  };
   const [draft, setDraft] = useState(initial);
   const draftRef = useRef(draft);
+  const wheelRef = useRef(null);
   const lastSent = useRef('');
   const queued = useRef(null);
   const sending = useRef(false);
@@ -134,20 +139,26 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   const settleTimer = useRef(null);
   const awaitingState = useRef('');
   const retryAfter = useRef(0);
-  const remoteState = useRef(initial());
+  const remoteState = useRef(readDeviceColor());
   const adjusting = useRef(false);
+  const toDraft = color => {
+    const hsv = window.ssmColor.rgbToHsv(color.r, color.g, color.b);
+    return { hue: hsv.h, saturation: hsv.s, brightness: color.brightness };
+  };
 
   useEffect(() => {
     if (!['ON', 'BRIGHT', 'DIM', 'COLOR'].includes(ledState?.ism)) return;
-    const next = initial();
-    remoteState.current = next;
+    const deviceColor = readDeviceColor();
+    const hsv = window.ssmColor.rgbToHsv(deviceColor.r, deviceColor.g, deviceColor.b);
+    const next = { hue: hsv.h, saturation: hsv.s, brightness: deviceColor.brightness };
+    remoteState.current = deviceColor;
     if (adjusting.current || queued.current || sending.current) return;
-    if (awaitingState.current && JSON.stringify(next) !== awaitingState.current) return;
+    if (awaitingState.current && JSON.stringify(deviceColor) !== awaitingState.current) return;
     awaitingState.current = '';
     clearTimeout(settleTimer.current);
     draftRef.current = next;
     setDraft(next);
-    lastSent.current = JSON.stringify(next);
+    lastSent.current = JSON.stringify(deviceColor);
   }, [ledState?.r, ledState?.g, ledState?.b, ledState?.brightness, ledState?.ism]);
 
   useEffect(() => () => {
@@ -186,8 +197,9 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
         settleTimer.current = setTimeout(() => {
           awaitingState.current = '';
           if (!adjusting.current && !queued.current && !sending.current) {
-            draftRef.current = remoteState.current;
-            setDraft(remoteState.current);
+            const next = toDraft(remoteState.current);
+            draftRef.current = next;
+            setDraft(next);
           }
         }, 5000);
       }
@@ -196,39 +208,106 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   };
 
   const queueColor = (values, immediate = false) => {
-    const next = {
-      r: Number(values.r), g: Number(values.g), b: Number(values.b),
-      brightness: Number(values.brightness),
+    const nextDraft = {
+      hue: ((Number(values.hue) % 360) + 360) % 360,
+      saturation: Math.min(1, Math.max(0, Number(values.saturation))),
+      brightness: Math.min(255, Math.max(1, Math.round(Number(values.brightness)))),
     };
-    draftRef.current = next;
-    setDraft(next);
+    const next = {
+      ...window.ssmColor.hsvToRgb(nextDraft.hue, nextDraft.saturation),
+      brightness: nextDraft.brightness,
+    };
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
     queued.current = next;
     if (immediate) flushColor();
     else if (!sendTimer.current) sendTimer.current = setTimeout(flushColor, 120);
   };
 
+  const updateWheel = event => {
+    const rect = wheelRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const radius = Math.min(rect.width, rect.height) / 2;
+    const x = (event.clientX - rect.left - rect.width / 2) / radius;
+    const y = (event.clientY - rect.top - rect.height / 2) / radius;
+    const distance = Math.min(1, Math.hypot(x, y));
+    const hue = (Math.atan2(y, x) * 180 / Math.PI + 450) % 360;
+    queueColor({ ...draftRef.current, hue, saturation: distance });
+  };
+  const finishWheel = event => {
+    if (wheelRef.current?.hasPointerCapture(event.pointerId)) {
+      wheelRef.current.releasePointerCapture(event.pointerId);
+    }
+    adjusting.current = false;
+    flushColor();
+  };
+  const adjustWithKey = event => {
+    const next = { ...draftRef.current };
+    if (event.key === 'ArrowRight') next.hue += 5;
+    else if (event.key === 'ArrowLeft') next.hue -= 5;
+    else if (event.key === 'ArrowUp') next.saturation += 0.05;
+    else if (event.key === 'ArrowDown') next.saturation -= 0.05;
+    else if (event.key === 'Home') next.saturation = 0;
+    else if (event.key === 'End') next.saturation = 1;
+    else return;
+    event.preventDefault();
+    queueColor(next);
+  };
+  const rgb = window.ssmColor.hsvToRgb(draft.hue, draft.saturation);
+  const wheelAngle = draft.hue * Math.PI / 180;
+  const markerX = 50 + Math.sin(wheelAngle) * draft.saturation * 43;
+  const markerY = 50 - Math.cos(wheelAngle) * draft.saturation * 43;
+
   return <div className="device-led-controls">
-    <div className="device-led-controls__sliders">
-      {(widget.channels || ['r', 'g', 'b', 'brightness']).map(channel => <label key={channel} className="device-led-controls__slider">
-        <span>{channelLabels[channel] || channel}</span>
-        <input type="range" min={channel === 'brightness' ? 1 : 0} max="255" step="1"
-          value={draft[channel]} aria-label={channelLabels[channel] || channel}
-          onPointerDown={() => { adjusting.current = true; }}
-          onChange={event => queueColor({ ...draftRef.current, [channel]: Number(event.target.value) })}
-          onPointerUp={() => { adjusting.current = false; flushColor(); }}
-          onPointerCancel={() => { adjusting.current = false; flushColor(); }}
-          onKeyUp={() => flushColor()}
-          onBlur={() => { adjusting.current = false; flushColor(); }}/>
-        <output>{draft[channel]}</output>
-      </label>)}
+    <span className="device-led-controls__hint">点按或拖动色盘选颜色</span>
+    <div className="device-led-controls__layout">
+    <div className="device-led-controls__picker">
+      <div ref={wheelRef} className="device-led-controls__wheel" role="slider" tabIndex={0}
+        aria-label="选择灯光颜色" aria-valuemin="0" aria-valuemax="359"
+        aria-valuenow={Math.round(draft.hue)}
+        aria-valuetext={`色相 ${Math.round(draft.hue)} 度，饱和度 ${Math.round(draft.saturation * 100)}%`}
+        style={{ '--wheel-x': `${markerX}%`, '--wheel-y': `${markerY}%`, '--wheel-color': `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})` }}
+        onPointerDown={event => {
+          wheelRef.current.setPointerCapture(event.pointerId);
+          adjusting.current = true;
+          updateWheel(event);
+        }}
+        onPointerMove={event => {
+          if (wheelRef.current?.hasPointerCapture(event.pointerId)) updateWheel(event);
+        }}
+        onPointerUp={finishWheel} onPointerCancel={finishWheel}
+        onKeyDown={adjustWithKey} onKeyUp={() => flushColor()}
+        onBlur={() => { adjusting.current = false; flushColor(); }}>
+        <span className="device-led-controls__wheel-center" aria-hidden="true"/>
+        <span className="device-led-controls__wheel-marker" aria-hidden="true"/>
+      </div>
     </div>
+    <div className="device-led-controls__side">
+    <label className="device-led-controls__brightness">
+      <span>亮度</span>
+      <input type="range" min="1" max="255" step="1" value={draft.brightness}
+        aria-label="亮度"
+        onPointerDown={() => { adjusting.current = true; }}
+        onChange={event => queueColor({ ...draftRef.current, brightness: Number(event.target.value) })}
+        onPointerUp={() => { adjusting.current = false; flushColor(); }}
+        onPointerCancel={() => { adjusting.current = false; flushColor(); }}
+        onKeyUp={() => flushColor()}
+        onBlur={() => { adjusting.current = false; flushColor(); }}/>
+      <output>{Math.round(draft.brightness / 255 * 100)}%</output>
+    </label>
     {swatches.length > 0 && <div className="device-led-controls__presets" aria-label="预设颜色">
       {swatches.map((swatch, idx) => <button key={(swatch.label || 'color') + idx}
-        type="button" onClick={() => queueColor(swatch, true)}>
+        type="button" aria-pressed={Math.abs(rgb.r - swatch.r) <= 1 && Math.abs(rgb.g - swatch.g) <= 1 && Math.abs(rgb.b - swatch.b) <= 1}
+        onClick={() => {
+          const hsv = window.ssmColor.rgbToHsv(swatch.r, swatch.g, swatch.b);
+          queueColor({ ...draftRef.current, hue: hsv.h, saturation: hsv.s }, true);
+        }}>
         <i style={{ background: `rgb(${swatch.r}, ${swatch.g}, ${swatch.b})` }}/>
         {swatch.label}
       </button>)}
     </div>}
+    </div>
+    </div>
   </div>;
 }
 

@@ -7,6 +7,8 @@
 import json
 import os
 import time as _time
+import contextlib
+import contextvars
 from urllib.parse import quote, urlparse
 
 import requests
@@ -14,6 +16,7 @@ import requests
 _state    = None   # SharedState 实例
 _mqtt     = None   # paho MQTT 客户端
 _registry = None   # cloud.cards.registry.CardRegistry 实例
+_peer_request = contextvars.ContextVar("peer_request", default=False)
 
 # Go2 等 HTTP 设备的 API 基址（api 进程，同机默认 8082）
 GO2_API_BASE = os.getenv("GO2_API_BASE", "http://127.0.0.1:8082")
@@ -32,11 +35,23 @@ def init(shared_state, mqtt_client, registry=None):
     _registry = registry
 
 
+@contextlib.contextmanager
+def peer_feedback_scope():
+    """Keep internal peer coordination out of browser session feedback."""
+    token = _peer_request.set(True)
+    try:
+        yield
+    finally:
+        _peer_request.reset(token)
+
+
 def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "ok", **extra):
     """向 PWA 发布编排进度反馈（ssm/feedback/{session_id}）。
 
     extra 为附加字段（如 RuleBuilderNode 的 rule），会并入 payload 一同发出。
     """
+    if _peer_request.get():
+        return
     payload = {"session_id": session_id, "stage": stage,
                "text": text, "status": status, "ts": int(_time.time())}
     payload.update(extra)
@@ -67,6 +82,7 @@ def do_publish_task(
                     "actor": execution_context.get("actor"),
                     "persist": execution_context.get("persist"),
                     "space_id": execution_context.get("space_id"),
+                    "source": execution_context.get("source"),
                     "action": action, "params": params, "ts": int(_time.time())}),
         qos=1,
     )
@@ -101,6 +117,9 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
         "X-SSM-Persist": "true" if persist is True else "false",
         "X-SSM-Space-Id": str(body.get("space_id", "main")),
     }
+    if body.get("origin_kind") in {"user_delegated", "agent_autonomous"}:
+        headers["X-SSM-Origin-Kind"] = body["origin_kind"]
+        headers["X-SSM-Expires-At"] = str(int(body.get("expires_at") or 0))
     deadline = _time.monotonic() + timeout
     task_id = str(body.get("task_id") or "")
     try:

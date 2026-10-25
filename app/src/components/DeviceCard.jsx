@@ -1,93 +1,29 @@
-function SensorCard({ agent, unitData }) {
-  const uid     = agent.unit_id;
-  const meta    = getAgentMeta(agent);
-  const reading = getSensorReading(agent, unitData);
-  const offline = !agent._online;
-  return (
-    <div className="glass" style={{
-      display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px',
-      marginBottom: 8, borderRadius: 'var(--radius-card)',
-      background: 'var(--color-surface-1)',
-      border: '1px solid var(--color-border)',
-      opacity: offline ? 0.4 : 1,
-    }}>
-      <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
-        background: `${meta.color}18`, color: meta.color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Icon name={meta.icon} size={19}/>
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden',
-          textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--color-text)' }}>
-          {agent.name || uid}
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-dim)',
-          fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-          {offline ? '离线' : `${meta.label} · 只读`}
-        </div>
-      </div>
-      <span style={{ fontSize: 14, fontWeight: 600,
-        color: offline ? 'var(--color-text-dim)' : reading.color,
-        fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-        {offline ? '—' : reading.value}
-      </span>
-      <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-        background: offline ? 'var(--color-offline)' : 'var(--color-online)',
-        boxShadow: offline ? 'none' : '0 0 6px var(--color-online-glow)' }}/>
-    </div>
-  );
+/* 首页设备入口：名称和当前状态只出现一次，整行可进入设备页。 */
+function HomeDeviceRow({ agent, unitData, connected }) {
+  const uid = agent.unit_id;
+  const meta = getAgentMeta(agent);
+  const online = connected && agent._online;
+  const state = (unitData[uid] || {}).state || {};
+  const stateLabel = agentKind(agent) === 'led'
+    ? getLedStateInfo(state).label
+    : getStateLabel(agent, unitData);
+  const detail = !connected ? '状态待同步'
+    : !agent._online ? '离线'
+    : stateLabel === '状态待同步' ? '在线' : stateLabel;
+
+  return <button type="button" className="home-device-row"
+    onClick={() => navigate('#/devices/' + encodeURIComponent(uid))}
+    aria-label={`查看${agent.name || uid}，${detail}`}>
+    <span className="home-device-row__icon" style={{ color: meta.color, background: `${meta.color}16` }}>
+      <Icon name={meta.icon} size={18}/>
+    </span>
+    <span className="home-device-row__text">
+      <strong>{agent.name || uid}</strong>
+      <small>{detail}</small>
+    </span>
+    <span className={`home-device-row__dot${online ? ' is-online' : ''}`} aria-hidden="true"/>
+    <Icon name="arrow" size={14} sw={2}/>
+  </button>;
 }
 
-function ActuatorCard({ agent, unitData }) {
-  const uid      = agent.unit_id;
-  const meta     = getAgentMeta(agent);
-  const active   = isAgentActive(agent, unitData);
-  const offline  = !agent._online;
-  return (
-    <button type="button"
-      onClick={() => navigate('#/devices/' + encodeURIComponent(uid))}
-      aria-label={`查看${agent.name || uid}详情`}
-      className="glass interactive home-device-card"
-      style={{
-        padding: '12px 14px', marginBottom: 10,
-        borderRadius: 'var(--radius-card)',
-        background: active && !offline
-          ? `linear-gradient(135deg, ${meta.color}15, var(--color-surface-1))`
-          : 'var(--color-surface-1)',
-        border: `1px solid ${active && !offline ? meta.color + '40' : 'var(--color-border)'}`,
-        opacity: offline ? 0.4 : 1,
-      }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div style={{ width: 42, height: 42, borderRadius: 13, flexShrink: 0,
-          background: active && !offline ? meta.color : 'var(--color-surface-2)',
-          color: active && !offline ? 'var(--color-bg)' : meta.color,
-          display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Icon name={meta.icon} size={19}/>
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 500, overflow: 'hidden',
-            textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--color-text)' }}>
-            {agent.name || uid}
-          </div>
-          <div style={{ fontSize: 11, marginTop: 2, fontFamily: 'var(--font-mono)',
-            color: offline ? 'var(--color-text-dim)' : 'var(--color-online)' }}>
-            {offline ? '离线' : '在线'}
-          </div>
-          <div style={{ fontSize: 11, marginTop: 2, fontFamily: 'var(--font-mono)',
-            color: offline ? 'var(--color-text-dim)' : (active ? meta.color : 'var(--color-text-muted)') }}>
-            当前状态：{offline ? '不可用' : getStateLabel(agent, unitData)}
-          </div>
-        </div>
-        <div style={{ flexShrink: 0, color: offline ? 'var(--color-text-dim)' : 'var(--color-text-muted)', opacity: offline ? 0.4 : 1 }}>
-          <Icon name="arrow" size={13} sw={2}/>
-        </div>
-        <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-          background: offline ? 'var(--color-offline)' : 'var(--color-online)',
-          boxShadow: offline ? 'none' : '0 0 6px var(--color-online-glow)' }}/>
-      </div>
-    </button>
-  );
-}
-
-window.SensorCard  = SensorCard;
-window.ActuatorCard = ActuatorCard;
+window.HomeDeviceRow = HomeDeviceRow;

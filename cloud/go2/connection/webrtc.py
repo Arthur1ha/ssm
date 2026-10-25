@@ -130,6 +130,9 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
                 _nav.mode.value,
                 _nav.target or "-",
             )
+            publisher = getattr(self, "_peer_state_callback", None)
+            if publisher is not None:
+                publisher()
             await asyncio.sleep(_STATUS_INTERVAL)
 
     # ── 命令发送 ──────────────────────────────────────────────────────────

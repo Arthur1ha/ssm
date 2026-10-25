@@ -22,7 +22,10 @@ def test_reactive_action_uses_executor_and_stops_after_mode_switch(monkeypatch):
     context = ExecutionContext("mode-owner", "admin", True)
     mind.set_active(True, context)
     asyncio.run(mind._dispatch_action("Hello", "test", "test"))
-    assert calls == [("go2_sport", {"cmd": "Hello"}, context)]
+    assert len(calls) == 1
+    assert calls[0][:2] == ("go2_sport", {"cmd": "Hello"})
+    assert calls[0][2].session_id == context.session_id
+    assert calls[0][2].origin_kind == "agent_autonomous"
     mind.set_active(False)
     asyncio.run(mind._dispatch_action("Hello", "test", "test"))
     assert len(calls) == 1

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,9 +37,11 @@ from cloud.api.sessions import router as sessions_router
 from cloud.api import intents as intents_module
 from cloud.api.intents import router as intents_router
 from cloud.cards.registry import get_registry
+from cloud.peers import gateway as peer_gateway
 
 _esp32_state: ESP32State = ESP32State()
 _esp32_mqtt_client = None
+_peer_status_seen: dict[str, bool] = {}
 
 
 def get_mqtt_client():
@@ -55,6 +58,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
             ("ssm/result/+/+",      0),
             ("ssm/task/+/+",        0),
             ("ssm/feedback/+",      0),
+            ("ssm/peer/result/+",   0),
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
@@ -74,12 +78,28 @@ def _on_esp32_message(client, userdata, msg):
 
     # CardRegistry 处理 card 和 manifest topic（更新设备注册表）
     get_registry().handle_message(topic, raw)
+    if peer_gateway.handle_peer_result(topic, raw):
+        return
     intents_module.handle_mqtt_message(topic, raw)
 
     parts = topic.split("/")
     if len(parts) == 4 and parts[0] == "ssm" and parts[1] == "agents":
         unit_id  = parts[2]
         msg_type = parts[3]
+        if unit_id == "go2" and msg_type == "status":
+            online = raw.strip() == "online"
+            if not online:
+                peer_gateway.cancel_pending(target_unit_id="go2", reason="target_offline")
+            if _peer_status_seen.get(unit_id) != online:
+                _peer_status_seen[unit_id] = online
+                agent = esp32_agent_mod.get_agent()
+                if agent and agent.get_autonomy_mode() == "reactive":
+                    agent.push_sensor_event("peer_go2", {"online": online, "ts": int(time.time())})
+        if unit_id == "esp32_desk" and msg_type == "status" and raw.strip() != "online":
+            peer_gateway.cancel_pending(target_unit_id=os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"),
+                                        reason="target_offline")
+        if unit_id == "cloud_orchestrator" and msg_type == "status" and raw.strip() != "online":
+            peer_gateway.cancel_pending(target_unit_id="cloud_orchestrator", reason="target_offline")
         if msg_type == "manifest" and isinstance(payload, dict):
             _esp32_state.on_manifest(unit_id, payload)
         if msg_type in ("state", "event") and isinstance(payload, dict):
@@ -102,10 +122,11 @@ def _on_esp32_message(client, userdata, msg):
 
     elif len(parts) == 4 and parts[1] == "task":
         # 识别"用户/编排器对设备的命令"（排除灯智能体自身的 agent_auto 任务），
-        # 触发自主层让位窗口，避免自主调光立刻翻掉用户设置。
+        # reactive 模式触发让位窗口，避免自主调光立刻翻掉用户设置。
         if (parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
                 and isinstance(payload, dict)
-                and payload.get("session_id") not in (None, "agent_auto", "auto")):
+                and payload.get("session_id") not in (None, "agent_auto", "auto")
+                and payload.get("source") != "peer_autonomous"):
             agent = esp32_agent_mod.get_agent()
             if agent:
                 agent.mark_user_command(parts[2])
@@ -169,6 +190,7 @@ async def lifespan(app):
     _esp32_mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)
     go2_router_module.init_mqtt(_esp32_mqtt_client)
     intents_module.init_mqtt(_esp32_mqtt_client)
+    peer_gateway.init(_esp32_mqtt_client, _esp32_state)
 
     # LWT：api 进程意外崩溃时把 Go2 标记离线（能力卡 retained 保留，靠 online=false 表达失活，
     # 与 ESP32 的 status/LWT 模型一致）。paho 单客户端仅一个 will，故选 status 离线。
@@ -190,6 +212,7 @@ async def lifespan(app):
     _esp32_mqtt_client.loop_stop()
     _esp32_mqtt_client.disconnect()
     intents_module.init_mqtt(None)
+    peer_gateway.shutdown()
     logger.info("[ESP32Agent MQTT] Disconnected")
 
 

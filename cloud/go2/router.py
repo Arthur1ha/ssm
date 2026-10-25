@@ -66,6 +66,15 @@ def _normalize_context(context) -> ExecutionContext:
     return context if isinstance(context, ExecutionContext) else SYSTEM_CONTEXT
 
 
+def _cancel_pending_peer_requests(context: ExecutionContext) -> None:
+    """A direct user command takes priority over queued Go2 collaboration."""
+    if context.origin_kind != "user_delegated" or context.session_id == "system":
+        return
+    from cloud.peers.gateway import cancel_pending
+    cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous",
+                   reason="user_takeover")
+
+
 def _require_admin_persist(context: ExecutionContext) -> None:
     if context.actor != "admin" or not context.persist:
         raise HTTPException(status_code=403, detail="administrator persistence required")
@@ -266,6 +275,8 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
 @router.delete("/connection")
 async def go2_disconnect(context: ExecutionContext = Depends(require_service_context)):
     global _autonomy_mode
+    from cloud.peers.gateway import cancel_pending
+    cancel_pending(initiator_unit_id="go2", reason="mode_changed")
     await go2.disconnect()
     _configure_vision_consumers("manual")
     _autonomy_mode   = "manual"
@@ -361,6 +372,7 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     if cmd not in SPORT_CMD:
         raise HTTPException(status_code=400, detail=f"Unknown command: {cmd}")
     _check_direct_motion(cmd, req.params or {}, context)
+    _cancel_pending_peer_requests(context)
     try:
         result = await go2.send_command(cmd, req.params or None)
     except ValueError as exc:
@@ -378,6 +390,7 @@ async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends
     context = _normalize_context(context)
     command = "Move" if any((req.vx, req.vy, req.vyaw)) else "StopMove"
     _check_direct_motion(command, {"x": req.vx, "y": req.vy, "z": req.vyaw}, context)
+    _cancel_pending_peer_requests(context)
     try:
         result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=2.0)
     except ValueError as exc:
@@ -424,6 +437,7 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.agent import run_agent
     context = _normalize_context(context)
+    _cancel_pending_peer_requests(context)
     if req.task_id is not None:
         from cloud.go2.tasks import chat_tasks
         if not req.task_id or len(req.task_id) > 128:
@@ -500,6 +514,7 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
     from cloud.go2.agent import run_agent_stream
 
     context = _normalize_context(context)
+    _cancel_pending_peer_requests(context)
 
     async def sse_gen():
         drive.user_interrupt = True
@@ -665,6 +680,8 @@ async def nav_stop(context: ExecutionContext = Depends(require_service_context))
 async def emergency_stop(context: ExecutionContext = Depends(require_service_context)):
     context = _normalize_context(context)
     global _autonomy_mode
+    from cloud.peers.gateway import cancel_pending
+    cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     from cloud.go2.navigation.navigator import navigator
     navigator.stop()
     _autonomy_mode = "manual"
@@ -740,6 +757,10 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
         raise HTTPException(status_code=400, detail=f"未知自主模式: {req.mode}")
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
+    if req.mode == "manual":
+        from cloud.peers.gateway import cancel_pending
+        cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous",
+                       reason="mode_changed")
     if req.mode == _autonomy_mode:
         return {"ok": True, "mode": _autonomy_mode}
 

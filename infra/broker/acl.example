@@ -9,12 +9,16 @@ topic read ssm/agents/#
 topic read ssm/result/#
 topic read ssm/task/#
 topic read ssm/feedback/#
+topic read ssm/peer/result/#
 topic write ssm/intent/#
 topic write ssm/session/#
+topic write ssm/peer/request/#
+topic write ssm/peer/cancel/#
 topic write ssm/task/#
 topic write ssm/rules/#
 topic write ssm/agents/go2/card
 topic write ssm/agents/go2/status
+topic write ssm/agents/go2/state
 topic write ssm/agents/go2/thought
 topic write ssm/agents/esp32_desk_led/speech
 topic write ssm/agents/esp32_desk_led/thought
@@ -25,9 +29,14 @@ topic read ssm/decision/active
 topic read ssm/intent/#
 topic read ssm/result/#
 topic read ssm/session/#
+topic read ssm/peer/request/#
+topic read ssm/peer/cancel/#
 topic write ssm/decision/active
 topic write ssm/agents/cloud_orchestrator/manifest
+topic write ssm/agents/cloud_orchestrator/card
+topic write ssm/agents/cloud_orchestrator/status
 topic write ssm/agents/cloud_orchestrator/state
+topic write ssm/peer/result/#
 topic write ssm/feedback/#
 topic write ssm/task/#
 
