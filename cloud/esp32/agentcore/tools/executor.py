@@ -91,10 +91,21 @@ def execute_auxiliary(*, unit_id: str, tool: str, params: dict,
             skill_id=params["skill_id"], params=params["params"], context=context,
             mode_available=mode_available, request_id=params.get("request_id"),
         )
+    if tool == "send_message":
+        from cloud.api.main import get_agent_messenger
+        messenger = get_agent_messenger()
+        if messenger is None:
+            return {"result": "error", "error": "messaging_unavailable"}
+        return messenger.send_message(unit_id, params["target"], params["content"],
+                                      reply_to=params.get("reply_to"))
     from cloud.esp32 import tools
     try:
         if tool == "list_peers":
             return {"result": "ok", "peers": tools.list_peers(unit_id)}
+        if tool == "get_space_context":
+            from cloud.api.main import _esp32_state
+            from cloud.space.context import get_space_context
+            return {"result": "ok", "space": get_space_context(unit_id, state=_esp32_state)}
         tools.publish_speech(params["text"])
         tools.publish_thought(params["text"], unit_id=unit_id)
         return {"result": "accepted"}

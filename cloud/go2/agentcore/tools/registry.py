@@ -46,6 +46,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
         ToolSpec("go2_list_people", "列出空间人员库", _schema({}), roles=("admin",), timeout_s=5),
         ToolSpec("list_peers", "查询当前空间其他智能体的在线状态与公开技能；请求协作前先查询", _schema({}), timeout_s=5),
+        ToolSpec("get_space_context", "重新读取当前空间的同伴、环境与有效用户要求", _schema({}), timeout_s=5),
+        ToolSpec("send_message", "给同空间在线智能体发送简短消息；已发送不表示对方答应或完成动作", _schema({
+            "target": _string(minLength=1, maxLength=64),
+            "content": _string(minLength=1, maxLength=1000),
+            "reply_to": _string(minLength=1, maxLength=64),
+        }, ("target", "content")), timeout_s=5),
         ToolSpec("request_peer_skill", "请求同伴执行公开技能，等待最终结果；只有 ok 表示目标完成，失败后不要执行依赖动作", _schema({
             "target_unit_id": _string(minLength=1),
             "skill_id": _string(minLength=1),

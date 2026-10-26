@@ -81,6 +81,20 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 | `ssm/decision/active` | Cloud | `"true"` 或 `"false"` |
 | `ssm/rules/{device_id}` | Cloud（retained）| `[{"id":"...","en":true,"trig":{...},"act":{...}}]` |
 
+### 共享空间要求（当前状态，retained）
+
+| Topic | 发布者 | 格式 |
+|-------|--------|------|
+| `ssm/space/main/constraints/current` | 编排器（已验证用户意图，retained + QoS 1） | 签名 JSON `{space_id,revision,issued_at,constraints:[...]}`；每项含 `constraint_id`、`text`、`source_session_id`、`targets`（成员 ID 或 `*`）、`issued_at`、`expires_at`。空列表清除要求。接收端验证签名并按有效期过滤；同伴消息不能创建此类要求。 |
+
+### 智能体定向消息（内部，非 retained）
+
+| Topic | 发布者 | 格式 |
+|-------|--------|------|
+| `ssm/agents/{target_unit_id}/message` | 灯、Go2、编排器所在云端进程 | HMAC 签名 JSON；正文消息含 `kind=message`、`message_id`、`conversation_id`、`reply_to`、`reply_kind`、`sender`、`target`、`content`、`deadline`、`round`。同一主题的 `received`、`progress`、`result` 消息引用原 `message_id`；进度带 `task_id`，最终结果带 `result` 与可选 `reason`。收信端校验签名、同空间成员、目标在线、截止时间、长度和重放。QoS 1；投递成功仅表示发出，不表示目标答应或动作完成。 |
+
+运行期按消息 ID 跟踪 `waiting_reply`、`waiting_start`、`waiting_result` 与最终结果。接收者受理物理任务后必须回传原 `task_id`，完成后回传最终结果。结果丢失时按原任务 ID 查询，不重新发布动作。消息不走 `request_peer_skill` 的任务网关，也不授予设备或用户权限。
+
 ### 智能体同伴协调请求（内部，非 retained）
 
 同伴对灯和 Go2 的单技能请求由 API 可信网关校验后走各自现有 MQTT task/result 或 HTTP 数据面。仅请求编排器的 `coordinate_request` 使用下列独立主题；不得伪装为 `ssm/intent/{session_id}`。请求与结果均使用与 intent 相同的 `_mqtt_auth` HMAC 封套签名（签名绑定 topic、规范化 payload、时间戳和 nonce），接收方校验签名、重放和有效期。Broker ACL 应只允许 API 账号发布 request、编排器账号发布 result；禁止终端直接发布。service token 不进入 MQTT payload。

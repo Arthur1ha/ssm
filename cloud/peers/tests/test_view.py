@@ -71,6 +71,27 @@ def test_status_is_authoritative_and_state_staleness_is_explicit(tmp_path):
     assert list_peers(registry, space, initiator_unit_id="go2", now=1010)[0]["online"] is False
 
 
+def test_peer_view_separates_service_online_from_device_connection(tmp_path):
+    space = SpaceRegistry(tmp_path / "space.json")
+    space.update_space(device_ids=["esp32_desk", "go2"])
+    registry = CardRegistry()
+    go2 = _card("go2", "go2", "robot", "go2_sport")
+    go2["state_machine"] = {"connection_field": "connected"}
+    _publish_card(registry, go2)
+    _publish_card(registry, _card("esp32_desk_led", "esp32_desk", "actuator", "set_state"))
+    registry.handle_message("ssm/agents/go2/status", "online")
+    registry.handle_message("ssm/agents/go2/state", json.dumps({
+        "unit_id": "go2", "connected": False, "ts": 1000,
+    }))
+    fresh = next(peer for peer in list_peers(registry, space,
+                    initiator_unit_id="esp32_desk_led", now=1010) if peer["unit_id"] == "go2")
+    assert fresh["online"] is True
+    assert fresh["device_connected"] is False
+    stale = next(peer for peer in list_peers(registry, space,
+                    initiator_unit_id="esp32_desk_led", now=1100) if peer["unit_id"] == "go2")
+    assert stale["device_connected"] is None
+
+
 def test_card_topic_identity_must_match_payload():
     registry = CardRegistry()
     _publish_card(registry, _card("go2", "go2", "robot", "go2_sport"))

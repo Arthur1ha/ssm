@@ -38,6 +38,11 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(output, ensure_ascii=False, default=str)
 
 
+class ConsoleFormatter(logging.Formatter):
+    def __init__(self) -> None:
+        super().__init__("%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
+
+
 def _cleanup_old_traces(log_dir: Path) -> None:
     cutoff = time.time() - RETENTION_DAYS * 86400
     for path in log_dir.glob("agent-trace-*.jsonl*"):
@@ -66,11 +71,14 @@ def configure_logging(service: str, *, log_dir: Path | None = None) -> None:
     root.setLevel(logging.INFO)
     if not any(getattr(h, "_ssm_process_handler", False) for h in root.handlers):
         stream = logging.StreamHandler(sys.stdout)
-        stream.setFormatter(JsonFormatter())
+        stream.setFormatter(ConsoleFormatter())
         stream._ssm_process_handler = True
         root.addHandler(stream)
     trace = logging.getLogger("agent_trace")
     trace.setLevel(logging.INFO)
+    # Full model prompts and tool payloads belong in the trace file. Sending the
+    # JSONL record through the process console wraps it in another JSON string.
+    trace.propagate = False
     wanted = log_dir / f"agent-trace-{service}-{os.getpid()}.jsonl"
     if not any(getattr(h, "baseFilename", None) == str(wanted) for h in trace.handlers):
         handler = PrivateRotatingFileHandler(wanted, maxBytes=TRACE_MAX_BYTES,
@@ -79,4 +87,4 @@ def configure_logging(service: str, *, log_dir: Path | None = None) -> None:
         trace.addHandler(handler)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         for handler in logging.getLogger(name).handlers:
-            handler.setFormatter(JsonFormatter())
+            handler.setFormatter(ConsoleFormatter())

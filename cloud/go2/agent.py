@@ -141,25 +141,16 @@ def _identity_context() -> str:
     return "当前人物：未识别"
 
 
-def _peer_context() -> str:
-    """Expose only the gateway's bounded public peer snapshot to planning."""
+def _space_context() -> str:
+    """Read the shared public space snapshot for this model turn."""
     try:
-        from cloud.peers.gateway import list_visible_peers
-        peers = list_visible_peers("go2")
+        from cloud.api.main import _esp32_state
+        from cloud.space.context import get_space_context
+        snapshot = get_space_context("go2", state=_esp32_state)
     except Exception as exc:
-        logger.warning("[Go2/Agent] peer snapshot unavailable: %s", type(exc).__name__)
-        return "同伴视图暂不可用"
-    summary = []
-    for peer in peers[:8]:
-        summary.append({
-            "unit_id": peer.get("unit_id"),
-            "online": peer.get("online"),
-            "skills": [
-                {"id": skill.get("id"), "params_schema": skill.get("params_schema", {})}
-                for skill in peer.get("skills", [])[:12]
-            ],
-        })
-    return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+        logger.warning("[Go2/Agent] space snapshot unavailable: %s", type(exc).__name__)
+        return "空间现状暂不可用"
+    return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
 
 
 def _cached_identity_reply(user_msg: str) -> str:
@@ -281,7 +272,7 @@ async def planner_node(state: Go2AgentState) -> Go2AgentState:
     logger.info("[Go2/Agent] planning session=%s message_chars=%d", state["session_id"], len(state["user_msg"]))
     prompt = build_prompt(
         "planner", personality=get_system_prompt(), user_input=state["user_msg"], memory=memory_context,
-        tools=tool_descriptions(), device_state=f"fsm={getattr(go2, 'fsm_state', 'unknown')}; peers={_peer_context()}",
+        tools=tool_descriptions(), device_state=f"fsm={getattr(go2, 'fsm_state', 'unknown')}; space={_space_context()}",
         memory_sources=recalled.sources, tool_version="go2-tools-v2",
     )
     logger.info("[Go2/Prompt] %s", prompt.metadata)

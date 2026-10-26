@@ -22,6 +22,7 @@ from cloud.go2.agentcore.perception.vision import VisionFrame
 from cloud.go2.agentcore.soul import get_system_prompt
 from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
+from cloud.go2.space_context import prompt_space_context
 from cloud.go2.navigation import frontier as frontier_mod
 
 logger = logging.getLogger(__name__)
@@ -316,7 +317,8 @@ class Drive:
 
             try:
                 bundle = build_prompt(
-                    "free_explore", personality=get_system_prompt(), device_state=prompt,
+                    "free_explore", personality=get_system_prompt(),
+                    device_state=prompt + "\n当前空间现状：" + prompt_space_context(),
                     tool_results=history_str, tool_version="go2-tools-v1",
                 )
                 self._last_prompt_metadata = bundle.metadata
@@ -490,7 +492,8 @@ class Drive:
         try:
             bundle = build_prompt(
                 "free_explore", personality=get_system_prompt(), memory=memory_ctx,
-                device_state=prompt, memory_sources=("episode",), tool_version="go2-tools-v1",
+                device_state=prompt + "\n当前空间现状：" + prompt_space_context(),
+                memory_sources=("episode",), tool_version="go2-tools-v1",
             )
             self._last_prompt_metadata = bundle.metadata
             logger.info("[Go2/Prompt] %s", bundle.metadata)

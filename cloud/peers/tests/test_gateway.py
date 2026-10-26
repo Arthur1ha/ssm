@@ -170,6 +170,8 @@ def test_direct_user_takeover_signals_pending_coordinator(monkeypatch):
 
 
 def test_lamp_to_go2_uses_existing_http_skill_task(monkeypatch):
+    from cloud.go2.connection import go2
+    monkeypatch.setattr(go2, "is_connected", True)
     cards = _Cards()
     cards.cards["go2"]["skills"] = [{
         "id": "go2_sport", "invoke": {"action": "SPORT"},
@@ -200,6 +202,35 @@ def test_lamp_to_go2_uses_existing_http_skill_task(monkeypatch):
         assert calls[0][4]["skill_id"] == "go2_sport"
         assert calls[0][4]["params"] == {"cmd": "Hello"}
         assert calls[0][4]["task_id"] == "peer_hello"
+    finally:
+        gateway.shutdown()
+
+
+def test_lamp_cannot_dispatch_to_disconnected_go2(monkeypatch):
+    from cloud.go2.connection import go2
+    cards = _Cards()
+    cards.cards["go2"]["skills"] = [{
+        "id": "go2_sport", "invoke": {"action": "SPORT"},
+        "params_schema": {"type": "object", "required": ["cmd"],
+                          "properties": {"cmd": {"enum": ["Hello"]}}},
+    }]
+    monkeypatch.setattr(go2, "is_connected", False)
+    monkeypatch.setattr(gateway, "get_registry", lambda: cards)
+    monkeypatch.setattr(gateway, "get_space_registry", lambda: _Space())
+    monkeypatch.setattr(gateway, "_dispatch_go2", lambda *args: (_ for _ in ()).throw(
+        AssertionError("disconnected robot must not receive a request")))
+    gateway._requests.clear()
+    gateway.init(_Mqtt(), _State())
+    try:
+        result = gateway.request_peer_skill(
+            initiator_unit_id="esp32_desk_led", target_unit_id="go2",
+            skill_id="go2_sport", params={"cmd": "Hello"},
+            context=ExecutionContext("ses_lamp", "visitor", False,
+                                     expires_at=int(time.time()) + 60),
+            origin_kind="user_delegated", request_id="peer_disconnected",
+        )
+        assert result["result"] == "blocked"
+        assert result["error"] == "Go2 device is not connected"
     finally:
         gateway.shutdown()
 

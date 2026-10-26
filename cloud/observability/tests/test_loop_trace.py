@@ -57,3 +57,28 @@ async def test_model_failure_never_dispatches_tool(tmp_path):
     assert "model.error" in names
     assert "tool.dispatch" not in names
     assert run.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_partial_reply_explains_disconnected_peer(tmp_path):
+    configure_logging("api", log_dir=tmp_path)
+    run = Run("run_peer", "session", "开灯再让机器狗站起来", time.time() + 10,
+              trace_id="tr_11111111111111111111111111111111", agent_id="lamp")
+
+    async def decide(current):
+        if not current.steps:
+            return {"tool": "set_led_state", "params": {"state": "ON"}}
+        if len(current.steps) == 1:
+            return {"tool": "request_peer_skill", "params": {"target_unit_id": "go2"}}
+        return {"final": "全部完成"}
+
+    async def execute(name, params, step_id):
+        if name == "set_led_state":
+            return {"result": "ok"}
+        return {"result": "blocked", "error": "Go2 device is not connected"}
+
+    await run_loop(run, decide, execute)
+    assert run.status == "partial"
+    assert "第1步" in run.response
+    assert "Go2 机器狗未连接" in run.response
+    assert "全部完成" not in run.response

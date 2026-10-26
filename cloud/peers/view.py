@@ -64,17 +64,24 @@ def list_peers(
             continue
         status_id = device_id if device_id in status_times else unit_id
         observed_at = status_times.get(status_id)
+        state_summary = _state_summary(card.get("state"), instant)
+        connection_field = (card.get("state_machine") or {}).get("connection_field")
+        device_connected = (
+            state_summary.get(connection_field)
+            if state_summary["status"] == "current" and connection_field else None
+        )
         peers.append({
             "unit_id": unit_id,
             "device_id": device_id,
             "name": card.get("name") or unit_id,
             "agent_type": agent_type,
             "online": bool(card.get("online")) and observed_at is not None,
+            "device_connected": device_connected if isinstance(device_connected, bool) else None,
             "skills": [
                 {key: skill[key] for key in ("id", "name", "tags", "params_schema") if key in skill}
                 for skill in card.get("skills", []) if isinstance(skill, dict)
             ],
-            "state_summary": _state_summary(card.get("state"), instant),
+            "state_summary": state_summary,
             "observed_at": observed_at,
         })
     return peers

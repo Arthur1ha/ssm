@@ -343,6 +343,10 @@ def request_peer_skill(
             raise PermissionError("initiator is unavailable in the current space")
         if target is None or not target.get("online"):
             raise PermissionError("target is offline or unknown")
+        if target_unit_id == "go2":
+            from cloud.go2.connection import go2
+            if not go2.is_connected:
+                raise PermissionError("Go2 device is not connected")
         if target_unit_id != "cloud_orchestrator" and card_device_id(target) not in space_devices:
             raise PermissionError("target is outside the current space")
         if target_unit_id == initiator_unit_id:

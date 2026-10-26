@@ -21,10 +21,11 @@ from cloud.go2.agentcore.tools.registry import TOOL_REGISTRY, tool_descriptions
 from cloud.go2.connection import go2
 from cloud.go2.execution import ExecutionContext
 from cloud.go2.paths import DATA_DIR
+from cloud.go2.space_context import prompt_space_context
 
 _store: RunStore | None = None
 _READ_ONLY = {"go2_status", "go2_observe", "go2_list_rules", "go2_list_locations",
-              "go2_recognize_person", "go2_list_people", "list_peers"}
+              "go2_recognize_person", "go2_list_people", "list_peers", "get_space_context"}
 
 
 def get_store() -> RunStore:
@@ -111,7 +112,8 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
         prompt = build_prompt(
             "loop", personality=persona, user_input=current.goal,
             tools=tool_descriptions() + '\n- ask_user: 暂停并向用户追问；参数 {"question": string}',
-            device_state=f"connected={go2.is_connected}; fsm={getattr(go2, 'fsm_state', 'unknown')}",
+            device_state=(f"connected={go2.is_connected}; fsm={getattr(go2, 'fsm_state', 'unknown')}; "
+                          f"space={prompt_space_context()}"),
             tool_results={"completed": _visible_steps(current), "supplement": supplemental},
             tool_version="go2-multitask-v1",
         )

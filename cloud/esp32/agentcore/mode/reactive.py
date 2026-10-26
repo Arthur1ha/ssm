@@ -92,10 +92,8 @@ class ReactiveMind:
         else:
             taught_str = ""
 
-        try:
-            peer_view = _tools_mod.list_peers(self._find_led_unit())
-        except Exception:
-            peer_view = []
+        from cloud.space.context import get_space_context
+        space_context = get_space_context(self._find_led_unit(), state=self._state)
         persona, persona_source, persona_reason = load_personality()
         emit_agent_event("persona.loaded", source=persona_source,
                          fallback_reason=persona_reason,
@@ -109,7 +107,7 @@ class ReactiveMind:
             "sound_detected（近 5 秒内是否有声音）、led_state（当前灯状态）、"
             "led_config（当前 RGB、亮度、闪烁次数）、time_period（时段）\n\n"
             f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
-            f"当前同伴：{json.dumps(peer_view, ensure_ascii=False)}\n\n"
+            f"当前空间现状：{json.dumps(space_context, ensure_ascii=False)}\n\n"
             f"{history_lines}"
             f"{hints_str}{taught_str}\n\n"
             "根据观测自主判断，输出 JSON 数组，无需任何动作时输出 []，不含代码块或解释。\n"
@@ -188,7 +186,7 @@ class ReactiveMind:
             logger.warning("unknown tool: %s", tool_name)
             return False
         try:
-            if tool_name in {"list_peers", "request_peer_skill", "speak"}:
+            if tool_name in {"list_peers", "get_space_context", "request_peer_skill", "send_message", "speak"}:
                 from cloud.esp32.agentcore.tools.executor import execute_auxiliary
                 from cloud.space.execution import ExecutionContext
                 result = execute_auxiliary(
@@ -201,7 +199,7 @@ class ReactiveMind:
                 if result.get("result") not in {"ok", "accepted"}:
                     logger.warning("auxiliary tool did not complete: %s", result)
                     return False
-                if tool_name != "list_peers":
+                if tool_name not in {"list_peers", "get_space_context"}:
                     self._last_act_ts = time.time()
                 return True
             if tool_name in ("set_led_state", "set_led_color", "blink_led"):

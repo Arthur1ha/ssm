@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "run_id": "req_coord_standup_001",
+  "session_id": "peer_req_coord_standup_001",
+  "goal": "请让Go2机器狗站起来",
+  "deadline": 1792995350.0,
+  "steps": [
+    {
+      "step_id": "6713e58cd3a44505a222163955aa331a",
+      "tool_call_id": "8974bf2228c448e19def1408de3278a7",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "go2",
+        "skill_id": "go2_sport",
+        "params": {
+          "cmd": "StandUp"
+        }
+      },
+      "fingerprint": "e93da66adbca44d02de2c79812574f303219689a96f6d0d572046898979bd409",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "blocked",
+        "error": "coordination_skill_denied"
+      }
+    }
+  ],
+  "status": "error",
+  "response": "暂时无法可靠理解下一步；已执行的动作不会重发。",
+  "question": "",
+  "trace_id": "tr_3b50bf8293e2442b9f8a892d804f42ef",
+  "parent_run_id": "lamp_e487496fa61d4b9ba8b6035b2f3a617a",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "updated_at": 1792995345.2976878
+}

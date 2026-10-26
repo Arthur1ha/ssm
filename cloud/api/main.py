@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -39,15 +40,24 @@ from cloud.api import intents as intents_module
 from cloud.api.intents import router as intents_router
 from cloud.cards.registry import get_registry
 from cloud.peers import gateway as peer_gateway
+from cloud.peers.messaging import AgentMessenger
+from cloud.peers.inbound import handle_api_peer_message
+from cloud.space.constraints import CURRENT_CONSTRAINTS_TOPIC, get_constraint_store
+from cloud.space.registry import get_space_registry
 
 _esp32_state: ESP32State = ESP32State()
 _esp32_mqtt_client = None
+_agent_messenger: AgentMessenger | None = None
 _peer_status_seen: dict[str, bool] = {}
 
 
 def get_mqtt_client():
     """返回 API 层共享的 MQTT 客户端，供 go2 模块 publish 使用。"""
     return _esp32_mqtt_client
+
+
+def get_agent_messenger() -> AgentMessenger | None:
+    return _agent_messenger
 
 
 def _on_esp32_connect(client, userdata, flags, rc):
@@ -60,6 +70,8 @@ def _on_esp32_connect(client, userdata, flags, rc):
             ("ssm/task/+/+",        0),
             ("ssm/feedback/+",      0),
             ("ssm/peer/result/+",   0),
+            ("ssm/agents/+/message", 0),
+            (CURRENT_CONSTRAINTS_TOPIC, 0),
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
@@ -80,6 +92,9 @@ def _on_esp32_message(client, userdata, msg):
 
     # CardRegistry 处理 card 和 manifest topic（更新设备注册表）
     get_registry().handle_message(topic, raw)
+    get_constraint_store().handle_message(topic, raw)
+    if _agent_messenger is not None and _agent_messenger.handle_message(topic, raw):
+        return
     if peer_gateway.handle_peer_result(topic, raw):
         return
     intents_module.handle_mqtt_message(topic, raw)
@@ -162,7 +177,7 @@ async def lifespan(app):
     if not any(isinstance(item, _DropSnapshotLogs) for item in access.filters):
         access.addFilter(_DropSnapshotLogs())
 
-    global _esp32_mqtt_client
+    global _esp32_mqtt_client, _agent_messenger
     broker_host = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
     broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
@@ -177,6 +192,12 @@ async def lifespan(app):
     go2_router_module.init_mqtt(_esp32_mqtt_client)
     intents_module.init_mqtt(_esp32_mqtt_client)
     peer_gateway.init(_esp32_mqtt_client, _esp32_state)
+    _agent_messenger = AgentMessenger(
+        _esp32_mqtt_client, get_registry(), get_space_registry(),
+        {"go2", os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")},
+        lambda message: handle_api_peer_message(_agent_messenger, message, _esp32_state),
+        task_result_lookup=_esp32_state.get_task_result,
+    )
 
     # LWT：api 进程意外崩溃时把 Go2 标记离线（能力卡 retained 保留，靠 online=false 表达失活，
     # 与 ESP32 的 status/LWT 模型一致）。paho 单客户端仅一个 will，故选 status 离线。
@@ -193,14 +214,31 @@ async def lifespan(app):
     agent = esp32_agent_mod.init(_esp32_state)
     agent.start()
 
-    yield
+    async def publish_go2_heartbeat():
+        while True:
+            await asyncio.sleep(30)
+            go2_router_module._publish_go2_state()
 
-    go2_router_module._publish_go2_status(False)
-    _esp32_mqtt_client.loop_stop()
-    _esp32_mqtt_client.disconnect()
-    intents_module.init_mqtt(None)
-    peer_gateway.shutdown()
-    logger.info("[ESP32Agent MQTT] Disconnected")
+    go2_heartbeat = asyncio.create_task(publish_go2_heartbeat())
+
+    try:
+        yield
+    finally:
+        go2_heartbeat.cancel()
+        try:
+            await go2_heartbeat
+        except asyncio.CancelledError:
+            pass
+
+        go2_router_module._publish_go2_status(False)
+        _esp32_mqtt_client.loop_stop()
+        _esp32_mqtt_client.disconnect()
+        intents_module.init_mqtt(None)
+        peer_gateway.shutdown()
+        if _agent_messenger is not None:
+            _agent_messenger.close()
+            _agent_messenger = None
+        logger.info("[ESP32Agent MQTT] Disconnected")
 
 
 app = FastAPI(lifespan=lifespan)

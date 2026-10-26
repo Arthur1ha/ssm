@@ -247,6 +247,24 @@ def list_peers() -> dict:
     return {"result": "ok", "peers": list_visible_peers("go2")}
 
 
+def get_space_context() -> dict:
+    from cloud.api.main import _esp32_state
+    from cloud.space.context import get_space_context as read_space
+    return {"result": "ok", "space": read_space("go2", state=_esp32_state)}
+
+
+def send_message(target: str, content: str, reply_to: str | None = None) -> dict:
+    """Send an agent message under this process's fixed Go2 identity."""
+    from cloud.api.main import get_agent_messenger
+    messenger = get_agent_messenger()
+    if messenger is None:
+        return {"result": "error", "error": "message_bus_unavailable"}
+    context = current_context()
+    if context.origin_kind == "user_delegated" and context.expires_at <= time.time():
+        return {"result": "blocked", "error": "session_expired"}
+    return messenger.send_message("go2", target, content, reply_to)
+
+
 async def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
                              request_id: str | None = None) -> dict:
     """Ask the trusted gateway for one peer action; never trust model role fields."""
@@ -295,6 +313,8 @@ TOOL_FN_MAP = {
     "go2_recognize_person":       go2_recognize_person,
     "go2_list_people":            go2_list_people,
     "list_peers":                 list_peers,
+    "get_space_context":          get_space_context,
+    "send_message":               send_message,
     "request_peer_skill":         request_peer_skill,
 }
 

@@ -34,6 +34,9 @@ TOOL_DECLARATIONS = {
     "list_peers": {"role": "user_or_reactive", "persistent": False, "timeout": 3.0,
                    "result_type": "snapshot", "description": "查询同空间在线同伴和公开技能",
                    "params_schema": {"type": "object", "properties": {}}},
+    "get_space_context": {"role": "user_or_reactive", "persistent": False, "timeout": 3.0,
+                          "result_type": "snapshot", "description": "重新读取同伴、环境和有效用户要求",
+                          "params_schema": {"type": "object", "properties": {}}},
     "request_peer_skill": {"role": "user_or_reactive", "persistent": False,
                            "timeout": 30.0, "result_type": "peer_result",
                            "description": "请求同伴公开技能；实际结果 ok 后才继续依赖动作",
@@ -43,6 +46,13 @@ TOOL_DECLARATIONS = {
                                                             "skill_id": {"type": "string"},
                                                             "params": {"type": "object"},
                                                             "request_id": {"type": "string"}}}},
+    "send_message": {"role": "user_or_reactive", "persistent": False,
+                     "timeout": 3.0, "result_type": "message_delivery",
+                     "description": "给同空间智能体发一条短消息；投递成功不等于对方答应或完成动作",
+                     "params_schema": {"type": "object", "required": ["target", "content"],
+                                       "properties": {"target": {"type": "string"},
+                                                      "content": {"type": "string", "maxLength": 1000},
+                                                      "reply_to": {"type": "string"}}}},
 }
 
 TOOL_DESCRIPTIONS = "可用工具（系统注入目标灯单元 ID）：\n" + "\n".join(
@@ -56,7 +66,7 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
         return False
     if tool == "speak":
         return set(params) == {"text"} and isinstance(params["text"], str) and 0 < len(params["text"].strip()) <= 120
-    if tool == "list_peers":
+    if tool in {"list_peers", "get_space_context"}:
         return not params
     if tool == "request_peer_skill":
         return (set(params) <= {"target_unit_id", "skill_id", "params", "request_id"}
@@ -66,6 +76,15 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
                 and bool(params["skill_id"])
                 and isinstance(params.get("params"), dict)
                 and ("request_id" not in params or isinstance(params["request_id"], str)))
+    if tool == "send_message":
+        return (set(params) <= {"target", "content", "reply_to"}
+                and isinstance(params.get("target"), str)
+                and 0 < len(params["target"]) <= 120
+                and isinstance(params.get("content"), str)
+                and 0 < len(params["content"].strip()) <= 1000
+                and ("reply_to" not in params or
+                     (isinstance(params["reply_to"], str) and
+                      0 < len(params["reply_to"]) <= 100)))
     return False
 
 

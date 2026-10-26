@@ -118,9 +118,16 @@ async def run_loop(
                  reply_kind="final")
             completed = [f"第{i}步" for i, s in enumerate(run.steps, 1)
                          if s.get("result", {}).get("result") == "ok"]
-            incomplete = [f"第{i}步 ({(s.get('result') or {}).get('result', 'unknown')})"
-                          for i, s in enumerate(run.steps, 1)
-                          if s.get("result", {}).get("result") != "ok"]
+            incomplete = []
+            for i, step in enumerate(run.steps, 1):
+                outcome = step.get("result") or {}
+                if outcome.get("result") == "ok":
+                    continue
+                reason = outcome.get("error")
+                if reason == "Go2 device is not connected":
+                    reason = "Go2 机器狗未连接"
+                detail = f"：{str(reason)[:120]}" if reason else ""
+                incomplete.append(f"第{i}步 ({outcome.get('result', 'unknown')}{detail})")
             run.status = "partial" if incomplete else "ok"
             if incomplete:
                 run.response = ("已确认：" + ("、".join(completed) if completed else "无")

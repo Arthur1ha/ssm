@@ -65,6 +65,21 @@ def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
                    origin_kind=origin_kind, request_id=request_id)
 
 
+def send_message(target: str, content: str, reply_to: str | None = None,
+                 unit_id: str = "esp32_desk_led") -> dict:
+    from cloud.api.main import get_agent_messenger
+    messenger = get_agent_messenger()
+    if messenger is None:
+        return {"result": "error", "error": "messaging_unavailable"}
+    return messenger.send_message(unit_id, target, content, reply_to=reply_to)
+
+
+def get_space_context(unit_id: str = "esp32_desk_led") -> dict:
+    from cloud.api.main import _esp32_state
+    from cloud.space.context import get_space_context as read_space
+    return read_space(unit_id, state=_esp32_state)
+
+
 def set_led_state(unit_id: str, state: str) -> str:
     """设置 LED 开关状态。"""
     task_id = f"auto_{uuid.uuid4().hex}"
@@ -100,5 +115,7 @@ TOOL_FN_MAP: dict = {
     "blink_led": blink_led,
     "speak": speak,
     "list_peers": list_peers,
+    "get_space_context": get_space_context,
     "request_peer_skill": request_peer_skill,
+    "send_message": send_message,
 }

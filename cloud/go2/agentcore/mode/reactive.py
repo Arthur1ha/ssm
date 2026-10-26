@@ -15,6 +15,7 @@ from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
 from cloud.go2.agentcore.soul import get_system_prompt
 from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
+from cloud.go2.space_context import prompt_space_context
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,8 @@ class ReactiveMind:
         try:
             bundle = build_prompt(
                 "reactive", personality=get_system_prompt(), memory=memory_ctx,
-                device_state=prompt, memory_sources=("episode",), tool_version="go2-tools-v1",
+                device_state=prompt + "\n当前空间现状：" + prompt_space_context(),
+                memory_sources=("episode",), tool_version="go2-tools-v1",
             )
             self._last_prompt_metadata = bundle.metadata
             logger.info("[Go2/Prompt] %s", bundle.metadata)

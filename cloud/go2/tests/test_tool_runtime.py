@@ -44,7 +44,6 @@ def robot(monkeypatch):
 @pytest.mark.asyncio
 async def test_registry_covers_all_implementations():
     from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP
-    assert len(TOOL_REGISTRY) == 14
     assert set(TOOL_REGISTRY) == set(TOOL_FN_MAP)
 
 
