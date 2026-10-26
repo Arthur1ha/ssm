@@ -98,66 +98,6 @@ class ESP32Agent(ReactiveMind):
         """供设备页对话等待 ESP32 的实际执行反馈。"""
         return self._state.wait_task_result(task_id, timeout=timeout)
 
-    def narrate_command(self, action: str, params: dict, *, task_id: str | None = None,
-                        trace_id: str | None = None, run_id: str | None = None) -> None:
-        """收到用户/编排器命令时，用 persona 生成一句台词并发 thought。
-
-        与 Go2 行为一致：执行后用性格大脑吐一句确认/吐槽，并发布到
-        ssm/agents/+/thought。必须能安全地从子线程调用——
-        内部全部 try/except 包好；LLM 不可用时不伪造智能体台词。
-        """
-        with bind_context(trace_id=trace_id or task_id, run_id=run_id or task_id,
-                          task_id=task_id, agent_id="esp32_desk_led"):
-            try:
-                params = params or {}
-                desc_parts = []
-                if "state" in params:
-                    desc_parts.append(f"state={params['state']}")
-                for k in ("r", "g", "b", "brightness", "count"):
-                    if k in params:
-                        desc_parts.append(f"{k}={params[k]}")
-                params_desc = "、".join(desc_parts) if desc_parts else "无额外参数"
-                persona, persona_source, persona_reason = load_personality()
-                emit_agent_event("persona.loaded", source=persona_source,
-                                 fallback_reason=persona_reason,
-                                 content_hash=hashlib.sha256(persona.encode()).hexdigest(),
-                                 prompt_trimmed=False)
-                prompt = (
-                    f"{persona}\n"
-                    "刚刚有人（用户或编排器）给你下达了一条控制 LED 灯的命令，你已经照做了。\n"
-                    f"命令动作：{action}（SET_STATE=开关，SET_COLOR=调色温/亮度，BLINK=闪烁）\n"
-                    f"命令参数：{params_desc}\n\n"
-                    "用你的性格说一句简短的话，确认或吐槽这次动作。"
-                    "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"
-                    "例如：行吧，给你开了。 / 这就给你调暖点。 / 又要关灯啊，随你。"
-                )
-                try:
-                    emit_agent_event("model.request", input=prompt,
-                                     model=str(getattr(self._llm, "model_name", "unknown")),
-                                     template_version="lamp-narration-v1", reply_kind="narration")
-                    started = time.monotonic()
-                    resp = self._llm.invoke([HumanMessage(content=prompt)])
-                    emit_agent_event("model.response", output=getattr(resp, "content", ""),
-                                     duration_ms=round((time.monotonic() - started) * 1000),
-                                     reply_kind="narration")
-                    text = (resp.content or "").strip().strip("\"'`").strip()
-                except Exception as e:
-                    logger.warning("narrate_command llm error: %s", type(e).__name__)
-                    emit_agent_event("model.error", stage="narration", error=type(e).__name__,
-                                     message=str(e))
-                    return
-                if not text:
-                    logger.warning("narrate_command empty model reply task=%s", task_id)
-                    return
-                emit_agent_event("reply.draft", reply=text, reply_kind="narration", source="model")
-                _tools.publish_thought(text, unit_id="esp32_desk_led",
-                                       trace_id=trace_id, run_id=run_id, task_id=task_id)
-                emit_agent_event("reply.emitted", reply=text, reply_kind="narration",
-                                 channel="mqtt_thought")
-                logger.info("narrate_command %s → %s", action, text)
-            except Exception as e:
-                logger.warning("narrate_command failed: %s", type(e).__name__)
-
     def handle_user_text(self, text: str, *, persist: bool = True,
                          memory_context: ExecutionContext | None = None) -> str | dict:
         """理解设备页文本：即时控灯、调教或闲聊；实际动作由 API 派发。"""
@@ -336,12 +276,15 @@ class ESP32Agent(ReactiveMind):
             run = store.claim_resume(run_id, context.session_id)
             if run is None:
                 return {"result": "rejected", "error": "run_already_resumed"}
+            run.reply_ready = False
+            store.save(run)
             emit_agent_event("run.resumed", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id=unit_id,
                              session_id=context.session_id, supplement=text)
         else:
             run = Run(run_id or uuid.uuid4().hex, context.session_id,
                       text, min(float(context.expires_at), time.time() + 90))
+            run.reply_ready = False
             run.trace_id = trace_id or "tr_" + uuid.uuid4().hex
             run.parent_run_id = parent_run_id or ""
             run.agent_id = unit_id
@@ -444,6 +387,8 @@ class ESP32Agent(ReactiveMind):
                 run.response = ""
                 run.reply_source = "runtime"
                 store.save(run)
+        run.reply_ready = True
+        store.save(run)
         status = run.status
         if status == "partial":
             status = next((step["result"]["result"] for step in reversed(run.steps)

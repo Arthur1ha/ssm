@@ -95,7 +95,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const connectionField = sm?.connection_field || (!card?.card_schema_version && 'connected' in runtimeState ? 'connected' : '');
   const current = stateField ? runtimeState[stateField] || '' : '';
   const connected = connectionField ? runtimeState[connectionField] === true : !!(card?._online ?? card?.online);
-  const offline = !(card?._online ?? card?.online);
+  const offline = !(card?._online ?? card?.online) || (connectionField && !connected);
   const meta = getAgentMeta(card || { unit_id: unitId, name: unitId });
   const ACCENT = meta.color;
   const hasUserMsg = messages.some(m => m.role === 'user');

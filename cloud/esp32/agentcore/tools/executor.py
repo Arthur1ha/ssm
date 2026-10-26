@@ -107,7 +107,6 @@ def execute_auxiliary(*, unit_id: str, tool: str, params: dict,
             from cloud.space.context import get_space_context
             return {"result": "ok", "space": get_space_context(unit_id, state=_esp32_state)}
         tools.publish_speech(params["text"])
-        tools.publish_thought(params["text"], unit_id=unit_id)
         return {"result": "accepted"}
     except Exception as exc:
         return {"result": "error", "error": str(exc)}

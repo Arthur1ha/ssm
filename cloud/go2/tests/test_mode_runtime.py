@@ -16,7 +16,6 @@ def test_reactive_action_uses_executor_and_stops_after_mode_switch(monkeypatch):
         return {"result": "accepted", "message": "device acknowledgement only"}
 
     monkeypatch.setattr(reactive, "execute_tool", fake_execute)
-    monkeypatch.setattr(reactive, "_publish_thought", lambda payload: None)
     monkeypatch.setattr(reactive.episode_memory, "add", lambda *args: (_ for _ in ()).throw(AssertionError("accepted is not complete")))
     mind = reactive.ReactiveMind()
     context = ExecutionContext("mode-owner", "admin", True)
@@ -35,7 +34,6 @@ def test_reactive_prompt_records_version_and_memory_source(monkeypatch):
     response = SimpleNamespace(content='{"action": null, "reason": "静观"}')
     llm = SimpleNamespace(ainvoke=AsyncMock(return_value=response))
     monkeypatch.setattr(reactive, "get_text_llm", lambda: llm)
-    monkeypatch.setattr(reactive, "_publish_thought", lambda payload: None)
     mind = reactive.ReactiveMind()
     mind.set_active(True)
     frame = {"persons": {"detected": False, "count": 0},

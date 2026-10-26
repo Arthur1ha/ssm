@@ -271,7 +271,6 @@ async def test_sse_and_standard_chat_report_same_accepted_status(monkeypatch, ro
         return {**state, "planned_tools": [{"tool": "go2_sport", "params": {"cmd": "Hello"}}],
                 "early_exit": False}
     monkeypatch.setattr(agent, "planner_node", planned)
-    monkeypatch.setattr(agent, "_publish_thought", lambda _payload: None)
     context = ExecutionContext("same-status", "visitor", False)
     normal = await agent.run_agent("same-status", "打招呼", context=context)
     events = [event async for event in agent.run_agent_stream("same-status", "打招呼", context=context)]

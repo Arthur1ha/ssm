@@ -27,17 +27,6 @@ from cloud.go2.navigation import frontier as frontier_mod
 
 logger = logging.getLogger(__name__)
 
-_THOUGHT_TOPIC = "ssm/agents/go2/thought"
-
-
-def _publish_thought(payload: dict) -> None:
-    from cloud.api.main import get_mqtt_client
-    import json as _json
-    client = get_mqtt_client()
-    if client:
-        client.publish(_THOUGHT_TOPIC, _json.dumps(payload, ensure_ascii=False))
-
-
 _CURIOSITY_THRESHOLD   = 10   # 10s 无事件 → EXPLORING
 _SOCIAL_CHECK_INTERVAL = 5    # SOCIAL 状态下每 5s 主动检查
 _ENGAGE_GONE_TIMEOUT   = 3    # 人脸消失 3s → 从 SOCIAL 回 IDLE
@@ -222,7 +211,6 @@ class Drive:
             initial_obs = f"观察失败：{exc}"
         episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
         logger.info("[Drive] 探索初始观察：%s", initial_obs)
-        _publish_thought({"type": "think", "text": initial_obs})
 
         for step in range(_MAX_STEPS):
             if self.user_interrupt or self._person_engaging:
@@ -339,15 +327,12 @@ class Drive:
             if decision.get("done") or tool == "stop":
                 logger.info("[Drive] EXPLORING 自主结束 step=%d：%s", step, reason)
                 episode_memory.add(EventType.ACTION_TAKEN, f"探索结束：{reason}")
-                _publish_thought({"type": "think", "text": reason})
                 await self._return_home()
                 break
 
             logger.info("[Drive] EXPLORING step=%d  tool=%s  reason=%s", step, tool, reason)
-            _publish_thought({"type": "think", "text": reason})
             result = await self._exec_explore_tool(tool, decision.get("params", {}))
             logger.info("[Drive] EXPLORING step=%d  result=%s", step, result)
-            _publish_thought({"type": "act", "text": str(result)})
 
             history.append({"step": step + 1, "tool": tool, "reason": reason, "result": result})
             episode_memory.add(
@@ -480,7 +465,6 @@ class Drive:
             return
 
         episode_memory.add(EventType.OBSERVATION, f"社交观察：{observation}")
-        _publish_thought({"type": "think", "text": observation})
         memory_ctx = episode_memory.format_context()
         prompt = (
             f"{self._identity_context()}\n"
@@ -509,17 +493,14 @@ class Drive:
 
         action = decision.get("action")
         reason = decision.get("reason", "")
-        _publish_thought({"type": "think", "text": reason})
         if action:
             try:
                 result = await self._execute_motion("go2_sport", {"cmd": action})
                 if result.get("result") != "ok":
-                    _publish_thought({"type": "act", "text": f"{action} 尚未确认完成", "execution": result})
                     return
                 self._last_action_ts = time.time()
                 episode_memory.add(EventType.ACTION_TAKEN, f"社交互动：执行了 {action}（{reason}）")
                 logger.info("[Drive] SOCIAL 执行 %s：%s", action, reason)
-                _publish_thought({"type": "act", "text": f"执行了{action}"})
             except Exception as exc:
                 logger.warning("[Drive] 社交执行失败: %s", exc)
         else:

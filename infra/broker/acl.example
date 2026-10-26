@@ -20,9 +20,7 @@ topic write ssm/rules/#
 topic write ssm/agents/go2/card
 topic write ssm/agents/go2/status
 topic write ssm/agents/go2/state
-topic write ssm/agents/go2/thought
 topic write ssm/agents/esp32_desk_led/speech
-topic write ssm/agents/esp32_desk_led/thought
 topic write ssm/agents/go2/message
 topic write ssm/agents/esp32_desk_led/message
 topic write ssm/agents/cloud_orchestrator/message

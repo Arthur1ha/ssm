@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_2a588984b3094103ab6be8a3c7b840e4",
+  "session_id": "ses_0Rz6oO80Ik7mpsdUbAA4jLvv",
+  "goal": "帮我开个紫灯，然后让狗坐下",
+  "deadline": 1793015519.098861,
+  "steps": [
+    {
+      "step_id": "faa0654317ae4077af8cf8a4c53f923a",
+      "tool_call_id": "7dbbbfc1b4a64b79aedb10d19c4af91b",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state",
+        "params": {
+          "state": "ON"
+        },
+        "message": "开灯"
+      },
+      "fingerprint": "43657f30a5e025152b095c167a60f0e04ff4e47f8a1b73e1578cb8d7d18da88a",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "ism_state": "ON",
+        "result": "ok",
+        "task_id": "faa0654317ae4077af8cf8a4c53f923a",
+        "session_id": "ses_0Rz6oO80Ik7mpsdUbAA4jLvv",
+        "ts": 6404,
+        "error": "",
+        "unit_id": "esp32_desk_led",
+        "query_endpoint": null,
+        "skill_id": "set_light_state"
+      }
+    },
+    {
+      "step_id": "fb6261d93fe54ce2b9553613145f7284",
+      "tool_call_id": "fe81f2a297aa4d97bec9f736c5b1836d",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_color",
+        "params": {
+          "r": 128,
+          "g": 0,
+          "b": 128,
+          "brightness": 255
+        },
+        "message": "把灯调成紫色"
+      },
+      "fingerprint": "58f5acff5a1d717e6b44ca7e3f64b1f736a63d6df3afd80548d833d442e1a455",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "ism_state": "ON",
+        "result": "ok",
+        "task_id": "fb6261d93fe54ce2b9553613145f7284",
+        "session_id": "ses_0Rz6oO80Ik7mpsdUbAA4jLvv",
+        "ts": 6416,
+        "error": "",
+        "unit_id": "esp32_desk_led",
+        "query_endpoint": null,
+        "skill_id": "set_light_color"
+      }
+    },
+    {
+      "step_id": "b7d6802823c04ea8aabf0e02eaa44b13",
+      "tool_call_id": "f33f499e92ff4e0293764dc8b215bfd9",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "go2",
+        "skill_id": "go2_sport",
+        "params": {
+          "cmd": "StandDown"
+        },
+        "message": "让狗坐下"
+      },
+      "fingerprint": "07f45de0708a01cc5210b074d9c645efaa1a63eec01b3bdd397e2475ad95c47c",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "run_id": "b7d6802823c04ea8aabf0e02eaa44b13",
+        "trace_id": "tr_c3702c3a64884544a46ceac5d7698fa8",
+        "result": "error",
+        "response": "我本来想坐下，但发现我还没连上主控，动作根本发不出去，所以还没完成。",
+        "actions_taken": [],
+        "tool_results": [
+          {
+            "tool": "go2_sport",
+            "result": {
+              "result": "blocked",
+              "error": "device_precondition",
+              "message": "Go2 未连接"
+            },
+            "step_id": "bf81c775864e4413a0960f0be2ee7af2"
+          },
+          {
+            "tool": "go2_status",
+            "result": {
+              "result": "error",
+              "message": "Go2 未连接"
+            },
+            "step_id": "eb11434a75824afd910ea11c4bc31f3b"
+          }
+        ],
+        "question": null,
+        "llm_available": false,
+        "task_id": "b7d6802823c04ea8aabf0e02eaa44b13",
+        "query_endpoint": "/api/go2/chat",
+        "unit_id": "go2",
+        "skill_id": "go2_sport"
+      }
+    }
+  ],
+  "status": "partial",
+  "response": "已确认：第1步、第2步；未完成或未确认：第3步 (error)。",
+  "question": "",
+  "trace_id": "tr_c3702c3a64884544a46ceac5d7698fa8",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "updated_at": 1793015478.6551795
+}

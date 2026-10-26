@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import time
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _VALID_LED_COLORS = frozenset({"white", "red", "yellow", "blue", "green", "cyan", "purple"})
 _STATUS_INTERVAL  = 10.0
+_STATE_STALE_S = 20.0
 
 
 class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
@@ -23,6 +25,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._status_task: asyncio.Task | None = None
         self._command_lock = asyncio.Lock()
         self._completion = None
+        self._completion_target: str | None = None
+        self._completion_samples = 0
         self._motion_epoch = 0
         self._velocity_timer = None
         self._move_control_active = False
@@ -31,6 +35,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
         self._move_control_active = False
+        self._last_state_received_at = None
         self.fsm_state = "connecting"
         if self._conn:
             await self._conn.disconnect()
@@ -80,6 +85,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         else:
             logger.warning("[Go2/Conn] 未找到视频 track，画面不可用")
 
+        self._last_state_received_at = time.monotonic()
         self._status_task = asyncio.create_task(self._status_loop())
 
         # 激活 Sport 模块：连接后不发 SPORT_MOD 命令时 WIRELESS_CONTROLLER 会被静默忽略
@@ -95,8 +101,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._finish_pending("error", "disconnected")
         self.is_connected = False
         self.fsm_state = "offline"
+        self._last_state_received_at = None
         if self._status_task and not self._status_task.done():
-            self._status_task.cancel()
+            if self._status_task is not asyncio.current_task():
+                self._status_task.cancel()
             self._status_task = None
         self._frame_ready = None
         if self._conn:
@@ -117,6 +125,11 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     async def _status_loop(self) -> None:
         from cloud.go2.navigation.navigator import navigator as _nav
         while self.is_connected:
+            if (self._last_state_received_at is not None
+                    and time.monotonic() - self._last_state_received_at > _STATE_STALE_S):
+                logger.warning("[Go2/Conn] 设备遥测中断，标记为离线")
+                await self.disconnect()
+                return
             odom = self._odom
             low  = self._low_state
             hdg  = math.degrees(odom.get("heading", 0.0))
@@ -141,6 +154,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if self._completion is not None and not self._completion.done():
             self._completion.set_result({"result": result, "error": error})
         self._completion = None
+        self._completion_target = None
+        self._completion_samples = 0
 
     def _validate_motion(self, cmd: str, params: dict | None = None) -> str:
         target = self.fsm_next(cmd)
@@ -187,6 +202,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         finally:
             if self._completion is waiter:
                 self._completion = None
+                self._completion_target = None
+                self._completion_samples = 0
             if not waiter.done():
                 waiter.cancel()
 
@@ -225,8 +242,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._last_progress = 0.0
         self._move_control_active = False
         self.fsm_state = next_state
-        if next_state in _TRANSIENT_STATES:
+        if next_state in _TRANSIENT_STATES or cmd in {"StandUp", "StandDown"}:
             self._completion = asyncio.get_running_loop().create_future()
+            self._completion_target = next_state if cmd in {"StandUp", "StandDown"} else None
+            self._completion_samples = 0
             return self._completion
         return None
 

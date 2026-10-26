@@ -38,6 +38,7 @@ class Run:
     agent_id: str = ""
     origin_kind: str = ""
     reply_source: str = "runtime"
+    reply_ready: bool = True
 
 
 def parse_decision(response: object) -> dict:

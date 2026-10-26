@@ -83,14 +83,3 @@ def test_lamp_failed_step_gets_persona_reply(monkeypatch, tmp_path):
                                  lambda *args, **kwargs: None)
     assert result["result"] == "rejected"
     assert result["reply"] == '行吧，这一步没办成，别急着给我记功。'
-
-
-def test_lamp_narration_does_not_publish_preset_reply_on_model_failure(monkeypatch):
-    def fail(_messages):
-        raise RuntimeError("model_unavailable")
-
-    agent = agent_mod.ESP32Agent(ESP32State(), llm=SimpleNamespace(invoke=fail))
-    published = []
-    monkeypatch.setattr(agent_mod._tools, "publish_thought", lambda *args, **kwargs: published.append(args))
-    agent.narrate_command("SET_STATE", {"state": "ON"}, task_id="test_narration")
-    assert published == []

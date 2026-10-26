@@ -19,7 +19,7 @@ function useSendIntent() {
     setThinkingText('');
   }, []);
 
-  const resetTimeout = useCallback((milliseconds = 40000) => {
+  const resetTimeout = useCallback((milliseconds = 150000) => {
     const active = activeRef.current;
     if (!active) return;
     clearTimeout(active.timeoutId);
@@ -82,7 +82,7 @@ function useSendIntent() {
     setThinking(true);
     setThinkingText(pick(PLANNING_TEXTS));
     activeRef.current = { callbacks, timeoutId: null };
-    resetTimeout(60000);
+    resetTimeout(150000);
     const body = { text: text.trim() };
     if (pendingRunRef.current) body.resume_run_id = pendingRunRef.current;
     if (callbacks.deviceHint) body.device_hint = callbacks.deviceHint;

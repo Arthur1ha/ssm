@@ -51,6 +51,14 @@ function getAgentDisplayName(agent) {
   return id || '智能体';
 }
 
+function isDeviceOnline(agent, unitData) {
+  if (!(agent?._online ?? agent?.online)) return false;
+  const connectionField = agent?.state_machine?.connection_field;
+  if (!connectionField) return true;
+  const state = unitData?.[agent.unit_id]?.state || agent.state || {};
+  return state[connectionField] === true;
+}
+
 // 灯的运行状态与颜色参数分开显示。旧固件的 retained 状态只作迁移期展示。
 function getLedStateInfo(state = {}) {
   const labels = {
@@ -72,7 +80,7 @@ function getStateLabel(agent, unitData) {
   const uid  = agent.unit_id;
   const s    = (unitData[uid] || {}).state || {};
   switch (agentKind(agent)) {
-    case 'robot':  return agent.state_machine?.views?.[s.ism]?.label || s.ism || '状态待同步';
+    case 'robot':  return agent.state_machine?.views?.[s.fsm_state]?.label || s.fsm_state || '状态待同步';
     case 'led': {
       const info = getLedStateInfo(s);
       return info.details && s.ism !== 'OFF' ? `${info.label} · ${info.details}` : info.label;

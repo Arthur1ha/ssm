@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_c8950ecd23d34b2389f0ba8d3d420c16",
+  "session_id": "ses_ddVruceHGwRzScsWAX-OvPtq",
+  "goal": "帮我开个紫灯，然后让狗坐下",
+  "deadline": 1793014972.2727017,
+  "steps": [],
+  "status": "error",
+  "response": "暂时无法可靠理解下一步；已执行的动作不会重发。",
+  "question": "",
+  "trace_id": "tr_d7f8db21024243c9a1b5f1d9d626788b",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "updated_at": 1793014893.8264322
+}

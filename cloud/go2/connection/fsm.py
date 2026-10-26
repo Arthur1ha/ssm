@@ -1,4 +1,5 @@
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -70,3 +71,18 @@ class Go2FSM:
             if waiter is not None and not waiter.done():
                 waiter.set_result({"result": "ok", "confirmation": "progress", "fsm_state": "standing"})
         self._last_progress = progress
+
+    def _fsm_on_posture(self, body_height: object) -> None:
+        """Confirm stand transitions only from fresh, stable robot telemetry."""
+        waiter = getattr(self, "_completion", None)
+        target = getattr(self, "_completion_target", None)
+        if waiter is None or waiter.done() or target not in {"lying", "standing"}:
+            return
+        if type(body_height) not in (int, float) or not math.isfinite(body_height):
+            self._completion_samples = 0
+            return
+        reached = body_height <= 0.12 if target == "lying" else body_height >= 0.25
+        self._completion_samples = self._completion_samples + 1 if reached else 0
+        if self._completion_samples >= 3:
+            waiter.set_result({"result": "ok", "confirmation": "body_height",
+                               "fsm_state": target, "body_height": body_height})

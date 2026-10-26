@@ -68,7 +68,7 @@ class ApiClient extends EventTarget {
     };
     source.onmessage = forward;
     [
-      'planning', 'executing', 'ack', 'pending_rule', 'discovery_candidates',
+      'planning', 'executing', 'ack', 'step', 'pending_rule', 'discovery_candidates',
       'done', 'partial', 'failed', 'denied', 'device', 'lease', 'session_ended',
     ].forEach(name => source.addEventListener(name, forward));
     source.onerror = () => {

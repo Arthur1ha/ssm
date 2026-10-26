@@ -64,7 +64,7 @@ const commandBus = {
     return { result: 'executing', task_id: taskId };
   },
 
-  async waitForLampRun(unitId, runId, timeoutMs = 30000) {
+  async waitForLampRun(unitId, runId, timeoutMs = 90000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {

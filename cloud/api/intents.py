@@ -300,10 +300,6 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
                 payload if isinstance(payload, dict) else {"value": payload})
         elif message_type == "event":
             event["event"] = payload if isinstance(payload, dict) else {"value": payload}
-        elif message_type == "thought":
-            if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
-                return False
-            event["thought"] = payload
         else:
             return False
         _events.broadcast(event)
@@ -634,6 +630,10 @@ async def get_lamp_chat_run(unit_id: str, run_id: str,
     run = RunStore(DATA_DIR / "runs").get(run_id, session["session_id"])
     if run is None:
         raise HTTPException(status_code=404, detail="lamp run not found")
+    if not run.reply_ready:
+        return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
+                "result": "executing", "reply": "", "question": None,
+                "steps": run.steps}
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": run.status, "reply": run.response,
             "question": run.question or None, "steps": run.steps}

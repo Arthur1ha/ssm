@@ -17,7 +17,7 @@ function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceNa
   const [sensorsOpen, setSensorsOpen] = useState(false);
   const devices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
   const sensors = agents.filter(a => a.agent_type !== 'robot' && a.agent_type !== 'actuator');
-  const onlineCount = agents.filter(agent => agent._online).length;
+  const onlineCount = agents.filter(agent => isDeviceOnline(agent, unitData)).length;
   const visibleSensors = sensorsOpen ? sensors : sensors.slice(0, 3);
   const latestEvent = recentEvents[0];
 

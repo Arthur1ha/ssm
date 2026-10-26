@@ -162,17 +162,6 @@ def _on_identity_event(event: IdentityEvent) -> None:
     elif identity_absent and may_record_episode:
         episode_memory.add(EventType.IDENTITY_CHANGE, f"{previous.name}已离开画面")
 
-    if current.status in {"recognized", "unknown"} and _mqtt_client is not None:
-        payload = {
-            "type": "identity", "agent_id": "go2", "ts": current.ts,
-            "status": current.status, "person_id": current.person_id,
-            "name": current.name, "role": current.role, "score": current.score,
-        }
-        try:
-            _mqtt_client.publish("ssm/agents/go2/thought", json.dumps(payload, ensure_ascii=False))
-        except Exception as exc:
-            logging.warning("[Go2/Identity] 发布识别事件失败: %s", exc)
-
     reactive_mind.on_identity_event(event)
     drive.on_identity_event(event)
 

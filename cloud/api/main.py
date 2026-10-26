@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -65,7 +64,6 @@ def _on_esp32_connect(client, userdata, flags, rc):
         client.subscribe([
             ("ssm/agents/+/state",  0),
             ("ssm/agents/+/event",  0),
-            (f"ssm/agents/{os.getenv('ESP32_LED_UNIT_ID', 'esp32_desk_led')}/thought", 0),
             ("ssm/result/+/+",      0),
             ("ssm/task/+/+",        0),
             ("ssm/feedback/+",      0),
@@ -149,25 +147,6 @@ def _on_esp32_message(client, userdata, msg):
             agent = esp32_agent_mod.get_agent()
             if agent:
                 agent.mark_user_command(parts[2])
-                if payload.get("source") != "lamp_chat":
-                    # 设备页对话已在执行完成后回复，无需再生成一条重复的 thought。
-                    # 其他命令的旁白在子线程等待结果，不阻塞 MQTT 回调。
-                    action = payload.get("action")
-                    params = payload.get("params", {})
-                    threading.Thread(
-                        target=_narrate_completed_command,
-                        args=(agent, parts[3], action, params,
-                              payload.get("trace_id"), payload.get("run_id")),
-                        daemon=True,
-                        name="ESP32Narrate",
-                    ).start()
-
-
-def _narrate_completed_command(agent, task_id, action, params, trace_id=None, run_id=None):
-    result = _esp32_state.wait_task_result(task_id, timeout=20.0)
-    if result.get("result") == "ok":
-        agent.narrate_command(action, params, task_id=task_id,
-                              trace_id=trace_id, run_id=run_id)
 
 
 @asynccontextmanager

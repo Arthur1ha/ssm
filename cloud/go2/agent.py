@@ -10,8 +10,6 @@ from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
-_GO2_THOUGHT_TOPIC = "ssm/agents/go2/thought"
-
 GO2_LLM_UNAVAILABLE_REPLY = (
     "Go2 的对话服务暂时不可用，刚才没法可靠理解指令。"
     "你稍后再喊我，或者先用页面上的动作按钮。"
@@ -20,19 +18,6 @@ GO2_AGENT_UNAVAILABLE_REPLY = (
     "Go2 这边的对话入口暂时不稳，我没把指令送进小脑袋。"
     "你稍后再试一下。"
 )
-
-
-def _get_mqtt_client():
-    """获取 API 层共享 MQTT 客户端。"""
-    from cloud.api.main import get_mqtt_client
-    return get_mqtt_client()
-
-
-def _publish_thought(payload: dict) -> None:
-    """发布 Go2 人格化回复到 thought topic。"""
-    client = _get_mqtt_client()
-    if client:
-        client.publish(_GO2_THOUGHT_TOPIC, json.dumps(payload, ensure_ascii=False))
 
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -528,8 +513,6 @@ async def run_agent(
     if not context.persist:
         _remember_turn(context.session_id, "用户", message)
         _remember_turn(context.session_id, "Go2", state["response_text"])
-    if state["response_text"] and not state.get("early_exit"):
-        _publish_thought({"type": "think", "text": state["response_text"]})
     result = state.get("result_override") or ("error" if state.get("error") else _execution_status(state["tool_results"]))
     logger.info("[Go2/Chat/Reply] session=%s result=%s text=%s", session_id, result,
                 json.dumps(state["response_text"], ensure_ascii=False))

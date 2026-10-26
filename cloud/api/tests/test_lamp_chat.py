@@ -1,5 +1,6 @@
 """Device chat boundaries that prevent a long wait or partial physical action."""
 
+import time
 from unittest.mock import MagicMock
 from types import SimpleNamespace
 
@@ -8,6 +9,34 @@ from fastapi import HTTPException
 
 from cloud.api import intents
 from cloud.esp32 import agent as esp32_agent
+
+
+@pytest.mark.asyncio
+async def test_lamp_run_waits_for_final_persona_reply(monkeypatch, tmp_path):
+    from cloud.agent_runtime.loop import Run
+    from cloud.agent_runtime.store import RunStore
+    from cloud.esp32 import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    store = RunStore(tmp_path / "runs")
+    run = Run("lamp_reply_race", "test-session", "亮紫灯，然后让狗坐下", time.time() + 90)
+    run.status = "error"
+    run.response = "暂时无法可靠理解下一步；已执行的动作不会重发。"
+    run.reply_ready = False
+    assert store.create(run)
+    session = {"session_id": "test-session"}
+
+    pending = await intents.get_lamp_chat_run("esp32_desk_led", run.run_id, session)
+    assert pending["result"] == "executing"
+    assert pending["reply"] == ""
+
+    run.response = "紫灯已经亮了；狗坐下的请求被拒了。"
+    run.reply_source = "persona_model"
+    run.reply_ready = True
+    store.save(run)
+    final = await intents.get_lamp_chat_run("esp32_desk_led", run.run_id, session)
+    assert final["result"] == "error"
+    assert final["reply"] == run.response
 
 
 def test_sequential_device_request_reaches_result_driven_loop(monkeypatch):

@@ -112,4 +112,3 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
 | `ssm/agents/esp32_desk_led/speech` | Cloud | `{"text":"...","priority":"normal","audio":"base64..."}` |
-| `ssm/agents/{unit_id}/thought` | Cloud | `{"text":"...","type":"think\|act"}`；灯消息另带 `unit_id` 和 `ts`，灯用 `esp32_desk_led`，机器狗用 `go2`；API 将空间内灯的 thought 转发到 PWA 的 SSE 活动流 |

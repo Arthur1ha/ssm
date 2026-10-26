@@ -2,13 +2,13 @@
 function HomeDeviceRow({ agent, unitData, connected }) {
   const uid = agent.unit_id;
   const meta = getAgentMeta(agent);
-  const online = connected && agent._online;
+  const online = connected && isDeviceOnline(agent, unitData);
   const state = (unitData[uid] || {}).state || {};
   const stateLabel = agentKind(agent) === 'led'
     ? getLedStateInfo(state).label
     : getStateLabel(agent, unitData);
   const detail = !connected ? '状态待同步'
-    : !agent._online ? '离线'
+    : !online ? '离线'
     : stateLabel === '状态待同步' ? '在线' : stateLabel;
 
   return <button type="button" className="home-device-row"

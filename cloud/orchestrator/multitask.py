@@ -102,7 +102,8 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                 "persist": context.get("persist"), "space_id": context.get("space_id"),
                 "origin_kind": context.get("origin_kind") or "user_delegated",
                 "expires_at": context.get("expires_at"),
-                "message": arguments.get("message") or context.get("user_msg") or skill_id,
+                "message": arguments.get("message") or params.get("message") or params.get("goal")
+                           or f"请执行 {skill_id}：{json.dumps(params, ensure_ascii=False)}",
                 "goal": params.get("goal"), "skill_id": skill_id, "params": params,
                 "task_id": step_id, "deadline": min(deadline, time.time() + 90),
                 "trace_id": correlation.get("trace_id"),

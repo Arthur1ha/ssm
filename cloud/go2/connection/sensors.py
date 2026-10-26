@@ -1,11 +1,13 @@
 import asyncio
 import math
+import time
 
 
 class Go2Sensors:
     def __init__(self) -> None:
         super().__init__()
         self._robot_state: dict = {}
+        self._last_state_received_at: float | None = None
         self._odom: dict = {}
         self._low_state: dict = {}
         self._voxel_raw: dict | None = None
@@ -18,8 +20,10 @@ class Go2Sensors:
     def _on_state(self, msg: dict) -> None:
         data = msg.get("data", {})
         inner = data.get("data", data) if isinstance(data, dict) else {}
+        self._last_state_received_at = time.monotonic()
         progress = float(inner.get("progress") or 0.0)
         self._fsm_on_progress(progress)
+        self._fsm_on_posture(inner.get("body_height"))
         self._robot_state = {
             "mode":        inner.get("mode"),
             "progress":    progress,

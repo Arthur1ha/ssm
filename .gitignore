@@ -62,6 +62,7 @@ cloud/space/space.json
 !cloud/go2/tests/test_recall.py
 !cloud/go2/tests/test_prompts.py
 !cloud/go2/tests/test_mode_runtime.py
+!cloud/go2/tests/test_posture_confirmation.py
 
 # Peer request and discovery regression tests are part of this implementation.
 !cloud/api/tests/
@@ -86,6 +87,7 @@ cloud/esp32/tests/conftest.py
 cloud/orchestrator/tests/*
 !cloud/orchestrator/tests/test_peer_coordination.py
 !cloud/orchestrator/tests/test_tools_context.py
+!cloud/orchestrator/tests/test_multitask_dispatch.py
 !cloud/observability/tests/
 !cloud/observability/tests/test_events.py
 !cloud/observability/tests/test_loop_trace.py
