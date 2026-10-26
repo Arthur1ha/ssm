@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import time
 import uuid
@@ -11,6 +12,7 @@ import uuid
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cloud.agent_runtime.loop import Run, parse_decision, run_loop
+from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply
 from cloud.agent_runtime.store import RunStore
 from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.agentcore.llm import get_text_llm
@@ -24,6 +26,7 @@ from cloud.go2.paths import DATA_DIR
 from cloud.go2.space_context import prompt_space_context
 
 _store: RunStore | None = None
+logger = logging.getLogger(__name__)
 _READ_ONLY = {"go2_status", "go2_observe", "go2_list_rules", "go2_list_locations",
               "go2_recognize_person", "go2_list_people", "list_peers", "get_space_context"}
 
@@ -47,15 +50,8 @@ def _result(run: Run) -> dict:
     if status == "partial":
         status = next((s["result"]["result"] for s in reversed(steps)
                        if s["result"]["result"] != "ok"), "error")
-    # The model's words cannot upgrade unconfirmed movement or partial work.
-    response = run.response
-    if status in {"accepted", "executing", "timeout", "unknown"}:
-        response = "动作的实际完成情况尚未确认；后续步骤已暂停。"
-    if status in {"blocked", "rejected", "error"} and steps:
-        response = "部分步骤已执行；后续步骤未完成。" if any(
-            s["result"]["result"] == "ok" for s in steps) else response
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
-            "result": status, "response": response,
+            "result": status, "response": run.response if run.reply_source != "runtime" else "",
             "actions_taken": [s["tool"] for s in steps if s["result"]["result"] == "ok"],
             "tool_results": steps, "question": run.question or None,
             "llm_available": status != "error"}
@@ -104,7 +100,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             from cloud.go2.card import get_card_skill
             skill = get_card_skill(skill_id)
             if not skill:
-                return {"final": "该公开技能当前不可用。"}
+                raise ValueError("unknown_public_skill")
             if skill.get("tool_name"):
                 return {"tool": skill["tool_name"], "params": params or {},
                         "decision_source": "public_skill"}
@@ -166,13 +162,33 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                       session_id=session_id, origin_kind=run.origin_kind):
         await run_loop(run, decide, execute, record=store.save, on_step=on_step,
                        effectful=lambda name: name not in _READ_ONLY)
+    if needs_persona_reply(run):
+        try:
+            persona, _, _ = load_system_prompt()
+            prompt = persona_reply_prompt(persona, run)
+            emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id="go2", session_id=session_id,
+                             input=prompt, template_version="persona-result-v1")
+            response = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
+            emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id="go2", session_id=session_id,
+                             output=getattr(response, "content", ""))
+            if not valid_persona_reply(response.content):
+                raise ValueError("invalid_persona_reply")
+            run.response = response.content.strip()
+            run.reply_source = "persona_model"
+            store.save(run)
+            emit_agent_event("reply.validated", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id="go2", session_id=session_id,
+                             reply=run.response, reason="persona_result_summary", reply_kind="final")
+        except Exception as exc:
+            logger.warning("Go2 persona reply unavailable run=%s error=%s", run.run_id, type(exc).__name__)
+            run.response = ""
+            run.reply_source = "runtime"
+            store.save(run)
     result = _result(run)
-    if result["response"] != run.response:
-        emit_agent_event("reply.validated", trace_id=run.trace_id or run.run_id,
+    if result["response"]:
+        emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                          run_id=run.run_id, agent_id="go2", session_id=session_id,
-                         reply= result["response"], previous_reply=run.response,
-                         reason="adapter_status_guard", reply_kind="final")
-    emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
-                     run_id=run.run_id, agent_id="go2", session_id=session_id,
-                     reply_kind="final", channel="http", reply=result["response"])
+                         reply_kind="final", channel="http", reply=result["response"])
     return result

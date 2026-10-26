@@ -11,6 +11,6 @@ def get_text_llm(model_class=None) -> ChatOpenAI:
         base_url=os.getenv("OPENAI_BASE_URL"),
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0,
-        timeout=20,
+        timeout=35,
         max_retries=0,
     )

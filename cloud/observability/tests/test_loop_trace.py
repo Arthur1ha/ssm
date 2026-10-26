@@ -8,7 +8,7 @@ from cloud.observability import configure_logging
 
 
 def _events(directory):
-    path = next(directory.glob("agent-trace-*.jsonl"))
+    path = next(directory.glob("session-*.jsonl"))
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
@@ -38,10 +38,14 @@ async def test_trace_records_dispatch_after_durable_pending_intent(tmp_path):
     assert all(event["trace_id"] == run.trace_id for event in events)
     assert records[0][1] == "pending"
     assert run.status == "ok"
+    assert run.response == "灯亮了"
+    validated = next(event for event in events if event["event"] == "reply.validated")
+    assert validated["reply"] == "灯亮了"
+    assert validated["changed"] is False
 
 
 @pytest.mark.asyncio
-async def test_model_failure_never_dispatches_tool(tmp_path):
+async def test_model_failure_never_dispatches_tool(tmp_path, caplog):
     configure_logging("api", log_dir=tmp_path)
     run = Run("run_timeout", "session", "move", time.time() + 10,
               trace_id="tr_fedcba9876543210fedcba9876543210", agent_id="go2")
@@ -57,6 +61,9 @@ async def test_model_failure_never_dispatches_tool(tmp_path):
     assert "model.error" in names
     assert "tool.dispatch" not in names
     assert run.status == "error"
+    assert "session=session" in caplog.text
+    assert "agent=go2" in caplog.text
+    assert "turn=1 failed error=TimeoutError" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -79,6 +86,6 @@ async def test_partial_reply_explains_disconnected_peer(tmp_path):
 
     await run_loop(run, decide, execute)
     assert run.status == "partial"
-    assert "第1步" in run.response
-    assert "Go2 机器狗未连接" in run.response
+    assert run.response == ""
+    assert [step["result"]["result"] for step in run.steps] == ["ok", "blocked"]
     assert "全部完成" not in run.response

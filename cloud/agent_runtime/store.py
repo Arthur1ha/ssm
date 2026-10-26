@@ -28,7 +28,8 @@ class RunStore:
         run = Run(**{name: value for name, value in data.items() if name in allowed})
         if any(step.get("dispatch_status") != "observed" for step in run.steps):
             run.status = "unknown"
-            run.response = "进程中断时有动作状态未确认；请先查询原任务，不能自动重发。"
+            run.response = ""
+            run.reply_source = "runtime"
         return run
 
     def create(self, run: Run) -> bool:

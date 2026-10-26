@@ -146,8 +146,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     commandBus.command(unitId, 'chat', params)
       .then(result => {
         setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
-        const reply = result?.question || result?.reply || result?.response || result?.text || commandBus.describe(result);
-        setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: reply }]);
+        const reply = result?.question || result?.reply || result?.response || result?.text;
+        if (reply) setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: reply }]);
+        else setExecution(commandBus.describe(result));
       })
       .finally(() => setSending(false));
   };

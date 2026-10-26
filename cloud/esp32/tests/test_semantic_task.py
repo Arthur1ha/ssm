@@ -65,3 +65,32 @@ def test_semantic_task_wait_uses_fastapi_worker_pool():
     # FastAPI offloads ordinary def handlers. An async handler would block its
     # event loop while run_once waits for physical completion.
     assert not inspect.iscoroutinefunction(lamp_router.invoke_lamp_semantic_task)
+
+
+def test_lamp_failed_step_gets_persona_reply(monkeypatch, tmp_path):
+    from cloud.esp32 import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    decisions = iter([
+        '{"tool":"missing_tool","params":{}}',
+        '{"final":"全完成了"}',
+        '行吧，这一步没办成，别急着给我记功。',
+    ])
+    model = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(content=next(decisions)))
+    agent = agent_mod.ESP32Agent(ESP32State(), llm=model)
+    context = ExecutionContext("lamp-persona-failure", "admin", True,
+                               "main", "user_delegated", int(time.time()) + 100)
+    result = agent.run_user_loop("试一试", "esp32_desk_led", context,
+                                 lambda *args, **kwargs: None)
+    assert result["result"] == "rejected"
+    assert result["reply"] == '行吧，这一步没办成，别急着给我记功。'
+
+
+def test_lamp_narration_does_not_publish_preset_reply_on_model_failure(monkeypatch):
+    def fail(_messages):
+        raise RuntimeError("model_unavailable")
+
+    agent = agent_mod.ESP32Agent(ESP32State(), llm=SimpleNamespace(invoke=fail))
+    published = []
+    monkeypatch.setattr(agent_mod._tools, "publish_thought", lambda *args, **kwargs: published.append(args))
+    agent.narrate_command("SET_STATE", {"state": "ON"}, task_id="test_narration")
+    assert published == []

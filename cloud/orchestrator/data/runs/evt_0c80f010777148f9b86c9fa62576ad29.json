@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_0c80f010777148f9b86c9fa62576ad29",
+  "session_id": "ses_oipwJJIxk9a-lwFv4QJZvGsb",
+  "goal": "我要写作业了，别打扰我",
+  "deadline": 1793013406.6304605,
+  "steps": [
+    {
+      "step_id": "75d5ffae44c54abdb4eb9c34d3d70d10",
+      "tool_call_id": "17f641312b63462e9bcee6cc0a7a6bfb",
+      "tool": "set_space_constraint",
+      "params": {
+        "text": "别打扰我",
+        "targets": [
+          "*"
+        ]
+      },
+      "fingerprint": "392342f5966f5be5ed6a390f78633714b66769ff0d4021545dcb9b2462d0172a",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "constraint_id": "evt_0c80f010777148f9b86c9fa62576ad29_current",
+        "expires_at": 1793013621.9226098
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "已确认完成：第1步。",
+  "question": "",
+  "trace_id": "tr_c7ecbd2ab2ef4871ae24c9ba6c4278ca",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "updated_at": 1793013325.7212837
+}

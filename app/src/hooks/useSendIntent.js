@@ -24,9 +24,9 @@ function useSendIntent() {
     if (!active) return;
     clearTimeout(active.timeoutId);
     active.timeoutId = setTimeout(() => {
-      const callback = activeRef.current?.callbacks?.onMessage;
+      const onStatus = activeRef.current?.callbacks?.onStatus;
       finish();
-      callback?.('操作超时，设备可能无响应');
+      onStatus?.('操作超时，设备可能无响应');
     }, milliseconds);
   }, [finish]);
 
@@ -44,7 +44,6 @@ function useSendIntent() {
         setThinkingText(stage === 'planning' ? pick(PLANNING_TEXTS) : pick(EXECUTING_TEXTS));
       } else if (stage === 'ack') {
         resetTimeout();
-        callbacks.onMessage?.(payload.text);
         setThinkingText(pick(EXECUTING_TEXTS));
       } else if (stage === 'step') {
         resetTimeout();
@@ -52,11 +51,13 @@ function useSendIntent() {
         const labels = { ok: '已完成', accepted: '已发送，待确认', executing: '执行中',
           blocked: '未执行', rejected: '未执行', timeout: '结果未确认',
           cancelled: '已取消', error: '执行失败' };
-        callbacks.onMessage?.(`第 ${payload.step_number || '?'} 步：${labels[status] || '状态已更新'}`);
+        callbacks.onStatus?.(`第 ${payload.step_number || '?'} 步：${labels[status] || '状态已更新'}`);
       } else if (stage === 'question') {
         pendingRunRef.current = payload.run_id || null;
         finish();
-        callbacks.onMessage?.(payload.question || payload.text || '请补充信息');
+        const question = payload.question || payload.text;
+        if (question) callbacks.onMessage?.(question);
+        else callbacks.onStatus?.('请补充信息');
       } else if (stage === 'pending_rule' && payload.rule) {
         finish();
         callbacks.onPendingRule?.(payload.rule);
@@ -64,11 +65,12 @@ function useSendIntent() {
         finish();
         // Discovery messages inform the user; device onboarding uses its
         // dedicated flow instead of treating a chat event as consent.
-        callbacks.onMessage?.(payload.text || '当前空间成员已经显示在设备列表中。');
+        callbacks.onStatus?.(payload.text || '当前空间成员已经显示在设备列表中。');
       } else if (['done', 'partial', 'failed', 'denied'].includes(stage)) {
         pendingRunRef.current = null;
         finish();
-        callbacks.onMessage?.(payload.text || (['failed', 'denied'].includes(stage) ? '这次操作没有完成' : '已处理'));
+        if (payload.text) callbacks.onMessage?.(payload.text);
+        else callbacks.onStatus?.(stage === 'done' ? '已处理' : '请求未完成，请查看任务状态');
       }
     };
     apiClient.addEventListener('server-event', onEvent);
@@ -91,12 +93,13 @@ function useSendIntent() {
         if (accepted.trace_id) callbacks.onTraceId?.(accepted.trace_id);
         if (accepted.stage && ['done', 'partial', 'failed'].includes(accepted.stage)) {
           finish();
-          callbacks.onMessage?.(accepted.text || '已处理');
+          if (accepted.text) callbacks.onMessage?.(accepted.text);
+          else callbacks.onStatus?.(accepted.stage === 'done' ? '已处理' : '请求未完成，请查看任务状态');
         }
       }
     } catch (error) {
       finish();
-      callbacks.onMessage?.(apiErrorText(error, '命令没有送达，请稍后再试'));
+      callbacks.onStatus?.(apiErrorText(error, '命令没有送达，请稍后再试'));
     }
   }, [finish, resetTimeout]);
 

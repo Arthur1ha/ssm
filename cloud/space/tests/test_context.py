@@ -43,6 +43,11 @@ def test_space_context_keeps_freshness_and_scoped_requirement(monkeypatch):
                                constraints=constraints, now=1000)
     assert set(result) == {"peers", "environment", "constraints"}
     assert {peer["unit_id"] for peer in result["peers"]} == {"go2", "esp32_desk_led"}
+    model_view = get_space_context("esp32_desk_led", state=_State(), registry=_Cards(),
+                                   constraints=constraints, now=1000, include_self=False)
+    assert [peer["unit_id"] for peer in model_view["peers"]] == ["go2"]
+    assert model_view["environment"] == result["environment"]
+    assert model_view["constraints"] == result["constraints"]
     assert next(peer for peer in result["peers"] if peer["unit_id"] == "go2")["state_summary"]["status"] == "stale"
     assert next(item for item in result["environment"] if item["source"] == "esp32_desk_light")["values"] == {"level": "DIM"}
     assert next(item for item in result["environment"] if item["source"] == "esp32_desk_sound")["status"] == "stale"

@@ -104,7 +104,7 @@ class ESP32Agent(ReactiveMind):
 
         与 Go2 行为一致：执行后用性格大脑吐一句确认/吐槽，并发布到
         ssm/agents/+/thought。必须能安全地从子线程调用——
-        内部全部 try/except 包好，LLM 异常时用兜底台词，绝不向外抛。
+        内部全部 try/except 包好；LLM 不可用时不伪造智能体台词。
         """
         with bind_context(trace_id=trace_id or task_id, run_id=run_id or task_id,
                           task_id=task_id, agent_id="esp32_desk_led"):
@@ -131,7 +131,6 @@ class ESP32Agent(ReactiveMind):
                     "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"
                     "例如：行吧，给你开了。 / 这就给你调暖点。 / 又要关灯啊，随你。"
                 )
-                fallback = False
                 try:
                     emit_agent_event("model.request", input=prompt,
                                      model=str(getattr(self._llm, "model_name", "unknown")),
@@ -146,16 +145,11 @@ class ESP32Agent(ReactiveMind):
                     logger.warning("narrate_command llm error: %s", type(e).__name__)
                     emit_agent_event("model.error", stage="narration", error=type(e).__name__,
                                      message=str(e))
-                    text = "行吧，照你说的办了。"
-                    fallback = True
+                    return
                 if not text:
-                    text = "行吧，照你说的办了。"
-                    fallback = True
-                if fallback:
-                    emit_agent_event("reply.fallback", reply=text, reply_kind="narration",
-                                     reason="model_error_or_empty")
-                emit_agent_event("reply.draft", reply=text, reply_kind="narration",
-                                 source="fallback" if fallback else "model")
+                    logger.warning("narrate_command empty model reply task=%s", task_id)
+                    return
+                emit_agent_event("reply.draft", reply=text, reply_kind="narration", source="model")
                 _tools.publish_thought(text, unit_id="esp32_desk_led",
                                        trace_id=trace_id, run_id=run_id, task_id=task_id)
                 emit_agent_event("reply.emitted", reply=text, reply_kind="narration",
@@ -318,6 +312,7 @@ class ESP32Agent(ReactiveMind):
         """Run one lamp/peer tool at a time against observed results."""
         import uuid
         from cloud.agent_runtime.loop import Run, parse_decision, run_loop
+        from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply
         from cloud.agent_runtime.store import RunStore
         from cloud.esp32.paths import DATA_DIR
         from cloud.esp32.agentcore.tools.registry import TOOL_DECLARATIONS
@@ -333,7 +328,8 @@ class ESP32Agent(ReactiveMind):
         previous = store.get(run_id, context.session_id) if run_id else None
         if previous and not resume:
             return {"run_id": previous.run_id, "result": previous.status,
-                    "reply": previous.response, "steps": previous.steps}
+                    "reply": previous.response if previous.reply_source != "runtime" else "",
+                    "steps": previous.steps}
         if resume and (previous is None or previous.status != "needs_clarification"):
             return {"result": "rejected", "error": "run_not_resumable"}
         if resume:
@@ -369,7 +365,7 @@ class ESP32Agent(ReactiveMind):
                             for name, decl in TOOL_DECLARATIONS.items()
                             if not lighting_only or name in {"set_led_state", "set_led_color", "blink_led"}}
             persona, persona_source, persona_reason = load_personality()
-            space_context = get_space_context(unit_id, state=self._state)
+            space_context = get_space_context(unit_id, state=self._state, include_self=False)
             emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
                              run_id=current.run_id, agent_id=unit_id,
                              source=persona_source, fallback_reason=persona_reason,
@@ -422,23 +418,41 @@ class ESP32Agent(ReactiveMind):
                           session_id=context.session_id, origin_kind=run.origin_kind):
             asyncio.run(run_loop(run, decide, execute, record=store.save,
                                  effectful=lambda name: name not in {"list_peers", "get_space_context"}))
+        if needs_persona_reply(run):
+            try:
+                persona, _, _ = load_personality()
+                prompt = persona_reply_prompt(persona, run)
+                emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
+                                 run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
+                                 input=prompt, model=str(getattr(self._llm, "model_name", "unknown")),
+                                 template_version="persona-result-v1")
+                response = self._llm.invoke([HumanMessage(content=prompt)])
+                emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
+                                 run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
+                                 output=getattr(response, "content", ""))
+                if not valid_persona_reply(response.content):
+                    raise ValueError("invalid_persona_reply")
+                run.response = response.content.strip()
+                run.reply_source = "persona_model"
+                store.save(run)
+                emit_agent_event("reply.validated", trace_id=run.trace_id or run.run_id,
+                                 run_id=run.run_id, agent_id=unit_id,
+                                 session_id=run.session_id, reply=run.response,
+                                 reason="persona_result_summary", reply_kind="final")
+            except Exception as exc:
+                logger.warning("lamp persona reply unavailable run=%s error=%s", run.run_id, type(exc).__name__)
+                run.response = ""
+                run.reply_source = "runtime"
+                store.save(run)
         status = run.status
         if status == "partial":
             status = next((step["result"]["result"] for step in reversed(run.steps)
                            if step.get("result", {}).get("result") != "ok"), "error")
-        if status in {"accepted", "executing", "timeout", "unknown"}:
-            reply = "动作的实际完成情况尚未确认；后续步骤已暂停。"
-        else:
-            reply = run.response
-        if reply != run.response:
-            emit_agent_event("reply.validated", trace_id=run.trace_id or run.run_id,
-                             run_id=run.run_id, agent_id=unit_id,
-                             session_id=run.session_id, reply=reply,
-                             previous_reply=run.response,
-                             reason="adapter_status_guard", reply_kind="final")
-        emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
-                         run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
-                         reply_kind="final", channel="http", reply=reply)
+        reply = run.response
+        if reply:
+            emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
+                             reply_kind="final", channel="http", reply=reply)
         return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
                 "result": status, "reply": reply,
                 "question": run.question or None, "steps": run.steps,

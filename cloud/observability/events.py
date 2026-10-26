@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from contextlib import contextmanager
@@ -11,7 +12,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-import structlog
+from .logging_config import write_agent_event
 
 EVENTS = frozenset({
     "task.received", "run.started", "persona.loaded", "persona.changed",
@@ -113,7 +114,9 @@ def emit_agent_event(event: str, **fields: Any) -> None:
                 safe[key] = {"preview": encoded[:MAX_FIELD_CHARS], "length": len(encoded),
                              "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
                              "truncated": True}
-    structlog.get_logger("agent_trace").info(
-        event, ts=datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        level="info", **safe,
-    )
+    try:
+        write_agent_event({"event": event,
+                           "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                           "level": "info", **safe})
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Session event log write failed: %s", type(exc).__name__)

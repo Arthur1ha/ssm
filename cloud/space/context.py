@@ -38,6 +38,7 @@ def get_space_context(
     registry: CardRegistry | None = None,
     constraints: ConstraintStore | None = None,
     now: float | None = None,
+    include_self: bool = True,
 ) -> dict[str, Any]:
     """Return peers, recent physical state, and effective user requirements.
 
@@ -48,7 +49,7 @@ def get_space_context(
     peer_cards = registry or get_registry()
     requirements = constraints or get_constraint_store()
     peers = (list_peers(peer_cards, initiator_unit_id=unit_id,
-                        include_self=True, now=instant)
+                        include_self=include_self, now=instant)
              if callable(getattr(peer_cards, "get_runtime_snapshot", None)) else [])
     environment: list[dict[str, Any]] = []
     snapshots = []

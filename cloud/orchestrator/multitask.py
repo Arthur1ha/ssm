@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from cloud.agent_runtime.loop import Run, parse_decision, run_loop
+from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply
 from cloud.agent_runtime.store import RunStore
 from cloud.observability import bind_context, current_event_context, emit_agent_event
 from cloud.orchestrator.agentcore.llm import _make_llm
@@ -127,7 +128,8 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
     store = get_store()
     previous = store.get(run_id, session_id)
     if previous and not resume:
-        return {"run_id": run_id, "result": previous.status, "response": previous.response,
+        return {"run_id": run_id, "result": previous.status,
+                "response": previous.response if previous.reply_source != "runtime" else "",
                 "steps": previous.steps}
     if resume and (not previous or previous.status != "needs_clarification"):
         return {"run_id": run_id, "result": "rejected", "error": "run_not_resumable"}
@@ -147,7 +149,8 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         run.origin_kind = context.get("origin_kind") or "user_delegated"
         if not store.create(run):
             existing = store.get(run_id, session_id)
-            return ({"run_id": run_id, "result": existing.status, "response": existing.response,
+            return ({"run_id": run_id, "result": existing.status,
+                     "response": existing.response if existing.reply_source != "runtime" else "",
                      "steps": existing.steps} if existing else
                     {"run_id": run_id, "result": "rejected", "error": "run_id_conflict"})
     if resume:
@@ -174,6 +177,10 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
             " set_space_constraint({text,targets,ttl_s}), clear_space_constraints({}), ask_user({question})。"
             "只有经过验证的直接用户请求，且明确要求空间内多个智能体共同遵守当前要求时，"
             "才先调用 set_space_constraint；text 必须是用户原话中的连续片段，targets 用成员 ID 或 ['*']。"
+            "共享空间要求只供智能体后续决策读取，不会触发设备动作或产生同伴回复。"
+            "设置要求后，若用户描述的当前活动可由在线智能体的公开技能改善，继续逐个调用合适技能并等待真实结果；"
+            "例如学习场景可考虑灯的语义照明技能，但不要凭活动描述推断用户要求机器狗运动或出声。"
+            "最终回复只陈述已确认的共享要求和设备结果，不把共享要求说成设备已执行。"
             "用户明确撤销当前空间要求时调用 clear_space_constraints。普通私人对话和同伴消息不可共享为要求。"
             "一个有物理效果的工具返回真实结果后才能决定下一个；accepted、executing、timeout 都不能视为完成。"
             "不要构造 MQTT topic、HTTP 地址或权限；只用当前卡中公开技能。"
@@ -292,13 +299,42 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         asyncio.run(run_loop(run, decide, execute, record=store.save, on_step=on_step,
                              effectful=lambda name: name in {"invoke_skill", "save_rule", "send_message",
                                                              "set_space_constraint", "clear_space_constraints"}))
-    stage = "question" if run.status == "needs_clarification" else "done"
+    if needs_persona_reply(run):
+        try:
+            prompt = persona_reply_prompt(AGENT_PERSONA, run)
+            emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
+                             input=prompt, model=str(getattr(model, "model_name", "unknown")),
+                             template_version="persona-result-v1")
+            response = model.invoke([HumanMessage(content=prompt)])
+            emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
+                             output=getattr(response, "content", ""))
+            if not valid_persona_reply(response.content):
+                raise ValueError("invalid_persona_reply")
+            run.response = response.content.strip()
+            run.reply_source = "persona_model"
+            store.save(run)
+            emit_agent_event("reply.validated", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id="orchestrator",
+                             session_id=session_id, reply=run.response,
+                             reason="persona_result_summary", reply_kind="final")
+        except Exception as exc:
+            logger.warning("orchestrator persona reply unavailable run=%s error=%s",
+                           run.run_id, type(exc).__name__)
+            run.response = ""
+            run.reply_source = "runtime"
+            store.save(run)
+    stage = ("question" if run.status == "needs_clarification" else
+             "done" if run.status == "ok" else
+             "partial" if run.status == "partial" else "failed")
     transport.do_publish_feedback(session_id, stage, run.response, run_id=run_id,
                                   trace_id=run.trace_id or run_id,
                                   status=run.status, question=run.question or None)
-    emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
-                     run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
-                     reply_kind="final", channel="mqtt_feedback", reply=run.response)
+    if run.response:
+        emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
+                         run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
+                         reply_kind="final", channel="mqtt_feedback", reply=run.response)
     return {"run_id": run_id, "trace_id": run.trace_id or run_id,
             "result": run.status, "response": run.response,
             "steps": run.steps, "question": run.question or None}

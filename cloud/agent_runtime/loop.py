@@ -37,6 +37,7 @@ class Run:
     parent_run_id: str = ""
     agent_id: str = ""
     origin_kind: str = ""
+    reply_source: str = "runtime"
 
 
 def parse_decision(response: object) -> dict:
@@ -100,11 +101,16 @@ async def run_loop(
                                               timeout=max(0.1, run.deadline - time.time()))
         except Exception as exc:
             error_id = uuid.uuid4().hex
-            logger.warning("agent run=%s model turn=%d failed error_id=%s",
-                           run.run_id, turn, error_id)
+            elapsed_ms = round((time.monotonic() - model_started) * 1000)
+            cause = exc.__cause__ or exc.__context__
+            cause_type = type(cause).__name__ if cause is not None else "-"
+            logger.warning("agent session=%s agent=%s run=%s model turn=%d failed error=%s cause=%s elapsed_ms=%d error_id=%s",
+                           run.session_id, run.agent_id, run.run_id, turn + 1,
+                           type(exc).__name__, cause_type, elapsed_ms, error_id)
             emit("model.error", turn=turn + 1, stage="decide", error=type(exc).__name__,
+                 cause=cause_type if cause is not None else None,
                  message=str(exc), stack=traceback.format_tb(exc.__traceback__), error_id=error_id,
-                 duration_ms=round((time.monotonic() - model_started) * 1000))
+                 duration_ms=elapsed_ms)
             run.status, run.response = "error", "暂时无法可靠理解下一步；已执行的动作不会重发。"
             break
         emit("model.decision", turn=turn + 1, decision=decision,
@@ -116,26 +122,12 @@ async def run_loop(
         if "final" in decision:
             emit("reply.draft", turn=turn + 1, reply=decision["final"], source="model",
                  reply_kind="final")
-            completed = [f"第{i}步" for i, s in enumerate(run.steps, 1)
-                         if s.get("result", {}).get("result") == "ok"]
-            incomplete = []
-            for i, step in enumerate(run.steps, 1):
-                outcome = step.get("result") or {}
-                if outcome.get("result") == "ok":
-                    continue
-                reason = outcome.get("error")
-                if reason == "Go2 device is not connected":
-                    reason = "Go2 机器狗未连接"
-                detail = f"：{str(reason)[:120]}" if reason else ""
-                incomplete.append(f"第{i}步 ({outcome.get('result', 'unknown')}{detail})")
-            run.status = "partial" if incomplete else "ok"
-            if incomplete:
-                run.response = ("已确认：" + ("、".join(completed) if completed else "无")
-                                + "；未完成或未确认：" + "、".join(incomplete) + "。")
-            elif any(s.get("effectful") for s in run.steps):
-                run.response = "已确认完成：" + "、".join(completed) + "。"
-            else:
-                run.response = str(decision["final"])
+            run.status = ("partial" if any((step.get("result") or {}).get("result") != "ok"
+                                           for step in run.steps) else "ok")
+            # A final claim cannot establish completion after a failed step.
+            # The device adapter asks its persona to explain the recorded facts.
+            run.response = "" if run.status == "partial" else str(decision["final"])
+            run.reply_source = "model" if run.status == "ok" else "runtime"
             emit("reply.validated", turn=turn + 1, reply=run.response,
                  changed=run.response != str(decision["final"]),
                  reason="execution_facts" if run.response != str(decision["final"]) else "unchanged",
@@ -151,6 +143,7 @@ async def run_loop(
                 run.status, run.response = "error", "追问内容无效。"
             else:
                 run.status, run.question, run.response = "needs_clarification", question[:500], question[:500]
+                run.reply_source = "model"
             emit("run.paused" if run.status == "needs_clarification" else "model.error",
                  turn=turn + 1, reason="ask_user", question=run.question or None)
             break

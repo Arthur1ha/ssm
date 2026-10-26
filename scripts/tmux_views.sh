@@ -25,29 +25,29 @@ add_window() {
     fi
 }
 
-trace_id=${1:-latest}
-if [[ "$trace_id" != latest && ! "$trace_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
-    echo "Trace ID may contain only letters, digits, _ and -" >&2
+view_id=${1:-latest}
+if [[ "$view_id" != latest && ! "$view_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "Session ID may contain only letters, digits, _ and -" >&2
     exit 2
 fi
-if [[ "$trace_id" == latest ]]; then
+if [[ "$view_id" == latest ]]; then
     trace_command="make -C '$ssm_dir' task-trace"
 else
-    trace_command="make -C '$ssm_dir' task-trace ID='$trace_id'"
+    trace_command="make -C '$ssm_dir' task-trace ID='$view_id'"
 fi
 
-if has_window task-trace; then
-    current=$(tmux show-window-options -v -t "$session:task-trace" @ssm_trace_id 2>/dev/null || true)
-    if [[ "$current" != "$trace_id" ]]; then
-        tmux respawn-window -k -t "$session:task-trace" "$trace_command"
-        echo "task-trace now follows $trace_id"
+if has_window session_trace; then
+    current=$(tmux show-window-options -v -t "$session:session_trace" @ssm_session_id 2>/dev/null || true)
+    if [[ "$current" != "$view_id" ]]; then
+        tmux respawn-window -k -t "$session:session_trace" "$trace_command"
+        echo "session_trace now follows $view_id"
     fi
 else
-    add_window task-trace "$trace_command"
+    add_window session_trace "$trace_command"
 fi
-tmux set-window-option -t "$session:task-trace" @ssm_trace_id "$trace_id"
+tmux set-window-option -t "$session:session_trace" @ssm_session_id "$view_id"
 add_window errors "make -C '$ssm_dir' errors"
-add_window go2-state "make -C '$ssm_dir' go2-state"
+add_window api-log "tail -n 80 -F '$ssm_dir/logs/api.log'"
 add_window mqtt-trace "make -C '$ssm_dir' trace"
 if [[ -n "${SERIAL_PORT:-}" ]]; then
     add_window esp32-serial "mpremote connect '$SERIAL_PORT' repl"

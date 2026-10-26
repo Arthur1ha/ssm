@@ -63,6 +63,7 @@ function App({ session, logout, refreshSession }) {
     appendActivity({ type: 'user', text: t });
     send(t, {
       onMessage:     msg  => appendActivity({ type: 'ai', agent: 'orchestrator', text: msg }),
+      onStatus:      msg  => appendActivity({ type: 'system', text: msg }),
       onTraceId: traceId => appendActivity({ type: 'trace', traceId }),
       onPendingRule: rule => {
         if (session.actor === 'admin') setPendingRule(rule);
