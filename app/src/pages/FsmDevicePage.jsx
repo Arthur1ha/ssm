@@ -32,6 +32,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   };
   const [messages, setMessages] = useState([initialMsg]);
   const [sending, setSending] = useState(false);
+  const [pendingRunId, setPendingRunId] = useState(null);
   const [execution, setExecution] = useState('');
   const [go2AssetsOpen, setGo2AssetsOpen] = useState(false);
   const [lampAssetsOpen, setLampAssetsOpen] = useState(false);
@@ -137,8 +138,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     if (!text || sending) return;
     setMessages(prev => [...prev, { role: 'user', text }]);
     setSending(true);
-    commandBus.command(unitId, 'chat', { message: text })
+    const params = { message: text };
+    if (pendingRunId) {
+      if (unitId === 'go2') params.resume_run_id = pendingRunId;
+      else { params.run_id = pendingRunId; params.resume = true; }
+    }
+    commandBus.command(unitId, 'chat', params)
       .then(result => {
+        setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
         const reply = result?.question || result?.reply || result?.response || result?.text || commandBus.describe(result);
         setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: reply }]);
       })

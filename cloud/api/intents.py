@@ -19,6 +19,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud.api.auth import require_csrf, require_session, session_is_active
@@ -152,6 +153,7 @@ class IntentRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
     intent_hint: str | None = Field(None, max_length=80)
     device_hint: str | None = Field(None, max_length=120)
+    resume_run_id: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class CommandRequest(BaseModel):
@@ -322,6 +324,8 @@ async def create_intent(
         payload["intent_hint"] = req.intent_hint
     if req.device_hint:
         payload["device_hint"] = req.device_hint
+    if req.resume_run_id:
+        payload["resume_run_id"] = req.resume_run_id
     _mqtt_publish_signed(f"ssm/intent/{session['session_id']}", payload)
     return {"accepted": True, "event_id": event_id, "session_id": session["session_id"]}
 
@@ -416,7 +420,8 @@ def _valid_lamp_params(action: str, params: Any) -> bool:
     return valid_lamp_params(action, params)
 
 
-def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
+def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any],
+                   run_id: str | None = None, resume: bool = False) -> dict[str, Any]:
     """Adapt an authenticated device-page session to the lamp Planner → Executor."""
     from cloud.space.execution import ExecutionContext
 
@@ -427,19 +432,17 @@ def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any]) -
     def dispatch(uid, action, params, _context, source):
         return _dispatch_mqtt_task(uid, action, params, session, source=source)
 
-    return agent.run_user_text(message, unit_id, context, dispatch)
+    return agent.run_user_loop(message, unit_id, context, dispatch,
+                               run_id=run_id, resume=resume)
 
 
-def _has_sequential_clauses(message: str) -> bool:
-    """A device chat cannot confirm multiple ordered actions as one task."""
-    clauses = re.split(r"(?:，|,)?\s*(?:然后|接着|随后|并且)\s*", message)
-    return len(clauses) > 1 and all(clause.strip() for clause in clauses)
-
-
-async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
+async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
+                            *, run_id: str | None = None, resume: bool = False) -> dict[str, Any]:
     """理解灯的对话，并在即时命令时等待 ESP32 的执行结果。"""
     if not message.strip():
         raise HTTPException(status_code=400, detail="chat requires message")
+    if run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
+        raise HTTPException(status_code=400, detail="invalid run_id")
     if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led") or _configured_card(unit_id) is None:
         raise HTTPException(status_code=404, detail="unit is not available in the current space")
     from cloud.esp32.agent import get_agent
@@ -451,19 +454,13 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any])
         "[DeviceChat/User] unit=%s session=%s text=%s",
         unit_id, session["session_id"], json.dumps(message, ensure_ascii=False),
     )
-    if _has_sequential_clauses(message):
-        result = {
-            "result": "needs_clarification",
-            "reply": "这句话有几个连续动作，设备页一次只能确认一个。请拆开发送；涉及机器狗移动时，请在它的页面说明方向和时长。",
-        }
-    else:
-        try:
-            result = await asyncio.to_thread(_run_lamp_chat, agent, unit_id, message, session)
-        except Exception:
-            device_chat_logger.exception(
-                "[DeviceChat/Error] unit=%s session=%s", unit_id, session["session_id"],
-            )
-            raise
+    try:
+        result = await run_in_threadpool(_run_lamp_chat, agent, unit_id, message, session, run_id, resume)
+    except Exception:
+        device_chat_logger.exception(
+            "[DeviceChat/Error] unit=%s session=%s", unit_id, session["session_id"],
+        )
+        raise
     device_chat_logger.info(
         "[DeviceChat/Reply] unit=%s session=%s result=%s text=%s task=%s",
         unit_id, session["session_id"], result.get("result", "ok"),
@@ -587,7 +584,9 @@ async def create_command(
 
     if req.action.lower() == "chat":
         message = str(req.params.get("message") or "").strip()
-        result = await execute_lamp_chat(unit_id, message, session)
+        result = await execute_lamp_chat(unit_id, message, session,
+                                         run_id=req.params.get("run_id"),
+                                         resume=req.params.get("resume") is True)
         return {"ok": True, "result": result}
 
     task_id = _dispatch_mqtt_task(unit_id, req.action, req.params, session)
@@ -595,11 +594,38 @@ async def create_command(
     return {"accepted": True, "status": "dispatched", "task_id": task_id}
 
 
+@router.get("/api/commands/{unit_id}/runs/{run_id}")
+async def get_lamp_chat_run(unit_id: str, run_id: str,
+                            session: dict[str, Any] = Depends(require_session)):
+    if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+        raise HTTPException(status_code=404, detail="lamp run not found")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
+        raise HTTPException(status_code=400, detail="invalid run_id")
+    from cloud.agent_runtime.store import RunStore
+    from cloud.esp32.paths import DATA_DIR
+    run = RunStore(DATA_DIR / "multitask.sqlite").get(run_id, session["session_id"])
+    if run is None:
+        raise HTTPException(status_code=404, detail="lamp run not found")
+    return {"run_id": run.run_id, "result": run.status, "reply": run.response,
+            "question": run.question or None, "steps": run.steps}
+
 @router.get("/api/commands/go2/tasks/{task_id}")
 async def get_go2_command_task(task_id: str, session: dict[str, Any] = Depends(require_session)):
     if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
     return await _internal_request(f"/api/go2/tasks/{task_id}", "GET", session)
+
+
+@router.post("/api/commands/go2/tasks/{task_id}/resume")
+async def resume_go2_command_task(task_id: str, req: CommandRequest,
+                                  session: dict[str, Any] = Depends(require_csrf)):
+    if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        raise HTTPException(status_code=400, detail="invalid task_id")
+    message = str(req.params.get("message") or "").strip()
+    if req.action.lower() != "chat" or not message:
+        raise HTTPException(status_code=400, detail="chat requires message")
+    return await _internal_request(f"/api/go2/tasks/{task_id}/resume", "POST", session,
+                                   {"message": message})
 
 
 @router.get("/api/commands/{unit_id}/tasks/{task_id}")

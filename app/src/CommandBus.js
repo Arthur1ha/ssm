@@ -3,16 +3,23 @@ const commandBus = {
   async command(unitId, action, params = {}) {
     const go2Chat = unitId === 'go2' && action === 'chat';
     const deviceChat = action === 'chat' && !go2Chat;
-    const taskId = go2Chat ? (params.task_id || `go2_${crypto.randomUUID().replaceAll('-', '')}`) : null;
+    const taskId = go2Chat ? (params.resume_run_id || params.task_id || `go2_${crypto.randomUUID().replaceAll('-', '')}`) : null;
+    const lampRunId = deviceChat ? (params.run_id || `lamp_${crypto.randomUUID().replaceAll('-', '')}`) : null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), deviceChat ? 60000 : 30000);
     try {
-      const data = await apiClient.request(`/api/commands/${encodeURIComponent(unitId)}`, {
-        method: 'POST', body: { action, params: go2Chat ? { ...params, task_id: taskId } : params }, signal: controller.signal,
+      const endpoint = go2Chat && params.resume_run_id
+        ? `/api/commands/go2/tasks/${encodeURIComponent(params.resume_run_id)}/resume`
+        : `/api/commands/${encodeURIComponent(unitId)}`;
+      const data = await apiClient.request(endpoint, {
+        method: 'POST', body: go2Chat && params.resume_run_id ? { action, params: { message: params.message } } :
+          { action, params: go2Chat ? { ...params, task_id: taskId } :
+            deviceChat ? { ...params, run_id: lampRunId } : params }, signal: controller.signal,
       });
       if (data?.result && typeof data.result === 'object') {
         if (data.result.result === 'executing' && taskId) return this.waitForGo2Task(taskId);
-        if (unitId !== 'go2' && data.result.result === 'timeout' && data.result.task_id) {
+        if (deviceChat && data.result.result === 'executing') return this.waitForLampRun(unitId, lampRunId);
+        if (!deviceChat && unitId !== 'go2' && data.result.result === 'timeout' && data.result.task_id) {
           return this.waitForLampTask(unitId, data.result.task_id, 15000);
         }
         return data.result;
@@ -27,6 +34,9 @@ const commandBus = {
     } catch (error) {
       if (go2Chat && (error.name === 'AbortError' || error.status === 502 || error.status === 503)) {
         return this.waitForGo2Task(taskId, error.name === 'AbortError' ? 90000 : 15000);
+      }
+      if (deviceChat && (error.name === 'AbortError' || error.status === 502 || error.status === 503)) {
+        return this.waitForLampRun(unitId, lampRunId);
       }
       return { result: error.name === 'AbortError' ? 'timeout' : 'error', error: error.message };
     } finally { clearTimeout(timer); }
@@ -52,6 +62,22 @@ const commandBus = {
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
     return { result: 'executing', task_id: taskId };
+  },
+
+  async waitForLampRun(unitId, runId, timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const result = await apiClient.request(
+          `/api/commands/${encodeURIComponent(unitId)}/runs/${encodeURIComponent(runId)}`,
+        );
+        if (result?.result !== 'executing') return result;
+      } catch (error) {
+        if ([401, 403].includes(error.status)) return { result: 'error', run_id: runId, error: error.message };
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return { result: 'executing', run_id: runId, reply: '任务仍在处理，可按原任务继续查询。' };
   },
 
   async waitForLampTask(unitId, taskId, timeoutMs = 25000) {
@@ -88,6 +114,8 @@ const commandBus = {
     if (result?.result === 'accepted') return '指令已发送，尚未确认完成';
     if (result?.result === 'executing') return '正在执行';
     if (result?.result === 'timeout') return '等待完成反馈超时，结果尚未确认';
+    if (result?.result === 'unknown') return '设备动作结果未知；不会自动重发';
+    if (result?.result === 'partial') return result.reply || result.response || '部分步骤未完成';
     if (result?.error) {
       try {
         const detail = JSON.parse(result.error);

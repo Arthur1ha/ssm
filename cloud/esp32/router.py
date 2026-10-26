@@ -28,6 +28,8 @@ class AutonomyRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     text: str
+    run_id: str | None = None
+    resume: bool = False
 
 
 class SemanticTaskRequest(BaseModel):
@@ -68,7 +70,8 @@ async def esp32_chat(unit_id: str, req: ChatRequest, _session: dict = Depends(re
     """设备页对话直达灯智能体：控灯、调教或闲聊。"""
     _require_led_unit(unit_id)
     from cloud.api.intents import execute_lamp_chat
-    return await execute_lamp_chat(unit_id, req.text.strip(), _session)
+    return await execute_lamp_chat(unit_id, req.text.strip(), _session,
+                                   run_id=req.run_id, resume=req.resume)
 
 
 @router.get("/{unit_id}/memory")
@@ -117,10 +120,6 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
     goal = str(req.goal or req.params.get("goal") or "").strip()
     if not goal or len(goal) > 1000:
         raise HTTPException(status_code=400, detail="invalid lighting goal")
-    from cloud.api.intents import _has_sequential_clauses
-    if _has_sequential_clauses(goal):
-        return {"result": "needs_clarification", "task_id": req.task_id,
-                "error": "multiple_ordered_actions"}
     if context.origin_kind != "user_delegated" or context.expires_at <= time.time():
         raise HTTPException(status_code=403, detail="a live delegated session is required")
     from cloud.cards.registry import get_registry
@@ -143,8 +142,8 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
             from cloud.esp32.tasks import update_progress
             update_progress(req.task_id, physical_id)
             return physical_id
-        result = agent.run_user_text(goal, unit_id, replace(context, persist=False),
-                                     dispatch, lighting_only=True)
+        result = agent.run_user_loop(goal, unit_id, replace(context, persist=False),
+                                     dispatch, lighting_only=True, run_id=req.task_id)
         return {**result, "physical_task_id": result.get("task_id")}
     # FastAPI runs synchronous route handlers in its worker pool. Waiting for
     # the result here therefore leaves the API event loop free for MQTT/SSE.

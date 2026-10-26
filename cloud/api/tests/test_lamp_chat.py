@@ -1,6 +1,7 @@
 """Device chat boundaries that prevent a long wait or partial physical action."""
 
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -9,20 +10,20 @@ from cloud.api import intents
 from cloud.esp32 import agent as esp32_agent
 
 
-@pytest.mark.asyncio
-async def test_sequential_device_request_does_not_dispatch_partial_action(monkeypatch):
-    lamp = MagicMock()
-    monkeypatch.setattr(intents, "_configured_card", lambda _unit_id: {"unit_id": "esp32_desk_led"})
-    monkeypatch.setattr(esp32_agent, "get_agent", lambda: lamp)
-    session = {"session_id": "test-session", "actor": "admin"}
+def test_sequential_device_request_reaches_result_driven_loop(monkeypatch):
+    call = MagicMock(return_value={"result": "needs_clarification", "reply": "移动几秒？",
+                                   "run_id": "run-1"})
+    lamp = SimpleNamespace(run_user_loop=call)
+    session = {"session_id": "test-session", "actor": "admin", "expires_at": 9999999999}
 
-    result = await intents.execute_lamp_chat(
+    result = intents._run_lamp_chat(
+        lamp,
         "esp32_desk_led", "把灯关掉，然后让机器狗后退几步", session,
     )
 
     assert result["result"] == "needs_clarification"
-    lamp.handle_user_text.assert_not_called()
-    lamp.mark_user_command.assert_not_called()
+    assert result["run_id"] == "run-1"
+    call.assert_called_once()
 
 
 def test_lamp_llm_does_not_retry_past_chat_deadline(monkeypatch):

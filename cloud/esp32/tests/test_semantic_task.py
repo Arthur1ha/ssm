@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import time
+from types import SimpleNamespace
 
 from cloud.esp32 import agent as agent_mod
 from cloud.esp32 import router as lamp_router
@@ -16,11 +17,11 @@ def test_semantic_task_waits_for_physical_result_and_reuses_id(monkeypatch, tmp_
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "semantic_tasks.sqlite3")
     tasks._tasks.clear()
     state = ESP32State()
-    agent = agent_mod.ESP32Agent(state, llm=object())
-    agent.handle_user_text = lambda text, **kwargs: {
-        "type": "act", "action": "SET_STATE", "params": {"state": "ON"},
-        "reply": "开好了。",
-    }
+    from cloud.esp32 import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+    model = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(
+        content='{"tool":"set_led_state","params":{"state":"ON"}}', tool_calls=[]))
+    agent = agent_mod.ESP32Agent(state, llm=model)
     monkeypatch.setattr(agent_mod, "get_agent", lambda: agent)
     monkeypatch.setattr(lamp_router._esp32_agent, "get_agent", lambda: agent)
     from cloud.cards import registry as card_registry

@@ -86,6 +86,10 @@ def parse_trusted_intent(
     text = unsigned.get("text")
     if not isinstance(text, str) or not text.strip():
         raise TrustedContextError("missing intent text")
+    resume_run_id = unsigned.get("resume_run_id")
+    if resume_run_id is not None and (not isinstance(resume_run_id, str)
+                                      or _REQUEST_ID.fullmatch(resume_run_id) is None):
+        raise TrustedContextError("invalid resume_run_id")
 
     return {
         "session_id": session_id,
@@ -99,6 +103,7 @@ def parse_trusted_intent(
         "intent_hint": unsigned.get("intent_hint", ""),
         "device_hint": unsigned.get("device_hint", ""),
         "event_id": unsigned.get("event_id", ""),
+        "resume_run_id": resume_run_id,
     }
 
 

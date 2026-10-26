@@ -26,8 +26,9 @@ import paho.mqtt.client as mqtt_lib
 from shared_state import SharedState
 from cloud.cards.registry import CardRegistry
 import tools as agent_tools
-from graph import (build_orchestrator, cancel_peer_coordination,
-                   clear_peer_coordination, clear_session_context, run_peer_coordination)
+from graph import (cancel_peer_coordination, clear_peer_coordination,
+                   clear_session_context)
+from cloud.orchestrator.multitask import run_intent_loop, run_peer_loop
 from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message
 from trusted_context import (
     TrustedContextError,
@@ -67,8 +68,9 @@ def _run_intent(session_id: str, graph_input: dict) -> None:
         logger.info("[Main] discarded stale intent session=%s", session_id)
         return
     try:
-        orchestrator.invoke(graph_input)
-        logger.info("[Main] ── 编排图完成 session=%s ──", session_id)
+        run_intent_loop(graph_input, resume=bool(graph_input.get("resume_run_id")),
+                        supplemental=graph_input.get("user_msg", "") if graph_input.get("resume_run_id") else "")
+        logger.info("[Main] ── 逐步任务完成 session=%s ──", session_id)
     except Exception as exc:
         logger.exception("[Main] 编排图异常 session=%s: %s", session_id, exc)
 
@@ -90,7 +92,7 @@ def _run_peer_request(client, trusted: dict) -> None:
         if trusted.get("expires_at", 0) <= time.time():
             result = {"result": "timeout", "error": "request_expired"}
         else:
-            result = run_peer_coordination(orchestrator, trusted)
+            result = run_peer_loop(trusted)
             if not isinstance(result, dict) or result.get("result") not in {
                 "ok", "blocked", "error", "timeout", "cancelled", "accepted", "executing"
             }:
@@ -325,7 +327,6 @@ _presence_client.reconnect_delay_set(min_delay=5, max_delay=30)
 _presence_client.on_connect = _on_presence_connect
 
 agent_tools.init(state, mqtt_client, registry)
-orchestrator = build_orchestrator()
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
 mqtt_client.loop_start()
@@ -379,6 +380,7 @@ while True:
                     "expires_at":   event["payload"].get("expires_at"),
                     "user_msg":     event["payload"]["user_msg"],
                     "event_id":     event["payload"].get("event_id", ""),
+                    "resume_run_id": event["payload"].get("resume_run_id"),
                     "requirements": [],
                     "route":         event["payload"].get("intent_hint", ""),
                     "planned_tasks": [],

@@ -65,13 +65,15 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 
 设备页按钮收到的物理 `task_id` 可由同一浏览器会话查询 `GET /api/commands/{unit_id}/tasks/{task_id}`；无回执时返回 `executing`，实际 `ssm/result` 到达后返回最终状态。会话结束后任务查询权限随之撤销，查询绝不重发 MQTT 任务。
 
+多步对话使用一个 `run_id` 关联多个 `step_id`。灯设备页可按原 ID 查询 `GET /api/commands/{unit_id}/runs/{run_id}`，追问后再次发送 `chat` 并携带 `run_id` 与 `resume=true`；Go2 用原 `task_id` 查询 `/api/commands/go2/tasks/{task_id}`，补充信息走 `/api/commands/go2/tasks/{task_id}/resume`。主聊天通过 `ssm/feedback/{session_id}` 的 `question` 事件取得 `run_id`，下一次 `/api/intents` 携带 `resume_run_id`。这些查询与续接都归属原会话，重启后未确认的物理步骤不会自动重发。
+
 ### 编排器
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
 | `ssm/intent/{session_id}` | FastAPI（内部） | `{"text":"...","context":{...},"_mqtt_auth":{"alg":"HMAC-SHA256","timestamp":...,"nonce":"...","signature":"..."}}`；签名绑定完整 topic 与规范化 payload，编排器校验时间窗并拒绝 nonce 重放 |
 | `ssm/session/{session_id}/ended` | FastAPI（内部） | `{"context":{...},"reason":"logout\|expired\|revoked","_mqtt_auth":{...}}`；与 intent 使用相同 HMAC 验证，触发会话历史、任务结果与 Go2 资源清理 |
-| `ssm/feedback/{session_id}` | Cloud | `{"session_id":"...","stage":"planning\|ack\|executing\|done\|partial\|failed\|denied","text":"...","status":"ok\|denied","ts":...}`；API/SSE 只向同一会话转发 |
+| `ssm/feedback/{session_id}` | Cloud | `{"session_id":"...","stage":"planning\|ack\|executing\|step\|question\|done\|partial\|failed\|denied","text":"...","status":"ok\|accepted\|executing\|blocked\|rejected\|timeout\|cancelled\|error\|needs_clarification","run_id":"...","step_id":"...","step_number":1,"tool":"...","result":{},"question":"...","ts":...}`；步骤字段只在对应 stage 出现，API/SSE 只向同一会话转发。`step` 的 `result` 是实际工具结果，`question` 暂停原 `run_id`。 |
 | `ssm/decision/active` | Cloud | `"true"` 或 `"false"` |
 | `ssm/rules/{device_id}` | Cloud（retained）| `[{"id":"...","en":true,"trig":{...},"act":{...}}]` |
 

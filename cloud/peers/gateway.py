@@ -131,6 +131,14 @@ def _skill_policy(initiator: str, target: str, skill_id: str, params: dict, orig
             raise PermissionError("unsupported coordination skill")
         return
     if target == "go2":
+        if skill_id == "go2_move" and origin == "user_delegated":
+            duration = params.get("duration")
+            speed = params.get("speed", 0.3)
+            if (params.get("direction") in {"forward", "backward", "left", "right", "turn_left", "turn_right"}
+                    and type(duration) in {int, float} and 0 < duration <= 10
+                    and type(speed) in {int, float} and 0 < speed <= 0.5):
+                return
+            raise PermissionError("Go2 peer movement requires bounded direction, duration and speed")
         allowed = {"Hello"} if origin == "agent_autonomous" else {"Hello", "Dance1", "Dance2"}
         if skill_id != "go2_sport" or params.get("cmd") not in allowed:
             raise PermissionError("Go2 peer motion is outside the permitted skill set")

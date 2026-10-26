@@ -8,6 +8,7 @@ function useSendIntent() {
   const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState('');
   const activeRef = useRef(null);
+  const pendingRunRef = useRef(null);
 
   const finish = useCallback(() => {
     const active = activeRef.current;
@@ -45,6 +46,17 @@ function useSendIntent() {
         resetTimeout();
         callbacks.onMessage?.(payload.text);
         setThinkingText(pick(EXECUTING_TEXTS));
+      } else if (stage === 'step') {
+        resetTimeout();
+        const status = payload.result?.result || payload.status;
+        const labels = { ok: '已完成', accepted: '已发送，待确认', executing: '执行中',
+          blocked: '未执行', rejected: '未执行', timeout: '结果未确认',
+          cancelled: '已取消', error: '执行失败' };
+        callbacks.onMessage?.(`第 ${payload.step_number || '?'} 步：${labels[status] || '状态已更新'}`);
+      } else if (stage === 'question') {
+        pendingRunRef.current = payload.run_id || null;
+        finish();
+        callbacks.onMessage?.(payload.question || payload.text || '请补充信息');
       } else if (stage === 'pending_rule' && payload.rule) {
         finish();
         callbacks.onPendingRule?.(payload.rule);
@@ -54,6 +66,7 @@ function useSendIntent() {
         // dedicated flow instead of treating a chat event as consent.
         callbacks.onMessage?.(payload.text || '当前空间成员已经显示在设备列表中。');
       } else if (['done', 'partial', 'failed', 'denied'].includes(stage)) {
+        pendingRunRef.current = null;
         finish();
         callbacks.onMessage?.(payload.text || (['failed', 'denied'].includes(stage) ? '这次操作没有完成' : '已处理'));
       }
@@ -69,6 +82,7 @@ function useSendIntent() {
     activeRef.current = { callbacks, timeoutId: null };
     resetTimeout(60000);
     const body = { text: text.trim() };
+    if (pendingRunRef.current) body.resume_run_id = pendingRunRef.current;
     if (callbacks.deviceHint) body.device_hint = callbacks.deviceHint;
     if (callbacks.intentHint) body.intent_hint = callbacks.intentHint;
     try {

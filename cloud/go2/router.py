@@ -440,7 +440,7 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 
 @router.post("/chat")
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
-    from cloud.go2.agent import run_agent
+    from cloud.go2.multitask import run_go2_loop
     context = _normalize_context(context)
     _cancel_pending_peer_requests(context)
     if req.task_id is not None:
@@ -459,9 +459,10 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         async def run_task():
             drive.user_interrupt = True
             try:
-                return await run_agent(
+                return await run_go2_loop(
                     context.session_id, req.message, skill_id=req.skill_id,
-                    params=req.params, context=context,
+                    params=req.params, context=context, run_id=req.task_id,
+                    deadline=deadline,
                 )
             finally:
                 drive.user_interrupt = False
@@ -478,7 +479,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         return JSONResponse(result, status_code=202) if result.get("result") == "executing" else result
     drive.user_interrupt = True
     task = asyncio.create_task(
-        run_agent(
+        run_go2_loop(
             context.session_id, req.message, skill_id=req.skill_id,
             params=req.params, context=context,
         ),
@@ -494,12 +495,25 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
 @router.get("/tasks/{task_id}")
 async def go2_task_status(task_id: str, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.tasks import chat_tasks
+    from cloud.go2.multitask import get_store, _result
     context = _normalize_context(context)
     record = chat_tasks.get(task_id, context.session_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        run = get_store().get(task_id, context.session_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        return _result(run)
     result = record.snapshot()
     return JSONResponse(result, status_code=202) if result.get("result") == "executing" else result
+
+
+@router.post("/tasks/{task_id}/resume")
+async def go2_task_resume(task_id: str, req: ChatRequest,
+                          context: ExecutionContext = Depends(require_service_context)):
+    from cloud.go2.multitask import run_go2_loop
+    context = _normalize_context(context)
+    return await run_go2_loop(context.session_id, req.message, context=context,
+                              run_id=task_id, resume=True)
 
 
 @router.post("/tasks/{task_id}/cancel")
@@ -516,7 +530,7 @@ async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(requ
 @router.post("/chat/stream")
 async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
-    from cloud.go2.agent import run_agent_stream
+    from cloud.go2.multitask import run_go2_loop
 
     context = _normalize_context(context)
     _cancel_pending_peer_requests(context)
@@ -527,9 +541,30 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
         if stream_task is not None:
             session_tasks.track(context.session_id, stream_task)
         try:
-            async for event in run_agent_stream(context.session_id, req.message, context=context):
+            queue = asyncio.Queue()
+            task = asyncio.create_task(run_go2_loop(
+                context.session_id, req.message, context=context,
+                run_id=req.task_id, deadline=req.deadline,
+                on_step=lambda step: queue.put_nowait({"type": "tool_done", "tool": step["tool"],
+                                                       "step_id": step["step_id"], "result": step["result"]}),
+            ))
+            yield f"data: {json.dumps({'type': 'thinking', 'text': '正在理解指令…'}, ensure_ascii=False)}\n\n"
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            result = await task
+            yield f"data: {json.dumps({'type': 'response', 'text': result.get('response', '')}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', **result}, ensure_ascii=False)}\n\n"
         finally:
+            if 'task' in locals() and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             drive.user_interrupt = False
 
     return StreamingResponse(

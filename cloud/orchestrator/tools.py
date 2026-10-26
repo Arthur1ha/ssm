@@ -174,6 +174,42 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     return {"result": "executing", "task_id": task_id}
 
 
+def do_http_task_status(endpoint: str, task_id: str, context: dict, timeout: float = 5.0) -> dict:
+    """Query an already dispatched task by its original ID; never POST it again."""
+    if endpoint == "/api/go2/chat":
+        path = "/api/go2/tasks/" + quote(task_id, safe="")
+    elif endpoint.startswith("/api/internal/esp32/") and endpoint.endswith("/agent/tasks"):
+        path = endpoint + "/" + quote(task_id, safe="")
+    else:
+        return {"result": "rejected", "error": "task_status_unavailable"}
+    token = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
+    if len(token) < 16:
+        return {"result": "error", "error": "service_token_unavailable"}
+    headers = {
+        "X-SSM-Service-Token": token,
+        "X-SSM-Session-Id": str(context.get("session_id", "")),
+        "X-SSM-Actor": str(context.get("actor", "")),
+        "X-SSM-Persist": "true" if context.get("persist") is True else "false",
+        "X-SSM-Space-Id": str(context.get("space_id", "main")),
+        "X-SSM-Origin-Kind": str(context.get("origin_kind") or "user_delegated"),
+        "X-SSM-Expires-At": str(int(context.get("expires_at") or 0)),
+    }
+    try:
+        response = requests.get(f"{GO2_API_BASE}{path}", headers=headers,
+                                timeout=timeout, allow_redirects=False,
+                                proxies={"http": None, "https": None})
+        if response.is_redirect:
+            return {"result": "error", "error": "redirect_denied"}
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.Timeout:
+        return {"result": "timeout", "task_id": task_id}
+    except Exception:
+        return {"result": "error", "task_id": task_id, "error": "task_status_failed"}
+    return data if isinstance(data, dict) and isinstance(data.get("result"), str) else {
+        "result": "error", "task_id": task_id, "error": "invalid_response"}
+
+
 def do_cleanup_go2_session(session_id: str, actor: str = "visitor") -> dict:
     """Tell Go2 to release only resources owned by one ended session."""
     endpoint = f"/api/go2/sessions/{session_id}/cleanup"
