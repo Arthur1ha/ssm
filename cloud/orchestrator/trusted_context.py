@@ -90,6 +90,10 @@ def parse_trusted_intent(
     if resume_run_id is not None and (not isinstance(resume_run_id, str)
                                       or _REQUEST_ID.fullmatch(resume_run_id) is None):
         raise TrustedContextError("invalid resume_run_id")
+    trace_id = unsigned.get("trace_id")
+    if trace_id is not None and (not isinstance(trace_id, str)
+                                 or re.fullmatch(r"tr_[A-Fa-f0-9]{32}", trace_id) is None):
+        raise TrustedContextError("invalid trace_id")
 
     return {
         "session_id": session_id,
@@ -103,6 +107,7 @@ def parse_trusted_intent(
         "intent_hint": unsigned.get("intent_hint", ""),
         "device_hint": unsigned.get("device_hint", ""),
         "event_id": unsigned.get("event_id", ""),
+        "trace_id": trace_id or unsigned.get("event_id", ""),
         "resume_run_id": resume_run_id,
     }
 
@@ -209,6 +214,14 @@ def parse_trusted_peer_request(
             or expires_at <= current_time or expires_at <= issued_at
             or expires_at > current_time + 120):
         raise TrustedContextError("invalid expires_at")
+    trace_id = unsigned.get("trace_id")
+    parent_run_id = unsigned.get("parent_run_id")
+    if trace_id is not None and (not isinstance(trace_id, str)
+                                 or re.fullmatch(r"tr_[A-Fa-f0-9]{32}", trace_id) is None):
+        raise TrustedContextError("invalid trace_id")
+    if parent_run_id is not None and (not isinstance(parent_run_id, str)
+                                      or _REQUEST_ID.fullmatch(parent_run_id) is None):
+        raise TrustedContextError("invalid parent_run_id")
     return {
         "request_id": topic_request_id,
         "initiator_unit_id": initiator,
@@ -222,6 +235,8 @@ def parse_trusted_peer_request(
         "space_id": MAIN_SPACE_ID,
         "issued_at": float(issued_at),
         "expires_at": float(expires_at),
+        "trace_id": trace_id,
+        "parent_run_id": parent_run_id,
     }
 
 

@@ -7,6 +7,7 @@ from cloud.esp32.agentcore.tools.registry import (
     PHYSICAL_ACTIONS, normalize_brightness, valid_auxiliary_params, valid_lamp_params,
 )
 from cloud.space.execution import ExecutionContext
+from cloud.observability import emit_agent_event
 
 _physical_lock = threading.Lock()
 
@@ -44,6 +45,9 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
         if not wait:
             return {"result": "accepted", "task_id": task_id, "action": action}
         outcome = state.wait_task_result(task_id, timeout=PHYSICAL_ACTIONS[action]["timeout"])
+        emit_agent_event("device.result", task_id=task_id, target_unit_id=unit_id,
+                         action=action, status=outcome.get("result", "error"),
+                         result=outcome, completion_basis="edge_result")
         return {"result": outcome.get("result", "error"), "task_id": task_id,
                 "action": action, "error": outcome.get("error") or outcome.get("reason")}
 

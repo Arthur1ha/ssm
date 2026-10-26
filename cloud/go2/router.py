@@ -9,7 +9,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
+import uuid
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -414,6 +416,8 @@ class ChatRequest(BaseModel):
     task_id: str | None = None
     deadline: float | None = None
     sync_window_s: float = 8.0
+    trace_id: str | None = None
+    parent_run_id: str | None = None
 
 
 async def _stop_task_motion(context: ExecutionContext) -> dict:
@@ -442,6 +446,11 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.multitask import run_go2_loop
     context = _normalize_context(context)
+    if req.trace_id is not None and not re.fullmatch(r"tr_[A-Fa-f0-9]{32}", req.trace_id):
+        raise HTTPException(status_code=400, detail="invalid trace_id")
+    if req.parent_run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", req.parent_run_id):
+        raise HTTPException(status_code=400, detail="invalid parent_run_id")
+    trace_id = req.trace_id or "tr_" + uuid.uuid4().hex
     _cancel_pending_peer_requests(context)
     if req.task_id is not None:
         from cloud.go2.tasks import chat_tasks
@@ -462,7 +471,8 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
                 return await run_go2_loop(
                     context.session_id, req.message, skill_id=req.skill_id,
                     params=req.params, context=context, run_id=req.task_id,
-                    deadline=deadline,
+                    deadline=deadline, trace_id=trace_id,
+                    parent_run_id=req.parent_run_id,
                 )
             finally:
                 drive.user_interrupt = False
@@ -471,6 +481,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
             record = chat_tasks.start(
                 req.task_id, context.session_id, fingerprint, deadline, run_task,
                 on_timeout=lambda: _stop_task_motion(context),
+                trace_id=trace_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -482,6 +493,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         run_go2_loop(
             context.session_id, req.message, skill_id=req.skill_id,
             params=req.params, context=context,
+            trace_id=trace_id, parent_run_id=req.parent_run_id,
         ),
         name=f"go2-chat-{context.session_id}",
     )
@@ -545,6 +557,7 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
             task = asyncio.create_task(run_go2_loop(
                 context.session_id, req.message, context=context,
                 run_id=req.task_id, deadline=req.deadline,
+                trace_id=req.trace_id, parent_run_id=req.parent_run_id,
                 on_step=lambda step: queue.put_nowait({"type": "tool_done", "tool": step["tool"],
                                                        "step_id": step["step_id"], "result": step["result"]}),
             ))

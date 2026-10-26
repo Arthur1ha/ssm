@@ -63,6 +63,7 @@ function App({ session, logout, refreshSession }) {
     appendActivity({ type: 'user', text: t });
     send(t, {
       onMessage:     msg  => appendActivity({ type: 'ai', agent: 'orchestrator', text: msg }),
+      onTraceId: traceId => appendActivity({ type: 'trace', traceId }),
       onPendingRule: rule => {
         if (session.actor === 'admin') setPendingRule(rule);
         else appendActivity({ type: 'ai', agent: 'orchestrator', text: '临时体验不会保存长期规则。你仍可以直接控制现有设备。' });

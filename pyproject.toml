@@ -18,6 +18,7 @@ dependencies = [
     "pillow>=12.2.0",
     "opencv-python-headless>=4.10.0",
     "tencentcloud-sdk-python>=3.1.188",
+    "structlog>=25.0.0",
 ]
 
 [dependency-groups]

@@ -1,5 +1,6 @@
 """soul.py — 性格存储（personality）与特质演化（soul evolution）。"""
 import json
+import hashlib
 import logging
 from datetime import date, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from cloud.go2.agentcore.tools.tools import get_text_llm
 from cloud.go2.agentcore.memory.daily_summary import get_summary
 from cloud.go2.paths import SOUL_DIR
 from cloud.go2.execution import can_persist, require_persist
+from cloud.observability import emit_agent_event
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +36,32 @@ _DEFAULT_TRAITS: dict = {
 
 # ── personality ───────────────────────────────────────────────────
 
-def get_system_prompt() -> str:
+def load_system_prompt() -> tuple[str, str, str | None]:
     """Return the mutable personality expression, not runtime safety rules."""
     try:
-        return json.loads(_PERSONALITY_FILE.read_text(encoding="utf-8"))["prompt"]
-    except Exception:
-        return _DEFAULT_PERSONALITY
+        text = json.loads(_PERSONALITY_FILE.read_text(encoding="utf-8"))["prompt"]
+        if isinstance(text, str) and text.strip():
+            return text, "custom", None
+        return _DEFAULT_PERSONALITY, "default", "empty_or_invalid_prompt"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _DEFAULT_PERSONALITY, "default", type(exc).__name__
+
+
+def get_system_prompt() -> str:
+    return load_system_prompt()[0]
 
 
 def set_personality(prompt: str) -> None:
     require_persist("change personality")
+    previous = get_system_prompt()
     _PERSONALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
     _PERSONALITY_FILE.write_text(
         json.dumps({"prompt": prompt}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    emit_agent_event("persona.changed", agent_id="go2", operator_kind="admin",
+                     before_hash=hashlib.sha256(previous.encode()).hexdigest(),
+                     after_hash=hashlib.sha256(prompt.encode()).hexdigest())
 
 
 # ── traits ────────────────────────────────────────────────────────

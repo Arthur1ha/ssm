@@ -26,6 +26,12 @@ test_*.py
 
 # 运行时数据，不纳入版本控制
 *.db
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
 cloud/go2/agentcore/personality.json
 cloud/go2/agentcore/traits.json
 
@@ -76,3 +82,6 @@ cloud/esp32/tests/conftest.py
 cloud/orchestrator/tests/*
 !cloud/orchestrator/tests/test_peer_coordination.py
 !cloud/orchestrator/tests/test_tools_context.py
+!cloud/observability/tests/
+!cloud/observability/tests/test_events.py
+!cloud/observability/tests/test_loop_trace.py

@@ -1,11 +1,13 @@
 """Lamp expression; permissions remain in the executor, not here."""
 
 import json
+import hashlib
 import os
 import tempfile
 
 from cloud.esp32.paths import PERSONALITY_FILE
 from cloud.space.execution import ExecutionContext
+from cloud.observability import emit_agent_event
 
 AGENT_PERSONA = """
 你是一个桌面空间智能体，性格设定如下：
@@ -18,12 +20,18 @@ AGENT_PERSONA = """
 """
 
 
-def get_personality() -> str:
+def load_personality() -> tuple[str, str, str | None]:
     try:
         text = json.loads(PERSONALITY_FILE.read_text(encoding="utf-8"))["prompt"]
-        return text if isinstance(text, str) and text.strip() else AGENT_PERSONA
-    except (OSError, ValueError, KeyError, TypeError):
-        return AGENT_PERSONA
+        if isinstance(text, str) and text.strip():
+            return text, "custom", None
+        return AGENT_PERSONA, "default", "empty_or_invalid_prompt"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return AGENT_PERSONA, "default", type(exc).__name__
+
+
+def get_personality() -> str:
+    return load_personality()[0]
 
 
 def set_personality(prompt: str, context: ExecutionContext) -> None:
@@ -33,6 +41,7 @@ def set_personality(prompt: str, context: ExecutionContext) -> None:
     prompt = prompt.strip()
     if not 1 <= len(prompt) <= 2000:
         raise ValueError("personality must contain 1–2000 characters")
+    previous = get_personality()
     PERSONALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".personality-", suffix=".json",
                                               dir=PERSONALITY_FILE.parent)
@@ -42,6 +51,10 @@ def set_personality(prompt: str, context: ExecutionContext) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, PERSONALITY_FILE)
+        emit_agent_event("persona.changed", agent_id="esp32_desk_led",
+                         operator_kind=context.actor,
+                         before_hash=hashlib.sha256(previous.encode()).hexdigest(),
+                         after_hash=hashlib.sha256(prompt.encode()).hexdigest())
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

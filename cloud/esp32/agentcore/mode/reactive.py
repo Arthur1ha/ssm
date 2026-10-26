@@ -6,12 +6,15 @@ import queue
 import re
 import threading
 import time
+import uuid
+import hashlib
 
 from langchain_core.messages import HumanMessage
 
 from cloud.esp32 import tools as _tools
-from cloud.esp32.agentcore.soul import get_personality
+from cloud.esp32.agentcore.soul import load_personality
 from cloud.esp32.agentcore.perception.sensors import sense as sense_sensors
+from cloud.observability import bind_context, emit_agent_event
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +96,13 @@ class ReactiveMind:
             peer_view = _tools_mod.list_peers(self._find_led_unit())
         except Exception:
             peer_view = []
+        persona, persona_source, persona_reason = load_personality()
+        emit_agent_event("persona.loaded", source=persona_source,
+                         fallback_reason=persona_reason,
+                         content_hash=hashlib.sha256(persona.encode()).hexdigest(),
+                         prompt_trimmed=False)
         prompt = (
-            f"{get_personality()}\n"
+            f"{persona}\n"
             "你负责控制桌面 LED 灯，根据当前传感器观测自主决定是否采取行动。\n\n"
             f"当前观测：{json.dumps(sense_data, ensure_ascii=False)}\n"
             "字段说明：light_level（DARK/DIM/NORMAL/BRIGHT）、light_lux（照度，越小越暗）、"
@@ -110,7 +118,13 @@ class ReactiveMind:
         )
 
         try:
+            emit_agent_event("model.request", turn=1, input=prompt,
+                             model=str(getattr(self._llm, "model_name", "unknown")),
+                             template_version="lamp-reactive-v1")
+            started = time.monotonic()
             resp = self._llm.invoke([HumanMessage(content=prompt)])
+            emit_agent_event("model.response", turn=1, output=getattr(resp, "content", ""),
+                             duration_ms=round((time.monotonic() - started) * 1000))
             content = resp.content.strip()
             content = re.sub(r"```(?:json)?\n?", "", content).strip().rstrip("`").strip()
             idx_s, idx_e = content.find("["), content.rfind("]")
@@ -119,9 +133,13 @@ class ReactiveMind:
             tool_calls = json.loads(content[idx_s:idx_e + 1])
             if not isinstance(tool_calls, list):
                 raise ValueError("expected list")
+            emit_agent_event("model.decision", turn=1, decision=tool_calls,
+                             decision_source="model")
             return [c for c in tool_calls if isinstance(c, dict) and "tool" in c]
         except Exception as e:
             logger.warning("reason parse error: %s", e)
+            emit_agent_event("model.error", turn=1, stage="reactive_reason",
+                             error=type(e).__name__, message=str(e))
             return None
 
     def _find_led_unit(self) -> str:
@@ -144,6 +162,7 @@ class ReactiveMind:
         """
         from cloud.esp32 import tools as _tools_mod
         from cloud.esp32.agentcore.tools.registry import TOOL_DECLARATIONS, valid_lamp_params
+        self._last_reactive_tool_result = {"result": "blocked", "error": "reactive_preflight"}
         now = time.time()
         if not isinstance(params, dict) or tool_name not in TOOL_DECLARATIONS:
             return False
@@ -178,6 +197,7 @@ class ReactiveMind:
                                              "main", "agent_autonomous", 0),
                     mode_available=self._should_act(),
                 )
+                self._last_reactive_tool_result = result
                 if result.get("result") not in {"ok", "accepted"}:
                     logger.warning("auxiliary tool did not complete: %s", result)
                     return False
@@ -207,6 +227,7 @@ class ReactiveMind:
                         fn(unit_id=_uid, **arguments),
                     source="lamp_reactive", preflight=preflight,
                 )
+                self._last_reactive_tool_result = result
                 if result.get("result") != "ok":
                     logger.warning("reactive command did not complete: %s", result)
                     return False
@@ -218,6 +239,7 @@ class ReactiveMind:
             return True
         except Exception as e:
             logger.warning("tool %s failed: %s", tool_name, e)
+            self._last_reactive_tool_result = {"result": "error", "error": type(e).__name__}
             return False
 
     def _execute(self, tool_calls: list, led_unit: str):
@@ -230,7 +252,15 @@ class ReactiveMind:
         for call in tool_calls[:4]:
             if not isinstance(call, dict):
                 break
+            emit_agent_event("tool.dispatch", tool=call.get("tool"),
+                             params=call.get("params", {}), dispatch_status="pending")
+            started = time.monotonic()
             ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_unit)
+            outcome = getattr(self, "_last_reactive_tool_result", {"result": "unknown"})
+            emit_agent_event("tool.result", tool=call.get("tool"),
+                             status=outcome.get("result", "unknown"), result=outcome,
+                             task_id=outcome.get("task_id"), request_id=outcome.get("request_id"),
+                             duration_ms=round((time.monotonic() - started) * 1000))
             if not ok:
                 break  # do not narrate success or run dependent actions after a failed command
             completed.append(call.get("tool", ""))
@@ -345,21 +375,30 @@ class ReactiveMind:
                     continue
 
                 self._last_reason_ts = time.time()
-                tool_calls = self._reason(sense)
-                if tool_calls is None:
-                    continue
-                if not self._should_act() or not self._device_online():
-                    # A user, mode change or offline status may have arrived
-                    # while model inference was in progress. Keep the context
-                    # eligible for reassessment after the gate opens.
-                    continue
-                self._last_reason_sig = sig   # 这个情境已评估过，下次相同则跳过
-
+                run_id = uuid.uuid4().hex
+                trace_id = "tr_" + uuid.uuid4().hex
+                with bind_context(trace_id=trace_id, run_id=run_id,
+                                  agent_id=self._find_led_unit(),
+                                  origin_kind="agent_autonomous"):
+                    emit_agent_event("run.started", mode=self._autonomy_mode,
+                                     input=sense, triggered_by_event=triggered_by_event)
+                    tool_calls = self._reason(sense)
+                    if tool_calls is None:
+                        emit_agent_event("run.finished", status="error",
+                                         reason="reason_failed")
+                        continue
+                    if not self._should_act() or not self._device_online():
+                        emit_agent_event("run.paused", reason="autonomy_gate_changed",
+                                         mode=self._autonomy_mode,
+                                         user_hold=self._in_user_hold())
+                        continue
+                    self._last_reason_sig = sig
+                    completed = (self._execute(tool_calls, self._find_led_unit())
+                                 if tool_calls and self._should_act() else [])
+                    emit_agent_event("run.finished", status="ok" if len(completed) == len(tool_calls) else "partial",
+                                     selected_tools=[call.get("tool") for call in tool_calls],
+                                     completed_tools=completed)
                 logger.info("tool_calls (%d): %s", len(tool_calls), json.dumps(tool_calls, ensure_ascii=False))
-
-                # Mode or user hold can change while the LLM is reasoning.
-                completed = (self._execute(tool_calls, self._find_led_unit())
-                             if tool_calls and self._should_act() else [])
                 self._belief_history.append({
                     "ts": time.time(),
                     "context": f"light={sense['light_level']} sound={sense['sound_detected']} led={sense['led_state']}",

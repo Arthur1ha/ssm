@@ -28,6 +28,7 @@ class TriggerMap:
         self._blink_config = None
         self._last_led_snapshot = None
         self._recent_results = []  # bounded QoS-1 duplicate suppression
+        self._task_correlation = {}  # only active task IDs; terminal payload caches IDs
 
         self._led_task_pfx = "ssm/task/{}/".format(UNIT_LED)
         self._rules_topic  = "ssm/rules/{}".format(DEVICE_ID)
@@ -193,6 +194,14 @@ class TriggerMap:
             self._publish_result(task_id, self._pending_blink[1], "executing")
             return
         session_id = p.get("session_id", "") if isinstance(p, dict) else ""
+        correlation = {}
+        if isinstance(p, dict):
+            for field in ("trace_id", "run_id", "request_id"):
+                value = p.get(field)
+                if isinstance(value, str) and 0 < len(value) <= 160:
+                    correlation[field] = value
+        if correlation:
+            self._task_correlation[task_id] = correlation
         action     = p.get("action") if isinstance(p, dict) else None
         params     = p.get("params", {}) if isinstance(p, dict) else {}
         try:
@@ -217,7 +226,9 @@ class TriggerMap:
             "result": result, "error": error,
             "ism_state": self._ism_led.state, "ts": time.time(),
         }
+        payload.update(self._task_correlation.get(task_id, {}))
         if result != "executing":
+            self._task_correlation.pop(task_id, None)
             self._recent_results.append(payload)
             if len(self._recent_results) > 16:
                 self._recent_results.pop(0)

@@ -5,9 +5,10 @@
 # make ps / logs     查看进程 / 日志
 
 .PHONY: broker broker-bg api api-bg orchestrator orchestrator-bg pwa pwa-bg tunnel tunnel-bg \
-        stop ps logs tunnel-url trace go2-logs go2-state go2-logs-window
+        stop ps logs rotate-logs tunnel-url trace trace-task task-trace errors tmux-windows go2-logs go2-state go2-logs-window
 
 SSM_DIR     := $(CURDIR)
+export ID
 LOG_DIR     := $(SSM_DIR)/logs
 BROKER_CONF := $(LOG_DIR)/mosquitto.conf
 PUBLIC_URL  := https://ssm.eliottxu.top
@@ -97,12 +98,29 @@ ps:
 	@pgrep -a -f "mosquitto|uvicorn|app/serve\.py|cloudflared|orchestrator/main\.py" || echo "(none)"
 
 logs:
-	@echo "=== API ===" && tail -20 logs/api.log 2>/dev/null || echo "(no log)"
-	@echo "=== ESP32 ===" && tail -20 logs/esp32.log 2>/dev/null || echo "(no log)"
-	@echo "=== Go2 events / chat ===" && grep -v '\[Go2/Status\]' logs/go2.log 2>/dev/null | tail -20 || echo "(no log)"
-	@echo "=== Orchestrator ===" && tail -20 logs/orchestrator.log 2>/dev/null || echo "(no log)"
-	@echo "=== PWA ===" && tail -5 logs/pwa.log 2>/dev/null || echo "(no log)"
-	@echo "=== tunnel ===" && tail -5 logs/tunnel.log 2>/dev/null || echo "(no log)"
+	@echo "=== Latest task ==="
+	@uv run python scripts/trace_task.py --latest --limit 12 || true
+	@echo "=== Recent agent errors ==="
+	@uv run python scripts/trace_task.py --errors --limit 8 || true
+
+rotate-logs:
+	@mkdir -p $(LOG_DIR)
+	@SSM_DIR='$(SSM_DIR)' SSM_LOG_USER="$$(id -un)" SSM_LOG_GROUP="$$(id -gn)" \
+		envsubst < infra/logrotate/ssm.conf.tmpl > $(LOG_DIR)/logrotate.conf
+	@logrotate -s $(LOG_DIR)/.logrotate.state $(LOG_DIR)/logrotate.conf
+
+trace-task:
+	@if [ -z "$$ID" ]; then echo "Usage: make trace-task ID=<trace_id> [JSON=1]" >&2; exit 2; fi
+	@uv run python scripts/trace_task.py "$$ID" $(if $(filter 1 true yes,$(JSON)),--json,) $(if $(filter 1 true yes,$(FOLLOW)),--follow,)
+
+task-trace:
+	@if [ -n "$$ID" ]; then uv run python scripts/trace_task.py "$$ID" --follow; else uv run python scripts/trace_task.py --latest --follow; fi
+
+errors:
+	@uv run python scripts/trace_task.py --errors --follow
+
+tmux-windows:
+	@bash scripts/tmux_views.sh "$${ID:-latest}"
 
 tunnel-url:
 	@echo "$(PUBLIC_URL)"
@@ -116,10 +134,10 @@ trace:
 	done
 
 go2-logs:
-	@tail -F $(LOG_DIR)/go2.log | grep --line-buffered --text -v "\[Go2/Status\]"
+	@tail -F $(LOG_DIR)/api.log | grep --line-buffered --text -E 'cloud\.go2|\[Go2/' | grep --line-buffered --text -v '\[Go2/Status\]'
 
 go2-state:
-	@tail -F $(LOG_DIR)/go2.log | grep --line-buffered --text "\[Go2/Status\]"
+	@tail -F $(LOG_DIR)/api.log | grep --line-buffered --text '\[Go2/Status\]'
 
 go2-logs-window:
 	@tmux list-windows -F '#{window_name}' | grep -Fxq go2-events || tmux new-window -n go2-events 'make -C $(SSM_DIR) go2-logs'

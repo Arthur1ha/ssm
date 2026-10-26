@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -27,6 +28,7 @@ from cloud.api.policy import audit_event, ensure_go2_action, ensure_instant_acti
 from cloud.cards.registry import get_registry
 from cloud.mqtt_signing import MqttSignatureError, sign_message
 from cloud.space.registry import DEFAULT_SPACE_ID, card_device_id, get_space_registry
+from cloud.observability import current_event_context, emit_agent_event
 
 logger = logging.getLogger(__name__)
 device_chat_logger = logging.getLogger("cloud.esp32.chat")
@@ -315,10 +317,24 @@ async def create_intent(
     session: dict[str, Any] = Depends(require_csrf),
 ):
     event_id = "evt_" + uuid.uuid4().hex
+    trace_id = "tr_" + uuid.uuid4().hex
+    if req.resume_run_id:
+        from cloud.agent_runtime.store import RunStore
+        runs_dir = Path(os.getenv("SSM_ORCHESTRATOR_RUN_DIR",
+                                  str(Path(__file__).resolve().parents[1] / "orchestrator" / "data" / "runs")))
+        store = RunStore(runs_dir)
+        previous = store.get(req.resume_run_id, session["session_id"])
+        if previous is not None:
+            if previous.trace_id:
+                trace_id = previous.trace_id
+            else:
+                previous.trace_id = trace_id
+                store.save(previous)
     payload: dict[str, Any] = {
         "text": req.text,
         "context": _context(session),
         "event_id": event_id,
+        "trace_id": trace_id,
     }
     if req.intent_hint:
         payload["intent_hint"] = req.intent_hint
@@ -326,8 +342,13 @@ async def create_intent(
         payload["device_hint"] = req.device_hint
     if req.resume_run_id:
         payload["resume_run_id"] = req.resume_run_id
+    emit_agent_event("task.received", trace_id=trace_id,
+                     session_id=session["session_id"], agent_id="orchestrator",
+                     origin_kind="user_delegated", input=req.text,
+                     entry="/api/intents", event_id=event_id)
     _mqtt_publish_signed(f"ssm/intent/{session['session_id']}", payload)
-    return {"accepted": True, "event_id": event_id, "session_id": session["session_id"]}
+    return {"accepted": True, "event_id": event_id, "trace_id": trace_id,
+            "session_id": session["session_id"]}
 
 
 def _configured_card(unit_id: str) -> dict[str, Any] | None:
@@ -340,7 +361,7 @@ def _configured_card(unit_id: str) -> dict[str, Any] | None:
 
 def _dispatch_mqtt_task(
     unit_id: str, action: str, params: dict[str, Any], session: dict[str, Any],
-    *, source: str | None = None,
+    *, source: str | None = None, task_id: str | None = None,
 ) -> str:
     ensure_instant_action(action.upper())
     card = _configured_card(unit_id)
@@ -387,7 +408,9 @@ def _dispatch_mqtt_task(
             for edge in transitions
         ):
             raise HTTPException(status_code=409, detail="action is blocked in the current lamp state")
-    task_id = "task_" + uuid.uuid4().hex
+    task_id = task_id or "task_" + uuid.uuid4().hex
+    if not re.fullmatch(r"task_[A-Fa-f0-9]{32}", task_id):
+        raise ValueError("invalid_physical_task_id")
     payload = {
         "task_id": task_id,
         "session_id": session["session_id"],
@@ -398,12 +421,17 @@ def _dispatch_mqtt_task(
         "space_id": DEFAULT_SPACE_ID,
         "ts": int(time.time()),
     }
+    correlation = current_event_context()
+    payload.update({key: correlation[key] for key in ("trace_id", "run_id") if key in correlation})
     if source:
         payload["source"] = source
     owned_lamp_task = unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
     if owned_lamp_task:
         with _lamp_task_owners_lock:
             _lamp_task_owners[task_id] = (unit_id, session["session_id"])
+    emit_agent_event("device.command", task_id=task_id, target_unit_id=unit_id,
+                     action=action, params=params, transport="mqtt",
+                     status="pending_publish")
     try:
         _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
     except Exception:
@@ -603,10 +631,11 @@ async def get_lamp_chat_run(unit_id: str, run_id: str,
         raise HTTPException(status_code=400, detail="invalid run_id")
     from cloud.agent_runtime.store import RunStore
     from cloud.esp32.paths import DATA_DIR
-    run = RunStore(DATA_DIR / "multitask.sqlite").get(run_id, session["session_id"])
+    run = RunStore(DATA_DIR / "runs").get(run_id, session["session_id"])
     if run is None:
         raise HTTPException(status_code=404, detail="lamp run not found")
-    return {"run_id": run.run_id, "result": run.status, "reply": run.response,
+    return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
+            "result": run.status, "reply": run.response,
             "question": run.question or None, "steps": run.steps}
 
 @router.get("/api/commands/go2/tasks/{task_id}")

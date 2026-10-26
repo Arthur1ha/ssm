@@ -23,6 +23,7 @@ from cloud.cards.registry import get_registry
 from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message, verify_message
 from cloud.space.execution import ExecutionContext
 from cloud.space.registry import card_device_id, get_space_registry
+from cloud.observability import current_event_context, emit_agent_event
 
 logger = logging.getLogger(__name__)
 _TERMINAL = {"ok", "blocked", "error", "timeout", "cancelled", "rejected"}
@@ -321,6 +322,10 @@ def request_peer_skill(
         entry.ready.wait(timeout)
         return get_request_result(request_id) or dict(entry.result)
 
+    emit_agent_event("peer.dispatch", request_id=request_id,
+                     initiator_unit_id=initiator_unit_id, target_unit_id=target_unit_id,
+                     skill_id=skill_id, params=params, origin_kind=origin_kind)
+    started = time.monotonic()
     try:
         origin, actor = _trusted_origin(context, origin_kind)
         if origin == "user_delegated":
@@ -391,6 +396,9 @@ def request_peer_skill(
     logger.info("[PeerGateway] request=%s result=%s target=%s error=%s",
                 request_id, entry.result.get("result"), target_unit_id,
                 entry.result.get("error") or "-")
+    emit_agent_event("peer.result", request_id=request_id, target_unit_id=target_unit_id,
+                     status=entry.result.get("result"), result=entry.result,
+                     duration_ms=round((time.monotonic() - started) * 1000))
     return dict(entry.result)
 
 
@@ -402,12 +410,20 @@ def _dispatch_lamp(request_id: str, target: str, action: str, params: dict,
                "session_id": context.session_id if origin == "user_delegated" else "agent_auto",
                "action": action, "params": params, "actor": actor, "persist": False,
                "space_id": "main", "source": "peer_request", "ts": int(time.time())}
+    correlation = current_event_context()
+    payload.update({key: correlation[key] for key in ("trace_id", "run_id") if key in correlation})
     info = _mqtt.publish(f"ssm/task/{target}/{request_id}", json.dumps(payload), qos=1)
+    emit_agent_event("device.command", request_id=request_id, task_id=request_id,
+                     target_unit_id=target, action=action, params=params,
+                     transport="mqtt", status="published" if getattr(info, "rc", 0) == 0 else "publish_failed")
     if getattr(info, "rc", 0) != 0:
         return _failure("error", "mqtt_publish_failed", request_id)
     logger.info("[PeerGateway] request=%s dispatched transport=mqtt target=%s task=%s",
                 request_id, target, request_id)
     result = _esp32_state.wait_task_result(request_id, timeout=timeout)
+    emit_agent_event("device.result", request_id=request_id, task_id=request_id,
+                     target_unit_id=target, status=result.get("result", "error"),
+                     result=result, completion_basis="edge_result")
     return {"request_id": request_id, "target_unit_id": target, "task_id": request_id,
             "result": result.get("result", "error"),
             "error": result.get("error") or result.get("reason")}
@@ -419,6 +435,9 @@ def _dispatch_lamp_semantic(request_id: str, target: str, endpoint: str, params:
     deadline = time.monotonic() + timeout
     body = {"goal": params["goal"], "task_id": request_id,
             "deadline": time.time() + timeout}
+    correlation = current_event_context()
+    body.update({"trace_id": correlation.get("trace_id"),
+                 "parent_run_id": correlation.get("run_id")})
     result = _go2_http(endpoint, "POST", context, origin, request_id, timeout, body)
     while result.get("result") == "executing" and time.monotonic() < deadline:
         time.sleep(min(0.2, max(0, deadline - time.monotonic())))
@@ -481,6 +500,9 @@ def _dispatch_go2(request_id: str, skill_id: str, params: dict,
     body = {"message": "执行公开技能", "skill_id": skill_id, "params": params,
             "task_id": request_id, "deadline": time.time() + timeout,
             "sync_window_s": min(8.0, timeout)}
+    correlation = current_event_context()
+    body.update({"trace_id": correlation.get("trace_id"),
+                 "parent_run_id": correlation.get("run_id")})
     logger.info("[PeerGateway] request=%s dispatched transport=http target=go2 skill=%s",
                 request_id, skill_id)
     result = _go2_http("/api/go2/chat", "POST", context, origin, request_id, timeout, body)
@@ -505,6 +527,9 @@ def _dispatch_coordinator(request_id: str, initiator: str, target: str, skill: s
                "origin_kind": origin, "origin_session_id": context.session_id if origin == "user_delegated" else None,
                "actor": actor, "persist": False, "space_id": "main",
                "issued_at": now, "expires_at": now + max(1, math.ceil(timeout))}
+    correlation = current_event_context()
+    payload.update({"trace_id": correlation.get("trace_id"),
+                    "parent_run_id": correlation.get("run_id")})
     info = _mqtt.publish(topic, json.dumps(sign_message(topic, payload)), qos=1)
     if getattr(info, "rc", 0) != 0:
         return _failure("error", "mqtt_publish_failed", request_id)

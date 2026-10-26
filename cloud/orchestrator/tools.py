@@ -5,6 +5,7 @@
 """
 
 import json
+from cloud.observability import current_event_context, emit_agent_event
 import os
 import time as _time
 import contextlib
@@ -76,6 +77,9 @@ def do_publish_task(
     if _state:
         _state.register_task(task_id, session_id)
     execution_context = context or {}
+    correlation = current_event_context()
+    emit_agent_event("device.command", task_id=task_id, target_unit_id=unit_id,
+                     action=action, params=params, transport="mqtt", status="pending_publish")
     _mqtt.publish(
         f"ssm/task/{unit_id}/{task_id}",
         json.dumps({"task_id": task_id, "session_id": session_id,
@@ -83,7 +87,9 @@ def do_publish_task(
                     "persist": execution_context.get("persist"),
                     "space_id": execution_context.get("space_id"),
                     "source": execution_context.get("source"),
-                    "action": action, "params": params, "ts": int(_time.time())}),
+                    "action": action, "params": params, "ts": int(_time.time()),
+                    "trace_id": correlation.get("trace_id"),
+                    "run_id": correlation.get("run_id")}),
         qos=1,
     )
 

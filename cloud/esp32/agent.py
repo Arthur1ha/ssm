@@ -6,6 +6,7 @@ import queue
 import time
 import datetime
 import logging
+import hashlib
 import threading
 from typing import Optional
 
@@ -17,10 +18,11 @@ logger = logging.getLogger(__name__)
 from cloud.esp32.state import ESP32State
 from cloud.esp32 import tools as _tools
 from cloud.esp32.agentcore.llm import get_text_llm
-from cloud.esp32.agentcore.soul import AGENT_PERSONA, get_personality
+from cloud.esp32.agentcore.soul import AGENT_PERSONA, get_personality, load_personality
 from cloud.esp32.agentcore import prompts
 from cloud.esp32.agentcore.mode.reactive import ReactiveMind
 from cloud.space.execution import ExecutionContext
+from cloud.observability import bind_context, emit_agent_event
 
 USER_HOLD_TTL = 300   # 用户/编排器命令后，自主层让位时长（秒）
 _VALID_AUTONOMY_MODES = ("manual", "reactive")
@@ -95,45 +97,71 @@ class ESP32Agent(ReactiveMind):
         """供设备页对话等待 ESP32 的实际执行反馈。"""
         return self._state.wait_task_result(task_id, timeout=timeout)
 
-    def narrate_command(self, action: str, params: dict) -> None:
+    def narrate_command(self, action: str, params: dict, *, task_id: str | None = None,
+                        trace_id: str | None = None, run_id: str | None = None) -> None:
         """收到用户/编排器命令时，用 persona 生成一句台词并发 thought。
 
         与 Go2 行为一致：执行后用性格大脑吐一句确认/吐槽，并发布到
         ssm/agents/+/thought。必须能安全地从子线程调用——
         内部全部 try/except 包好，LLM 异常时用兜底台词，绝不向外抛。
         """
-        try:
-            params = params or {}
-            desc_parts = []
-            if "state" in params:
-                desc_parts.append(f"state={params['state']}")
-            for k in ("r", "g", "b", "brightness", "count"):
-                if k in params:
-                    desc_parts.append(f"{k}={params[k]}")
-            params_desc = "、".join(desc_parts) if desc_parts else "无额外参数"
-
-            prompt = (
-                f"{get_personality()}\n"
-                "刚刚有人（用户或编排器）给你下达了一条控制 LED 灯的命令，你已经照做了。\n"
-                f"命令动作：{action}（SET_STATE=开关，SET_COLOR=调色温/亮度，BLINK=闪烁）\n"
-                f"命令参数：{params_desc}\n\n"
-                "用你的性格说一句简短的话，确认或吐槽这次动作。"
-                "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"
-                "例如：行吧，给你开了。 / 这就给你调暖点。 / 又要关灯啊，随你。"
-            )
+        with bind_context(trace_id=trace_id or task_id, run_id=run_id or task_id,
+                          task_id=task_id, agent_id="esp32_desk_led"):
             try:
-                resp = self._llm.invoke([HumanMessage(content=prompt)])
-                text = (resp.content or "").strip()
-                text = text.strip("\"'`").strip()
+                params = params or {}
+                desc_parts = []
+                if "state" in params:
+                    desc_parts.append(f"state={params['state']}")
+                for k in ("r", "g", "b", "brightness", "count"):
+                    if k in params:
+                        desc_parts.append(f"{k}={params[k]}")
+                params_desc = "、".join(desc_parts) if desc_parts else "无额外参数"
+                persona, persona_source, persona_reason = load_personality()
+                emit_agent_event("persona.loaded", source=persona_source,
+                                 fallback_reason=persona_reason,
+                                 content_hash=hashlib.sha256(persona.encode()).hexdigest(),
+                                 prompt_trimmed=False)
+                prompt = (
+                    f"{persona}\n"
+                    "刚刚有人（用户或编排器）给你下达了一条控制 LED 灯的命令，你已经照做了。\n"
+                    f"命令动作：{action}（SET_STATE=开关，SET_COLOR=调色温/亮度，BLINK=闪烁）\n"
+                    f"命令参数：{params_desc}\n\n"
+                    "用你的性格说一句简短的话，确认或吐槽这次动作。"
+                    "只输出这一句台词本身，不超过一句，不要代码块、不要解释、不要引号。\n"
+                    "例如：行吧，给你开了。 / 这就给你调暖点。 / 又要关灯啊，随你。"
+                )
+                fallback = False
+                try:
+                    emit_agent_event("model.request", input=prompt,
+                                     model=str(getattr(self._llm, "model_name", "unknown")),
+                                     template_version="lamp-narration-v1", reply_kind="narration")
+                    started = time.monotonic()
+                    resp = self._llm.invoke([HumanMessage(content=prompt)])
+                    emit_agent_event("model.response", output=getattr(resp, "content", ""),
+                                     duration_ms=round((time.monotonic() - started) * 1000),
+                                     reply_kind="narration")
+                    text = (resp.content or "").strip().strip("\"'`").strip()
+                except Exception as e:
+                    logger.warning("narrate_command llm error: %s", type(e).__name__)
+                    emit_agent_event("model.error", stage="narration", error=type(e).__name__,
+                                     message=str(e))
+                    text = "行吧，照你说的办了。"
+                    fallback = True
+                if not text:
+                    text = "行吧，照你说的办了。"
+                    fallback = True
+                if fallback:
+                    emit_agent_event("reply.fallback", reply=text, reply_kind="narration",
+                                     reason="model_error_or_empty")
+                emit_agent_event("reply.draft", reply=text, reply_kind="narration",
+                                 source="fallback" if fallback else "model")
+                _tools.publish_thought(text, unit_id="esp32_desk_led",
+                                       trace_id=trace_id, run_id=run_id, task_id=task_id)
+                emit_agent_event("reply.emitted", reply=text, reply_kind="narration",
+                                 channel="mqtt_thought")
+                logger.info("narrate_command %s → %s", action, text)
             except Exception as e:
-                logger.warning("narrate_command llm error: %s", e)
-                text = "行吧，照你说的办了。"
-            if not text:
-                text = "行吧，照你说的办了。"
-            _tools.publish_thought(text, unit_id="esp32_desk_led")
-            logger.info("narrate_command %s → %s", action, text)
-        except Exception as e:
-            logger.warning("narrate_command failed: %s", e)
+                logger.warning("narrate_command failed: %s", type(e).__name__)
 
     def handle_user_text(self, text: str, *, persist: bool = True,
                          memory_context: ExecutionContext | None = None) -> str | dict:
@@ -286,7 +314,9 @@ class ESP32Agent(ReactiveMind):
 
     def run_user_loop(self, text: str, unit_id: str, context: ExecutionContext,
                       dispatch, *, lighting_only: bool = False,
-                      run_id: str | None = None, resume: bool = False) -> dict:
+                      run_id: str | None = None, resume: bool = False,
+                      trace_id: str | None = None,
+                      parent_run_id: str | None = None) -> dict:
         """Run one lamp/peer tool at a time against observed results."""
         import uuid
         from cloud.agent_runtime.loop import Run, parse_decision, run_loop
@@ -298,7 +328,7 @@ class ESP32Agent(ReactiveMind):
         if (context.space_id != "main" or context.origin_kind != "user_delegated"
                 or context.actor not in {"admin", "visitor"} or context.expires_at <= time.time()):
             return {"result": "rejected", "error": "invalid_context", "reply": "当前会话已失效。"}
-        store = RunStore(DATA_DIR / "multitask.sqlite")
+        store = RunStore(DATA_DIR / "runs")
         previous = store.get(run_id, context.session_id) if run_id else None
         if previous and not resume:
             return {"run_id": previous.run_id, "result": previous.status,
@@ -309,14 +339,26 @@ class ESP32Agent(ReactiveMind):
             run = store.claim_resume(run_id, context.session_id)
             if run is None:
                 return {"result": "rejected", "error": "run_already_resumed"}
+            emit_agent_event("run.resumed", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id=unit_id,
+                             session_id=context.session_id, supplement=text)
         else:
             run = Run(run_id or uuid.uuid4().hex, context.session_id,
                       text, min(float(context.expires_at), time.time() + 90))
+            run.trace_id = trace_id or "tr_" + uuid.uuid4().hex
+            run.parent_run_id = parent_run_id or ""
+            run.agent_id = unit_id
+            run.origin_kind = context.origin_kind
             if not store.create(run):
                 existing = store.get(run.run_id, context.session_id)
                 return ({"run_id": existing.run_id, "result": existing.status,
                          "reply": existing.response, "steps": existing.steps} if existing else
                         {"result": "rejected", "error": "run_id_conflict"})
+            emit_agent_event("task.received", trace_id=run.trace_id,
+                             run_id=run.run_id, parent_run_id=run.parent_run_id or None,
+                             agent_id=unit_id, session_id=context.session_id,
+                             origin_kind=run.origin_kind, input=text,
+                             entry="lamp_semantic" if lighting_only else "lamp_chat")
         self.mark_user_command(unit_id)
 
         async def decide(current):
@@ -324,8 +366,14 @@ class ESP32Agent(ReactiveMind):
                                    "params_schema": decl["params_schema"]}
                             for name, decl in TOOL_DECLARATIONS.items()
                             if not lighting_only or name in {"set_led_state", "set_led_color", "blink_led"}}
+            persona, persona_source, persona_reason = load_personality()
+            emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
+                             run_id=current.run_id, agent_id=unit_id,
+                             source=persona_source, fallback_reason=persona_reason,
+                             content_hash=hashlib.sha256(persona.encode()).hexdigest(),
+                             prompt_trimmed=False)
             prompt = (
-                f"{get_personality()}\n固定约束：一次只输出一个 JSON 对象，格式为"
+                f"{persona}\n固定约束：一次只输出一个 JSON 对象，格式为"
                 '{"tool":"工具名","params":{...}} 或 {"final":"回复"}。'
                 "每轮根据真实工具结果决定下一步。需要补充信息则调用 ask_user，参数 question。"
                 "不得把 accepted、timeout、executing 说成完成；已完成步骤不能重复调用。"
@@ -336,7 +384,19 @@ class ESP32Agent(ReactiveMind):
                 f"补充信息：{text if resume else ''}\n"
                 f"步骤结果：{json.dumps(current.steps[-8:], ensure_ascii=False, default=str)}"
             )
+            turn = len(current.steps) + 1
+            fields = {"trace_id": current.trace_id or current.run_id,
+                      "run_id": current.run_id, "agent_id": unit_id,
+                      "session_id": current.session_id, "turn": turn}
+            emit_agent_event("model.request", **fields, input=prompt,
+                             model=str(getattr(self._llm, "model_name", "unknown")),
+                             template_version="lamp-multitask-v1")
+            started = time.monotonic()
             response = self._llm.invoke([HumanMessage(content=prompt)])
+            emit_agent_event("model.response", **fields,
+                             output={"content": getattr(response, "content", ""),
+                                     "tool_calls": getattr(response, "tool_calls", None)},
+                             duration_ms=round((time.monotonic() - started) * 1000))
             return parse_decision(response)
 
         async def execute(name, params, step_id):
@@ -351,8 +411,11 @@ class ESP32Agent(ReactiveMind):
                     dispatch=dispatch, source="lamp_semantic" if lighting_only else "lamp_chat")
             return execute_auxiliary(unit_id=unit_id, tool=name, params=params, context=context)
 
-        asyncio.run(run_loop(run, decide, execute, record=store.save,
-                             effectful=lambda name: name not in {"list_peers"}))
+        with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
+                          parent_run_id=run.parent_run_id or None, agent_id=unit_id,
+                          session_id=context.session_id, origin_kind=run.origin_kind):
+            asyncio.run(run_loop(run, decide, execute, record=store.save,
+                                 effectful=lambda name: name not in {"list_peers"}))
         status = run.status
         if status == "partial":
             status = next((step["result"]["result"] for step in reversed(run.steps)
@@ -361,7 +424,17 @@ class ESP32Agent(ReactiveMind):
             reply = "动作的实际完成情况尚未确认；后续步骤已暂停。"
         else:
             reply = run.response
-        return {"run_id": run.run_id, "result": status, "reply": reply,
+        if reply != run.response:
+            emit_agent_event("reply.validated", trace_id=run.trace_id or run.run_id,
+                             run_id=run.run_id, agent_id=unit_id,
+                             session_id=run.session_id, reply=reply,
+                             previous_reply=run.response,
+                             reason="adapter_status_guard", reply_kind="final")
+        emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
+                         run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
+                         reply_kind="final", channel="http", reply=reply)
+        return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
+                "result": status, "reply": reply,
                 "question": run.question or None, "steps": run.steps,
                 "task_id": next((s.get("result", {}).get("task_id") for s in reversed(run.steps)
                                  if s.get("result", {}).get("task_id")), None)}

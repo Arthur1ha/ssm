@@ -55,6 +55,8 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 | `ssm/task/{unit_id}/{task_id}` | Cloud | `{"task_id":"...","session_id":"...","action":"SET_STATE","params":{"state":"ON"},"actor":"admin\|visitor\|agent","persist":false,"space_id":"main","ts":1234567890}`；灯的正式命令为 `SET_STATE`（`ON/OFF`）、`SET_COLOR`（`r/g/b/brightness`）、`BLINK`（`r/g/b/count`）。旧固件的 `SET_STATE BRIGHT/DIM` 仅在迁移期兼容；不携带云端 service token，发布者由 broker ACL 限制为 API/编排器账号 |
 | `ssm/result/{unit_id}/{task_id}` | ESP32 | `{"task_id":"...","session_id":"...","result":"executing\|ok\|cancelled\|blocked\|error","ism_state":"ON","ts":...}`；旧固件可省略 `session_id`，编排器按已登记任务归属补齐 |
 
+任务消息可附带 `trace_id`（用户任务根 ID）、`run_id`（发起智能体运行）和 `request_id`（同伴请求）；ESP32 在回执中回传收到的关联字段，异步 `BLINK` 完成回执也沿用同一组值。旧固件不回传时，云端按已登记 `task_id` 补齐查询关联。这些字段只用于观测，不参与权限判断或设备动作选择。
+
 > 注：ESP32 云端离线时由 `local_rules` 直接调用 `TriggerMap.exec_command` 执行兜底动作（设备内函数调用，不经 MQTT）。
 
 ### 灯的语义技能（控制面 Card，数据面 HTTP → MQTT）
@@ -66,6 +68,8 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 设备页按钮收到的物理 `task_id` 可由同一浏览器会话查询 `GET /api/commands/{unit_id}/tasks/{task_id}`；无回执时返回 `executing`，实际 `ssm/result` 到达后返回最终状态。会话结束后任务查询权限随之撤销，查询绝不重发 MQTT 任务。
 
 多步对话使用一个 `run_id` 关联多个 `step_id`。灯设备页可按原 ID 查询 `GET /api/commands/{unit_id}/runs/{run_id}`，追问后再次发送 `chat` 并携带 `run_id` 与 `resume=true`；Go2 用原 `task_id` 查询 `/api/commands/go2/tasks/{task_id}`，补充信息走 `/api/commands/go2/tasks/{task_id}/resume`。主聊天通过 `ssm/feedback/{session_id}` 的 `question` 事件取得 `run_id`，下一次 `/api/intents` 携带 `resume_run_id`。这些查询与续接都归属原会话，重启后未确认的物理步骤不会自动重发。
+
+三类用户入口返回可信 `trace_id`；任务查询、继续和 SSE 反馈沿用原 ID。`ssm/intent/{session_id}` 的签名正文带 `trace_id`；同伴 `request/result` 带 `trace_id` 与 `parent_run_id`，HTTP 内部任务正文带同样字段。浏览器可显示该 ID 供排查，但不能用它声明角色或权限。
 
 ### 编排器
 

@@ -1,16 +1,15 @@
 """Durable, idempotent lamp semantic tasks and their physical task IDs.
 
-The SQLite task ID ledger has no automatic expiry. Reusing an old ID can
+The JSON task ID ledger has no automatic expiry. Reusing an old ID can
 return its recorded result, but can never dispatch another physical command.
 """
 
-import json
-import sqlite3
+import time
 import threading
-from contextlib import closing
 from dataclasses import dataclass, field
 
-from cloud.esp32.paths import TASKS_FILE
+from cloud.agent_runtime.json_files import locked_directory, read_record, record_path, write_record
+from cloud.esp32.paths import TASKS_DIR
 
 
 @dataclass
@@ -24,42 +23,36 @@ _lock = threading.RLock()
 _tasks: dict[str, _Task] = {}
 
 
-def _connect():
-    TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(TASKS_FILE, timeout=5)
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS semantic_tasks ("
-        "task_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)"
-    )
-    return connection
+def _path(task_id: str):
+    return record_path(TASKS_DIR, task_id)
 
 
 def _read(task_id: str) -> tuple[tuple, dict] | None:
-    with closing(_connect()) as db:
-        row = db.execute("SELECT fingerprint, result FROM semantic_tasks WHERE task_id=?",
-                         (task_id,)).fetchone()
-    return (tuple(json.loads(row[0])), json.loads(row[1])) if row else None
+    with locked_directory(TASKS_DIR):
+        data = read_record(_path(task_id))
+    return (tuple(data["fingerprint"]), data["result"]) if data else None
 
 
 def _write(task_id: str, fingerprint: tuple, result: dict) -> None:
-    with closing(_connect()) as db:
-        with db:
-            db.execute(
-                "INSERT INTO semantic_tasks(task_id,fingerprint,result) VALUES(?,?,?) "
-                "ON CONFLICT(task_id) DO UPDATE SET result=excluded.result",
-                (task_id, json.dumps(fingerprint), json.dumps(result, ensure_ascii=False)),
-            )
+    with locked_directory(TASKS_DIR):
+        path = _path(task_id)
+        old = read_record(path)
+        if old is not None and tuple(old["fingerprint"]) != fingerprint:
+            raise ValueError("task_id_conflict")
+        write_record(path, {"schema_version": 1, "task_id": task_id,
+                            "fingerprint": list(fingerprint), "result": result,
+                            "physical_task_id": result.get("physical_task_id"),
+                            "updated_at": time.time()})
 
 
-def _reserve(task_id: str, fingerprint: tuple) -> bool:
-    with closing(_connect()) as db:
-        with db:
-            cursor = db.execute(
-                "INSERT OR IGNORE INTO semantic_tasks(task_id,fingerprint,result) VALUES(?,?,?)",
-                (task_id, json.dumps(fingerprint),
-                 json.dumps({"result": "executing", "task_id": task_id})),
-            )
-            return cursor.rowcount == 1
+def _reserve(task_id: str, fingerprint: tuple, trace_id: str = "") -> bool:
+    with locked_directory(TASKS_DIR):
+        return write_record(_path(task_id), {
+            "schema_version": 1, "task_id": task_id,
+            "fingerprint": list(fingerprint),
+            "result": {"result": "executing", "task_id": task_id, "trace_id": trace_id},
+            "physical_task_id": None, "updated_at": time.time(),
+        }, exclusive=True)
 
 
 def get(task_id: str, session_id: str | None = None) -> dict | None:
@@ -108,7 +101,8 @@ def update_late_result(task_id: str, session_id: str, physical: dict) -> dict | 
         return current
 
 
-def run_once(task_id: str, fingerprint: tuple, work, sync_window_s: float = 25.0) -> dict:
+def run_once(task_id: str, fingerprint: tuple, work, sync_window_s: float = 25.0,
+             *, trace_id: str = "") -> dict:
     with _lock:
         task = _tasks.get(task_id)
         if task is not None:
@@ -123,12 +117,13 @@ def run_once(task_id: str, fingerprint: tuple, work, sync_window_s: float = 25.0
                 # A completed ID may have left the memory cache; an executing
                 # ID from a prior process has an unknown outcome. Neither runs again.
                 return get(task_id)
-            if not _reserve(task_id, fingerprint):
+            if not _reserve(task_id, fingerprint, trace_id):
                 stored = _read(task_id)
                 if stored and stored[0] != fingerprint:
                     return {"result": "rejected", "task_id": task_id, "error": "task_id_conflict"}
                 return get(task_id)
-            task = _Task(fingerprint, {"result": "executing", "task_id": task_id})
+            task = _Task(fingerprint, {"result": "executing", "task_id": task_id,
+                                       "trace_id": trace_id})
             _tasks[task_id] = task
             if len(_tasks) > 256:
                 stale = next((key for key, item in _tasks.items()
@@ -145,7 +140,8 @@ def run_once(task_id: str, fingerprint: tuple, work, sync_window_s: float = 25.0
             except Exception as exc:
                 result = {"result": "error", "error": type(exc).__name__}
             with _lock:
-                task.result = {**result, "task_id": task_id}
+                task.result = {**result, "task_id": task_id,
+                               "trace_id": result.get("trace_id") or trace_id}
                 _write(task_id, task.fingerprint, task.result)
                 task.ready.set()
         threading.Thread(target=run, name=f"lamp-task-{task_id[:16]}", daemon=True).start()

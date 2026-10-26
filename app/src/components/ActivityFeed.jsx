@@ -30,6 +30,17 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
   return (
     <div style={{ padding: '0 16px' }}>
       {entries.map((e, i) => {
+        if (e.type === 'trace') {
+          return <div key={i} style={{ textAlign: 'center', marginBottom: 8 }}>
+            <button type="button" onClick={() => navigator.clipboard?.writeText(e.traceId)}
+              title="复制任务编号" style={{ fontSize: 10, color: 'var(--color-text-dim)',
+                fontFamily: 'var(--font-mono)', background: 'var(--color-surface-2)',
+                border: '1px solid var(--color-border)', borderRadius: 999,
+                padding: '4px 10px', cursor: 'pointer' }}>
+              任务编号 {e.traceId} · 点击复制
+            </button>
+          </div>;
+        }
         if (e.type === 'user') {
           return (
             <div key={i} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>

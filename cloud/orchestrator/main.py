@@ -8,13 +8,9 @@ import time
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from cloud.observability import configure_logging, emit_agent_event
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
+configure_logging("orchestrator")
 logger = logging.getLogger("orchestrator.main")
 
 from pathlib import Path
@@ -260,10 +256,16 @@ def on_message(client, userdata, msg):
         state.register_session(trusted)
         logger.info("[Intent] accepted session=%s actor=%s persist=%s",
                     session_id, trusted["actor"], trusted["persist"])
+        emit_agent_event("task.received", trace_id=trusted.get("trace_id") or trusted.get("event_id"),
+                         run_id=trusted.get("resume_run_id") or trusted.get("event_id"),
+                         session_id=session_id, agent_id="orchestrator",
+                         origin_kind="user_delegated", input=trusted["user_msg"],
+                         entry="mqtt_intent")
         client.publish(
             f"ssm/feedback/{session_id}",
             json.dumps({"stage": "planning", "text": "已收到请求，正在处理...",
-                        "session_id": session_id, "status": "ok", "ts": int(time.time())}),
+                        "session_id": session_id, "trace_id": trusted.get("trace_id"),
+                        "status": "ok", "ts": int(time.time())}),
             qos=0,
         )
         event_queue.put({"trigger": "intent", "payload": trusted, "session_id": session_id})

@@ -14,7 +14,7 @@ from cloud.space.execution import ExecutionContext
 
 def test_semantic_task_waits_for_physical_result_and_reuses_id(monkeypatch, tmp_path):
     from cloud.esp32 import tasks
-    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "semantic_tasks.sqlite3")
+    monkeypatch.setattr(tasks, "TASKS_DIR", tmp_path / "semantic_tasks")
     tasks._tasks.clear()
     state = ESP32State()
     from cloud.esp32 import paths
@@ -32,9 +32,9 @@ def test_semantic_task_waits_for_physical_result_and_reuses_id(monkeypatch, tmp_
 
     published = []
     from cloud.api import intents
-    def dispatch(unit_id, action, params, session, source=None):
-        published.append((unit_id, action, params, session, source))
-        return "physical_semantic_1"
+    def dispatch(unit_id, action, params, session, source=None, task_id=None):
+        published.append((unit_id, action, params, session, source, task_id))
+        return task_id
     monkeypatch.setattr(intents, "_dispatch_mqtt_task", dispatch)
     monkeypatch.setitem(tools_registry.PHYSICAL_ACTIONS["SET_STATE"], "timeout", 0.02)
     context = ExecutionContext("semantic_test_session", "admin", True,
@@ -43,11 +43,11 @@ def test_semantic_task_waits_for_physical_result_and_reuses_id(monkeypatch, tmp_
 
     first = lamp_router.invoke_lamp_semantic_task("esp32_desk_led", request, context)
     assert first["result"] == "timeout"
-    assert first["physical_task_id"] == "physical_semantic_1"
+    assert first["physical_task_id"] == published[0][5]
     assert published[0][3]["persist"] is False
     assert len(published) == 1
 
-    state.store_task_result("physical_semantic_1", {"result": "ok"})
+    state.store_task_result(published[0][5], {"result": "ok"})
     later = asyncio.run(lamp_router.get_lamp_semantic_task(
         "esp32_desk_led", "semantic_test_1", context,
     ))

@@ -3,6 +3,7 @@
 import os
 import re
 import time
+import uuid
 from dataclasses import replace
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -37,6 +38,8 @@ class SemanticTaskRequest(BaseModel):
     params: dict = Field(default_factory=dict)
     task_id: str
     deadline: float | None = None
+    trace_id: str | None = None
+    parent_run_id: str | None = None
 
 
 class PersonalityRequest(BaseModel):
@@ -117,6 +120,10 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
     _require_led_unit(unit_id)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", req.task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
+    if req.trace_id is not None and not re.fullmatch(r"tr_[A-Fa-f0-9]{32}", req.trace_id):
+        raise HTTPException(status_code=400, detail="invalid trace_id")
+    if req.parent_run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", req.parent_run_id):
+        raise HTTPException(status_code=400, detail="invalid parent_run_id")
     goal = str(req.goal or req.params.get("goal") or "").strip()
     if not goal or len(goal) > 1000:
         raise HTTPException(status_code=400, detail="invalid lighting goal")
@@ -133,21 +140,28 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
         raise HTTPException(status_code=503, detail="lamp brain unavailable")
 
     from cloud.esp32.tasks import run_once
+    trace_id = req.trace_id or "tr_" + uuid.uuid4().hex
     def work():
         from cloud.api.intents import _dispatch_mqtt_task
         session = {"session_id": context.session_id, "actor": context.actor,
                    "expires_at": context.expires_at, "persist": False}
         def dispatch(uid, act, arguments, _context, source):
-            physical_id = _dispatch_mqtt_task(uid, act, arguments, session, source=source)
+            import uuid
             from cloud.esp32.tasks import update_progress
+            physical_id = "task_" + uuid.uuid4().hex
             update_progress(req.task_id, physical_id)
+            _dispatch_mqtt_task(uid, act, arguments, session,
+                                source=source, task_id=physical_id)
             return physical_id
         result = agent.run_user_loop(goal, unit_id, replace(context, persist=False),
-                                     dispatch, lighting_only=True, run_id=req.task_id)
+                                     dispatch, lighting_only=True, run_id=req.task_id,
+                                     trace_id=trace_id,
+                                     parent_run_id=req.parent_run_id)
         return {**result, "physical_task_id": result.get("task_id")}
     # FastAPI runs synchronous route handlers in its worker pool. Waiting for
     # the result here therefore leaves the API event loop free for MQTT/SSE.
-    return run_once(req.task_id, (context.session_id, unit_id, goal), work)
+    return run_once(req.task_id, (context.session_id, unit_id, goal), work,
+                    trace_id=trace_id)
 
 
 @internal_router.get("/{unit_id}/agent/tasks/{task_id}", include_in_schema=False)

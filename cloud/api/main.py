@@ -5,6 +5,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from cloud.observability import configure_logging
 
 logging.getLogger("cloud").setLevel(logging.INFO)
 
@@ -140,44 +141,26 @@ def _on_esp32_message(client, userdata, msg):
                     params = payload.get("params", {})
                     threading.Thread(
                         target=_narrate_completed_command,
-                        args=(agent, parts[3], action, params),
+                        args=(agent, parts[3], action, params,
+                              payload.get("trace_id"), payload.get("run_id")),
                         daemon=True,
                         name="ESP32Narrate",
                     ).start()
 
 
-def _narrate_completed_command(agent, task_id, action, params):
+def _narrate_completed_command(agent, task_id, action, params, trace_id=None, run_id=None):
     result = _esp32_state.wait_task_result(task_id, timeout=20.0)
     if result.get("result") == "ok":
-        agent.narrate_command(action, params)
+        agent.narrate_command(action, params, task_id=task_id,
+                              trace_id=trace_id, run_id=run_id)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    logging.getLogger("uvicorn.access").addFilter(_DropSnapshotLogs())
-
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    # 规范日志格式：年月日 + 时间 + 级别 + logger 名 + 消息
-    _fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-
-    # uvicorn 自带访问/错误日志默认无时间戳，统一套上规范格式
-    for _uvi_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
-        for _h in logging.getLogger(_uvi_name).handlers:
-            _h.setFormatter(_fmt)
-
-    # Go2 日志独立写 go2.log，不再冒泡到 uvicorn/api.log
-    _go2_handler = logging.FileHandler(_LOG_DIR / "go2.log")
-    _go2_handler.setFormatter(_fmt)
-    _go2_logger = logging.getLogger("cloud.go2")
-    _go2_logger.addHandler(_go2_handler)
-    _go2_logger.propagate = False
-
-    # ESP32 日志独立写 esp32.log，不再冒泡到 uvicorn/api.log
-    _esp32_handler = logging.FileHandler(_LOG_DIR / "esp32.log")
-    _esp32_handler.setFormatter(_fmt)
-    _esp32_logger = logging.getLogger("cloud.esp32")
-    _esp32_logger.addHandler(_esp32_handler)
-    _esp32_logger.propagate = False
+    configure_logging("api")
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _DropSnapshotLogs) for item in access.filters):
+        access.addFilter(_DropSnapshotLogs())
 
     global _esp32_mqtt_client
     broker_host = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")

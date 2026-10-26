@@ -88,6 +88,7 @@ function useSendIntent() {
     try {
       const accepted = await apiClient.request('/api/intents', { method: 'POST', body });
       if (activeRef.current) {
+        if (accepted.trace_id) callbacks.onTraceId?.(accepted.trace_id);
         if (accepted.stage && ['done', 'partial', 'failed'].includes(accepted.stage)) {
           finish();
           callbacks.onMessage?.(accepted.text || '已处理');

@@ -30,7 +30,9 @@ def publish_speech(text: str, priority: str = "normal"):
     _mqtt.publish("ssm/agents/esp32_desk_led/speech", json.dumps(payload, ensure_ascii=False))
 
 
-def publish_thought(text: str, unit_id: str = "esp32_desk_led", thought_type: str = "act"):
+def publish_thought(text: str, unit_id: str = "esp32_desk_led", thought_type: str = "act",
+                    trace_id: str | None = None, run_id: str | None = None,
+                    task_id: str | None = None):
     """在 MQTT topic 发布智能体的"心声"台词。
 
     topic 按 unit_id 拼接（默认灯设备 esp32_desk_led），与 Go2 的
@@ -38,6 +40,7 @@ def publish_thought(text: str, unit_id: str = "esp32_desk_led", thought_type: st
     """
     _mqtt.publish(f"ssm/agents/{unit_id}/thought", json.dumps({
         "text": text, "type": thought_type, "unit_id": unit_id, "ts": int(time.time()),
+        "trace_id": trace_id, "run_id": run_id, "task_id": task_id,
     }, ensure_ascii=False))
 
 

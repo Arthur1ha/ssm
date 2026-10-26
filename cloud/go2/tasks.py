@@ -14,14 +14,16 @@ class ChatTask:
     session_id: str
     fingerprint: str
     deadline: float
+    trace_id: str = ""
     created_at: float = field(default_factory=time.time)
     result: dict | None = None
     task: asyncio.Task | None = None
 
     def snapshot(self) -> dict:
         if self.result is None:
-            return {"task_id": self.task_id, "result": "executing", "deadline": self.deadline}
-        return {**self.result, "task_id": self.task_id}
+            return {"task_id": self.task_id, "trace_id": self.trace_id,
+                    "result": "executing", "deadline": self.deadline}
+        return {**self.result, "task_id": self.task_id, "trace_id": self.trace_id}
 
 
 class ChatTaskRegistry:
@@ -48,6 +50,7 @@ class ChatTaskRegistry:
         deadline: float,
         run: Callable[[], Awaitable[dict]],
         on_timeout: Callable[[], Awaitable[dict]] | None = None,
+        trace_id: str = "",
     ) -> ChatTask:
         self._prune()
         existing = self._records.get(task_id)
@@ -55,7 +58,7 @@ class ChatTaskRegistry:
             if existing.session_id != session_id or existing.fingerprint != fingerprint:
                 raise ValueError("task_id_conflict")
             return existing
-        record = ChatTask(task_id, session_id, fingerprint, deadline)
+        record = ChatTask(task_id, session_id, fingerprint, deadline, trace_id)
         self._records[task_id] = record
 
         async def execute() -> None:
