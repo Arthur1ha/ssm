@@ -2,16 +2,23 @@
 const commandBus = {
   async command(unitId, action, params = {}) {
     const go2Chat = unitId === 'go2' && action === 'chat';
+    const deviceChat = action === 'chat' && !go2Chat;
     const taskId = go2Chat ? (params.task_id || `go2_${crypto.randomUUID().replaceAll('-', '')}`) : null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    const timer = setTimeout(() => controller.abort(), deviceChat ? 60000 : 30000);
     try {
       const data = await apiClient.request(`/api/commands/${encodeURIComponent(unitId)}`, {
         method: 'POST', body: { action, params: go2Chat ? { ...params, task_id: taskId } : params }, signal: controller.signal,
       });
       if (data?.result && typeof data.result === 'object') {
-        return data.result.result === 'executing' && taskId
-          ? await this.waitForGo2Task(taskId) : data.result;
+        if (data.result.result === 'executing' && taskId) return this.waitForGo2Task(taskId);
+        if (unitId !== 'go2' && data.result.result === 'timeout' && data.result.task_id) {
+          return this.waitForLampTask(unitId, data.result.task_id, 15000);
+        }
+        return data.result;
+      }
+      if (unitId !== 'go2' && data?.task_id && data?.status === 'dispatched') {
+        return this.waitForLampTask(unitId, data.task_id);
       }
       if (data?.status === 'dispatched' || data?.accepted === true || data?.ok === true && !data?.result) {
         return { ...data, result: 'accepted' };
@@ -47,6 +54,24 @@ const commandBus = {
     return { result: 'executing', task_id: taskId };
   },
 
+  async waitForLampTask(unitId, taskId, timeoutMs = 25000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const result = await apiClient.request(
+          `/api/commands/${encodeURIComponent(unitId)}/tasks/${encodeURIComponent(taskId)}`,
+        );
+        if (result?.result !== 'executing') return result;
+      } catch (error) {
+        if ([401, 403, 404].includes(error.status)) {
+          return { result: 'error', task_id: taskId, error: error.message };
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return { result: 'executing', task_id: taskId };
+  },
+
   async cancelGo2Task(taskId) {
     return apiClient.request(`/api/commands/go2/tasks/${encodeURIComponent(taskId)}/cancel`, {
       method: 'POST', body: {},
@@ -60,6 +85,9 @@ const commandBus = {
   describe(result) {
     if (result?.result === 'needs_clarification' && result.question) return result.question;
     if (result?.error === 'stop_unconfirmed') return '停止指令尚未确认，请查看机器狗当前状态';
+    if (result?.result === 'accepted') return '指令已发送，尚未确认完成';
+    if (result?.result === 'executing') return '正在执行';
+    if (result?.result === 'timeout') return '等待完成反馈超时，结果尚未确认';
     if (result?.error) {
       try {
         const detail = JSON.parse(result.error);
@@ -70,7 +98,7 @@ const commandBus = {
     }
     const messages = {
       ok: '执行完成', accepted: '指令已发送，尚未确认完成', executing: '正在执行',
-      blocked: '当前状态或参数不允许执行', cancelled: '动作已被后续指令打断',
+      blocked: '当前状态或参数不允许执行', rejected: '指令参数或权限不符合设备要求', cancelled: '动作已被后续指令打断',
       timeout: '等待完成反馈超时，结果尚未确认', error: '执行失败',
       needs_clarification: result?.question || '请补充执行所需的信息',
     };

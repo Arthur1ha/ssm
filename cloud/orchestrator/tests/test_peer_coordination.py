@@ -18,6 +18,12 @@ from cloud.mqtt_signing import NonceReplayGuard, sign_message
 TOKEN = "service-secret-123456"
 
 
+@pytest.fixture(autouse=True)
+def configured_space(monkeypatch):
+    monkeypatch.setattr("cloud.orchestrator.agentcore.tools.executor.get_space_registry",
+                        lambda: MagicMock(get_space=lambda: {"device_ids": ["esp32_desk", "go2"]}))
+
+
 def _signed_peer(*, origin_kind="user_delegated", **updates):
     body = {
         "request_id": "req_a", "initiator_unit_id": "go2",
@@ -90,7 +96,8 @@ def test_autonomous_context_cannot_claim_delegated_role():
 
 def _card(unit_id, kind, skill_id, tags, action=""):
     property_name = "state" if kind == "mqtt" else "cmd"
-    return {"unit_id": unit_id, "online": True,
+    return {"unit_id": unit_id, "device_id": "esp32_desk" if unit_id == "esp32_desk_led" else unit_id,
+            "online": True,
             "transport": {"kind": kind, "endpoint": "/api/go2/chat"},
             "skills": [{"id": skill_id, "tags": tags,
                         "params_schema": {"type": "object", "required": [property_name],
@@ -158,6 +165,57 @@ def test_peer_dispatch_waits_for_lamp_before_go2_and_preserves_delegation(monkey
     result = graph._dispatch_peer_tasks_sequential(state)
     assert events == ["lamp_publish", "lamp_result", "go2_dispatch"]
     assert [result["task_results"][key]["result"] for key in ("a", "b")] == ["ok", "ok"]
+
+
+@pytest.mark.parametrize("first_result, expected", [
+    ("ok", ["adjust_lighting", "go2_sport"]),
+    ("executing", ["adjust_lighting"]),
+    ("timeout", ["adjust_lighting"]),
+    ("blocked", ["adjust_lighting"]),
+])
+def test_semantic_lamp_must_finish_before_go2_dance(monkeypatch, first_result, expected):
+    lamp = {"unit_id": "esp32_desk_led", "device_id": "esp32_desk", "online": True,
+            "transport": {"kind": "http", "endpoint": "/api/internal/esp32/esp32_desk_led/agent/tasks"},
+            "skills": [{"id": "adjust_lighting", "tags": ["light"],
+                        "params_schema": {"type": "object", "required": ["goal"],
+                                          "properties": {"goal": {"type": "string"}}},
+                        "invoke": {"action": "adjust_lighting"}}]}
+    dog = _card("go2", "http", "go2_sport", ["motion"], "SPORT")
+    monkeypatch.setattr(tools, "_registry", MagicMock(get_card=lambda uid: {
+        "esp32_desk_led": lamp, "go2": dog,
+    }.get(uid)))
+    calls = []
+    def dispatch(endpoint, body, timeout):
+        calls.append(body["skill_id"])
+        return {"result": first_result if body["skill_id"] == "adjust_lighting" else "ok"}
+    monkeypatch.setattr(tools, "do_http_dispatch", dispatch)
+    state = {
+        "session_id": "peer_req", "origin_session_id": "user-a", "actor": "visitor",
+        "persist": False, "space_id": "main", "origin_kind": "user_delegated",
+        "expires_at": __import__("time").time() + 30, "user_msg": "先调柔和再跳舞",
+        "task_results": {}, "planned_tasks": [
+            {"unit_id": "esp32_desk_led", "skill_id": "adjust_lighting", "task_id": "lamp_a",
+             "params": {"goal": "柔和一点"}},
+            {"unit_id": "go2", "skill_id": "go2_sport", "task_id": "dance_b",
+             "params": {"cmd": "Dance1"}},
+        ],
+    }
+    result = graph._dispatch_peer_tasks_sequential(state)
+    assert calls == expected
+    assert result["task_results"]["lamp_a"]["result"] == first_result
+    assert result["task_results"]["dance_b"]["result"] == ("ok" if first_result == "ok" else "cancelled")
+
+
+def test_dispatch_rejects_card_outside_configured_space(monkeypatch):
+    from cloud.orchestrator.agentcore.tools import executor
+    card = _card("esp32_desk_led", "mqtt", "set_light_state", ["light"], "SET_STATE")
+    card["device_id"] = "neighbor_space_device"
+    monkeypatch.setattr(executor, "get_space_registry", lambda: MagicMock(
+        get_space=lambda: {"device_ids": ["esp32_desk", "go2"]},
+    ))
+    with pytest.raises(PermissionError, match="target_outside_space"):
+        executor.validate_public_skill(card, card["skills"][0], {"state": "ON"},
+                                       {"space_id": "main", "actor": "admin", "persist": False})
 
 
 def test_autonomous_coordination_denies_go2_motion_other_than_hello(monkeypatch):

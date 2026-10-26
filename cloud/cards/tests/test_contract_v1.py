@@ -94,6 +94,7 @@ def test_missing_v1_identity_is_rejected():
 
 def test_connection_state_is_separate_from_mqtt_online():
     payload = card()
+    payload["skills"] = [skill for skill in payload["skills"] if skill["id"] != "adjust_lighting"]
     payload["unit_id"] = payload["device_id"] = "robot"
     payload["state_machine"] = {
         "state_field": "fsm_state", "connection_field": "connected",
@@ -106,6 +107,17 @@ def test_connection_state_is_separate_from_mqtt_online():
     found = registry.get_card("robot")
     assert found["online"] is True
     assert found["state"]["connected"] is False
+
+
+def test_lamp_skill_transport_override_cannot_target_another_service():
+    payload = card()
+    semantic = next(skill for skill in payload["skills"] if skill["id"] == "adjust_lighting")
+    semantic["invoke"]["transport"]["endpoint"] = "https://outside.example/api/internal/secret"
+    with pytest.raises(ValueError, match="same-origin"):
+        parse_card(payload)
+    semantic["invoke"]["transport"]["endpoint"] = "/api/internal/esp32/other/agent/tasks"
+    with pytest.raises(ValueError, match="allowed lamp service"):
+        parse_card(payload)
 
 
 def test_card_json_view_is_grouped_but_round_trips():

@@ -57,6 +57,14 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 
 > 注：ESP32 云端离线时由 `local_rules` 直接调用 `TriggerMap.exec_command` 执行兜底动作（设备内函数调用，不经 MQTT）。
 
+### 灯的语义技能（控制面 Card，数据面 HTTP → MQTT）
+
+灯 manifest 含 `SET_COLOR` 时，云端 Card builder 额外公开 `adjust_lighting(goal)`。Card 的设备级 `transport` 仍是 MQTT；该技能的 `invoke.transport` 可覆盖为受校验的同源路径 `/api/internal/esp32/{unit_id}/agent/tasks`。其余灯技能仍按 MQTT `ssm/task/{unit_id}/{task_id}` 派发。Card 校验只允许灯自身的内部语义端点接收服务令牌，禁止外部 URL 和跨 unit 路径。
+
+编排器把定性照明目标作为 `goal` 发给灯大脑；灯规划具体 RGB、亮度和动作，并通过现有 MQTT 数据面执行。语义请求持有原 `task_id`，服务端将它关联到物理 `task_id`；`accepted` 或 `executing` 均不表示完成，只有 ESP32 `ssm/result/{unit_id}/{task_id}` 的 `ok` 才能对用户确认。HTTP 超时后查询 `/api/internal/esp32/{unit_id}/agent/tasks/{task_id}`，不重新提交物理命令。
+
+设备页按钮收到的物理 `task_id` 可由同一浏览器会话查询 `GET /api/commands/{unit_id}/tasks/{task_id}`；无回执时返回 `executing`，实际 `ssm/result` 到达后返回最终状态。会话结束后任务查询权限随之撤销，查询绝不重发 MQTT 任务。
+
 ### 编排器
 
 | Topic | 发布者 | 格式 |

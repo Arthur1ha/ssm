@@ -26,7 +26,7 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 from cloud.esp32 import agent as esp32_agent_mod
 from cloud.esp32 import tools as esp32_tools
-from cloud.esp32.router import router as esp32_router
+from cloud.esp32.router import router as esp32_router, internal_router as esp32_internal_router
 from cloud.esp32.state import ESP32State
 from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
@@ -120,6 +120,8 @@ def _on_esp32_message(client, userdata, msg):
         task_id = parts[3]
         if isinstance(payload, dict):
             _esp32_state.store_task_result(task_id, payload)
+            if parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+                intents_module.record_lamp_task_result(task_id, payload)
 
     elif len(parts) == 4 and parts[1] == "task":
         # 识别"用户/编排器对设备的命令"（排除灯智能体自身的 agent_auto 任务），
@@ -222,6 +224,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(go2_router)
 app.include_router(people_router)
 app.include_router(esp32_router)
+app.include_router(esp32_internal_router)
 app.include_router(rules_router)
 app.include_router(devices_router)
 app.include_router(sessions_router)

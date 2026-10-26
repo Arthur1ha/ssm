@@ -131,11 +131,20 @@ def _skill_policy(initiator: str, target: str, skill_id: str, params: dict, orig
             raise PermissionError("unsupported coordination skill")
         return
     if target == "go2":
-        if skill_id != "go2_sport" or params.get("cmd") != "Hello":
-            raise PermissionError("peer requests may only use Go2 Hello")
+        allowed = {"Hello"} if origin == "agent_autonomous" else {"Hello", "Dance1", "Dance2"}
+        if skill_id != "go2_sport" or params.get("cmd") not in allowed:
+            raise PermissionError("Go2 peer motion is outside the permitted skill set")
         return
-    if origin == "agent_autonomous" and params.get("state") not in {"ON", "OFF"}:
-        raise PermissionError("autonomous lamp request is invalid")
+    if skill_id == "adjust_lighting":
+        if origin != "user_delegated" or not str(params.get("goal") or "").strip():
+            raise PermissionError("semantic lamp request requires user delegation")
+        return
+    if skill_id == "blink_light":
+        if origin != "user_delegated":
+            raise PermissionError("autonomous lamp blink is not permitted")
+        return
+    if skill_id != "set_light_state" or params.get("state") not in {"ON", "OFF"}:
+        raise PermissionError("lamp peer request is outside the permitted skill set")
 
 
 def _find_skill(card: dict, skill_id: str) -> dict | None:
@@ -164,13 +173,24 @@ def get_request_result(request_id: str) -> dict[str, Any] | None:
             return None
         result = dict(entry.result)
         context = entry.context
-        if (result.get("result") == "timeout" and result.get("target_unit_id") not in
+        if (result.get("result") == "timeout" and not result.get("semantic") and result.get("target_unit_id") not in
                 {None, "go2", "cloud_orchestrator"} and _esp32_state is not None):
             physical = _esp32_state.get_task_result(request_id)
             if physical and physical.get("result") in _TERMINAL - {"timeout"}:
                 result = {**result, "result": physical["result"],
                           "error": physical.get("error") or physical.get("reason")}
                 entry.result = result
+    if result.get("result") == "timeout" and result.get("semantic") and context is not None:
+        endpoint = result.get("endpoint")
+        if endpoint:
+            latest = _go2_http(f"{endpoint}/{request_id}", "GET", context,
+                               "user_delegated", request_id, 2.0)
+            if latest.get("result") in _TERMINAL - {"timeout"}:
+                with _lock:
+                    entry = _requests.get(request_id)
+                    if entry is not None and entry.result.get("result") == "timeout":
+                        entry.result = {**entry.result, **latest}
+                        result = dict(entry.result)
     if (result.get("result") == "timeout" and result.get("target_unit_id") == "go2"
             and context is not None):
         try:
@@ -316,9 +336,10 @@ def request_peer_skill(
             raise PermissionError("self request is not a peer request")
         skill = validate_skill_params(target, skill_id, params)
         action = str((skill.get("invoke") or {}).get("action") or "")
-        if target_unit_id not in {"go2", "cloud_orchestrator"}:
-            if action != "SET_STATE" or params.get("state") not in {"ON", "OFF"}:
-                raise PermissionError("peer lamp skill is not a safe switch action")
+        if target_unit_id not in {"go2", "cloud_orchestrator"} and skill_id not in {
+            "set_light_state", "blink_light", "adjust_lighting",
+        }:
+            raise PermissionError("peer lamp skill is not permitted")
         _skill_policy(initiator_unit_id, target_unit_id, skill_id, params, origin)
         logger.info("[PeerGateway] request=%s accepted from=%s to=%s skill=%s origin=%s",
                     request_id, initiator_unit_id, target_unit_id, skill_id, origin)
@@ -336,8 +357,18 @@ def request_peer_skill(
             result = _dispatch_coordinator(request_id, initiator_unit_id, target_unit_id,
                                            skill_id, params, context, origin, actor, entry, timeout)
         else:
-            result = _dispatch_lamp(request_id, target_unit_id, action, params,
-                                    context, actor, origin, timeout)
+            override = (skill.get("invoke") or {}).get("transport") or {}
+            if skill_id == "adjust_lighting" and override.get("kind") == "http":
+                from cloud.cards.validation import normalize_card
+                if target.get("card_schema_version", 0) != 1:
+                    raise PermissionError("legacy card cannot route a service token")
+                normalize_card(target)
+                result = _dispatch_lamp_semantic(request_id, target_unit_id,
+                                                 override["endpoint"], params,
+                                                 context, origin, timeout)
+            else:
+                result = _dispatch_lamp(request_id, target_unit_id, action, params,
+                                        context, actor, origin, timeout)
     except PermissionError as exc:
         result = _failure("blocked", str(exc), request_id)
     except ValueError as exc:
@@ -374,6 +405,23 @@ def _dispatch_lamp(request_id: str, target: str, action: str, params: dict,
             "error": result.get("error") or result.get("reason")}
 
 
+def _dispatch_lamp_semantic(request_id: str, target: str, endpoint: str, params: dict,
+                            context: ExecutionContext, origin: str, timeout: float) -> dict:
+    """Call the lamp brain once, then query the same semantic ID until terminal."""
+    deadline = time.monotonic() + timeout
+    body = {"goal": params["goal"], "task_id": request_id,
+            "deadline": time.time() + timeout}
+    result = _go2_http(endpoint, "POST", context, origin, request_id, timeout, body)
+    while result.get("result") == "executing" and time.monotonic() < deadline:
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+        result = _go2_http(f"{endpoint}/{request_id}", "GET", context, origin,
+                           request_id, max(0.1, deadline - time.monotonic()))
+    if result.get("result") == "executing":
+        result = {"result": "timeout", "error": "lamp_result_unknown"}
+    return {"request_id": request_id, "target_unit_id": target,
+            "semantic": True, "endpoint": endpoint, **result}
+
+
 def _go2_http(path: str, method: str, context: ExecutionContext, origin: str,
               request_id: str, timeout: float, body: dict | None = None) -> dict:
     token = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
@@ -392,7 +440,13 @@ def _go2_http(path: str, method: str, context: ExecutionContext, origin: str,
     }
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, msg, headers, newurl):
+            return None
+
+    # urllib follows redirects by default and may forward internal context
+    # headers to the redirected host. Internal service calls stay on one origin.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(request, timeout=max(0.1, min(25.0, timeout))) as response:
             payload = json.loads(response.read())

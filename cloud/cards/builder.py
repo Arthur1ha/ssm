@@ -124,28 +124,27 @@ FSM_DEFS: dict[str, StateMachine] = {
         "views": {
             "OFF": {
                 "label": "熄灭", "description": "灯环熄灭，等待下一条照明指令。",
-                "type": "light_ring", "color": "#505363", "intensity": 0.08,
+                "type": "light_ring",
             },
             "DIM": {
                 "label": "柔光", "description": "低亮暖光，适合休息和夜间环境。",
-                "type": "light_ring", "color": "#FFD08A", "intensity": 0.34,
+                "type": "light_ring",
             },
             "BRIGHT": {
                 "label": "亮光", "description": "高亮度照明，适合工作和阅读。",
-                "type": "light_ring", "color": "#FFF4D6", "intensity": 1.0,
+                "type": "light_ring",
             },
             "COLOR": {
                 "label": "彩光", "description": "以设定的颜色和亮度营造空间氛围。",
-                "type": "light_ring", "color": "#FFB45C", "intensity": 0.78,
-                "palette": ["#FF8A5C", "#FFD05C", "#7EE8A2", "#6B8CFF", "#D76BFF"],
+                "type": "light_ring",
             },
             "BLINK": {
                 "label": "闪烁", "description": "灯环间歇闪烁，用于提醒或引起注意。",
-                "type": "light_ring", "color": "#FFFFFF", "intensity": 0.9, "motion": "pulse",
+                "type": "light_ring",
             },
             "ERROR": {
                 "label": "异常", "description": "灯光执行异常，请检查设备连接与供电。",
-                "type": "light_ring", "color": "#FF5252", "intensity": 0.65, "motion": "alert",
+                "type": "light_ring",
             },
         },
     },
@@ -158,6 +157,9 @@ _NEW_LED_TRANSITIONS = [
     ("OFF", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
     ("ON", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
     ("BLINKING", "OFF", "CMD_OFF", "关灯", "SET_STATE", {"state": "OFF"}),
+    ("OFF", "ON", "CMD_COLOR", "调色", "SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
+    ("ON", "ON", "CMD_COLOR", "调色", "SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
+    ("BLINKING", "ON", "CMD_COLOR", "调色", "SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
     ("OFF", "BLINKING", "CMD_BLINK", "闪烁", "BLINK", {"count": 3}),
     ("ON", "BLINKING", "CMD_BLINK", "闪烁", "BLINK", {"count": 3}),
     ("BLINKING", "BLINKING", "CMD_BLINK", "再闪烁", "BLINK", {"count": 3}),
@@ -176,12 +178,11 @@ NEW_LED_FSM: StateMachine = {
     ],
     "views": {
         "OFF": {"label": "熄灭", "description": "灯环熄灭。",
-                "type": "light_ring", "color": "#505363", "intensity": 0.08},
+                "type": "light_ring"},
         "ON": {"label": "常亮", "description": "按当前颜色和亮度持续发光。",
-               "type": "light_ring", "color": "#FFFFFF", "intensity": 1.0},
+               "type": "light_ring"},
         "BLINKING": {"label": "闪烁", "description": "闪烁结束后恢复先前灯光。",
-                     "type": "light_ring", "color": "#FFFFFF", "intensity": 0.9,
-                     "motion": "pulse"},
+                     "type": "light_ring"},
     },
 }
 
@@ -287,6 +288,9 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
                  else CAPABILITY_SKILLS.get(action))
         if skill:
             skills.append(skill)
+    if agent_type == "actuator" and _fsm_key(manifest) == "led" and "SET_COLOR" in capability_actions:
+        from cloud.esp32.card import adjust_lighting_skill
+        skills.append(adjust_lighting_skill(unit_id))
 
     card = AgentCard(
         card_schema_version=1,

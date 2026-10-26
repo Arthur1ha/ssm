@@ -41,14 +41,7 @@ def publish_thought(text: str, unit_id: str = "esp32_desk_led", thought_type: st
     }, ensure_ascii=False))
 
 
-TOOL_DESCRIPTIONS = """可用工具（系统自动注入目标灯单元 ID）：
-- set_led_state(state): 开关 LED，state 必须为 ON/OFF 之一；ON 恢复上次常亮配置
-- set_led_color(r, g, b, brightness): 设置 LED 颜色，r/g/b/brightness 均为 0-255 整数
-- blink_led(r, g, b, count): 闪烁 LED，r/g/b 为 0-255 整数，count 为 1-20
-- speak(text): 播报中文语音，text 简洁不超过两句
-- list_peers(): 查询同一空间的在线同伴、技能和简要状态
-- request_peer_skill(target_unit_id, skill_id, params, request_id 可选): 请求同伴的公开技能；结果不是 ok 时停止后续动作。超时后用同一 request_id 查询，不重复执行。仅可请求网关允许的即时技能
-无需任何动作时输出 []"""
+from cloud.esp32.agentcore.tools.registry import TOOL_DESCRIPTIONS
 
 
 def list_peers(unit_id: str = "esp32_desk_led") -> list[dict]:

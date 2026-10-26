@@ -1,0 +1,1 @@
+"""Lamp perception adapters."""

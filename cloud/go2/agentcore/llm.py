@@ -12,11 +12,12 @@ def get_text_llm() -> ChatOpenAI:
     global _text_llm
     if _text_llm is None:
         _text_llm = ChatOpenAI(
-            model=os.getenv("GO2_TEXT_MODEL", "deepseek-chat"),
+            model=os.getenv("DEVICE_TEXT_MODEL", "deepseek-v4-flash-0731"),
             base_url=os.getenv("OPENAI_BASE_URL"),
             api_key=os.getenv("OPENAI_API_KEY"),
             temperature=0,
             timeout=30,
+            max_retries=0,
         )
     return _text_llm
 

@@ -152,44 +152,15 @@ def _subscribe_and_announce(client):
     # card 和 manifest topic 由 CardRegistry 统一订阅
     registry.subscribe(client)
     client.publish("ssm/decision/active", "true", retain=True)
+    from cloud.orchestrator.card import build_card, build_manifest
     client.publish(
         f"ssm/agents/{ORCHESTRATOR_ID}/card",
-        json.dumps({
-            "unit_id": ORCHESTRATOR_ID,
-            "device_id": ORCHESTRATOR_ID,
-            "name": "云端编排器",
-            "description": "协调空间内智能体任务",
-            "agent_type": "decision",
-            "online": False,
-            "transport": {"kind": "mqtt"},
-            "skills": [{
-                "id": "coordinate_request",
-                "name": "跨设备协调",
-                "tags": ["coordination"],
-                "params_schema": {
-                    "type": "object", "required": ["message"],
-                    "properties": {"message": {"type": "string", "minLength": 1}},
-                    "additionalProperties": False,
-                },
-                "invoke": {"action": "COORDINATE"},
-            }],
-            "state": {},
-        }, ensure_ascii=False),
-        qos=1,
-        retain=True,
+        json.dumps(build_card(ORCHESTRATOR_ID), ensure_ascii=False),
+        qos=1, retain=True,
     )
     client.publish(
         f"ssm/agents/{ORCHESTRATOR_ID}/manifest",
-        json.dumps({
-            "unit_id":    ORCHESTRATOR_ID,
-            "agent_type": "decision",
-            "name":       "llm_orchestrator",
-            "hw_platform":"cloud",
-            "topics": {
-                "manifest": f"ssm/agents/{ORCHESTRATOR_ID}/manifest",
-                "state":    f"ssm/agents/{ORCHESTRATOR_ID}/state",
-            }
-        }),
+        json.dumps(build_manifest(ORCHESTRATOR_ID)),
         retain=False,
     )
     _publish_decision_state(client)

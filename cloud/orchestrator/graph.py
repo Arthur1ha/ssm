@@ -24,6 +24,15 @@ from typing import TypedDict
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
+from cloud.orchestrator.agentcore.prompts import _build_card_prompt, AGENT_PERSONA, lighting_goal
+from cloud.orchestrator.agentcore.llm import _make_llm
+from cloud.orchestrator.agentcore.memory.session import _conversation_history, _append_history, clear_session_context, recent_history
+from cloud.orchestrator.agentcore.perception.space import _format_env_state, space_view
+from cloud.orchestrator.agentcore.tools.executor import (
+    resolve_skill_transport as _skill_transport, validate_public_skill,
+)
+from cloud.orchestrator.agentcore.skills.coordination import allows_step
+from cloud.orchestrator.agentcore.tools.registry import INTERNAL_TOOLS
 
 import tools as _t
 from cloud.space.registry import (
@@ -53,24 +62,11 @@ def clear_peer_coordination(request_id: str) -> None:
         _cancelled_peer_requests.discard(request_id)
 
 
-# ── 编排器自身人格 ───────────────────────────────────────────────
-# 编排器是智慧空间的"管家/协调者"：温暖、简洁、像主人贴心的贴身管家。
-# 只负责"框住整体计划与结果"，不复述各设备的具体动作细节（细节由设备自己的
-# 台词去说），避免与设备台词重复打架。
-AGENT_PERSONA = (
-    "你是这个智慧空间的贴心管家，像主人身边温暖体贴的老朋友。"
-    "说话简洁自然、有人情味，只负责把整体安排和结果轻轻交代一句，不啰嗦细节。"
-)
-
 LLM_UNAVAILABLE_REPLY = (
     "我这边和云端大脑的连接有点晃，刚才没法放心替你安排。"
     "你稍等我缓一口气，或者先点设备卡片直接控制。"
 )
 
-
-# ── 对话历史 ─────────────────────────────────────────────────────
-_conversation_history: dict[str, list] = {}
-_MAX_HISTORY = 10
 
 # Explicit card metadata is preferred.  The id/action list is a defensive
 # fallback for older cards which do not yet advertise ``persistent: true``.
@@ -84,38 +80,6 @@ _PERSISTENT_SKILL_MARKERS = (
 )
 
 
-def _int_env(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _format_env_state(sensors: dict, actuators: dict) -> str:
-    """把传感器和执行器快照格式化为可读字符串，注入 Planner prompt。"""
-    lines = []
-    for uid, data in sensors.items():
-        s = data.get("state") or data.get("event") or {}
-        lines.append(f"- {uid}：ISM={s.get('ism', '?')}")
-    for uid, data in actuators.items():
-        s = data.get("state", {})
-        lines.append(f"- {uid}：ISM={s.get('ism', '?')}")
-    return "\n".join(lines) if lines else "暂无环境数据"
-
-
-def _append_history(session_id: str, user_msg: str, response: str):
-    """Append to one session only; histories are never shared globally."""
-    history = _conversation_history.setdefault(session_id, [])
-    history.append({"user": user_msg, "assistant": response})
-    while len(history) > _MAX_HISTORY:
-        history.pop(0)
-
-
-def clear_session_context(session_id: str) -> None:
-    """Forget the graph's ephemeral conversation state for one session."""
-    _conversation_history.pop(session_id, None)
-
-
 def _skill_requires_persistence(skill: dict) -> bool:
     if skill.get("persistent") is True or skill.get("access") == "admin":
         return True
@@ -125,40 +89,6 @@ def _skill_requires_persistence(skill: dict) -> bool:
     invoke = skill.get("invoke", {})
     value = " ".join((str(skill.get("id", "")), str(invoke.get("action", "")))).lower()
     return any(marker in value for marker in _PERSISTENT_SKILL_MARKERS)
-
-
-def _make_llm():
-    """构建带 fallback 链的 ChatOpenAI（按 MODEL_LIST 顺序重试）。"""
-    model_list_str = os.getenv("MODEL_LIST", os.getenv("MODEL", ""))
-    models = [m.strip() for m in model_list_str.split(",") if m.strip()]
-    if not models:
-        models = ["deepseek-chat"]
-    base_url = os.getenv("OPENAI_BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
-    timeout = _int_env("LLM_TIMEOUT", 30)
-    max_retries = _int_env("LLM_MAX_RETRIES", 1)
-    max_tokens = _int_env("ORCHESTRATOR_MAX_TOKENS", 900)
-
-    base_kwargs = dict(
-        base_url=base_url,
-        api_key=api_key,
-        temperature=0,
-        timeout=timeout,
-        max_retries=max_retries,
-    )
-    if max_tokens > 0:
-        base_kwargs["max_tokens"] = max_tokens
-    llms = [ChatOpenAI(model=m, **base_kwargs) for m in models]
-    logger.info(
-        "[Graph] LLM config base_url=%s models=%s key_present=%s timeout=%s max_retries=%s max_tokens=%s",
-        base_url or "(empty)",
-        " → ".join(models),
-        bool(api_key),
-        timeout,
-        max_retries,
-        max_tokens if max_tokens > 0 else "disabled",
-    )
-    return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
 
 
 class OrchestratorState(TypedDict):
@@ -190,97 +120,6 @@ class OrchestratorState(TypedDict):
 
 # ── prompt 构建 ──────────────────────────────────────────────────
 
-def _build_card_prompt(cards: dict, user_msg: str, requirements: list,
-                        env_state: str = "", history: list = None,
-                        actor: str = "admin", persist: bool = True) -> str:
-    """把在线 card skills、环境状态、对话历史注入 prompt，一次 LLM 完成分类 + 规划。
-
-    Planner 输出带 route 字段的 JSON：act / chat / define_rule / discover_devices。
-    """
-    lines = []
-    for unit_id, card in cards.items():
-        if not card.get("online", True):
-            continue
-        if not card.get("skills"):
-            continue
-        lines.append(f"- {unit_id}（{card.get('name', unit_id)}）：")
-        for skill in card.get("skills", []):
-            schema = skill.get("params_schema", {})
-            props = schema.get("properties", {})
-            params_desc = json.dumps(props, ensure_ascii=False)
-            lines.append(f"  skill: {skill['id']}（{skill.get('name', '')}）params: {params_desc}")
-    agents_str = "\n".join(lines) if lines else "无可用智能体"
-
-    legacy_light = any(
-        "BRIGHT" in skill.get("params_schema", {}).get("properties", {}).get("state", {}).get("enum", [])
-        for card in cards.values() for skill in card.get("skills", [])
-        if skill.get("id") == "set_light_state"
-    )
-    light_state_guidance = (
-        "- set_light_state 请严格按设备卡中的 state 枚举填写；旧版灯接受 OFF/DIM/BRIGHT，"
-        "新版灯接受 ON/OFF。调色或指定亮度用 set_light_color。\n"
-        if legacy_light else
-        "- set_light_state 只接受 ON/OFF：用户明确要开灯或关灯时用；ON 恢复上次常亮颜色和亮度。\n"
-    )
-
-    history_str = ""
-    if history:
-        turns = [f"  用户：{h['user']}\n  助理：{h['assistant']}" for h in history]
-        history_str = "最近对话记录：\n" + "\n".join(turns) + "\n\n"
-
-    env_str = f"当前环境状态：\n{env_state}\n\n" if env_state else ""
-
-    return (
-        f"你是 SSM 多智能体编排中枢，兼任智能家居管家。根据用户意图，输出一个 JSON 对象（不含代码块）。\n"
-        f"人格设定（仅影响 route=chat 时 answer 的语气）：{AGENT_PERSONA}\n"
-        f"当 route=chat 时，answer 用这位管家的口吻，温暖简洁、像贴心老朋友；"
-        f"当 route=act 时只框住整体安排（如'都给你安排好咯'），不要复述各设备的具体动作。\n\n"
-        f"{history_str}"
-        f"{env_str}"
-        f"用户原话：{user_msg}\n"
-        f"当前会话角色：{actor}；允许长期写入：{'是' if persist else '否'}。"
-        f"不允许长期写入时，不得规划规则、地点/Home、人格、训练、长期记忆或人脸身份库变更。\n"
-        f"意图解析（可能为空）：{json.dumps(requirements, ensure_ascii=False)}\n\n"
-        f"已接入可调用智能体（未接入设备不在此列表中，不能用于 act 任务）：\n{agents_str}\n\n"
-        f"分类规则：\n"
-        f"1. 如果用户想发现、查看、接入当前空间里的新设备/新成员 → route=\"discover_devices\"。\n"
-        f"2. 如果用户明确要控制某个设备或调用某个智能体的技能 → route=\"act\"，输出 tasks 数组。\n"
-        f"3. 如果用户宣布到场/离开/开始某项活动（如'我回来了'、'我要工作了'、'开始学习'、'准备睡觉'、'我走了'、'客人来了'）→ route=\"act\"，同时规划所有相关任务：\n"
-        f"   ① 若灯光/环境状态需要调整，加入灯光任务；\n"
-        f"   ② 若 Go2 机器狗在线，加入一个对话类（conversation）任务，把用户的真实意图/目标转告它。\n"
-        f"4. 如果用户说'以后...就...'、'每次...就...'、'当...时自动...' → route=\"define_rule\"，输出 rule 对象。\n"
-        f"5. 其他（纯问答、闲聊、环境无需调整且无明确设备指向）→ route=\"chat\"，输出 answer 字符串。\n\n"
-        f"技能路由引导（按 skill 的 tags 选择，保持通用 card-driven）：\n"
-        f"- 明确的肢体动作（跳舞/站起/坐下/打招呼/握手等）→ 选带 motion 类 tag 的 skill，"
-        f"params 按其 schema 填（通常是 cmd）。\n"
-        f"- 要去某个地点/导航 → 选带 navigation 类 tag 的 skill，params 填目标位置（通常是 name）。\n"
-        f"- 开放式目标/场景意图（如'客人来了'、'我回来了'、'去门口看看'）→ 选带 conversation 类 tag 的 skill"
-        f"（如 go2_chat）。\n\n"
-        f"★ 关键：conversation 类 skill（go2_chat）的 params.message 必须是【用户真实意图/目标的忠实转述原文】，"
-        f"不要写成机器狗的人格台词或拟声词。下游智能体会用这段文字作为指令意图，自主规划要做的动作。\n"
-        f"  例：用户'客人回来了' → message=\"客人回来了，去门口迎接打招呼\"；"
-        f"用户'我回来了' → message=\"主人回来了，去门口迎接\"。\n"
-        f"  反例（禁止）：message=\"汪汪我来啦\"、\"摇尾巴欢迎你\" 这类台词——会导致机器狗规划不出动作。\n\n"
-        f"灯光（你是唯一调色大脑，像贴心管家那样自行拿捏什么最贴合用户当下的需要，不要套固定场景规则）：\n"
-        f"- set_light_color 是精细手段：可调任意颜色与亮度（r/g/b/brightness 均为 0-255）。"
-        f"当用户想要某种感受/氛围、或没有现成预设贴合时，用它，色温和明暗你自己判断。\n"
-        f"{light_state_guidance}"
-        f"- 用户要调暗或调亮时用 set_light_color，给出合适的 RGB 和 brightness；亮度 0 或全黑会关灯。\n"
-        f"- 用户不再需要灯时（要睡了、离开了）就关灯，别画蛇添足。\n\n"
-        f"act 校验：unit_id 必须在已接入可调用智能体列表里，skill_id 必须在该智能体的 skill 列表里，"
-        f"params 必须符合对应 skill 的 params_schema。\n"
-        f"找不到合适的 unit_id/skill_id 时改用 route=\"chat\" 回答'抱歉，没有合适的设备'。\n\n"
-        f"★ act 时附带 ack 字段：一句管家口吻、温暖简短的【即时确认】，表示你已领会用户意图、这就去张罗"
-        f"（在动作执行前先说给用户，让 ta 立刻收到回应）。例：用户'我回来了' → "
-        f"ack='欢迎回来，我这就安排大家为你接风～'。ack 是开场,不要把执行结果写进去（结果由收尾语负责）。\n\n"
-        f"输出格式（四选一，直接输出 JSON，不含代码块或解释）：\n"
-        f'- act:         {{"route": "act", "ack": "...", "tasks": [{{"unit_id": "...", "skill_id": "...", "params": {{...}}}}]}}\n'
-        f'- chat:        {{"route": "chat", "answer": "..."}}\n'
-        f'- define_rule: {{"route": "define_rule", "rule": {{"name": "...", "trigger": {{"tag": "light_level|presence|sound", "event": "..."}}, "action": {{"tag": "lighting", "cmd": "SET_STATE", "params": {{...}}}}}}}}\n'
-        f'- discover_devices: {{"route": "discover_devices"}}'
-    )
-
-
 def _parse_planner_output(content: str) -> dict:
     """从 LLM 输出中提取 JSON 对象，剥离代码块包裹。
 
@@ -299,6 +138,8 @@ def _http_timeout_for(card: dict, skill_id: str) -> float:
     """Go2 任务可跨同步窗口运行；外层预算覆盖服务端 90 秒截止时间。"""
     if card.get("unit_id") == "go2":
         return 95
+    if skill_id == "adjust_lighting":
+        return 60
     for skill in card.get("skills", []):
         if skill.get("id") == skill_id:
             if "navigation" in skill.get("tags", []):
@@ -336,9 +177,10 @@ def _make_planner_node(llm):
         space_id = str(state.get("space_id") or DEFAULT_SPACE_ID)
         _t.do_publish_feedback(session_id, "planning", "正在理解你的意图...")
 
-        discovered_cards = _t._registry.get_all_cards() if _t._registry else {}
         space_registry = get_space_registry()
-        cards = get_adopted_cards(discovered_cards, space_registry, space_id)
+        view = space_view(_t._registry, _t._state, space_registry, space_id)
+        discovered_cards = view["discovered"]
+        cards = view["cards"]
         if "space_id" not in state:
             cards = discovered_cards
         online_ids = [uid for uid, c in cards.items() if c.get("online", True)]
@@ -379,13 +221,11 @@ def _make_planner_node(llm):
             return {**state, "route": "discover_devices", "planned_tasks": [],
                     "response_text": text, "early_exit": True}
 
-        sensors   = _t._state.sensor_snapshot()   if _t._state else {}
-        actuators = _t._state.actuator_snapshot() if _t._state else {}
-        env_state = _format_env_state(sensors, actuators)
+        env_state = view["environment"]
         prompt = _build_card_prompt(
             cards, state["user_msg"], state.get("requirements", []),
             env_state=env_state,
-            history=list(_conversation_history.get(session_id, [])),
+            history=recent_history(session_id),
             actor=state.get("actor", "admin"),
             persist=state.get("persist", True),
         )
@@ -476,7 +316,7 @@ def _make_planner_node(llm):
             tasks_raw = []
 
         tasks = []
-        for i, t in enumerate(tasks_raw):
+        for i, t in enumerate(tasks_raw[:INTERNAL_TOOLS["invoke_skill"]["max_calls"]]):
             if not isinstance(t, dict):
                 continue
             unit_id = t.get("unit_id")
@@ -488,12 +328,19 @@ def _make_planner_node(llm):
             if not any(s.get("id") == skill_id for s in card.get("skills", [])):
                 logger.warning("[Planner] 丢弃 %s 未知 skill_id: %s", unit_id, skill_id)
                 continue
+            params = t.get("params", {})
+            if (skill_id == "set_light_color"
+                    and any(s.get("id") == "adjust_lighting" for s in card.get("skills", []))
+                    and not re.search(r"(?:#[0-9a-fA-F]{6}|RGB\s*\(|[rgbRGB]\s*[:=]\s*\d+)",
+                                      state.get("user_msg", ""))):
+                skill_id = "adjust_lighting"
+                params = {"goal": lighting_goal(state.get("user_msg", ""))}
             request_id = state.get("event_id") or uuid.uuid4().hex[:12]
             tasks.append({
                 "unit_id":  unit_id,
                 "skill_id": skill_id,
                 "task_id":  f"{request_id}_t{i}",
-                "params":   t.get("params", {}),
+                "params":   params,
             })
 
         # tasks 校验后为空 → 退化为闲聊，避免 Dispatcher 返回冷冰冰的错误
@@ -631,7 +478,13 @@ def _make_dispatcher_node():
                                session_id, task["skill_id"])
                 continue
 
-            kind = card.get("transport", {}).get("kind")
+            try:
+                transport = validate_public_skill(card, skill, task["params"], state)
+            except (ValueError, PermissionError) as exc:
+                results[task["task_id"]] = {"result": "rejected", "task_id": task["task_id"],
+                                            "session_id": session_id, "error": str(exc)[:120]}
+                continue
+            kind = transport.get("kind")
 
             if kind == "mqtt":
                 action = skill.get("invoke", {}).get("action", "")
@@ -648,7 +501,7 @@ def _make_dispatcher_node():
                             json.dumps(task["params"], ensure_ascii=False), task["task_id"])
 
             elif kind == "http":
-                endpoint = card.get("transport", {}).get("endpoint", "")
+                endpoint = transport.get("endpoint", "")
                 # message 是给下游（Go2 agent）的指令意图：
                 # 优先用 params.message（Planner 已忠实转述用户真实意图），
                 # 否则退回用户原话，最后才退回 skill 名+params（保证非空）。
@@ -735,23 +588,19 @@ def _dispatch_peer_tasks_sequential(state: OrchestratorState) -> OrchestratorSta
             results[task_id] = {"result": "blocked", "task_id": task_id,
                                 "error": "invalid_skill_parameters"}
             break
-        kind = card.get("transport", {}).get("kind")
-        # Coordination is intentionally limited to the first verified loop:
-        # lamp ON/OFF and Go2's stationary Hello. In particular, another
-        # go2_chat call would make a second delegation hop.
-        light_switch = (kind == "mqtt" and "light" in skill.get("tags", [])
-                        and skill.get("invoke", {}).get("action") == "SET_STATE"
-                        and task["params"].get("state") in {"ON", "OFF"})
-        greeting = (kind == "http" and task["unit_id"] == "go2"
-                    and task["skill_id"] == "go2_sport"
-                    and task["params"].get("cmd") == "Hello")
-        if not (light_switch or greeting):
+        try:
+            transport = _skill_transport(card, skill)
+        except ValueError as exc:
+            results[task_id] = {"result": "blocked", "task_id": task_id,
+                                "error": str(exc)[:120]}
+            break
+        kind = transport.get("kind")
+        if not allows_step(task, skill, kind, state.get("origin_kind", "")):
             results[task_id] = {"result": "blocked", "task_id": task_id,
                                 "error": "coordination_skill_denied"}
             break
         try:
-            from cloud.peers.gateway import validate_skill_params
-            skill = validate_skill_params(card, task["skill_id"], task["params"])
+            validate_public_skill(card, skill, task["params"], state)
         except (ValueError, PermissionError) as exc:
             results[task_id] = {"result": "blocked", "task_id": task_id,
                                 "error": str(exc)[:120]}
@@ -779,7 +628,7 @@ def _dispatch_peer_tasks_sequential(state: OrchestratorState) -> OrchestratorSta
                 result = {"result": "timeout", "task_id": task_id,
                           "error": "result_not_confirmed"}
         elif kind == "http":
-            endpoint = card.get("transport", {}).get("endpoint", "")
+            endpoint = transport.get("endpoint", "")
             message = (task["params"].get("message") or state["user_msg"])
             delegated = state.get("origin_kind") == "user_delegated"
             body = {
@@ -843,7 +692,8 @@ def _make_evaluator_node():
                 continue
             unit_id = task["unit_id"]
             card = _t._registry.get_card(unit_id) if _t._registry else None
-            kind = card.get("transport", {}).get("kind") if card else "mqtt"
+            skill = next((s for s in card.get("skills", []) if s.get("id") == task["skill_id"]), None) if card else None
+            kind = (_skill_transport(card, skill).get("kind") if card and skill else "mqtt")
             if kind == "mqtt":
                 pending.append(tid)
 

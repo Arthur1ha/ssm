@@ -32,6 +32,16 @@ device_chat_logger = logging.getLogger("cloud.esp32.chat")
 router = APIRouter(tags=["gateway"])
 
 _mqtt_client = None
+_lamp_task_owners: dict[str, tuple[str, str]] = {}
+_lamp_task_results: dict[str, dict[str, Any]] = {}
+_lamp_task_owners_lock = threading.Lock()
+
+
+def record_lamp_task_result(task_id: str, result: dict[str, Any]) -> None:
+    """Keep owned browser results available even if the state ring is trimmed."""
+    with _lamp_task_owners_lock:
+        if task_id in _lamp_task_owners:
+            _lamp_task_results[task_id] = dict(result)
 
 
 def init_mqtt(client) -> None:
@@ -50,7 +60,7 @@ def _context(session: dict[str, Any]) -> dict[str, Any]:
     return {
         "session_id": session["session_id"],
         "actor": session["actor"],
-        "persist": session["actor"] == "admin",
+        "persist": session.get("persist", session["actor"] == "admin"),
         "space_id": DEFAULT_SPACE_ID,
         "issued_at": session["issued_at"],
         "expires_at": session["expires_at"],
@@ -332,6 +342,25 @@ def _dispatch_mqtt_task(
     card = _configured_card(unit_id)
     if card is None:
         raise HTTPException(status_code=404, detail="unit is not available in the current space")
+    if not card.get("online", False):
+        raise HTTPException(status_code=503, detail="unit is offline")
+    if unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+        from cloud.esp32.agentcore.tools.registry import (
+            valid_lamp_params, normalize_brightness, fsm_allows,
+        )
+        from cloud.api.main import _esp32_state
+        current = (_esp32_state.actuator_snapshot().get(unit_id, {}).get("state") or {})
+        current_ism = str(current.get("ism") or (card.get("state") or {}).get("ism") or "")
+        legacy_states = {"BRIGHT", "DIM"} <= set((card.get("state_machine") or {}).get("states", []))
+        if not valid_lamp_params(action, params, allow_legacy=legacy_states):
+            raise HTTPException(status_code=400, detail="invalid lamp action parameters")
+        if action == "SET_COLOR" and "brightness" not in params:
+            try:
+                params = normalize_brightness(action, params, current)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not fsm_allows(card, current_ism, action, params):
+            raise HTTPException(status_code=409, detail="lamp action is unavailable in the current FSM state")
     if (card.get("transport") or {}).get("kind") != "mqtt":
         raise HTTPException(status_code=400, detail="unsupported device transport")
     allowed = {
@@ -341,6 +370,19 @@ def _dispatch_mqtt_task(
     allowed.update(str(edge.get("action") or "") for edge in (card.get("state_machine") or {}).get("transitions", []))
     if allowed and action not in allowed:
         raise HTTPException(status_code=403, detail="action is not declared by this unit")
+    if unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+        from cloud.api.main import _esp32_state
+        machine = card.get("state_machine") or {}
+        current = (_esp32_state.actuator_snapshot().get(unit_id, {}).get("state") or {}).get("ism")
+        transitions = machine.get("transitions") or []
+        # Only precheck when the reported state belongs to this Card version.
+        # Older retained Cards may use different state names; the edge FSM
+        # remains authoritative in that case.
+        if current in machine.get("states", []) and transitions and not any(
+            edge.get("src") == current and edge.get("action") == action
+            for edge in transitions
+        ):
+            raise HTTPException(status_code=409, detail="action is blocked in the current lamp state")
     task_id = "task_" + uuid.uuid4().hex
     payload = {
         "task_id": task_id,
@@ -348,87 +390,50 @@ def _dispatch_mqtt_task(
         "action": action,
         "params": params,
         "actor": session["actor"],
-        "persist": session["actor"] == "admin",
+        "persist": session.get("persist", session["actor"] == "admin"),
         "space_id": DEFAULT_SPACE_ID,
         "ts": int(time.time()),
     }
     if source:
         payload["source"] = source
-    _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
+    owned_lamp_task = unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+    if owned_lamp_task:
+        with _lamp_task_owners_lock:
+            _lamp_task_owners[task_id] = (unit_id, session["session_id"])
+    try:
+        _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
+    except Exception:
+        if owned_lamp_task:
+            with _lamp_task_owners_lock:
+                _lamp_task_owners.pop(task_id, None)
+                _lamp_task_results.pop(task_id, None)
+        raise
     return task_id
 
 
 def _valid_lamp_params(action: str, params: Any) -> bool:
-    if not isinstance(params, dict):
-        return False
-    if action == "SET_STATE":
-        return set(params) == {"state"} and params["state"] in ("ON", "OFF")
-    if action == "SET_COLOR":
-        required, optional = {"r", "g", "b"}, {"brightness"}
-        if not required <= set(params) or set(params) - required - optional:
-            return False
-        return all(type(value) is int and 0 <= value <= 255 for value in params.values())
-    if action == "BLINK":
-        if "count" not in params or set(params) - {"count", "r", "g", "b"}:
-            return False
-        return all(
-            type(value) is int and (1 <= value <= 20 if key == "count" else 0 <= value <= 255)
-            for key, value in params.items()
-        )
-    return False
+    from cloud.esp32.agentcore.tools.registry import valid_lamp_params
+    return valid_lamp_params(action, params)
 
 
 def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
-    agent.mark_user_command(unit_id)
-    planned = agent.handle_user_text(message, persist=session["actor"] == "admin")
-    device_chat_logger.info(
-        "[DeviceChat/Plan] unit=%s session=%s plan=%s",
-        unit_id, session["session_id"], json.dumps(planned, ensure_ascii=False),
+    """Adapt an authenticated device-page session to the lamp Planner → Executor."""
+    from cloud.space.execution import ExecutionContext
+
+    context = ExecutionContext(
+        session["session_id"], session["actor"], session["actor"] == "admin",
+        DEFAULT_SPACE_ID, "user_delegated", int(session["expires_at"]),
     )
-    if not isinstance(planned, dict):
-        return {"result": "ok", "reply": str(planned)}
-    if planned.get("llm_available") is False:
-        return {"result": "error", **planned}
-    if planned.get("type") == "peer":
-        from cloud.peers.gateway import request_peer_skill
-        from cloud.space.execution import ExecutionContext
+    def dispatch(uid, action, params, _context, source):
+        return _dispatch_mqtt_task(uid, action, params, session, source=source)
 
-        context = ExecutionContext(
-            session["session_id"], session["actor"], False, DEFAULT_SPACE_ID,
-            "user_delegated", int(session["expires_at"]),
-        )
-        result = request_peer_skill(
-            initiator_unit_id=unit_id,
-            target_unit_id=planned.get("target_unit_id", ""),
-            skill_id=planned.get("skill_id", ""),
-            params=planned.get("params", {}),
-            context=context,
-            origin_kind="user_delegated",
-        )
-        if result.get("result") == "ok":
-            return {"result": "ok", "reply": planned.get("reply") or "同伴任务完成了。",
-                    "request_id": result["request_id"]}
-        return {"result": result.get("result", "error"), "reply": "同伴没有确认完成这项任务。",
-                "error": result.get("error"), "request_id": result.get("request_id")}
-    if planned.get("type") != "act":
-        return {"result": "ok", **planned}
+    return agent.run_user_text(message, unit_id, context, dispatch)
 
-    action, params = planned.get("action"), planned.get("params")
-    if not _valid_lamp_params(action, params):
-        logger.warning("lamp chat produced invalid action or params: %s %s", action, params)
-        return {"result": "error", "reply": "这条灯光指令我没理解清楚，请再说一次。"}
 
-    task_id = _dispatch_mqtt_task(unit_id, action, params, session, source="lamp_chat")
-    execution = agent.wait_task_result(task_id, 20.0)
-    outcome = execution.get("result", "error")
-    if outcome == "ok":
-        return {"result": "ok", "reply": planned["reply"], "action": action, "task_id": task_id}
-    detail = execution.get("error") or execution.get("reason")
-    logger.warning("lamp chat task %s ended with %s: %s", task_id, outcome, detail)
-    reply = "灯没能执行这条命令。" if outcome != "timeout" else "还没收到灯的执行反馈，暂时不能确认它是否执行了。"
-    if detail:
-        reply += f"原因：{detail}"
-    return {"result": outcome, "reply": reply, "task_id": task_id}
+def _has_sequential_clauses(message: str) -> bool:
+    """A device chat cannot confirm multiple ordered actions as one task."""
+    clauses = re.split(r"(?:，|,)?\s*(?:然后|接着|随后|并且)\s*", message)
+    return len(clauses) > 1 and all(clause.strip() for clause in clauses)
 
 
 async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any]) -> dict[str, Any]:
@@ -446,13 +451,19 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any])
         "[DeviceChat/User] unit=%s session=%s text=%s",
         unit_id, session["session_id"], json.dumps(message, ensure_ascii=False),
     )
-    try:
-        result = await asyncio.to_thread(_run_lamp_chat, agent, unit_id, message, session)
-    except Exception:
-        device_chat_logger.exception(
-            "[DeviceChat/Error] unit=%s session=%s", unit_id, session["session_id"],
-        )
-        raise
+    if _has_sequential_clauses(message):
+        result = {
+            "result": "needs_clarification",
+            "reply": "这句话有几个连续动作，设备页一次只能确认一个。请拆开发送；涉及机器狗移动时，请在它的页面说明方向和时长。",
+        }
+    else:
+        try:
+            result = await asyncio.to_thread(_run_lamp_chat, agent, unit_id, message, session)
+        except Exception:
+            device_chat_logger.exception(
+                "[DeviceChat/Error] unit=%s session=%s", unit_id, session["session_id"],
+            )
+            raise
     device_chat_logger.info(
         "[DeviceChat/Reply] unit=%s session=%s result=%s text=%s task=%s",
         unit_id, session["session_id"], result.get("result", "ok"),
@@ -591,6 +602,27 @@ async def get_go2_command_task(task_id: str, session: dict[str, Any] = Depends(r
     return await _internal_request(f"/api/go2/tasks/{task_id}", "GET", session)
 
 
+@router.get("/api/commands/{unit_id}/tasks/{task_id}")
+async def get_lamp_command_task(unit_id: str, task_id: str,
+                                session: dict[str, Any] = Depends(require_session)):
+    """Query the original lamp physical ID without publishing a second command."""
+    if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+        raise HTTPException(status_code=404, detail="lamp task not found")
+    if not re.fullmatch(r"task_[A-Fa-f0-9]{32}", task_id):
+        raise HTTPException(status_code=400, detail="invalid task_id")
+    with _lamp_task_owners_lock:
+        owner = _lamp_task_owners.get(task_id)
+        cached = _lamp_task_results.get(task_id)
+    if owner != (unit_id, session["session_id"]):
+        raise HTTPException(status_code=404, detail="lamp task not found")
+    from cloud.api.main import _esp32_state
+    physical = cached or _esp32_state.get_task_result(task_id)
+    if physical is None:
+        return {"result": "executing", "task_id": task_id}
+    return {"result": physical.get("result", "error"), "task_id": task_id,
+            "error": physical.get("error") or physical.get("reason")}
+
+
 @router.post("/api/commands/go2/tasks/{task_id}/cancel")
 async def cancel_go2_command_task(task_id: str, session: dict[str, Any] = Depends(require_csrf)):
     if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
@@ -664,4 +696,9 @@ async def end_session(session: dict[str, Any], reason: str) -> None:
         logger.warning("Failed to clean Go2 session %s", session_id)
     _events.emit(session_id, {"type": "session_ended", "reason": reason})
     _events.clear(session_id)
+    with _lamp_task_owners_lock:
+        for task_id, owner in tuple(_lamp_task_owners.items()):
+            if owner[1] == session_id:
+                _lamp_task_owners.pop(task_id, None)
+                _lamp_task_results.pop(task_id, None)
     audit_event("session_ended", session, reason=reason)

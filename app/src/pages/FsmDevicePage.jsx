@@ -34,6 +34,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const [sending, setSending] = useState(false);
   const [execution, setExecution] = useState('');
   const [go2AssetsOpen, setGo2AssetsOpen] = useState(false);
+  const [lampAssetsOpen, setLampAssetsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const reportExecution = result => setExecution(commandBus.describe(result));
 
@@ -145,6 +146,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   };
 
   const isGo2 = unitId === 'go2' || card?.device_id === 'go2'; // dedicated asset settings only
+  const isLamp = (card?.skills || []).some(skill => skill.id === 'adjust_lighting');
   useEffect(() => { setPreviewState(null); }, [unitId]);
   const isOn = !!current && current !== sm?.initial;
 
@@ -254,13 +256,93 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         modes={modes} modeVals={modeVals} onSwitchMode={switchMode}
         offline={offline} connected={connected} safetyAction={safetyAction}
         onSafety={() => { setSettingsOpen(false); dispatchTransition(safetyAction); }}
-        isGo2={isGo2} actor={actor} unitId={unitId}
-        onGo2Settings={() => setGo2AssetsOpen(true)}/>
+        isGo2={isGo2} isLamp={isLamp} actor={actor} unitId={unitId}
+        onGo2Settings={() => setGo2AssetsOpen(true)}
+        onLampSettings={() => setLampAssetsOpen(true)}/>
       {actor === 'admin' && isGo2 && <Go2AssetsDrawer open={go2AssetsOpen} onClose={() => setGo2AssetsOpen(false)}/>}
+      {actor === 'admin' && isLamp && <LampAssetsDrawer unitId={unitId} open={lampAssetsOpen}
+        onClose={() => setLampAssetsOpen(false)}/>}
     </div>
   );
 }
 window.FsmDevicePage = FsmDevicePage;
+
+function LampAssetsDrawer({ unitId, open, onClose }) {
+  const { useEffect, useState } = React;
+  const [personality, setPersonality] = useState('');
+  const [memory, setMemory] = useState({ taught: [], episodes: [], daily_summary: '' });
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const base = '/api/esp32/' + encodeURIComponent(unitId);
+  const load = async () => {
+    setBusy(true);
+    try {
+      const [profile, records] = await Promise.all([
+        apiClient.request(base + '/personality'), apiClient.request(base + '/memory'),
+      ]);
+      setPersonality(profile.prompt || '');
+      setMemory(records || { taught: [], episodes: [], daily_summary: '' });
+      setFeedback('');
+    } catch (error) { setFeedback(apiErrorText(error, '灯的记忆暂时无法读取')); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { if (open) load(); }, [open, unitId]);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = event => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+  const save = async event => {
+    event.preventDefault();
+    if (!personality.trim() || busy) return;
+    setBusy(true);
+    try {
+      await apiClient.request(base + '/personality', { method: 'POST', body: { prompt: personality.trim() } });
+      setFeedback('人设已更新');
+    } catch (error) { setFeedback(apiErrorText(error, '人设更新失败')); }
+    finally { setBusy(false); }
+  };
+  return <>
+    <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
+    <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`}
+      role="dialog" aria-modal="true" aria-hidden={!open} aria-labelledby="lamp-assets-title">
+      <div className="space-drawer__handle"/>
+      <header className="space-drawer__header">
+        <div><small>LAMP AGENT</small><h2 id="lamp-assets-title">灯智能体设置</h2></div>
+        <div className="space-drawer__header-actions">
+          <button className="btn" onClick={load} disabled={busy}>刷新</button>
+          <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭灯设置"><Icon name="x" size={14}/></button>
+        </div>
+      </header>
+      <div className="space-drawer__body" aria-busy={busy}>
+        {feedback && <p role="status" className="action-feedback">{feedback}</p>}
+        <section className="asset-section">
+          <div className="asset-section__heading"><div><small>SOUL PROFILE</small><h3>灯的人设</h3></div><span>长期生效</span></div>
+          <form className="personality-editor" onSubmit={save}>
+            <textarea value={personality} onChange={event => setPersonality(event.target.value)}
+              rows="5" maxLength="2000" placeholder="描述灯的表达方式…"/>
+            <div><small>{personality.length} / 2000</small><button className="btn btn--accent" disabled={busy || !personality.trim()}>更新人设</button></div>
+          </form>
+        </section>
+        <section className="asset-section asset-section--memory">
+          <div className="asset-section__heading"><div><small>LONG MEMORY</small><h3>灯的记忆</h3></div><span>{memory.taught?.length || 0} 条调教</span></div>
+          <div className="memory-block"><h4>今日记录</h4><pre>{memory.daily_summary || '（今天暂无记录）'}</pre></div>
+          <div className="memory-block"><h4>近期经历</h4>
+            {memory.episodes?.length ? <ul>{memory.episodes.map((entry, index) =>
+              <li key={entry.ts || index}><span>{entry.detail}</span><code>{entry.result}</code></li>)}</ul>
+              : <p className="asset-empty">还没有保存的经历。</p>}
+          </div>
+          <div className="memory-block"><h4>已教习惯</h4>
+            {memory.taught?.length ? <ul>{memory.taught.map((rule, index) =>
+              <li key={rule.id || index}><span>{rule.trigger} → {rule.behavior}</span><code>{rule.hit_count || 0} 次触发</code></li>)}</ul>
+              : <p className="asset-empty">还没有保存的调教习惯。</p>}
+          </div>
+        </section>
+      </div>
+    </aside>
+  </>;
+}
 
 function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, stateField, connectionField, legacyLed, connected, selectedState, onSelectState }) {
   const { useState, useRef, useEffect } = React;
@@ -363,7 +445,7 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
   </div>;
 }
 
-function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, actor, unitId, onGo2Settings }) {
+function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, isLamp, actor, unitId, onGo2Settings, onLampSettings }) {
   const panelRef = React.useRef(null);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
@@ -405,6 +487,9 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
       </section>)}
       {actor === 'admin' && isGo2 && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onGo2Settings(); }}>
         <span><strong>Go2 设置</strong><small>地点、人设与记忆</small></span><Icon name="arrow" size={15}/>
+      </button>}
+      {actor === 'admin' && isLamp && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onLampSettings(); }}>
+        <span><strong>灯智能体设置</strong><small>人设与记忆</small></span><Icon name="arrow" size={15}/>
       </button>}
       <a className="device-settings-card" href={'/api/devices/' + encodeURIComponent(unitId) + '/agent'}
         target="_blank" rel="noopener noreferrer">

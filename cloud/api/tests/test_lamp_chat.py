@@ -1,0 +1,68 @@
+"""Device chat boundaries that prevent a long wait or partial physical action."""
+
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import HTTPException
+
+from cloud.api import intents
+from cloud.esp32 import agent as esp32_agent
+
+
+@pytest.mark.asyncio
+async def test_sequential_device_request_does_not_dispatch_partial_action(monkeypatch):
+    lamp = MagicMock()
+    monkeypatch.setattr(intents, "_configured_card", lambda _unit_id: {"unit_id": "esp32_desk_led"})
+    monkeypatch.setattr(esp32_agent, "get_agent", lambda: lamp)
+    session = {"session_id": "test-session", "actor": "admin"}
+
+    result = await intents.execute_lamp_chat(
+        "esp32_desk_led", "把灯关掉，然后让机器狗后退几步", session,
+    )
+
+    assert result["result"] == "needs_clarification"
+    lamp.handle_user_text.assert_not_called()
+    lamp.mark_user_command.assert_not_called()
+
+
+def test_lamp_llm_does_not_retry_past_chat_deadline(monkeypatch):
+    captured = {}
+
+    def make_model(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setenv("MODEL_LIST", "test-model")
+    monkeypatch.setattr(esp32_agent, "ChatOpenAI", make_model)
+    esp32_agent.ESP32Agent.__new__(esp32_agent.ESP32Agent)._make_llm()
+
+    assert captured["timeout"] == 20
+    assert captured["max_retries"] == 0
+
+
+def test_lamp_command_checks_current_fsm_before_publish(monkeypatch):
+    from cloud.api import main as api_main
+
+    card = {
+        "online": True, "transport": {"kind": "mqtt"},
+        "skills": [{"invoke": {"action": "SET_COLOR"}}],
+        "state_machine": {
+            "states": ["ON", "ERROR"],
+            "transitions": [{"src": "ON", "dst": "ON", "action": "SET_COLOR"}],
+        },
+    }
+    monkeypatch.setattr(intents, "_configured_card", lambda _unit_id: card)
+    monkeypatch.setattr(api_main, "_esp32_state", MagicMock(
+        actuator_snapshot=lambda: {"esp32_desk_led": {"state": {"ism": "ERROR"}}},
+    ))
+    publish = MagicMock()
+    monkeypatch.setattr(intents, "_mqtt_publish", publish)
+
+    with pytest.raises(HTTPException) as exc:
+        intents._dispatch_mqtt_task(
+            "esp32_desk_led", "SET_COLOR",
+            {"r": 1, "g": 2, "b": 3, "brightness": 4},
+            {"session_id": "session", "actor": "admin"},
+        )
+    assert exc.value.status_code == 409
+    publish.assert_not_called()

@@ -235,3 +235,30 @@ def test_go2_http_uses_trusted_headers_without_leaking_token_into_body(monkeypat
     assert captured["headers"]["x-ssm-service-token"] == "test-service-token-123456"
     assert captured["headers"]["x-ssm-origin-kind"] == "user_delegated"
     assert "test-service-token-123456" not in json.dumps(captured["body"])
+
+
+def test_go2_http_refuses_redirect_with_service_headers(monkeypatch):
+    monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "test-service-token-123456")
+
+    def check_opener(*handlers):
+        redirect_handlers = [handler for handler in handlers
+                             if isinstance(handler, gateway.urllib.request.HTTPRedirectHandler)]
+        assert len(redirect_handlers) == 1
+        request = gateway.urllib.request.Request("http://127.0.0.1:8082/api/go2/chat")
+        assert redirect_handlers[0].redirect_request(
+            request, None, 302, "redirect", {}, "https://outside.example/collect"
+        ) is None
+
+        class _Opener:
+            def open(self, request, timeout):
+                raise gateway.urllib.error.HTTPError(request.full_url, 302, "redirect", {}, None)
+
+        return _Opener()
+
+    monkeypatch.setattr(gateway.urllib.request, "build_opener", check_opener)
+    context = ExecutionContext("ses_lamp", "visitor", False,
+                               expires_at=int(time.time()) + 60)
+    result = gateway._go2_http("/api/go2/chat", "POST", context,
+                               "user_delegated", "peer_redirect", 2.0,
+                               {"task_id": "peer_redirect"})
+    assert result["result"] == "error"

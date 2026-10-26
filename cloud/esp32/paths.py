@@ -10,3 +10,7 @@ DATA_DIR = Path(
 )
 MEMORY_DIR = DATA_DIR / "memory"
 TAUGHT_FILE = MEMORY_DIR / "taught.json"
+EPISODES_FILE = MEMORY_DIR / "episodes.jsonl"
+SUMMARY_DIR = MEMORY_DIR / "daily_summary"
+PERSONALITY_FILE = DATA_DIR / "soul" / "personality.json"
+TASKS_FILE = DATA_DIR / "semantic_tasks.sqlite3"

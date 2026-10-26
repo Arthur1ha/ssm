@@ -25,10 +25,6 @@ class StateView(TypedDict):
     label: str
     description: str
     type: Literal["light_ring", "robot_pose", "image", "generic"]
-    color: NotRequired[str]
-    intensity: NotRequired[float]
-    palette: NotRequired[list[str]]
-    motion: NotRequired[str]
     pose: NotRequired[str]
     symbol: NotRequired[str]
 
@@ -53,6 +49,7 @@ class SkillInvoke(TypedDict):
     """
 
     action: str
+    transport: NotRequired[dict]  # optional validated per-skill transport override
 
 
 class SkillDef(TypedDict):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from copy import deepcopy
 from urllib.parse import urlsplit
 
@@ -81,6 +82,17 @@ def normalize_card(payload: dict) -> dict:
             raise ValueError("skill requires tags, params_schema and invoke")
         if not isinstance(skill["invoke"].get("action"), str):
             raise ValueError("skill.invoke.action must be a string")
+        override = skill["invoke"].get("transport")
+        if override is not None:
+            if not isinstance(override, dict) or override.get("kind") != "http":
+                raise ValueError("skill.invoke.transport must be a trusted HTTP override")
+            endpoint = override.get("endpoint")
+            _same_origin_path(endpoint, "skill.invoke.transport.endpoint")
+            # Only the service-owned lamp brain may receive a token through a
+            # retained MQTT Card override. Device cards cannot route it elsewhere.
+            match = re.fullmatch(r"/api/internal/esp32/([A-Za-z0-9_-]{1,64})/agent/tasks", endpoint)
+            if not match or match.group(1) != card["unit_id"]:
+                raise ValueError("skill.invoke.transport endpoint is not an allowed lamp service")
 
     sm = card.get("state_machine")
     if sm is not None:

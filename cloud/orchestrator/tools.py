@@ -122,12 +122,14 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
         headers["X-SSM-Expires-At"] = str(int(body.get("expires_at") or 0))
     deadline = _time.monotonic() + timeout
     task_id = str(body.get("task_id") or "")
+    lamp_semantic = endpoint.startswith("/api/internal/esp32/") and endpoint.endswith("/agent/tasks")
+    task_query_path = (endpoint + "/" if lamp_semantic else "/api/go2/tasks/")
     try:
         resp = requests.post(url, json=body, headers=headers, timeout=min(25, timeout),
                              allow_redirects=False,
                              proxies={"http": None, "https": None})
     except requests.exceptions.Timeout:
-        if not (task_id and endpoint == "/api/go2/chat"):
+        if not (task_id and (endpoint == "/api/go2/chat" or lamp_semantic)):
             raise
         # The original POST may still be executing. Query its server-owned ID;
         # never resend a motion-producing request after a client timeout.
@@ -146,12 +148,12 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
             if "result" not in data:
                 return {**data, "result": "error", "error": data.get("error") or "missing_execution_result"}
             return data
-        if endpoint != "/api/go2/chat":
+        if endpoint != "/api/go2/chat" and not lamp_semantic:
             return data
         task_id = str(data.get("task_id") or task_id)
     if not task_id:
         return {"result": "error", "error": "missing_task_id"}
-    query_url = f"{GO2_API_BASE}/api/go2/tasks/{quote(task_id, safe='')}"
+    query_url = f"{GO2_API_BASE}{task_query_path}{quote(task_id, safe='')}"
     while _time.monotonic() < deadline:
         remaining = deadline - _time.monotonic()
         try:
