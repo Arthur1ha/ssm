@@ -3,6 +3,7 @@ function Go2AssetsDrawer({ open, onClose }) {
   const { useCallback, useEffect, useState } = React;
   const [locations, setLocations] = useState([]);
   const [personality, setPersonality] = useState('');
+  const [socialInitiative, setSocialInitiative] = useState(45);
   const [memory, setMemory] = useState({ taught: [], today: '' });
   const [locationName, setLocationName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -21,7 +22,10 @@ function Go2AssetsDrawer({ open, onClose }) {
     if (locationResult.status === 'fulfilled') {
       setLocations(Array.isArray(locationResult.value) ? locationResult.value : []);
     }
-    if (personalityResult.status === 'fulfilled') setPersonality(personalityResult.value?.prompt || '');
+    if (personalityResult.status === 'fulfilled') {
+      setPersonality(personalityResult.value?.prompt || '');
+      setSocialInitiative(personalityResult.value?.social_initiative ?? 45);
+    }
     if (memoryResult.status === 'fulfilled') {
       setMemory({
         taught: Array.isArray(memoryResult.value?.taught) ? memoryResult.value.taught : [],
@@ -79,7 +83,8 @@ function Go2AssetsDrawer({ open, onClose }) {
     event.preventDefault();
     const prompt = personality.trim();
     if (!prompt) return;
-    await runGo2Action('personality', 'set_personality', { prompt }, 'Go2 人设已更新');
+    await runGo2Action('personality', 'set_personality',
+      { prompt, social_initiative: Number(socialInitiative) }, 'Go2 人设已更新');
   };
 
   const formatCoordinate = value => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
@@ -155,6 +160,10 @@ function Go2AssetsDrawer({ open, onClose }) {
             <form className="personality-editor" onSubmit={savePersonality}>
               <textarea value={personality} onChange={event => setPersonality(event.target.value)}
                 rows="5" maxLength="4000" placeholder="描述 Go2 的性格、表达方式和行为偏好…"/>
+              <label>社交主动性 {socialInitiative} · {socialInitiative < 35 ? '低' : socialInitiative < 70 ? '中' : '高'}
+                <input type="range" min="0" max="100" value={socialInitiative}
+                  onChange={event => setSocialInitiative(Number(event.target.value))}/>
+              </label>
               <div><small>{personality.length} / 4000</small>
                 <button className="btn btn--accent" disabled={busy === 'personality' || !personality.trim()}>
                   {busy === 'personality' ? '更新中…' : '更新人设'}

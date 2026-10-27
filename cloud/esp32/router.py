@@ -81,6 +81,7 @@ class PhysicalReplyRequest(BaseModel):
 
 class PersonalityRequest(BaseModel):
     prompt: str
+    social_initiative: int | None = None
 
 
 @router.get("/autonomy")
@@ -139,24 +140,22 @@ async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
 @router.get("/{unit_id}/personality")
 async def esp32_personality_get(unit_id: str, _session: dict = Depends(require_admin)):
     _require_led_unit(unit_id)
-    from cloud.esp32.agentcore.soul import get_personality
-    return {"prompt": get_personality()}
+    from cloud.esp32.agentcore.soul import get_personality_view
+    return get_personality_view()
 
 
 @router.post("/{unit_id}/personality")
 async def esp32_personality_set(unit_id: str, req: PersonalityRequest,
                                  session: dict = Depends(require_admin_csrf)):
-    from cloud.api.activity import user_intervention
-    await user_intervention()
     _require_led_unit(unit_id)
-    from cloud.esp32.agentcore.soul import set_personality, get_personality
+    from cloud.esp32.agentcore.soul import set_personality, get_personality_view
     context = ExecutionContext(session["session_id"], "admin", True, "main",
                                "user_delegated", int(session["expires_at"]))
     try:
-        set_personality(req.prompt, context)
+        set_personality(req.prompt, context, req.social_initiative)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"prompt": get_personality()}
+    return get_personality_view()
 
 
 @internal_router.post("/{unit_id}/agent/tasks", include_in_schema=False)

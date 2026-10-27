@@ -62,12 +62,15 @@ def get_space_context(
             if len(environment) >= _MAX_UNITS:
                 break
             environment.append(_summarize(source, entry, instant))
-    current = get_activity_store().current(space_id="main")
+    activity_store = get_activity_store()
+    current = activity_store.current(space_id="main")
     activity = None
     if current and current.get("status") in {"starting", "active", "partial"}:
         activity = {key: current[key] for key in
                     ("activity_id", "space_id", "context", "started_at", "revision", "status")
                     if key in current}
+    discoveries = (activity_store.recent_discoveries(unit_id, now=instant)
+                   if activity and callable(getattr(activity_store, "recent_discoveries", None)) else [])
     return {"peers": peers, "environment": environment,
             "constraints": requirements.list_for(unit_id, now=instant),
-            "activity": activity}
+            "activity": activity, "recent_discoveries": discoveries}

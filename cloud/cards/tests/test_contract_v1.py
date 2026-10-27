@@ -76,6 +76,16 @@ def test_unknown_or_invalid_widget_is_skipped_without_dropping_card(caplog):
     assert "Skipping" in caplog.text
 
 
+def test_map_widget_accepts_only_same_origin_api_endpoint():
+    payload = card()
+    payload["widgets"] = [{"type": "map", "states": [], "placement": "media",
+                           "endpoint": "/api/go2/map.png"}]
+    assert parse_card(payload)["widgets"] == payload["widgets"]
+
+    payload["widgets"][0]["endpoint"] = "https://outside.test/map.png"
+    assert parse_card(payload)["widgets"] == []
+
+
 def test_v0_retained_card_is_still_discoverable():
     legacy = {"slug": "legacy", "name": "旧设备", "agent_type": "robot",
               "transport": {"kind": "http"}, "skills": []}

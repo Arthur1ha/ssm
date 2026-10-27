@@ -8,7 +8,7 @@ from copy import deepcopy
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
-_WIDGETS = {"led_color", "color_swatches", "connection", "joystick", "video"}
+_WIDGETS = {"led_color", "color_swatches", "connection", "joystick", "video", "map"}
 _VIEWS = {"light_ring", "robot_pose", "image", "generic"}
 _URL_KEYS = {"endpoint", "command_endpoint", "state_stream", "status_endpoint", "get", "set"}
 
@@ -151,8 +151,8 @@ def normalize_card(payload: dict) -> dict:
                 _same_origin_path(widget.get("status_endpoint"), "widget.connection.status_endpoint")
                 _required_string(widget.get("connect_action"), "widget.connection.connect_action")
                 _required_string(widget.get("disconnect_action"), "widget.connection.disconnect_action")
-            if kind == "video":
-                _same_origin_path(widget.get("endpoint"), "widget.video.endpoint")
+            if kind in ("video", "map"):
+                _same_origin_path(widget.get("endpoint"), f"widget.{kind}.endpoint")
             if sm and any(state not in sm["states"] and state not in sm.get("views", {}) for state in widget.get("states", [])):
                 raise ValueError("widget.states references unknown state")
         except ValueError as exc:

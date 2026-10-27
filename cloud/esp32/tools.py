@@ -21,15 +21,6 @@ def publish_task(unit_id: str, task_id: str, action: str, params: dict, session_
     )
 
 
-def publish_speech(text: str, priority: str = "normal"):
-    from cloud.esp32.tts import synthesize
-    payload = {"text": text, "priority": priority}
-    audio_b64 = synthesize(text)
-    if audio_b64:
-        payload["audio"] = audio_b64
-    _mqtt.publish("ssm/agents/esp32_desk_led/speech", json.dumps(payload, ensure_ascii=False))
-
-
 from cloud.esp32.agentcore.tools.registry import TOOL_DESCRIPTIONS
 
 
@@ -88,17 +79,10 @@ def blink_led(unit_id: str, r: int, g: int, b: int, count: int) -> str:
     return task_id
 
 
-def speak(text: str) -> str:
-    """播报语音。"""
-    publish_speech(text)
-    return f"speech: {text}"
-
-
 TOOL_FN_MAP: dict = {
     "set_led_state": set_led_state,
     "set_led_color": set_led_color,
     "blink_led": blink_led,
-    "speak": speak,
     "list_peers": list_peers,
     "get_space_context": get_space_context,
     "request_peer_skill": request_peer_skill,

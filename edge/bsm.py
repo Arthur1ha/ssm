@@ -177,7 +177,7 @@ class BSM:
         if raw == 1 and self._sound_prev == 0:
             if time.ticks_diff(now, self._sound_cooldown) >= SOUND_COOLDOWN_MS:
                 self._sound_cooldown = now
-                self._event_cb("SOUND_DETECTED", {"ts": time.time()})
+                self._event_cb("SOUND_DETECTED", {})
         self._sound_prev = raw
 
     # ─────────────────────────────────────────────────────────

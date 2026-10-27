@@ -140,7 +140,7 @@ Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
 - `ssm/feedback/{session_id}` —— 编排器渐进式执行反馈
 - `ssm/decision/active` —— 云端在线总开关（`true`/`false`，离线时 ESP32 本地规则接管）
 - `ssm/rules/{device_id}` —— 自动化规则（retained）
-- `ssm/agents/{unit_id}/thought`、`ssm/agents/esp32_desk_led/speech` —— 拟人化思考 / 语音表达
+- `ssm/agents/{unit_id}/thought` —— 拟人化思考
 
 所有 payload 均为 JSON，每条消息带 `unit_id`（自标识键）和 `ts`（Unix 时间戳）。
 
@@ -183,12 +183,12 @@ make ps / logs     # 查看进程 / 日志
 
 ```bash
 cd edge
-mpremote connect <端口> cp boot.py config.py local_config.py probe.py ism.py bsm.py \
+mpremote connect <端口> cp boot.py clock.py config.py local_config.py probe.py ism.py bsm.py \
   mqtt_client.py trigger_map.py local_rules.py agent_manifest.py main.py :
 mpremote connect <端口> reset
 ```
 
-上传后串口应输出 `[Probe] {...}` 显示各传感器探测结果。
+上传后串口应输出 `[Clock] Unix time synced: ...` 和 `[Probe] {...}`。若 NTP 暂不可用，设备继续运行并每分钟重试；校时成功后会重新发布 retained 状态。
 
 ### 3. 打开手机 PWA
 

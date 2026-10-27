@@ -48,3 +48,20 @@ def test_expired_peer_message_never_starts_agent(monkeypatch):
     handle_api_peer_message(messenger, expired, None)
     assert messenger.calls == [("result", ("msg_1", "cancelled"),
                                 {"reason": "message_expired"})]
+
+
+def test_reply_is_recorded_but_never_starts_a_new_agent_turn():
+    messenger = Messenger()
+    handle_api_peer_message(messenger, {**MESSAGE, "reply_to": "msg_previous"}, None)
+    assert messenger.calls == []
+
+
+def test_ended_activity_message_does_not_start_agent(monkeypatch):
+    monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: type(
+        "Store", (), {"current": lambda self: {"activity_id": "act_1", "status": "ending",
+                                                "devices": {"go2": {"status": "joined"},
+                                                            "esp32_desk_led": {"status": "joined"}}}})())
+    messenger = Messenger()
+    handle_api_peer_message(messenger, {**MESSAGE, "activity_id": "act_1"}, None)
+    assert messenger.calls == [("result", ("msg_1", "cancelled"),
+                                {"reason": "activity_ended"})]

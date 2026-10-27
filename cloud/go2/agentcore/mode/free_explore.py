@@ -25,6 +25,7 @@ from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 from cloud.go2.space_context import prompt_space_context
 from cloud.go2.navigation import frontier as frontier_mod
+from cloud.peers.social import SocialState, activity_peers
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ class Drive:
         self._last_prompt_metadata: dict | None = None
         self._pending_question_id: str | None = None
         self._vision_retry_after = 0.0
+        self._social_state = SocialState()
+        self._social_retry_after = 0.0
 
     @staticmethod
     def _result_text(result: dict) -> str:
@@ -72,12 +75,93 @@ class Drive:
         activity_id = activity.get("activity_id") if activity else None
         return activity_id if activity_id and self.owner_session_id == activity_id else None
 
-    def _activity_event(self, event_type: str, text: str = "", **facts) -> None:
+    def _activity_event(self, event_type: str, text: str = "", **facts) -> dict | None:
         activity_id = self._activity_id()
         if activity_id:
             from cloud.space.activity import get_activity_store
-            get_activity_store().record_event(activity_id, event_type, unit_id="go2",
-                                              text=str(text)[:500], **facts)
+            if event_type == "observation":
+                facts.setdefault("source", "vision_description")
+            return get_activity_store().record_event(activity_id, event_type, unit_id="go2",
+                                                     text=str(text)[:500], **facts)
+        return None
+
+    async def _evaluate_social(self, local_observation: dict | None = None) -> None:
+        """A separate, non-motion decision at a Drive safety checkpoint."""
+        if (self.user_interrupt or self._pending_question_id or not go2.is_connected
+                or time.time() < self._social_retry_after):
+            return
+        activity_id = self._activity_id()
+        if not activity_id:
+            self._social_state.reset(None)
+            return
+        from cloud.space.context import get_space_context
+        from cloud.api.main import _esp32_state
+        from cloud.go2.agentcore.soul import get_personality_view
+        context = get_space_context("go2", state=_esp32_state)
+        activity, peers = activity_peers("go2", context["peers"])
+        score = get_personality_view()["social_initiative"]
+        opportunity = self._social_state.opportunity(
+            activity, peers, context["recent_discoveries"], score, unit_id="go2")
+        if local_observation and local_observation.get("event_id") and peers:
+            if local_observation["event_id"] not in self._social_state.seen_discoveries:
+                opportunity = {"kind": "own_observation",
+                               "event_ids": [local_observation["event_id"]],
+                               "discoveries": [{"summary": local_observation.get("text", "")[:240],
+                                                "event_id": local_observation["event_id"]}]}
+        if not opportunity:
+            return
+        if not activity or not peers:
+            return
+        targets = [{"unit_id": peer["unit_id"], "name": peer.get("name"),
+                    "skills": (peer.get("skills") or [])[:5]} for peer in peers]
+        prompt = (
+            f"{get_personality_view()['prompt']}\n"
+            "你正在活动内评估是否主动向同伴说一句有价值的话。"
+            "只根据当前活动和可靠发现判断；工作或睡觉等情境可保持安静。"
+            "不能声称动作已完成或从普通视觉描述推断人物身份、偏好。"
+            "只输出 JSON：{\"decision\":\"send_message\",\"target\":\"设备ID\","
+            "\"content\":\"简短内容\",\"reason\":\"话题\"} 或"
+            " {\"decision\":\"skip\",\"reason\":\"原因\"}。\n"
+            f"当前活动：{json.dumps(context['activity'], ensure_ascii=False)}\n"
+            f"机会：{json.dumps(opportunity, ensure_ascii=False)}\n"
+            f"在线同伴：{json.dumps(targets, ensure_ascii=False)}\n"
+            f"共享现状：{prompt_space_context()}"
+        )
+        try:
+            response = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
+            content = re.sub(r"```(?:json)?\n?", "", response.content.strip()).strip().rstrip("`")
+            decision = json.loads(content)
+        except Exception as exc:
+            logger.warning("[Drive/Social] evaluation failed: %s", exc)
+            self._social_retry_after = time.time() + 30
+            return
+        if not isinstance(decision, dict) or decision.get("decision") not in {"send_message", "skip"}:
+            logger.warning("[Drive/Social] invalid decision: %s", decision)
+            self._social_retry_after = time.time() + 30
+            return
+        self._social_state.evaluated(opportunity)
+        if decision.get("decision") != "send_message":
+            logger.info("[Drive/Social] skip: %s", decision.get("reason", ""))
+            return
+        target = str(decision.get("target") or "")
+        message = str(decision.get("content") or "").strip()[:1000]
+        topic = str(decision.get("reason") or message)
+        latest_activity, latest_peers = activity_peers(
+            "go2", get_space_context("go2", state=_esp32_state)["peers"])
+        if (not message or not latest_activity or latest_activity["activity_id"] != activity_id
+                or target not in {peer["unit_id"] for peer in latest_peers}
+                or not self._social_state.can_send(target, topic)
+                or self._activity_id() != activity_id or self.user_interrupt):
+            logger.info("[Drive/Social] send blocked by activity or budget")
+            return
+        from cloud.go2.agentcore.tools.tools import send_message
+        outcome = send_message(target, message)
+        if outcome.get("result") == "accepted":
+            self._social_state.sent(target, topic)
+            logger.info("[Drive/Social] sent message=%s conversation=%s",
+                        outcome.get("message_id"), outcome.get("conversation_id"))
+        else:
+            logger.info("[Drive/Social] delivery rejected: %s", outcome)
 
     async def _execute_motion(self, name: str, params: dict) -> dict:
         if self.user_interrupt or not go2.is_connected:
@@ -217,6 +301,8 @@ class Drive:
             if self.user_interrupt or self._pending_question_id:
                 continue
 
+            await self._evaluate_social()
+
             self._curiosity += 1
             self._social_tick += 1
 
@@ -274,7 +360,8 @@ class Drive:
             self._activity_event("message", message, status="error")
             return
         episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
-        self._activity_event("observation", initial_obs)
+        initial_event = self._activity_event("observation", initial_obs)
+        await self._evaluate_social(initial_event)
         logger.info("[Drive] 探索初始观察：%s", initial_obs)
 
         for step in range(_MAX_STEPS):
@@ -359,8 +446,6 @@ class Drive:
                 f"             每次移动到位后系统已自动观察一次，只在「想凑近再看看」时才单独用，别浪费步数。\n"
                 f"  go2_navigate_to   → name: 回到一个已标记的地点\n"
                 f"      何时用：想回到之前 go2_tag_location 标过的某个地点（只能去「已知地点」里列出来的）。\n"
-                f"  send_message      → target: 在线同伴 ID, content: 简短提议或分享\n"
-                f"      何时用：发现值得分享的事或想邀请同伴配合；发送不代表对方接受。\n"
                 f"  ask_user          → question: 简短问题\n"
                 f"      何时用：看到了无法判断且需要用户辨认的物体；发问题和截图后暂停探索。\n"
                 f"  stop              → 结束探索\n"
@@ -405,7 +490,8 @@ class Drive:
                 self._activity_event("action_result", result, action=tool,
                                      status=self._last_execution_result)
             elif tool == "go2_observe":
-                self._activity_event("observation", result)
+                observed_event = self._activity_event("observation", result)
+                await self._evaluate_social(observed_event)
             logger.info("[Drive] EXPLORING step=%d  result=%s", step, result)
 
             history.append({"step": step + 1, "tool": tool, "reason": reason, "result": result})
@@ -443,14 +529,21 @@ class Drive:
                     return "无法标记：odom 数据不可用"
                 return spatial_memory.tag_location(params.get("name", "unknown"), odom)
             elif tool == "send_message":
-                if not self._activity_id():
-                    self._last_execution_result = "blocked"
-                    return "当前没有空间活动"
-                from cloud.go2.agentcore.tools.tools import send_message
+                from cloud.space.context import get_space_context
+                from cloud.api.main import _esp32_state
+                view = get_space_context("go2", state=_esp32_state)
+                activity, peers = activity_peers("go2", view["peers"])
                 target = str(params.get("target") or "")
                 content = str(params.get("content") or "")
+                if (not activity or target not in {peer["unit_id"] for peer in peers}
+                        or not self._social_state.can_send(target, content)):
+                    self._last_execution_result = "blocked"
+                    return "当前活动或社交预算不允许发信"
+                from cloud.go2.agentcore.tools.tools import send_message
                 outcome = send_message(target, content)
                 status = outcome.get("result", "error")
+                if status == "accepted":
+                    self._social_state.sent(target, content)
                 self._last_execution_result = "ok" if status == "accepted" else status
                 return ("消息已发送，尚未确认同伴回复" if status == "accepted"
                         else self._result_text(outcome))
@@ -555,6 +648,8 @@ class Drive:
             nav_summary = result
 
         observation = await go2_observe("描述当前看到的场景，有什么值得继续探索的")
+        observed_event = self._activity_event("observation", observation)
+        await self._evaluate_social(observed_event)
         return f"{nav_summary} | 到达后观察：{observation}"
 
     async def _do_social(self) -> None:

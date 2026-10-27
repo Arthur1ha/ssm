@@ -226,6 +226,7 @@ def _build_go2_card() -> dict:
                 "visible": False,
             },
             {"type": "video", "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "placement": "media", "order": 10, "endpoint": "/api/go2/video", "requires_connection": True},
+            {"type": "map", "states": [], "placement": "media", "order": 15, "endpoint": "/api/go2/map.png", "requires_connection": True},
             {"type": "joystick", "states": ["moving"], "placement": "controls", "order": 20, "action": "velocity"},
         ],
     }

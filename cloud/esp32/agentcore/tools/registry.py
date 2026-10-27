@@ -27,10 +27,6 @@ TOOL_DECLARATIONS = {
                                     "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 20},
                                                    **{k: {"type": "integer", "minimum": 0, "maximum": 255}
                                                       for k in ("r", "g", "b")}}}},
-    "speak": {"role": "user_or_reactive", "persistent": False, "timeout": 10.0,
-              "result_type": "accepted", "description": "播报不超过 120 字的中文文本",
-              "params_schema": {"type": "object", "required": ["text"],
-                                "properties": {"text": {"type": "string", "maxLength": 120}}}},
     "list_peers": {"role": "user_or_reactive", "persistent": False, "timeout": 3.0,
                    "result_type": "snapshot", "description": "查询同空间在线同伴和公开技能",
                    "params_schema": {"type": "object", "properties": {}}},
@@ -64,8 +60,6 @@ TOOL_DESCRIPTIONS = "可用工具（系统注入目标灯单元 ID）：\n" + "\
 def valid_auxiliary_params(tool: str, params: Any) -> bool:
     if not isinstance(params, dict):
         return False
-    if tool == "speak":
-        return set(params) == {"text"} and isinstance(params["text"], str) and 0 < len(params["text"].strip()) <= 120
     if tool in {"list_peers", "get_space_context"}:
         return not params
     if tool == "request_peer_skill":

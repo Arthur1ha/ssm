@@ -1,7 +1,7 @@
 # trigger_map.py — ISM ↔ BSM bridge
 # All topics follow: ssm/agents/{unit_id}/{state|event}
 
-import time
+from clock import unix_time
 from ism import State, Trigger
 from config import DEVICE_ID, UNIT_LIGHT, UNIT_IR, UNIT_SOUND, UNIT_LED
 
@@ -127,7 +127,7 @@ class TriggerMap:
     #  Called by BSM event_cb for hardware-originated events
     # ─────────────────────────────────────────────────────────
     def on_bsm_event(self, event, data):
-        ts = time.time()
+        ts = unix_time()
 
         if event in ("LIGHT_CHANGED", "LIGHT_HEARTBEAT"):
             payload = {"unit_id": UNIT_LIGHT, "value": data["value"],
@@ -224,7 +224,7 @@ class TriggerMap:
             "unit_id": UNIT_LED,
             "task_id": task_id, "session_id": session_id,
             "result": result, "error": error,
-            "ism_state": self._ism_led.state, "ts": time.time(),
+            "ism_state": self._ism_led.state, "ts": unix_time(),
         }
         payload.update(self._task_correlation.get(task_id, {}))
         if result != "executing":
@@ -247,7 +247,7 @@ class TriggerMap:
             return
         payload = {"unit_id": UNIT_LED,
                    "ism": state, "r": values[0], "g": values[1],
-                   "b": values[2], "brightness": values[3], "ts": time.time()}
+                   "b": values[2], "brightness": values[3], "ts": unix_time()}
         if state == State.BLINKING:
             payload["count"] = values[4]
         self._mqtt.publish("ssm/agents/{}/state".format(UNIT_LED), payload, retain=True)

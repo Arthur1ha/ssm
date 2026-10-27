@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_9895a9459cf0469a9a68c28f3819ac20",
+  "session_id": "ses_J8dvIgQwmgR8L9RexHW-Gwpa",
+  "goal": "我要工作了",
+  "deadline": 1793108294.494215,
+  "steps": [
+    {
+      "step_id": "5a41a46ec1db4141b30f830211add4e4",
+      "tool_call_id": "240a4fd52fbf4fae9706cac2a7cc8006",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_3a68298dd8a049cbb2f3b1735817df33",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_9895a9459cf0469a9a68c28f3819ac20",
+          "source_session_id": "ses_J8dvIgQwmgR8L9RexHW-Gwpa",
+          "started_at": 1793108206.1621556,
+          "revision": 1793108206194,
+          "status": "partial",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "unavailable",
+              "owner": "",
+              "error": "RuntimeError"
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "joined",
+              "owner": "act_3a68298dd8a049cbb2f3b1735817df33",
+              "error": "",
+              "joined_at": 1793108206.1879966
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "工作模式已帮你开启，桌面的智能灯也已经就位。不过机器狗暂时没连上，先不管它，你安心工作。",
+  "question": "",
+  "trace_id": "tr_11bcd927a4724d33a7e58798ffa4d2cc",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "工作模式已开启，智能灯已加入。Go2 机器狗暂时没连上，先不打扰它。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793108211.006985
+}

@@ -1,12 +1,53 @@
 """Simulated mode execution boundaries; no robot or network access."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
+import pytest
+from fastapi import HTTPException
+
+from cloud.go2.card import _build_go2_card
+from cloud.go2.connection import go2
 from cloud.go2.agentcore.mode import free_explore, reactive
 from cloud.go2 import router as go2_router
 from cloud.go2.execution import ExecutionContext
+
+
+def test_go2_card_declares_center_map_widget():
+    widgets = _build_go2_card()["widgets"]
+    map_widget = next(widget for widget in widgets if widget["type"] == "map")
+    assert map_widget["endpoint"] == "/api/go2/map.png"
+    assert map_widget["placement"] == "media"
+    assert map_widget["requires_connection"] is True
+
+
+@pytest.mark.asyncio
+async def test_map_image_rejects_stale_data_and_serves_fresh_png(monkeypatch):
+    monkeypatch.setattr(go2, "is_connected", True)
+    monkeypatch.setattr(go2, "_voxel_raw", {
+        "data": {
+            "resolution": 0.05,
+            "origin": [0.0, 0.0, 0.0],
+            "width": [16, 16, 38],
+            "data": {"points": np.array([[0.4, 0.4, 0.5]])},
+        },
+    })
+    monkeypatch.setattr(go2, "_odom", {})
+    monkeypatch.setattr(go2, "_global_path", [])
+    monkeypatch.setattr(go2, "_voxel_received_at", time.monotonic() - 21)
+
+    with pytest.raises(HTTPException) as stale:
+        await go2_router.go2_map_image()
+    assert stale.value.status_code == 503
+
+    monkeypatch.setattr(go2, "_voxel_received_at", time.monotonic())
+    response = await go2_router.go2_map_image()
+    assert response.media_type == "image/png"
+    assert response.body.startswith(b"\x89PNG")
+    assert response.headers["cache-control"] == "private, no-store"
 
 
 def test_reactive_action_uses_executor_and_stops_after_mode_switch(monkeypatch):

@@ -111,7 +111,7 @@ class TelemetryField(TypedDict):
 class Widget(TypedDict):
     """态内富控件声明，type 为 PWA 内置实现的有限集合。"""
 
-    type: Literal["connection", "joystick", "video", "color_swatches", "led_color"]
+    type: Literal["connection", "joystick", "video", "map", "color_swatches", "led_color"]
     states: list[str]            # 在哪些状态下显示（空=全程）
     placement: NotRequired[Literal["media", "controls"]]  # 语义区域，前端按屏幕尺寸排版
     order: NotRequired[int]      # 同一区域内的显示顺序

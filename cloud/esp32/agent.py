@@ -64,6 +64,8 @@ class ESP32Agent(ReactiveMind):
         self._user_hold_until: float = 0.0
         self._last_reason_sig: tuple | None = None   # 上次问 LLM 时的情境签名（实质变化门）
         self._last_reason_ts: float = 0.0
+        from cloud.peers.social import SocialState
+        self._social_state = SocialState()
 
     def get_autonomy_mode(self) -> str:
         """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""

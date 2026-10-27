@@ -241,6 +241,15 @@ def _on_identity_event(event: IdentityEvent) -> None:
     elif identity_absent and may_record_episode:
         episode_memory.add(EventType.IDENTITY_CHANGE, f"{previous.name}已离开画面")
 
+    if identity_changed and current.role == "owner":
+        from cloud.space.activity import get_activity_store
+        activity = get_activity_store().current()
+        if (activity and (activity.get("devices") or {}).get("go2", {}).get("status") == "joined"):
+            get_activity_store().record_event(
+                activity["activity_id"], "person_identified", unit_id="go2",
+                text=f"已确认看到主人{current.name}", source="identity_recognition",
+                confidence=current.score)
+
     reactive_mind.on_identity_event(event)
     drive.on_identity_event(event)
 
@@ -737,6 +746,7 @@ class AutonomyRequest(BaseModel):
 
 class PersonalityRequest(BaseModel):
     prompt: str
+    social_initiative: int | None = None
 
 
 @router.post("/navigation/locations")
@@ -932,18 +942,21 @@ async def go2_identity_recognize(context: ExecutionContext = Depends(require_int
 async def go2_personality_get(context=Depends(require_admin_read)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.agentcore.soul import get_system_prompt
-    return {"prompt": get_system_prompt()}
+    from cloud.go2.agentcore.soul import get_personality_view
+    return get_personality_view()
 
 
 @router.post("/personality")
-async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
+async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.agentcore.soul import set_personality
+    from cloud.go2.agentcore.soul import set_personality, get_personality_view
     with use_context(context):
-        set_personality(req.prompt)
-    return {"ok": True, "prompt": req.prompt}
+        try:
+            set_personality(req.prompt, req.social_initiative)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **get_personality_view()}
 
 
 @router.get("/debug/voxel_map")
@@ -1087,17 +1100,17 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
     from cloud.go2.agentcore.memory import spatial as spatial_memory
     from cloud.go2.navigation.navigator import navigator
 
+    if (not go2.is_connected or go2.voxel_received_at is None
+            or time.monotonic() - go2.voxel_received_at > 20.0):
+        raise HTTPException(status_code=503, detail="地图数据尚未就绪")
+
     SCALE = 3
 
     grid_obj = go2.occupancy_grid
     odom     = go2.odom
 
     if grid_obj is None:
-        img = Image.new("RGB", (384, 384), (12, 14, 20))
-        d   = ImageDraw.Draw(img)
-        d.text((140, 188), "NO MAP", fill=(50, 60, 50))
-        buf = io.BytesIO(); img.save(buf, "PNG")
-        return Response(content=buf.getvalue(), media_type="image/png")
+        raise HTTPException(status_code=503, detail="地图数据尚未就绪")
 
     nx, ny = grid_obj.width[0], grid_obj.width[1]
     W, H   = nx * SCALE, ny * SCALE
@@ -1165,4 +1178,5 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
 
     buf = io.BytesIO()
     img.save(buf, "PNG")
-    return Response(content=buf.getvalue(), media_type="image/png")
+    return Response(content=buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "private, no-store"})

@@ -3,10 +3,9 @@
 from unittest.mock import MagicMock
 
 from cloud.esp32.agent import ESP32Agent
-from cloud.esp32.agentcore.tools.executor import execute_auxiliary
+from cloud.esp32.agentcore.tools.registry import TOOL_DECLARATIONS
 from cloud.esp32.agentcore.memory import taught as migrated_taught
 from cloud.esp32.memory import taught as legacy_taught
-from cloud.space.execution import ExecutionContext
 
 
 def _agent(monkeypatch, *, ism="OFF", online=True):
@@ -66,14 +65,11 @@ def test_reactive_taught_id_inside_params_does_not_block_online_lamp(monkeypatch
     assert touched == ["tb_work"]
 
 
-def test_speech_validates_text_and_returns_acceptance(monkeypatch):
-    context = ExecutionContext("s", "admin", False, "main", "user_delegated", 2**63)
-    sent = []
-    monkeypatch.setattr("cloud.esp32.tools.publish_speech", lambda text: sent.append(text))
-    spoken = execute_auxiliary(unit_id="esp32_desk_led", tool="speak", params={"text": "你好"}, context=context)
-    assert spoken == {"result": "accepted", "subtitle": "你好"}
-    assert execute_auxiliary(unit_id="esp32_desk_led", tool="speak", params={"text": ""}, context=context)["result"] == "rejected"
-    assert sent == ["你好"]
+def test_lamp_only_declares_supported_tools():
+    assert set(TOOL_DECLARATIONS) == {
+        "set_led_state", "set_led_color", "blink_led", "list_peers",
+        "get_space_context", "request_peer_skill", "send_message",
+    }
 
 
 def test_taught_old_and_new_paths_share_module_and_data(tmp_path):

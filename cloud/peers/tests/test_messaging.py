@@ -4,6 +4,7 @@ import json
 import threading
 
 from cloud.peers.messaging import AgentMessenger
+from cloud.space.activity import ActivityStore
 
 
 class Cards:
@@ -151,3 +152,35 @@ def test_invalid_sender_and_tampered_payload(monkeypatch):
     finally:
         go2.close()
         lamp.close()
+
+
+def test_peer_messages_reach_visible_fallback_only_without_activity(tmp_path, monkeypatch):
+    monkeypatch.setenv("SSM_INTERNAL_SERVICE_TOKEN", "test-service-token-123456")
+    store = ActivityStore(tmp_path / "activity.json")
+    monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: store)
+    visible = []
+    bus = Bus()
+    api = AgentMessenger(bus, Cards(), Space(), {"go2", "esp32_desk_led"},
+                         lambda _message: None, on_visible_message=visible.append)
+    orchestrator = AgentMessenger(bus, Cards(), Space(), {"cloud_orchestrator"},
+                                  lambda _message: None)
+    try:
+        outside = api.send_message("go2", "esp32_desk_led", "活动外消息")
+        bus.deliver(api)
+        assert [item["message_id"] for item in visible] == [outside["message_id"]]
+        external = orchestrator.send_message("cloud_orchestrator", "go2", "外部发来的消息")
+        bus.deliver(api, orchestrator)
+        assert [item["message_id"] for item in visible] == [outside["message_id"], external["message_id"]]
+
+        source = "evt_" + "a" * 32
+        store.note_user_intervention(source)
+        activity = store.begin("工作", source, 1)
+        inside = api.send_message("go2", "esp32_desk_led", "活动内消息")
+        bus.deliver(api)
+        assert len(visible) == 2
+        recorded = [item for item in store.events(activity["activity_id"])
+                    if item.get("message_id") == inside["message_id"]]
+        assert len(recorded) == 1 and recorded[0]["text"] == "活动内消息"
+    finally:
+        api.close()
+        orchestrator.close()

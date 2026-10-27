@@ -1,6 +1,7 @@
 """The peer gateway must preserve authority and physical result semantics."""
 
 import json
+import importlib
 import time
 
 import pytest
@@ -12,8 +13,8 @@ from cloud.space.execution import ExecutionContext
 
 def test_autonomous_dance_requires_both_agents_in_current_activity(monkeypatch):
     from cloud.space import activity as activity_module
-    from cloud.go2 import router as go2_router
-    from cloud.esp32 import router as lamp_router
+    go2_router = importlib.import_module("cloud.go2.router")
+    lamp_router = importlib.import_module("cloud.esp32.router")
 
     current = {"activity_id": "act_test"}
     owners = {"go2": "act_test", "lamp": None}

@@ -108,11 +108,13 @@ class ReactiveMind:
             "led_config（当前 RGB、亮度、闪烁次数）、time_period（时段）\n\n"
             f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
             f"当前空间现状：{json.dumps(space_context, ensure_ascii=False)}\n\n"
+            f"社交评估机会：{json.dumps(sense_data.get('social_opportunity'), ensure_ascii=False)}。"
+            "有机会时可根据情境发送一条相关同伴消息，也可输出 [] 跳过；安静周期不等于必须发信。"
+            "同伴回复只是结果，不要据此重新发起相同话题。\n\n"
             f"{history_lines}"
             f"{hints_str}{taught_str}\n\n"
             "根据观测自主判断，输出 JSON 数组，无需任何动作时输出 []，不含代码块或解释。\n"
-            "示例：[{\"tool\": \"set_led_color\", \"params\": {\"r\": 255, \"g\": 160, \"b\": 60, \"brightness\": 160}}, "
-            "{\"tool\": \"speak\", \"params\": {\"text\": \"傍晚了，给你调个暖黄\"}}]"
+            "示例：[{\"tool\": \"set_led_color\", \"params\": {\"r\": 255, \"g\": 160, \"b\": 60, \"brightness\": 160}}]"
         )
 
         try:
@@ -156,7 +158,7 @@ class ReactiveMind:
         """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
 
         set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
-        speak 等不受冷却约束。色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
+        色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
         """
         from cloud.esp32 import tools as _tools_mod
         from cloud.esp32.agentcore.tools.registry import TOOL_DECLARATIONS, valid_lamp_params
@@ -165,6 +167,20 @@ class ReactiveMind:
         if not isinstance(params, dict) or tool_name not in TOOL_DECLARATIONS:
             return False
         params = dict(params)
+
+        if tool_name == "send_message":
+            from cloud.peers.social import activity_peers
+            from cloud.space.context import get_space_context
+            context = get_space_context(led_unit, state=self._state)
+            activity, peers = activity_peers(led_unit, context["peers"])
+            target = str(params.get("target") or "")
+            topic = str(params.get("reason") or params.get("content") or "")
+            if (not activity or target not in {peer["unit_id"] for peer in peers}
+                    or not self._social_state.can_send(target, topic)):
+                self._last_reactive_tool_result = {"result": "blocked", "error": "social_gate"}
+                return False
+            params.pop("reason", None)
+            params.pop("reply_to", None)
 
         action = TOOL_DECLARATIONS[tool_name].get("action")
         if action and not valid_lamp_params(action, params):
@@ -186,7 +202,7 @@ class ReactiveMind:
             logger.warning("unknown tool: %s", tool_name)
             return False
         try:
-            if tool_name in {"list_peers", "get_space_context", "request_peer_skill", "send_message", "speak"}:
+            if tool_name in {"list_peers", "get_space_context", "request_peer_skill", "send_message"}:
                 from cloud.esp32.agentcore.tools.executor import execute_auxiliary
                 from cloud.space.execution import ExecutionContext
                 result = execute_auxiliary(
@@ -199,6 +215,8 @@ class ReactiveMind:
                 if result.get("result") not in {"ok", "accepted"}:
                     logger.warning("auxiliary tool did not complete: %s", result)
                     return False
+                if tool_name == "send_message":
+                    self._social_state.sent(target, topic)
                 if tool_name not in {"list_peers", "get_space_context"}:
                     self._last_act_ts = time.time()
                 return True
@@ -261,7 +279,7 @@ class ReactiveMind:
             started = time.monotonic()
             ok = self._dispatch_tool(call.get("tool", ""), params, led_unit)
             outcome = getattr(self, "_last_reactive_tool_result", {"result": "unknown"})
-            if call.get("tool") in {"set_led_state", "set_led_color", "blink_led", "speak"}:
+            if call.get("tool") in {"set_led_state", "set_led_color", "blink_led"}:
                 reply_steps.append({"step_id": "auto_" + uuid.uuid4().hex,
                                     "tool": call.get("tool"), "params": params,
                                     "result": outcome})
@@ -377,8 +395,7 @@ class ReactiveMind:
                     logger.debug("sensor event received from %s", unit_id)
                 except queue.Empty:
                     if time.time() - _last_any_event_ts > OFFLINE_THRESHOLD:
-                        logger.debug("periodic tick: device offline, skip")
-                        continue
+                        logger.debug("periodic tick: no sensor events")
                     logger.debug("periodic tick")
 
                 if not self._should_act() or not self._device_online():
@@ -393,6 +410,18 @@ class ReactiveMind:
                 logger.debug("sense: %s", sense)
 
                 sense["proactive_hints"] = self._check_proactive(sense)
+
+                from cloud.space.context import get_space_context
+                from cloud.peers.social import activity_peers
+                from cloud.esp32.agentcore.soul import get_personality_view
+                social_context = get_space_context(self._find_led_unit(), state=self._state)
+                activity, eligible = activity_peers(self._find_led_unit(), social_context["peers"])
+                opportunity = self._social_state.opportunity(
+                    activity, eligible, social_context["recent_discoveries"],
+                    get_personality_view()["social_initiative"],
+                    unit_id=self._find_led_unit())
+                if opportunity:
+                    sense["social_opportunity"] = opportunity
 
                 # 仅在感知、灯配置或调教规则变化时重新评估；事件去抖和最小间隔限制 LLM 频率。
                 from cloud.esp32.agentcore.memory import taught as _taught
@@ -409,7 +438,9 @@ class ReactiveMind:
                 sig = (sense["light_level"], sense["time_period"],
                        sense["sound_detected"], sense["led_state"],
                        tuple(led_config.get(k) for k in ("r", "g", "b", "brightness", "count")),
-                       rule_sig, peer_sig)
+                       rule_sig, peer_sig,
+                       (opportunity["kind"], tuple(opportunity["event_ids"]),
+                        int(time.time() // 300)) if opportunity else None)
                 if sig == self._last_reason_sig:
                     logger.debug("no material change %s, skip LLM", sig)
                     continue
@@ -430,6 +461,8 @@ class ReactiveMind:
                         emit_agent_event("run.finished", status="error",
                                          reason="reason_failed")
                         continue
+                    if opportunity:
+                        self._social_state.evaluated(opportunity)
                     if not self._should_act() or not self._device_online():
                         emit_agent_event("run.paused", reason="autonomy_gate_changed",
                                          mode=self._autonomy_mode,

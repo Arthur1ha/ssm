@@ -39,6 +39,120 @@ function VideoCanvas({ connected, endpoint = '/api/go2/video' }) {
   });
 }
 
+function MapWidget({ connected, endpoint }) {
+  const { useEffect, useRef, useState } = React;
+  const [imageUrl, setImageUrl] = useState('');
+  const [expanded, setExpanded] = useState(false);
+  const triggerRef = useRef(null);
+  const closeRef = useRef(null);
+
+  useEffect(() => {
+    if (!connected || !endpoint?.startsWith('/api/')) {
+      setImageUrl('');
+      return;
+    }
+    let active = true;
+    let inFlight = false;
+    let currentUrl = '';
+    let controller = null;
+
+    const refresh = async () => {
+      if (!active || inFlight || document.hidden) return;
+      inFlight = true;
+      controller = new AbortController();
+      let nextUrl = '';
+      try {
+        const separator = endpoint.includes('?') ? '&' : '?';
+        const response = await fetch(`${endpoint}${separator}_=${Date.now()}`, {
+          credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('map unavailable');
+        nextUrl = URL.createObjectURL(await response.blob());
+        const image = new Image();
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = reject;
+          image.src = nextUrl;
+        });
+        if (!active) return;
+        const previousUrl = currentUrl;
+        currentUrl = nextUrl;
+        nextUrl = '';
+        setImageUrl(currentUrl);
+        if (previousUrl) setTimeout(() => URL.revokeObjectURL(previousUrl), 100);
+      } catch (_) {
+        if (active && !document.hidden) {
+          setImageUrl('');
+          if (currentUrl) URL.revokeObjectURL(currentUrl);
+          currentUrl = '';
+        }
+      } finally {
+        if (nextUrl) URL.revokeObjectURL(nextUrl);
+        inFlight = false;
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) controller?.abort();
+      else refresh();
+    };
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      controller?.abort();
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+    };
+  }, [connected, endpoint]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    closeRef.current?.focus();
+    const onKeyDown = event => {
+      if (event.key === 'Escape') setExpanded(false);
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        closeRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      triggerRef.current?.focus();
+    };
+  }, [expanded]);
+
+  return <>
+    <button ref={triggerRef} type="button" className="map-widget__thumb"
+      onClick={() => setExpanded(true)} disabled={!imageUrl}
+      aria-label={imageUrl ? '展开导航地图' : '等待地图数据'}>
+      {imageUrl ? <img src={imageUrl} alt=""/> : <span className="map-widget__empty">等待地图</span>}
+      <span className="map-widget__label">地图</span>
+      {imageUrl && <span className="map-widget__expand" aria-hidden="true">↗</span>}
+    </button>
+    {expanded && ReactDOM.createPortal(
+      <div className="map-viewer__backdrop" onPointerDown={event => {
+        if (event.target === event.currentTarget) setExpanded(false);
+      }}>
+        <section className="map-viewer" role="dialog" aria-modal="true" aria-label="导航地图">
+          <header className="map-viewer__header">
+            <strong>导航地图</strong>
+            <button ref={closeRef} type="button" onClick={() => setExpanded(false)} aria-label="关闭地图">×</button>
+          </header>
+          <div className="map-viewer__image">
+            {imageUrl ? <img src={imageUrl} alt="机器狗周围的导航地图"/>
+              : <span>等待地图数据</span>}
+          </div>
+          <p className="map-viewer__legend">绿色 · 机器狗　灰色 · 障碍　蓝色 · 路线</p>
+        </section>
+      </div>, document.body,
+    )}
+  </>;
+}
+
 function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
   const { useRef, useState, useEffect, useCallback } = React;
 
@@ -159,3 +273,4 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
 
 window.VirtualJoystick = VirtualJoystick;
 window.VideoCanvas = VideoCanvas;
+window.MapWidget = MapWidget;

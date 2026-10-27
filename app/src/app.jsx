@@ -33,6 +33,7 @@ function App({ session, logout, refreshSession }) {
   const [activityHistory, setActivityHistory] = useState([]);
   const lastVisibleActivity = useRef(null);
   const seenReplies = useRef(new Set());
+  const seenPeerMessages = useRef(new Set());
   const completedRequests = useRef(new Set());
   const traceRequests = useRef(new Map());
   const pendingReplies = useRef([]);
@@ -66,17 +67,36 @@ function App({ session, logout, refreshSession }) {
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
-  const updateRequestBubble = (requestId, text) => {
+  const updateRequestStatus = (requestId, text) => {
     if (!text) return;
     setActivityLog(prev => prev.map(entry =>
-      entry.type === 'ai' && entry.requestId === requestId && !entry.final
+      entry.type === 'run_status' && entry.requestId === requestId && !entry.final
         ? { ...entry, text } : entry));
   };
-  const finishRequestBubble = (requestId, text) => {
+  const finishRequest = (requestId, text, eventId) => {
+    if (!text || completedRequests.current.has(requestId)) return;
     completedRequests.current.add(requestId);
-    setActivityLog(prev => prev.map(entry =>
-      entry.type === 'ai' && entry.requestId === requestId
-        ? { ...entry, text, final: true } : entry));
+    setActivityLog(prev => [...prev.map(entry =>
+      entry.type === 'run_status' && entry.requestId === requestId
+        ? { ...entry, text: '处理结束', final: true } : entry),
+      { type: 'ai', agent: 'cloud_orchestrator', requestId, text, final: true, eventId }]);
+  };
+  const recordProgressStep = (requestId, event) => {
+    if (!event.step_id) return;
+    setActivityLog(prev => {
+      const agent = event.agent_id || 'cloud_orchestrator';
+      const index = prev.findIndex(entry => entry.type === 'step'
+        && entry.requestId === requestId && entry.stepId === event.step_id
+        && entry.agent === agent && entry.runId === event.run_id);
+      if (index >= 0) return prev.map((entry, at) => at === index
+        ? mergeRunStep(entry, event) : entry);
+      const row = { type: 'step', requestId, stepId: event.step_id, runId: event.run_id, agent,
+        event, narrative: event.stage === 'narrated' ? event.text : '' };
+      const finalIndex = prev.findIndex(entry => entry.type === 'ai'
+        && entry.requestId === requestId);
+      if (finalIndex < 0) return [...prev, row];
+      return [...prev.slice(0, finalIndex), row, ...prev.slice(finalIndex)];
+    });
   };
   const appendReply = (item) => {
     if (!item?.text) return;
@@ -85,18 +105,37 @@ function App({ session, logout, refreshSession }) {
     if (replyKey && seenReplies.current.has(replyKey)) return;
     if (replyKey) seenReplies.current.add(replyKey);
     if (requestId && ['orchestrator', 'cloud_orchestrator'].includes(item.agent_id)) {
-      completedRequests.current.add(requestId);
-      setActivityLog(prev => prev.map(entry =>
-        entry.type === 'ai' && entry.requestId === requestId
-          ? { ...entry, text: item.text, final: true } : entry));
+      finishRequest(requestId, item.text, item.event_id);
       return;
     }
-    appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
-      eventId: item.event_id, traceId: item.trace_id });
+    const row = { type: 'ai', agent: item.agent_id, text: item.text,
+      eventId: item.event_id, traceId: item.trace_id, requestId };
+    if (!requestId) { appendActivity(row); return; }
+    setActivityLog(prev => {
+      const finalIndex = prev.findIndex(entry => entry.type === 'ai'
+        && entry.requestId === requestId && entry.final);
+      if (finalIndex < 0) return [...prev, row];
+      return [...prev.slice(0, finalIndex), row, ...prev.slice(finalIndex)];
+    });
   };
   useEffect(() => {
     const onEvent = event => {
       const item = event.detail || {};
+      if (item.type === 'peer_message' && item.message_id && item.text) {
+        if (seenPeerMessages.current.has(item.message_id)) return;
+        seenPeerMessages.current.add(item.message_id);
+        if (seenPeerMessages.current.size > 100) {
+          seenPeerMessages.current.delete(seenPeerMessages.current.values().next().value);
+        }
+        appendActivity({ type: 'peer_message', sender: item.sender, target: item.target,
+          replyTo: item.reply_to, text: item.text, eventId: item.event_id });
+        return;
+      }
+      if (item.type === 'agent_progress' && item.step_id && item.trace_id) {
+        const requestId = traceRequests.current.get(item.trace_id);
+        if (requestId && completedRequests.current.has(requestId)) recordProgressStep(requestId, item);
+        return;
+      }
       if (item.type !== 'agent_reply' || !item.text) return;
       if (item.scope === 'space' && item.source === 'autonomous') {
         if (item.activity_id && item.activity_id === currentActivity?.activity_id) return;
@@ -120,18 +159,19 @@ function App({ session, logout, refreshSession }) {
     const requestId = ++nextRequestId.current;
     setActivityLog(prev => [...prev,
       { type: 'user', text: t, requestId },
-      { type: 'ai', agent: 'cloud_orchestrator', requestId,
-        text: '收到，我先看看怎么帮你处理。' },
+      { type: 'run_status', agent: 'cloud_orchestrator', requestId,
+        text: '正在了解你的需求' },
     ]);
     send(t, {
       onMessage: (msg, agent, event) => appendReply({ ...event, text: msg,
         agent_id: agent || 'cloud_orchestrator' }),
       onProgress: event => {
-        if (completedRequests.current.has(requestId)) return;
-        updateRequestBubble(requestId, describeAgentStatus(event));
-        appendActivity({ ...event, type: event.type, requestId });
+        if (event.step_id) recordProgressStep(requestId, event);
+        else if (!completedRequests.current.has(requestId)) {
+          updateRequestStatus(requestId, describeAgentStatus(event));
+        }
       },
-      onStatus: msg => finishRequestBubble(requestId, msg),
+      onStatus: msg => finishRequest(requestId, msg),
       onTraceId: (traceId, eventId) => {
         traceRequests.current.set(traceId, requestId);
         if (eventId) setActivityLog(prev => prev.map(entry =>
@@ -144,10 +184,10 @@ function App({ session, logout, refreshSession }) {
       },
       onPendingRule: rule => {
         if (session.actor === 'admin') {
-          finishRequestBubble(requestId, '规则已经准备好，请确认是否保存。');
+          finishRequest(requestId, '规则已经准备好，请确认是否保存。');
           setPendingRule(rule);
         } else {
-          finishRequestBubble(requestId, '临时体验不会保存长期规则，你仍可以直接控制现有设备。');
+          finishRequest(requestId, '临时体验不会保存长期规则，你仍可以直接控制现有设备。');
         }
       },
       intentHint: options.intentHint,
@@ -248,7 +288,7 @@ function App({ session, logout, refreshSession }) {
             </div>
           )}
 
-          <ActivityFeed entries={activityLog} activity={displayActivity}
+          <ActivityFeed entries={activityLog} agents={agents} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}

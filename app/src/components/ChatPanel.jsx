@@ -1,14 +1,11 @@
 /* ChatPanel — 统一聊天面板组件（variant="inline"：内嵌页面，撑满父容器剩余高度） */
 const { useState, useEffect, useRef } = React;
 
-function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAgentName,
+function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAgentName, deviceName,
                      onSend, placeholder, variant, disabled, open, children }) {
   const [input,  setInput]  = useState('');
   const msgsRef  = useRef(null);
   const inputRef = useRef(null);
-  const latestRequestKey = [...messages].reverse().find(m =>
-    m.role === 'assistant' && m.requestKey)?.requestKey;
-
   useEffect(() => {
     if (msgsRef.current) {
       msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
@@ -37,31 +34,40 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
         display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.map((m, i) => {
           const agentColor = getAgentBubbleColor(m.agent);
-          const sticky = m.role === 'assistant' && Boolean(m.requestKey)
-            && m.requestKey === latestRequestKey;
+          const displayName = m.agentName || (m.agent === thinkingAgent && deviceName)
+            || getAgentDisplayName(m.agent);
+          if (m.role === 'status') return <div key={m.id || i}
+            className={`run-status${m.final ? ' run-status--finished' : ''}`}
+            role={m.final ? undefined : 'status'}>
+            <span className="run-status__dot" aria-hidden="true"/>
+            <span>{displayName}</span>
+            <span className="run-status__separator">·</span><span>{m.text}</span>
+          </div>;
+          if (m.role === 'step') {
+            const previous = messages[i - 1];
+            const startsGroup = previous?.role !== 'step' || previous.requestKey !== m.requestKey
+              || previous.agent !== m.agent;
+            return <div key={m.id || i} className="run-step"
+              style={{ '--run-color': agentColor }}>
+              {startsGroup && <div className="run-step__agent">{displayName}</div>}
+              <div className="run-step__detail"><span className="run-step__marker" aria-hidden="true"/>
+                {m.narrative || (m.event ? describeRunProgress(m.event, true) : m.text)}
+              </div>
+            </div>;
+          }
           return (
-          <div key={i} style={{ maxWidth: '82%',
+          <div key={m.id || i} style={{ maxWidth: '82%',
             alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-            display: 'flex', flexDirection: 'column', gap: 4,
-            position: sticky ? 'sticky' : 'relative',
-            top: sticky ? 0 : undefined,
-            zIndex: sticky ? 2 : undefined }}>
-            {m.role !== 'step' && (
-              <div style={{
+            display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{
                 fontSize: 10, paddingLeft: m.role === 'user' ? 0 : 4,
                 paddingRight: m.role === 'user' ? 4 : 0,
                 color: m.role === 'user' ? 'var(--color-accent)' : agentColor,
                 opacity: 0.75, textAlign: m.role === 'user' ? 'right' : 'left',
                 fontFamily: 'var(--font-mono)', letterSpacing: '0.04em',
               }}>
-                {m.role === 'user' ? '你' : (m.agentName || getAgentDisplayName(m.agent))}
-              </div>
-            )}
-            {m.role === 'step' ? (
-              <div style={{ padding: '6px 10px', fontSize: 11, lineHeight: 1.5,
-                borderLeft: '2px solid var(--color-border-strong)',
-                color: 'var(--color-text-dim)' }}>{m.text}</div>
-            ) : (
+                {m.role === 'user' ? '你' : displayName}
+            </div>
             <div style={{
               padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
               borderRadius: m.role === 'user' ? '16px 16px 4px 16px' : '4px 16px 16px 16px',
@@ -69,7 +75,6 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
               color: m.role === 'user' ? 'var(--color-bg)' : 'var(--color-text)',
               border: m.role === 'user' ? 'none' : `1px solid ${agentColor}25`,
             }}>{m.text}</div>
-            )}
             {m.actions?.map((ac, ai) => (
               <div key={ai} style={{ display: 'flex', alignItems: 'center', gap: 8,
                 padding: '7px 11px',

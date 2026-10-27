@@ -318,6 +318,7 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
 
   const VirtualJoystick = window.VirtualJoystick;
   const VideoCanvas = window.VideoCanvas;
+  const MapWidget = window.MapWidget;
 
   // 只渲染当前状态匹配的 widget（states 为空=全程显示）
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
@@ -357,6 +358,9 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
           <VideoCanvas connected={true} endpoint={w.endpoint}/>
         </div>
       );
+    }
+    if (w.type === 'map' && MapWidget && w.endpoint?.startsWith('/api/')) {
+      return <MapWidget key={'map' + idx} connected={onlineConnection} endpoint={w.endpoint}/>;
     }
     return <span key={'unsupported' + idx} className="device-widget-unsupported">控件不可用：{w.type}</span>;
   }).filter(Boolean);

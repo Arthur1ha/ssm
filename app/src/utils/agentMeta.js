@@ -73,7 +73,7 @@ function describeAgentStatus(event) {
   return '';
 }
 
-function describeRunProgress(event) {
+function describeRunProgress(event, compact = false) {
   if (['planning', 'executing', 'summarizing', 'finished'].includes(event.stage)) {
     if (event.stage === 'planning') return `正在核对可用设备与当前状态，处理：${event.goal || '当前请求'}`;
     if (event.stage === 'executing') return `已选定下一步，正在处理：${event.goal || '当前请求'}`;
@@ -104,14 +104,14 @@ function describeRunProgress(event) {
   const cmd = event.arguments?.cmd;
   const sport = { StandDown: '坐下', StandUp: '站起来', Hello: '打招呼',
     StopMove: '停止移动', Stretch: '伸展' };
-  const task = ['set_light_state', 'set_led_state'].includes(actionId) && targetName
-    ? `请${targetName}${state === 'ON' ? '开灯' : state === 'OFF' ? '关灯' : `调整灯光${detailArgs}`}`
-    : actionId === 'go2_chat' && targetName && event.requested_text
-      ? `请${targetName}处理“${event.requested_text}”`
+  const task = ['set_light_state', 'set_led_state'].includes(actionId) && (targetName || compact)
+    ? `${compact ? '' : `请${targetName}`}${state === 'ON' ? '开灯' : state === 'OFF' ? '关灯' : `调整灯光${detailArgs}`}`
+    : actionId === 'go2_chat' && (targetName || compact) && event.requested_text
+      ? `${compact ? '' : `请${targetName}`}处理“${event.requested_text}”`
       : actionId === 'go2_sport' && sport[cmd]
-        ? `让${targetName || '机器狗'}${sport[cmd]}`
-        : `${targetName ? `请${targetName}` : '正在'}${action}${detailArgs}`;
-  if (event.stage === 'decision') return `接下来${task}`;
+        ? `${compact ? '' : `让${targetName || '机器狗'}`}${sport[cmd]}`
+        : `${compact ? '' : targetName ? `请${targetName}` : '正在'}${action}${detailArgs}`;
+  if (event.stage === 'decision') return compact ? `下一步：${task}` : `接下来${task}`;
   if (event.stage === 'dispatching') return `${task}，等待执行结果`;
   if (event.stage === 'considering') {
     const outcome = event.status === 'ok' ? '已确认完成'
@@ -130,6 +130,17 @@ function describeRunProgress(event) {
   const reason = typeof event.reason === 'string' && /^[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\s，。！？：；、（）“”·0-9]+$/.test(event.reason)
     ? `：${event.reason}` : '';
   return `${task}：${status}${detail}${reason}`;
+}
+
+function mergeRunStep(entry, event) {
+  const order = { decision: 0, dispatching: 1, observed: 2, narrated: 2, considering: 3 };
+  const current = order[entry.event?.stage] ?? -1;
+  const incoming = order[event.stage] ?? -1;
+  return {
+    ...entry,
+    event: event.stage === 'narrated' || incoming < current ? entry.event : event,
+    narrative: event.stage === 'narrated' ? event.text || entry.narrative : entry.narrative,
+  };
 }
 
 function isDeviceOnline(agent, unitData) {

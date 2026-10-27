@@ -36,6 +36,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
         self._move_control_active = False
         self._last_state_received_at = None
+        self._voxel_raw = None
+        self._voxel_received_at = None
         self.fsm_state = "connecting"
         if self._conn:
             await self._conn.disconnect()
@@ -102,6 +104,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self.is_connected = False
         self.fsm_state = "offline"
         self._last_state_received_at = None
+        self._voxel_raw = None
+        self._voxel_received_at = None
         if self._status_task and not self._status_task.done():
             if self._status_task is not asyncio.current_task():
                 self._status_task.cancel()

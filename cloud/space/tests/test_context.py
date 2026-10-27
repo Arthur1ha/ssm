@@ -41,7 +41,7 @@ def test_space_context_keeps_freshness_and_scoped_requirement(monkeypatch):
                                "expires_at": 1100}, now=1000)
     result = get_space_context("esp32_desk_led", state=_State(), registry=_Cards(),
                                constraints=constraints, now=1000)
-    assert set(result) == {"peers", "environment", "constraints", "activity"}
+    assert set(result) == {"peers", "environment", "constraints", "activity", "recent_discoveries"}
     assert {peer["unit_id"] for peer in result["peers"]} == {"go2", "esp32_desk_led"}
     model_view = get_space_context("esp32_desk_led", state=_State(), registry=_Cards(),
                                    constraints=constraints, now=1000, include_self=False)
@@ -116,7 +116,8 @@ def test_space_context_accepts_partial_runtime_stubs():
                                state=SimpleNamespace(actuator_snapshot=lambda: {}),
                                registry=SimpleNamespace(), constraints=ConstraintStore(),
                                now=1000)
-    assert result == {"peers": [], "environment": [], "constraints": [], "activity": None}
+    assert result == {"peers": [], "environment": [], "constraints": [],
+                      "activity": None, "recent_discoveries": []}
 
 
 def test_space_context_shares_current_activity_without_private_session_details(monkeypatch):

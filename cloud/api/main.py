@@ -45,7 +45,7 @@ from cloud.peers.inbound import handle_api_peer_message
 from cloud.space.constraints import CURRENT_CONSTRAINTS_TOPIC, get_constraint_store
 from cloud.space.activity import CURRENT_ACTIVITY_TOPIC, get_activity_store
 from cloud.mqtt_signing import sign_message
-from cloud.space.registry import get_space_registry
+from cloud.space.registry import DEFAULT_SPACE_ID, get_space_registry
 
 _esp32_state: ESP32State = ESP32State()
 _esp32_mqtt_client = None
@@ -198,12 +198,21 @@ async def lifespan(app):
 
     get_activity_store().configure(publish=publish_activity,
                                    emit=lambda event: intents_module._events.emit_space(event["space_id"], event))
+    def emit_peer_message(message):
+        intents_module._events.emit_space(DEFAULT_SPACE_ID, {
+            "type": "peer_message", "event_id": "evt_" + message["message_id"],
+            "message_id": message["message_id"], "sender": message["sender"],
+            "target": message["target"], "text": message["content"],
+            "reply_to": message.get("reply_to"), "ts": time.time(),
+        })
+
     peer_gateway.init(_esp32_mqtt_client, _esp32_state)
     _agent_messenger = AgentMessenger(
         _esp32_mqtt_client, get_registry(), get_space_registry(),
         {"go2", os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")},
         lambda message: handle_api_peer_message(_agent_messenger, message, _esp32_state),
         task_result_lookup=_esp32_state.get_task_result,
+        on_visible_message=emit_peer_message,
     )
 
     # LWT：api 进程意外崩溃时把 Go2 标记离线（能力卡 retained 保留，靠 online=false 表达失活，

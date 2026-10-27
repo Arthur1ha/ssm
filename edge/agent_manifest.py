@@ -1,12 +1,12 @@
 # agent_manifest.py — Publish retained manifests for present agents only.
 # Fully driven by UNIT_CONFIGS + PRESENCE; no unit-specific logic here.
-import time
+from clock import unix_time
 from config import DEVICE_ID, FIRMWARE_VER, UNIT_CONFIGS
 from probe import PRESENCE
 
 
 def publish(mqtt):
-    ts = time.time()
+    ts = unix_time()
     count = 0
     for unit_id, cfg in UNIT_CONFIGS.items():
         base = "ssm/agents/{}".format(unit_id)

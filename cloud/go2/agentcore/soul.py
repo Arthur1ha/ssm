@@ -2,6 +2,9 @@
 import json
 import hashlib
 import logging
+import os
+import tempfile
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
@@ -32,6 +35,21 @@ _DEFAULT_TRAITS: dict = {
     "boldness":     60,
     "last_evolved": None,
 }
+_personality_lock = threading.RLock()
+
+
+def _atomic_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".soul-", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # ── personality ───────────────────────────────────────────────────
@@ -51,14 +69,39 @@ def get_system_prompt() -> str:
     return load_system_prompt()[0]
 
 
-def set_personality(prompt: str) -> None:
+def get_personality_view() -> dict:
+    with _personality_lock:
+        value = _load_traits().get("extraversion", 45)
+        score = value if type(value) is int and 0 <= value <= 100 else 45
+        return {"prompt": get_system_prompt(), "social_initiative": score}
+
+
+def set_personality(prompt: str, social_initiative: int | None = None) -> None:
     require_persist("change personality")
-    previous = get_system_prompt()
-    _PERSONALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PERSONALITY_FILE.write_text(
-        json.dumps({"prompt": prompt}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    prompt = prompt.strip()
+    if not 1 <= len(prompt) <= 4000:
+        raise ValueError("personality must contain 1–4000 characters")
+    if social_initiative is not None and (type(social_initiative) is not int
+                                          or not 0 <= social_initiative <= 100):
+        raise ValueError("social_initiative must be an integer from 0 to 100")
+    with _personality_lock:
+        previous = get_system_prompt()
+        old_prompt = _PERSONALITY_FILE.read_bytes() if _PERSONALITY_FILE.exists() else None
+        old_traits = _TRAITS_FILE.read_bytes() if _TRAITS_FILE.exists() else None
+        traits = _load_traits()
+        if social_initiative is not None:
+            traits["extraversion"] = social_initiative
+        try:
+            _atomic_json(_PERSONALITY_FILE, {"prompt": prompt})
+            if social_initiative is not None:
+                _atomic_json(_TRAITS_FILE, traits)
+        except Exception:
+            for path, content in ((_PERSONALITY_FILE, old_prompt), (_TRAITS_FILE, old_traits)):
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
+            raise
     emit_agent_event("persona.changed", agent_id="go2", operator_kind="admin",
                      before_hash=hashlib.sha256(previous.encode()).hexdigest(),
                      after_hash=hashlib.sha256(prompt.encode()).hexdigest())
@@ -77,8 +120,8 @@ def _load_traits(traits_path: Optional[Path] = None) -> dict:
 def _save_traits(traits: dict, traits_path: Optional[Path] = None) -> None:
     require_persist("change soul traits")
     path = traits_path or _TRAITS_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(traits, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _personality_lock:
+        _atomic_json(path, traits)
 
 
 def _apply_delta(traits: dict, delta: dict) -> dict:
@@ -91,7 +134,8 @@ def _apply_delta(traits: dict, delta: dict) -> dict:
 
 # ── evolution ─────────────────────────────────────────────────────
 
-async def _regen_prompt(traits: dict) -> str:
+async def _regen_prompt(traits: dict, *, expected_prompt: str,
+                        traits_path: Optional[Path] = None) -> str:
     from langchain_core.messages import HumanMessage
     prompt = (
         f"你是机器狗 Go2 的性格描述生成器。\n\n"
@@ -105,8 +149,12 @@ async def _regen_prompt(traits: dict) -> str:
     )
     resp = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
     personality = resp.content.strip()
-    set_personality(personality)
-    logger.info("[Soul] 性格表达已更新")
+    with _personality_lock:
+        if _load_traits(traits_path) != traits or get_system_prompt() != expected_prompt:
+            logger.info("[Soul] 管理员或新演化已更新性格，丢弃过期描述")
+            return get_system_prompt()
+        set_personality(personality)
+        logger.info("[Soul] 性格表达已更新")
     return personality
 
 
@@ -143,12 +191,17 @@ async def evolve_from_summary(
         logger.warning("[Soul] delta 解析失败: %s", exc)
         delta = {}
 
-    new_traits = _apply_delta(traits, delta)
-    new_traits["last_evolved"] = date_str
-    _save_traits(new_traits, traits_path)
+    with _personality_lock:
+        # The model call above may have taken seconds; apply its small delta to
+        # the current administrator-edited value, not the old snapshot.
+        new_traits = _apply_delta(_load_traits(traits_path), delta)
+        new_traits["last_evolved"] = date_str
+        expected_prompt = get_system_prompt()
+        _save_traits(new_traits, traits_path)
     logger.info("[Soul] 特质更新完成 date=%s delta=%s", date_str, delta)
 
-    await _regen_prompt(new_traits)
+    await _regen_prompt(new_traits, expected_prompt=expected_prompt,
+                        traits_path=traits_path)
     return new_traits
 
 

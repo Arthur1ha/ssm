@@ -48,6 +48,7 @@ docs/superpowers/*
 !docs/superpowers/plans/
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-10-27-space-activity-lifecycle.md
+!docs/superpowers/plans/2026-10-27-personality-driven-peer-interaction.md
 paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin
@@ -72,6 +73,7 @@ cloud/space/space.json
 !cloud/go2/tests/test_prompts.py
 !cloud/go2/tests/test_mode_runtime.py
 !cloud/go2/tests/test_posture_confirmation.py
+!cloud/go2/tests/test_social_drive.py
 
 # Peer request and discovery regression tests are part of this implementation.
 !cloud/api/tests/
@@ -86,11 +88,15 @@ cloud/space/space.json
 !cloud/peers/tests/test_semantic_lamp_peer.py
 !cloud/peers/tests/test_messaging.py
 !cloud/peers/tests/test_inbound.py
+!cloud/peers/tests/test_social.py
+!cloud/peers/tests/test_personality_view.py
 !cloud/space/tests/
 !cloud/space/tests/test_context.py
+!cloud/space/tests/test_discoveries.py
 !cloud/esp32/tests/
 !cloud/esp32/tests/test_semantic_task.py
 !cloud/esp32/tests/test_tool_boundary.py
+!cloud/esp32/tests/test_social_reactive.py
 cloud/esp32/tests/__init__.py
 cloud/esp32/tests/conftest.py
 !cloud/orchestrator/tests/

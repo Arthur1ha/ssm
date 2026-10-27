@@ -1,8 +1,10 @@
 /* ActivityFeed — 主屏活动流组件 */
-function ActivityFeed({ entries, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
+function ActivityFeed({ entries, agents = [], activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
   onEndActivity, onAnswerActivity }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
+  const getName = unitId => agents.find(agent => agent.unit_id === unitId)?.name
+    || getAgentDisplayName(unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
   const currentCard = hasActivity ? {
     id: activity?.activity_id || activityEvents[0]?.activity_id || 'recent',
@@ -10,29 +12,30 @@ function ActivityFeed({ entries, activity, activityEvents = [], activityHistory 
   } : null;
   const cards = [...activityHistory, ...(currentCard ? [currentCard] : [])];
   const findAnchor = card => {
-    if (!card.activity) return -1;
     const started = card.events.find(event => event.event_type === 'started');
     const context = card.activity?.context || card.activity?.text || started?.text || '';
-    const owner = card.activity?.source_event_id
-      ? entries.find(entry => entry.type === 'user' && entry.intentEventId === card.activity.source_event_id)
+    const sourceEventId = card.activity?.source_event_id || started?.source_event_id;
+    const owner = sourceEventId
+      ? entries.find(entry => entry.type === 'user' && entry.intentEventId === sourceEventId)
       : null;
-    if (owner) {
-      return entries.findIndex(entry => entry.type === 'ai' && entry.requestId === owner.requestId);
-    }
-    if (context) {
-      for (let index = entries.length - 1; index >= 0; index--) {
-        if (entries[index].type === 'user' && entries[index].text === context) {
-          return entries.findIndex(entry =>
-            entry.type === 'ai' && entry.requestId === entries[index].requestId);
-        }
-      }
+    const requestId = owner?.requestId || (!sourceEventId && card !== currentCard && context
+      ? [...entries].reverse().find(entry => entry.type === 'user' && entry.text === context)?.requestId
+      : null);
+    if (!requestId) return -1;
+    const finalIndex = entries.findIndex(entry => entry.type === 'ai'
+      && entry.requestId === requestId && entry.final);
+    if (finalIndex >= 0) return finalIndex;
+    for (let index = entries.length - 1; index >= 0; index--) {
+      if (entries[index].requestId === requestId) return index + 1;
     }
     return -1;
   };
-  const activityAnchor = currentCard ? findAnchor(currentCard) : -1;
   const cardsAt = new Map();
   cards.forEach(card => {
-    const position = findAnchor(card) + 1;
+    const anchor = findAnchor(card);
+    // A user-triggered activity belongs before that request's final reply.
+    // Autonomous activities stay after the chat entries.
+    const position = anchor >= 0 ? anchor : card === currentCard ? entries.length : 0;
     cardsAt.set(position, [...(cardsAt.get(position) || []), card]);
   });
   const rows = [];
@@ -46,29 +49,39 @@ function ActivityFeed({ entries, activity, activityEvents = [], activityHistory 
   }, [entries]);
 
   useEffect(() => {
-    if (hasActivity && (entries.length === 0 || activityAnchor === entries.length - 1)) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [activityEvents.length, activity?.status, hasActivity, activityAnchor, entries.length]);
+    if (hasActivity) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activityEvents.length, activity?.status, hasActivity]);
 
   if (rows.length === 0) return null;
-  const latestRequestId = [...entries].reverse().find(e => e.type === 'ai' && e.requestId)?.requestId;
-
   return (
     <div style={{ padding: '0 16px' }}>
-      {rows.map(({ entry: e, index: i }) => {
+      {rows.map(({ entry: e, index: i }, rowIndex) => {
         if (e.type === 'space_activity') {
           const card = e.card;
           return <SpaceActivityFeed key={`activity-${card.id}`}
             activity={card.activity} events={card.events} ending={card.ending}
-            error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}/>;
+            error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
+            getName={getName}/>;
         }
-        if (e.type === 'run_stage' || e.type === 'agent_progress') {
-          return <div key={e.event_id || i} style={{ margin: '4px 16px 8px', padding: '6px 10px',
-            borderLeft: '2px solid var(--color-border-strong)', color: 'var(--color-text-dim)',
-            fontSize: ['planning', 'executing', 'summarizing', 'finished'].includes(e.stage) ? 12 : 11 }}>
-            {e.type === 'agent_progress' && e.agent_id ? `${getAgentDisplayName(e.agent_id)} · ` : ''}
-            {e.stage === 'narrated' && e.text ? e.text : describeRunProgress(e)}
+        if (e.type === 'run_status') {
+          return <div key={`status-${e.requestId}`} className={`run-status${e.final ? ' run-status--finished' : ''}`}
+            role={e.final ? undefined : 'status'}>
+            <span className="run-status__dot" aria-hidden="true"/>
+            <span>SSM 管家</span><span className="run-status__separator">·</span><span>{e.text}</span>
+          </div>;
+        }
+        if (e.type === 'step') {
+          const agent = e.event?.target_unit_id || e.agent || 'cloud_orchestrator';
+          const previous = rows[rowIndex - 1]?.entry;
+          const previousAgent = previous?.event?.target_unit_id || previous?.agent;
+          const startsGroup = previous?.type !== 'step' || previous.requestId !== e.requestId
+            || previousAgent !== agent;
+          const color = getAgentBubbleColor(agent);
+          const text = e.narrative || describeRunProgress(e.event, true);
+          return <div key={`step-${e.requestId}-${e.runId}-${e.agent}-${e.stepId}`} className="run-step"
+            style={{ '--run-color': color }}>
+            {startsGroup && <div className="run-step__agent">{getName(agent)}</div>}
+            <div className="run-step__detail"><span className="run-step__marker" aria-hidden="true"/>{text}</div>
           </div>;
         }
         if (e.type === 'user') {
@@ -87,19 +100,18 @@ function ActivityFeed({ entries, activity, activityEvents = [], activityHistory 
             </div>
           );
         }
-        if (e.type === 'ai') {
-          const agent = e.agent || 'orchestrator';
+        if (e.type === 'ai' || e.type === 'peer_message') {
+          const agent = e.sender || e.agent || 'orchestrator';
           const oc = getAgentBubbleColor(agent);
           return (
-            <div key={e.requestId || i} style={{ display: 'flex', justifyContent: 'flex-start',
-              marginBottom: 8, position: e.requestId && e.requestId === latestRequestId ? 'sticky' : 'relative',
-              top: e.requestId && e.requestId === latestRequestId ? 8 : undefined,
-              zIndex: e.requestId && e.requestId === latestRequestId ? 2 : undefined }}>
+            <div key={e.eventId || `${e.type}-${i}`} style={{ display: 'flex', justifyContent: 'flex-start',
+              marginBottom: 8 }}>
               <div style={{ maxWidth: '88%', minWidth: 0, display: 'flex',
                 flexDirection: 'column', gap: 4 }}>
                 <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
                   fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                  {getAgentDisplayName(agent)}
+                  {getName(agent)}{e.type === 'peer_message' && e.target
+                    ? ` → ${getName(e.target)}${e.replyTo ? ' · 回应' : ''}` : ''}
                 </div>
                 <div style={{
                   padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
@@ -162,24 +174,25 @@ function activityMediaUrl(event) {
 function activityEventKind(event) {
   const type = String(event.event_type || '').toLowerCase();
   if (type.includes('question') || type.includes('ask_user')) return 'question';
-  if (type.includes('observation') || type.includes('observed')) return 'observation';
-  if (type.includes('message') || type.includes('proposal') || type.includes('reply') || type === 'response') return 'message';
+  if (type.includes('observation') || type.includes('observed') || type === 'person_identified') return 'observation';
+  if (type.includes('message') || type.includes('proposal') || type.includes('reply')) return 'message';
   return 'status';
 }
 
-function activityStatusText(event, name) {
+function activityStatusText(event, name, compact = false) {
   const type = event.event_type;
   const mode = { reactive: '自主调光', free_explore: '自由探索' }[event.mode] || event.mode || '自主模式';
   if (type === 'started') return `活动已开始：${event.text || '设备正在加入'}`;
   if (type === 'ended') return '活动已结束';
-  if (type === 'device_joined') return `${name}已进入${mode}`;
+  if (type === 'device_joined') return `${compact ? '' : name}已进入${mode}`;
+  if (type === 'response') return `${compact ? '' : name}已回应${event.status ? ` · ${event.status}` : ''}`;
   if (type === 'device_left') return event.status === 'offline'
-    ? `${name}离线，未加入活动`
+    ? `${compact ? '' : name}离线，未加入活动`
     : event.status === 'left'
-      ? `${name}已退出${mode}${event.text ? ` · ${event.text}` : ''}`
+      ? `${compact ? '' : name}已退出${mode}${event.text ? ` · ${event.text}` : ''}`
       : event.status === 'unknown'
-        ? `${name}的模式状态尚未确认${event.text ? ` · ${event.text}` : ''}`
-      : `${name}未加入${mode}${event.text ? ` · ${event.text}` : ''}`;
+        ? `${compact ? '' : `${name}的`}模式状态尚未确认${event.text ? ` · ${event.text}` : ''}`
+      : `${compact ? '' : name}未加入${mode}${event.text ? ` · ${event.text}` : ''}`;
   if (['action', 'action_progress', 'action_result'].includes(type)) {
     const statusText = {
       executing: '正在执行', accepted: '已收到动作请求，等待确认',
@@ -187,14 +200,15 @@ function activityStatusText(event, name) {
       timeout: '动作结果尚未确认', unknown: '动作结果尚未确认',
       cancelled: '动作已取消', rejected: '已拒绝动作',
     }[event.status] || '动作状态已更新';
-    return `${name} · ${statusText}`;
+    return compact ? statusText : `${name} · ${statusText}`;
   }
-  return `${event.unit_id ? `${name} · ` : ''}${event.text || '状态已更新'}`;
+  return `${event.unit_id && !compact ? `${name} · ` : ''}${event.text || '状态已更新'}`;
 }
 
-/* Device speech, observations and confirmed state use different treatments.
+/* Device messages, observations and confirmed state use different treatments.
  * An invitation therefore never looks like an action that already happened. */
-function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer }) {
+function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
+  getName = getAgentDisplayName }) {
   const { useEffect, useState } = React;
   const [expanded, setExpanded] = useState(false);
   const context = activity?.context || activity?.user_text || activity?.text ||
@@ -209,7 +223,7 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer })
     ['device_left', 'action_result'].includes(event.event_type));
   const summary = summaryEvent
     ? activityStatusText(summaryEvent, summaryEvent.unit_id
-      ? getAgentDisplayName(summaryEvent.unit_id) : '空间管家')
+      ? getName(summaryEvent.unit_id) : '空间管家')
     : '本次活动已结束';
   useEffect(() => setExpanded(false), [activityId, isActive, isEnding]);
   if (!activity && events.length === 0 && !error) return null;
@@ -235,18 +249,23 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer })
     {error && <div className="space-activity__error" role="alert">{error}</div>}
     {!showTimeline && events.length > 0 && <div className="space-activity__summary">{summary}</div>}
     {showTimeline && <div className="space-activity__timeline">
-      {events.map(event => {
+      {events.map((event, index) => {
         const kind = activityEventKind(event);
         const unitId = event.unit_id || event.agent_id || '';
-        const name = unitId ? getAgentDisplayName(unitId) : '空间管家';
+        const name = unitId ? getName(unitId) : '空间管家';
         const target = event.target_unit_id || event.target || '';
+        const previous = events[index - 1];
+        const sameDevice = previous && (previous.unit_id || previous.agent_id || '') === unitId;
+        const showSpeaker = !sameDevice || (kind === 'message' || kind === 'question')
+          && (previous.target_unit_id || previous.target || '') !== target;
         const mediaUrl = activityMediaUrl(event);
         const text = event.text || '';
         return <div key={event.event_id} className={`space-activity__item space-activity__item--${kind}`}>
           <span className="space-activity__time">{timeLabel(event.ts)}</span>
           <div className="space-activity__content">
+            {showSpeaker && <div className="space-activity__speaker">{name}{target ? ` → ${getName(target)}` : ''}
+              {event.reply_to ? ' · 回应' : ''}</div>}
             {kind === 'message' || kind === 'question' ? <>
-              <div className="space-activity__speaker">{name}{target ? ` → ${getAgentDisplayName(target)}` : ''}</div>
               <div className="space-activity__bubble">{text || (kind === 'question' ? '需要你帮忙看一下。' : '发送了一条消息')}
                 {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
               </div>
@@ -254,9 +273,9 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer })
                 回答{name}
               </button>}
             </> : kind === 'observation' ? <div className="space-activity__observation">
-              <span>{name}看到了</span><p>{text || '一条新观察'}</p>
+              <span>看到了</span><p>{text || '一条新观察'}</p>
               {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
-            </div> : <div className="space-activity__status">{activityStatusText(event, name)}</div>}
+            </div> : <div className="space-activity__status">{activityStatusText(event, name, true)}</div>}
           </div>
         </div>;
       })}

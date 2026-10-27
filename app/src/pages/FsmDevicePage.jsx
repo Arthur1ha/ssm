@@ -43,6 +43,72 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     clearTimeout(pendingRuns.current.get(runId)?.timer);
     pendingRuns.current.delete(runId);
   };
+  const retainRun = runId => {
+    const pending = pendingRuns.current.get(runId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingRuns.current.set(runId, { ...pending,
+      timer: setTimeout(() => forgetRun(runId), 180000) });
+  };
+  const insertAfterRequest = (rows, requestKey, row) => {
+    for (let index = rows.length - 1; index >= 0; index--) {
+      if (rows[index].requestKey === requestKey) {
+        return [...rows.slice(0, index + 1), row, ...rows.slice(index + 1)];
+      }
+    }
+    return [...rows, row];
+  };
+  const finishMessage = (requestKey, text, eventId, isError = false) => {
+    if (!text) return;
+    setMessages(previous => {
+      const status = previous.map(message => message.role === 'status'
+        && message.requestKey === requestKey
+        ? { ...message, text: '处理结束', final: true } : message);
+      const finalIndex = status.findIndex(message => message.role === 'assistant'
+        && message.requestKey === requestKey);
+      if (finalIndex >= 0) {
+        if (isError && !status[finalIndex].isError) return status;
+        return status.map((message, index) => index === finalIndex
+          ? { ...message, text, eventId, final: true, isError } : message);
+      }
+      return insertAfterRequest(status, requestKey,
+        { id: `${requestKey}:reply`, role: 'assistant', agent: unitId,
+          requestKey, text, eventId, final: true, isError });
+    });
+  };
+  const updateStatus = (requestKey, text) => {
+    if (!text) return;
+    setMessages(previous => {
+      const status = previous.find(message => message.role === 'status'
+        && message.requestKey === requestKey);
+      if (status?.final) return previous;
+      if (status) return previous.map(message => message === status
+        ? { ...message, text } : message);
+      const finalIndex = previous.findIndex(message => message.role === 'assistant'
+        && message.requestKey === requestKey);
+      const row = { id: `${requestKey}:status`, role: 'status', agent: unitId,
+        requestKey, text: finalIndex < 0 ? text : '处理结束', final: finalIndex >= 0 };
+      if (finalIndex < 0) return insertAfterRequest(previous, requestKey, row);
+      return [...previous.slice(0, finalIndex), row, ...previous.slice(finalIndex)];
+    });
+  };
+  const updateStep = (requestKey, item) => {
+    const stepId = item.step_id || item.event_id;
+    if (!stepId) return;
+    setMessages(previous => {
+      const index = previous.findIndex(message => message.role === 'step'
+        && message.requestKey === requestKey && message.stepId === stepId);
+      if (index >= 0) return previous.map((message, at) => at === index
+        ? mergeRunStep(message, item) : message);
+      const row = { id: `${requestKey}:step:${stepId}`, role: 'step', agent: unitId,
+        requestKey, stepId, event: item,
+        narrative: item.stage === 'narrated' ? item.text : '' };
+      const finalIndex = previous.findIndex(message => message.role === 'assistant'
+        && message.requestKey === requestKey);
+      if (finalIndex < 0) return insertAfterRequest(previous, requestKey, row);
+      return [...previous.slice(0, finalIndex), row, ...previous.slice(finalIndex)];
+    });
+  };
   useEffect(() => () => {
     pendingRuns.current.forEach(entry => clearTimeout(entry.timer));
     pendingRuns.current.clear();
@@ -59,13 +125,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         const replyKey = `${requestKey}:${item.event_id}`;
         if (seenReplies.current.has(replyKey)) return;
         seenReplies.current.add(replyKey);
-        setMessages(previous => previous.some(message => message.requestKey === requestKey)
-          ? previous.map(message => message.role === 'assistant' && message.requestKey === requestKey
-            ? { ...message, text: item.text, final: true, eventId: item.event_id } : message)
-          : [...previous, { role: 'assistant', agent: unitId, requestKey,
-            text: item.text, final: true, eventId: item.event_id }]);
+        finishMessage(requestKey, item.text, item.event_id);
         if (!autonomous) {
-          forgetRun(item.run_id);
+          retainRun(item.run_id);
           if (activeRun.current === item.run_id) {
             setSending(false);
             activeRun.current = null;
@@ -75,30 +137,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         const progressKey = `${requestKey}:${item.event_id}`;
         if (seenProgress.current.has(progressKey)) return;
         seenProgress.current.add(progressKey);
-        const detail = item.stage === 'narrated' && item.text
-          ? item.text : describeRunProgress(item);
-        setMessages(previous => {
-          const existing = previous.find(message => message.role === 'assistant'
-            && message.requestKey === requestKey);
-          if (existing?.final) return previous;
-          const reply = existing ? previous.map(message => message === existing
-            ? { ...message, text: describeAgentStatus(item) || message.text } : message)
-            : [...previous, { role: 'assistant', agent: unitId, requestKey,
-              text: describeAgentStatus(item) || '我正在处理。' }];
-          return [...reply, { role: 'step', agent: unitId, requestKey,
-            text: detail, eventId: item.event_id }];
-        });
+        if (item.step_id) updateStep(requestKey, item);
+        else updateStatus(requestKey, describeAgentStatus(item) || '正在处理');
       } else if (item.type === 'reply_error') {
         const message = '这次没能给出完整回复，请稍后再试。';
-        setMessages(previous => previous.some(entry => entry.role === 'assistant'
-          && entry.requestKey === requestKey)
-          ? previous.map(entry => entry.role === 'assistant'
-            && entry.requestKey === requestKey && !entry.final
-              ? { ...entry, text: message, final: true } : entry)
-          : [...previous, { role: 'assistant', agent: unitId, requestKey,
-            text: message, final: true }]);
+        finishMessage(requestKey, message, item.event_id, true);
         if (!autonomous) {
-          forgetRun(item.run_id);
+          retainRun(item.run_id);
           if (activeRun.current === item.run_id) {
             setSending(false);
             activeRun.current = null;
@@ -178,7 +223,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     && (!w.states?.length || w.states.includes(current))
     && (!w.requires_connection || connected)
     && (!w.preview_only || previewState === current));
-  const hasBoardWidget = visibleWidgets.some(widget => widget.type !== 'video');
+  const hasBoardWidget = visibleWidgets.some(widget => widget.type !== 'video' && widget.type !== 'map');
   const statusLabel = offline ? '离线' : `在线 · ${sm?.views?.[current]?.label || '状态待同步'}`;
   const hasActionPreview = (sm?.states || []).some(state => {
     const type = sm?.views?.[state]?.type;
@@ -215,9 +260,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       crypto.randomUUID().replaceAll('-', '');
     if (pendingRuns.current.has(runId)) forgetRun(runId);
     const requestKey = `chat:${++nextRequestId.current}`;
-    setMessages(prev => [...prev, { role: 'user', text },
-      { role: 'assistant', agent: unitId, requestKey,
-        text: '收到，我先看看怎么帮你处理。' }]);
+    setMessages(prev => [...prev, { id: `${requestKey}:user`, role: 'user', text },
+      { id: `${requestKey}:status`, role: 'status', agent: unitId, requestKey,
+        text: '正在了解你的需求' }]);
     setSending(true);
     activeRun.current = runId;
     pendingRuns.current.set(runId, { key: requestKey, timer: null });
@@ -237,37 +282,34 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         const replyKey = `${requestKey}:${result?.event_id}`;
         if (result?.event_id && reply && !seenReplies.current.has(replyKey)) {
           seenReplies.current.add(replyKey);
-          setMessages(previous => previous.map(message => message.role === 'assistant'
-            && message.requestKey === requestKey
-              ? { ...message, text: reply, final: true, eventId: result.event_id } : message));
+          finishMessage(requestKey, reply, result.event_id);
           setSending(false);
           activeRun.current = null;
-          forgetRun(runId);
+          retainRun(runId);
         } else if (!result?.event_id || !reply) {
           const fallback = reply || result?.question || apiErrorText(
             { message: commandBus.describe(result) }, '设备暂时无法完成处理，请稍后重试。');
-          setMessages(previous => previous.map(message => message.role === 'assistant'
-            && message.requestKey === requestKey ? { ...message, text: fallback,
-              final: !['accepted', 'executing', 'timeout'].includes(result?.result) } : message));
+          if (['accepted', 'executing', 'timeout'].includes(result?.result)) {
+            updateStatus(requestKey, fallback);
+          } else {
+            finishMessage(requestKey, fallback, result?.event_id,
+              !reply && !result?.question);
+          }
           setSending(false);
           activeRun.current = null;
           // HTTP/query can finish before the matching SSE event. Keep its ID
           // briefly so a late reply or error still attaches to this task.
-          pendingRuns.current.set(runId, { key: requestKey,
-            timer: setTimeout(() => forgetRun(runId), 180000) });
+          retainRun(runId);
         }
       })
       .catch(error => {
         if (!pendingRuns.current.has(runId)) return;
-        setMessages(previous => previous.map(message => message.role === 'assistant'
-          && message.requestKey === requestKey
-            ? { ...message, text: apiErrorText(error), final: true } : message));
+        finishMessage(requestKey, apiErrorText(error), undefined, true);
         if (activeRun.current === runId) {
           setSending(false);
           activeRun.current = null;
         }
-        pendingRuns.current.set(runId, { key: requestKey,
-          timer: setTimeout(() => forgetRun(runId), 180000) });
+        retainRun(runId);
       });
   };
 
@@ -358,6 +400,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         thinking={false}
         thinkingText=""
         thinkingAgent={unitId}
+        deviceName={card?.name}
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : sending ? '正在处理…' : '告诉设备要做什么…'}
         disabled={offline || sending}
@@ -402,6 +445,7 @@ window.FsmDevicePage = FsmDevicePage;
 function LampAssetsDrawer({ unitId, open, onClose }) {
   const { useEffect, useState } = React;
   const [personality, setPersonality] = useState('');
+  const [socialInitiative, setSocialInitiative] = useState(70);
   const [memory, setMemory] = useState({ taught: [], episodes: [], daily_summary: '' });
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
@@ -413,6 +457,7 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
         apiClient.request(base + '/personality'), apiClient.request(base + '/memory'),
       ]);
       setPersonality(profile.prompt || '');
+      setSocialInitiative(profile.social_initiative ?? 70);
       setMemory(records || { taught: [], episodes: [], daily_summary: '' });
       setFeedback('');
     } catch (error) { setFeedback(apiErrorText(error, '灯的记忆暂时无法读取')); }
@@ -430,7 +475,8 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
     if (!personality.trim() || busy) return;
     setBusy(true);
     try {
-      await apiClient.request(base + '/personality', { method: 'POST', body: { prompt: personality.trim() } });
+      await apiClient.request(base + '/personality', { method: 'POST',
+        body: { prompt: personality.trim(), social_initiative: Number(socialInitiative) } });
       setFeedback('人设已更新');
     } catch (error) { setFeedback(apiErrorText(error, '人设更新失败')); }
     finally { setBusy(false); }
@@ -454,6 +500,10 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
           <form className="personality-editor" onSubmit={save}>
             <textarea value={personality} onChange={event => setPersonality(event.target.value)}
               rows="5" maxLength="2000" placeholder="描述灯的表达方式…"/>
+            <label>社交主动性 {socialInitiative} · {socialInitiative < 35 ? '低' : socialInitiative < 70 ? '中' : '高'}
+              <input type="range" min="0" max="100" value={socialInitiative}
+                onChange={event => setSocialInitiative(Number(event.target.value))}/>
+            </label>
             <div><small>{personality.length} / 2000</small><button className="btn btn--accent" disabled={busy || !personality.trim()}>更新人设</button></div>
           </form>
         </section>
@@ -492,7 +542,8 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
   const displayed = visibleWidgets.filter(widget => (!widget.requires_connection || connected)
     && (!widget.preview_only || selectedState === current));
   const videoWidgets = displayed.filter(widget => widget.type === 'video');
-  const mediaWidgets = displayed.filter(widget => widget.type !== 'video' && placement(widget) === 'media');
+  const mapWidget = displayed.find(widget => widget.type === 'map' && placement(widget) === 'media');
+  const mediaWidgets = displayed.filter(widget => widget !== mapWidget && widget.type !== 'video' && placement(widget) === 'media');
   const controlWidgets = displayed.filter(widget => widget.type !== 'video' && placement(widget) === 'controls');
   const hasColorControl = controlWidgets.some(widget => widget.type === 'led_color' || widget.type === 'color_swatches');
   const hiddenWidgets = activeWidgets.filter(widget => widget.visible === false);
@@ -547,10 +598,11 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
   return <div className="device-board" style={{ '--board-accent': color }}>
-    {(videoWidgets.length > 0 || showPreview) && <div className="device-board__media-row">
+    {(videoWidgets.length > 0 || mapWidget || showPreview) && <div className="device-board__media-row">
       {videoWidgets.length > 0 && <div className="device-board__video">
         {videoWidgets.map(renderWidget)}
       </div>}
+      {mapWidget && <div className="device-board__map">{renderWidget(mapWidget)}</div>}
       {showPreview && <div className="device-board__preview">
         <StateVisual view={view} state={previewTarget} color={color}/>
       </div>}

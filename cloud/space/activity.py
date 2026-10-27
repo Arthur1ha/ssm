@@ -7,6 +7,7 @@ journal keeps the activity timeline available after an SSE disconnect.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -104,6 +105,51 @@ class ActivityStore:
         with self._lock:
             return deepcopy(self._events.get(activity_id, []))
 
+    def recent_discoveries(self, receiver_unit_id: str, *, now: float | None = None,
+                           limit: int = 6, max_age_s: float = 600) -> list[dict[str, Any]]:
+        """Fresh, bounded evidence for an activity member, never replayed after end."""
+        instant = time.time() if now is None else now
+        limit = min(max(int(limit), 0), 6)
+        if not limit:
+            return []
+        with self._lock:
+            current = self._current
+            if (not current or current.get("status") not in {"starting", "active", "partial"}
+                    or (current.get("devices") or {}).get(receiver_unit_id, {}).get("status") != "joined"):
+                return []
+            activity_id = current["activity_id"]
+            rows = self._events.get(activity_id, [])
+            found, seen = [], set()
+            for event in reversed(rows):
+                source = event.get("unit_id")
+                ts = event.get("ts")
+                if (not source or source == receiver_unit_id or not isinstance(ts, (int, float))
+                        or not 0 <= instant - ts <= max_age_s):
+                    continue
+                event_type = event.get("event_type")
+                if event_type not in {"observation", "person_identified", "action_result", "message", "response"}:
+                    continue
+                if event_type == "action_result" and event.get("status") not in {"ok", "blocked", "rejected", "cancelled", "error"}:
+                    continue
+                if event_type == "message" and not event.get("reply_to"):
+                    continue
+                summary = str(event.get("text") or "")[:240].strip()
+                if not summary:
+                    continue
+                dedupe = (source, event_type, summary)
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                found.append({key: event[key] for key in
+                              ("event_id", "activity_id", "unit_id", "event_type", "ts",
+                               "source", "confidence", "status", "message_id", "conversation_id", "reply_to")
+                              if key in event})
+                found[-1]["source_unit_id"] = source
+                found[-1]["summary"] = summary
+                if len(found) >= limit:
+                    break
+            return deepcopy(list(reversed(found)))
+
     def note_user_intervention(self, source_event_id: str = "") -> int:
         """Record a validated API user request before it reaches a model/device."""
         with self._lock:
@@ -154,7 +200,8 @@ class ActivityStore:
             if self._current["status"] == "ending":
                 return False
             self._current["devices"][unit_id] = {"mode": mode, "status": status,
-                                                 "owner": owner, "error": error}
+                                                 "owner": owner, "error": error,
+                                                 **({"joined_at": time.time()} if status == "joined" else {})}
             self._current["revision"] = self._bump_locked()
             self._records[activity_id] = deepcopy(self._current)
             self._save_locked()
@@ -226,7 +273,7 @@ class ActivityStore:
 
     def _record_event_locked(self, activity_id: str, event_type: str, *, unit_id: str = "",
                              text: str = "", **facts: Any) -> dict[str, Any]:
-        allowed = {"message", "proposal", "response", "observation", "action", "action_progress",
+        allowed = {"message", "proposal", "response", "observation", "person_identified", "action", "action_progress",
                    "action_result", "question",
                    "started", "ended", "device_joined", "device_left"}
         if event_type not in allowed:
@@ -238,7 +285,15 @@ class ActivityStore:
         event.update({key: value for key, value in facts.items()
                       if key in {"target_unit_id", "message_id", "conversation_id", "task_id",
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
-                                 "question_id", "action", "physical_stop", "reason"}})
+                                 "question_id", "action", "physical_stop", "reason",
+                                 "source", "confidence"}})
+        if "source" in event:
+            event["source"] = str(event["source"])[:64]
+        if "confidence" in event and (isinstance(event["confidence"], bool)
+                                      or not isinstance(event["confidence"], (int, float))
+                                      or not math.isfinite(event["confidence"])
+                                      or not 0 <= event["confidence"] <= 100):
+            event.pop("confidence")
         rows = self._events.setdefault(activity_id, [])
         rows.append(event)
         details = [index for index, item in enumerate(rows) if item["event_type"] not in _KEY_EVENTS]

@@ -11,6 +11,7 @@ class Go2Sensors:
         self._odom: dict = {}
         self._low_state: dict = {}
         self._voxel_raw: dict | None = None
+        self._voxel_received_at: float | None = None
         self._global_path: list[dict] = []   # 机器人自身规划的全局路径点
         self._state_queues: list[asyncio.Queue] = []
         self._odom_queues: list[asyncio.Queue] = []
@@ -61,6 +62,7 @@ class Go2Sensors:
 
     def _on_voxel_map(self, msg: dict) -> None:
         self._voxel_raw = msg
+        self._voxel_received_at = time.monotonic()
 
     def _on_global_path(self, msg: dict) -> None:
         """解析机器人内置导航的全局路径，存为 [{x, y}, ...] 列表。"""
@@ -96,6 +98,10 @@ class Go2Sensors:
     @property
     def voxel_raw(self) -> dict | None:
         return self._voxel_raw
+
+    @property
+    def voxel_received_at(self) -> float | None:
+        return self._voxel_received_at
 
     @property
     def global_path(self) -> list[dict]:

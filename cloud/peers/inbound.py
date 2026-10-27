@@ -56,6 +56,21 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
     """Called by AgentMessenger's worker, never by the MQTT network callback."""
     if message.get("kind") != "message":
         return
+    # A reply is a result for the original sender. Sending it back through a
+    # fresh agent loop would cause two agents to answer one another indefinitely.
+    if message.get("reply_to"):
+        return
+    activity_id = message.get("activity_id")
+    if activity_id:
+        from cloud.space.activity import get_activity_store
+        activity = get_activity_store().current()
+        members = (activity or {}).get("devices") or {}
+        if (not activity or activity.get("activity_id") != activity_id
+                or activity.get("status") not in {"starting", "active", "partial"}
+                or members.get(message.get("sender"), {}).get("status") != "joined"
+                or members.get(message.get("target"), {}).get("status") != "joined"):
+            messenger.send_result(message["message_id"], "cancelled", reason="activity_ended")
+            return
     target = message["target"]
     context = ExecutionContext(
         "peer_" + message["conversation_id"], "visitor", False, "main",

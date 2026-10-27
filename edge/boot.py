@@ -67,3 +67,6 @@ if not wlan.isconnected():
 
 ip = wlan.ifconfig()[0]
 print(f"[boot] WiFi OK — IP: {ip}")
+
+from clock import sync_if_due
+sync_if_due()

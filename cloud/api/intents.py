@@ -615,7 +615,9 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
     admin_routes = {
         "tag_location": ("/api/go2/navigation/locations", "POST", {"name": str(params.get("name") or "").strip()}),
         "set_home": ("/api/go2/navigation/home", "PUT", {}),
-        "set_personality": ("/api/go2/personality", "POST", {"prompt": str(params.get("prompt") or "").strip()}),
+        "set_personality": ("/api/go2/personality", "POST", {"prompt": str(params.get("prompt") or "").strip(),
+                                                            **({"social_initiative": params["social_initiative"]}
+                                                               if "social_initiative" in params else {})}),
     }
     if normalized in admin_routes:
         if session["actor"] != "admin":
@@ -684,10 +686,11 @@ async def create_command(
 ):
     if "/" in unit_id or not unit_id.strip():
         raise HTTPException(status_code=400, detail="invalid unit id")
-    from cloud.api.activity import user_intervention
-    await user_intervention()
-    from cloud.peers.gateway import cancel_pending
-    cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
+    if not (unit_id == "go2" and req.action.lower() == "set_personality"):
+        from cloud.api.activity import user_intervention
+        await user_intervention()
+        from cloud.peers.gateway import cancel_pending
+        cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     if unit_id == "go2":
         try:
             result = await _dispatch_go2(req.action, req.params, session)
