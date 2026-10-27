@@ -336,7 +336,7 @@ class ESP32Agent(ReactiveMind):
             fields = {"trace_id": current.trace_id or current.run_id,
                       "run_id": current.run_id, "agent_id": unit_id,
                       "session_id": current.session_id, "turn": turn}
-            emit_agent_event("model.request", **fields, input=prompt,
+            emit_agent_event("model.request", **fields, input=prompt, goal=current.goal,
                              model=str(getattr(self._llm, "model_name", "unknown")),
                              template_version="lamp-multitask-v1")
             started = time.monotonic()
@@ -370,14 +370,20 @@ class ESP32Agent(ReactiveMind):
                 "delegated_skill" if run.parent_run_id else "device_chat")
             progress_closed = threading.Event()
             def progress(phase, step):
-                kind = "run_stage" if step is None else "agent_progress"
+                from cloud.agent_runtime.progress_facts import step_progress_facts
                 result = (step or {}).get("result") or {}
-                publish_agent_event(kind, agent_id=unit_id, session_id=event_session,
+                publish_agent_event("agent_progress", agent_id=unit_id, session_id=event_session,
                     scope="space" if autonomous else "session", space_id=context.space_id,
                     status=result.get("result") or phase, run_id=run.run_id,
                     trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
                     step_id=(step or {}).get("step_id", ""), source=event_source,
-                    stage=phase if step is None else None, tool=(step or {}).get("tool"),
+                    stage=phase, tool=(step or {}).get("tool"),
+                    step_number=len(run.steps) if step is not None else None,
+                    **({"goal": run.goal,
+                        "completed_count": sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
+                        "failed_count": sum((s.get("result") or {}).get("result") in
+                            {"blocked", "rejected", "cancelled", "error"} for s in run.steps)}
+                       if step is None else {k: v for k, v in step_progress_facts(step).items() if k != "tool"}),
                     event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
                         f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
                 if phase == "observed" and step is not None:
@@ -389,7 +395,9 @@ class ESP32Agent(ReactiveMind):
                             space_id=context.space_id, status=status, run_id=run.run_id,
                             trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
                             step_id=step["step_id"], source=event_source, stage="narrated",
-                            sequence=run.attempt * 10 + 2, text=answer)
+                            sequence=run.attempt * 10 + 3, text=answer,
+                            step_number=len(run.steps),
+                            **step_progress_facts(step))
                     def invoke_text(prompt):
                         return get_text_llm(ChatOpenAI).invoke([HumanMessage(content=prompt)]).content
                     submit_progress(persona, run.goal, step, invoke_text, publish_text,
@@ -403,7 +411,8 @@ class ESP32Agent(ReactiveMind):
                 prompt = persona_reply_prompt(persona, run)
                 emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
                                  run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
-                                 input=prompt, model=str(getattr(self._llm, "model_name", "unknown")),
+                                 input=prompt, goal=run.goal,
+                                 model=str(getattr(self._llm, "model_name", "unknown")),
                                  template_version="persona-result-v1")
                 response = self._llm.invoke([HumanMessage(content=prompt)])
                 emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,

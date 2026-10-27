@@ -28,7 +28,8 @@ def submit_progress(persona: str, goal: str, step: dict,
                     invoke: Callable[[str], str], publish: Callable[[str], None],
                     closed: threading.Event, deadline: float) -> None:
     """Drop excess or late narration; factual progress was already published."""
-    if closed.is_set() or time.time() >= deadline or not _slots.acquire(blocking=False):
+    slots = _slots
+    if closed.is_set() or time.time() >= deadline or not slots.acquire(blocking=False):
         return
     prompt = progress_prompt(persona, goal, dict(step))
 
@@ -41,6 +42,6 @@ def submit_progress(persona: str, goal: str, step: dict,
         except Exception as exc:
             logger.debug("persona progress unavailable: %s", type(exc).__name__)
         finally:
-            _slots.release()
+            slots.release()
 
     threading.Thread(target=work, daemon=True, name="persona-progress").start()

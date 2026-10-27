@@ -33,6 +33,13 @@ logger = logging.getLogger("orchestrator.multitask")
 _store: RunStore | None = None
 
 
+def build_intent_run_context(trusted: dict) -> dict:
+    """Carry every authenticated intent field into the worker, including trace_id."""
+    return {**trusted, "requirements": [], "route": trusted.get("intent_hint", ""),
+            "planned_tasks": [], "rule": {}, "task_results": {},
+            "response_text": "", "early_exit": False}
+
+
 def get_store() -> RunStore:
     global _store
     if _store is None:
@@ -184,9 +191,6 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         context = {**context, "user_msg": run.goal}
     model = llm or _make_llm()
     transport.do_publish_feedback(session_id, "planning", "正在理解并执行目标…", run_id=run_id)
-    transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
-        trace_id=run.trace_id or run_id, status="planning", stage="planning",
-        sequence=run.attempt)
 
     async def decide(current: Run) -> dict:
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
@@ -221,7 +225,7 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         fields = {"trace_id": current.trace_id or current.run_id,
                   "run_id": current.run_id, "agent_id": "orchestrator",
                   "session_id": session_id, "turn": turn}
-        emit_agent_event("model.request", **fields, input=prompt,
+        emit_agent_event("model.request", **fields, input=prompt, goal=current.goal,
                          model=str(getattr(model, "model_name", "unknown")),
                          template_version="orchestrator-multitask-v1")
         started = time.monotonic()
@@ -326,16 +330,23 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
     progress_closed = threading.Event()
 
     def on_progress(phase: str, step: dict | None) -> None:
+        from cloud.agent_runtime.progress_facts import step_progress_facts
         if step is None:
-            transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+            transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
                 trace_id=run.trace_id or run_id, status=phase, stage=phase,
-                sequence=run.attempt)
+                sequence=run.attempt, goal=run.goal,
+                completed_count=sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
+                failed_count=sum((s.get("result") or {}).get("result") in
+                    {"blocked", "rejected", "cancelled", "error"} for s in run.steps))
         else:
             result = step.get("result") or {}
             transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
                 trace_id=run.trace_id or run_id, status=result.get("result") or phase,
                 step_id=step["step_id"], stage=phase,
-                sequence=run.attempt * 10 + (0 if phase == "dispatching" else 1))
+                sequence=run.attempt * 10 + {"decision": 0, "dispatching": 1,
+                    "observed": 2, "considering": 4}.get(phase, 3),
+                step_number=len(run.steps),
+                **step_progress_facts(step))
             if phase == "observed":
                 status = result.get("result", "unknown")
                 def invoke_text(prompt):
@@ -345,7 +356,9 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                     transport.do_publish_ui_event(session_id, "agent_progress",
                         run_id=run_id, trace_id=run.trace_id or run_id,
                         status=status, text=answer, step_id=step["step_id"],
-                        stage="narrated", sequence=run.attempt * 10 + 2)
+                        stage="narrated", sequence=run.attempt * 10 + 3,
+                        step_number=len(run.steps),
+                        **step_progress_facts(step))
                 submit_progress(AGENT_PERSONA, run.goal, step, invoke_text,
                                 publish_text, progress_closed,
                                 min(run.deadline, time.time() + 4))
@@ -362,7 +375,8 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
             prompt = persona_reply_prompt(AGENT_PERSONA, run)
             emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
-                             input=prompt, model=str(getattr(model, "model_name", "unknown")),
+                             input=prompt, goal=run.goal,
+                             model=str(getattr(model, "model_name", "unknown")),
                              template_version="persona-result-v1")
             response = model.invoke([HumanMessage(content=prompt)])
             emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
@@ -390,9 +404,12 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
     transport.do_publish_feedback(session_id, stage, run.response, run_id=run_id,
                                   trace_id=run.trace_id or run_id,
                                   status=run.status, question=run.question or None)
-    transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+    transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
         trace_id=run.trace_id or run_id, status=run.status, stage="finished",
-        sequence=run.attempt)
+        sequence=run.attempt, goal=run.goal,
+        completed_count=sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
+        failed_count=sum((s.get("result") or {}).get("result") in
+            {"blocked", "rejected", "cancelled", "error"} for s in run.steps))
     transport.do_publish_ui_event(session_id, "agent_reply" if run.response else "reply_error",
         run_id=run_id, trace_id=run.trace_id or run_id, status=run.status,
         text=run.response,

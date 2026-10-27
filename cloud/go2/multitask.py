@@ -125,7 +125,8 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
         turn = len(current.steps) + 1
         fields = {"trace_id": current.trace_id or current.run_id, "run_id": current.run_id,
                   "agent_id": "go2", "session_id": session_id, "turn": turn}
-        emit_agent_event("model.request", **fields, model=str(getattr(model, "model_name", "unknown")),
+        emit_agent_event("model.request", **fields, goal=current.goal,
+                         model=str(getattr(model, "model_name", "unknown")),
                          template_version="go2-multitask-v1", input={"system": prompt.system, "human": prompt.human})
         started = time.monotonic()
         response = await model.ainvoke([
@@ -171,14 +172,20 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             "delegated_skill" if run.parent_run_id else "device_chat")
         progress_closed = threading.Event()
         def progress(phase, step):
-            kind = "run_stage" if step is None else "agent_progress"
+            from cloud.agent_runtime.progress_facts import step_progress_facts
             result = (step or {}).get("result") or {}
-            publish_agent_event(kind, agent_id="go2", session_id=event_session,
+            publish_agent_event("agent_progress", agent_id="go2", session_id=event_session,
                 scope="space" if autonomous else "session", space_id=context.space_id,
                 status=result.get("result") or phase, run_id=run.run_id,
                 trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
                 step_id=(step or {}).get("step_id", ""), source=event_source,
-                stage=phase if step is None else None, tool=(step or {}).get("tool"),
+                stage=phase, tool=(step or {}).get("tool"),
+                step_number=len(run.steps) if step is not None else None,
+                **({"goal": run.goal,
+                    "completed_count": sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
+                    "failed_count": sum((s.get("result") or {}).get("result") in
+                        {"blocked", "rejected", "cancelled", "error"} for s in run.steps)}
+                   if step is None else {k: v for k, v in step_progress_facts(step).items() if k != "tool"}),
                 event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
                     f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
             if phase == "observed" and step is not None:
@@ -190,7 +197,9 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                         space_id=context.space_id, status=status, run_id=run.run_id,
                         trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
                         step_id=step["step_id"], source=event_source, stage="narrated",
-                        sequence=run.attempt * 10 + 2, text=answer)
+                        sequence=run.attempt * 10 + 3, text=answer,
+                        step_number=len(run.steps),
+                        **step_progress_facts(step))
                 def invoke_text(prompt):
                     from cloud.go2.agentcore.llm import get_text_llm as fresh_model
                     return asyncio.run(fresh_model().ainvoke([HumanMessage(content=prompt)])).content
@@ -205,7 +214,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             prompt = persona_reply_prompt(persona, run)
             emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", session_id=session_id,
-                             input=prompt, template_version="persona-result-v1")
+                             input=prompt, goal=run.goal, template_version="persona-result-v1")
             response = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
             emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", session_id=session_id,
@@ -223,6 +232,16 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             run.response = ""
             run.reply_source = "runtime"
             store.save(run)
+    # A delegated request without a reply or verified action cannot be
+    # reported as complete when the physical Go2 is disconnected.
+    if (run.parent_run_id and not go2.is_connected and run.status == "ok"
+            and not any(step.get("effectful") and
+                        (step.get("result") or {}).get("result") == "ok"
+                        for step in run.steps)):
+        run.status = "blocked"
+        run.response = ""
+        run.reply_source = "runtime"
+        store.save(run)
     result = _result(run)
     progress_closed.set()
     progress("finished", None)

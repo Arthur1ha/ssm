@@ -98,10 +98,13 @@ async def run_loop(
     if on_progress:
         on_progress("planning", None)
     effects = sum(bool(step.get("effectful")) for step in run.steps)
+    execution_announced = False
     for turn in range(max_turns):
         if time.time() >= run.deadline:
             run.status, run.response = "timeout", "任务已到期；未确认的动作不会自动重发。"
             break
+        if on_progress and run.steps:
+            on_progress("considering", run.steps[-1])
         model_started = time.monotonic()
         try:
             decision = await asyncio.wait_for(decide(run),
@@ -164,10 +167,14 @@ async def run_loop(
                 "tool": name, "params": params, "fingerprint": hashlib.sha256(
                     json.dumps([name, params], sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
                 "effectful": is_effect, "dispatch_status": "pending", "result": None}
+        if on_progress and not execution_announced:
+            on_progress("executing", None)
+            execution_announced = True
         run.steps.append(step)
         if record:
             record(run, step)
         if on_progress:
+            on_progress("decision", step)
             on_progress("dispatching", step)
         emit("tool.dispatch", turn=turn + 1, step_id=step_id,
              tool_call_id=step["tool_call_id"], tool=name, params=params,

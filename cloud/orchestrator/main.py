@@ -24,7 +24,7 @@ from cloud.cards.registry import CardRegistry
 import tools as agent_tools
 from graph import (cancel_peer_coordination, clear_peer_coordination,
                    clear_session_context)
-from cloud.orchestrator.multitask import run_intent_loop, run_peer_loop
+from cloud.orchestrator.multitask import build_intent_run_context, run_intent_loop, run_peer_loop
 from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message
 from cloud.peers.messaging import AgentMessenger
 from cloud.space.constraints import CURRENT_CONSTRAINTS_TOPIC, get_constraint_store
@@ -435,24 +435,7 @@ while True:
             session_id = event.get("session_id", "")
             logger.info("[Main] ── 编排图启动 session=%s ──", session_id)
             _intent_worker.submit(
-                _run_intent, session_id, {
-                    "session_id":   session_id,
-                    "actor":        event["payload"]["actor"],
-                    "persist":      event["payload"]["persist"],
-                    "space_id":     event["payload"]["space_id"],
-                    "issued_at":    event["payload"]["issued_at"],
-                    "expires_at":   event["payload"].get("expires_at"),
-                    "user_msg":     event["payload"]["user_msg"],
-                    "event_id":     event["payload"].get("event_id", ""),
-                    "resume_run_id": event["payload"].get("resume_run_id"),
-                    "requirements": [],
-                    "route":         event["payload"].get("intent_hint", ""),
-                    "planned_tasks": [],
-                    "rule":          {},
-                    "task_results":  {},
-                    "response_text": "",
-                    "early_exit":    False,
-                },
+                _run_intent, session_id, build_intent_run_context(event["payload"]),
             )
             continue
 

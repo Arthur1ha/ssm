@@ -45,7 +45,7 @@ async function peopleRequest(path, options, timeoutMs = 30000) {
   try { return await apiClient.request(path, { ...options, signal: controller.signal }); }
   catch (error) {
     if (controller.signal.aborted) throw new Error('请求超时，请刷新人员库确认结果后重试');
-    if (error?.status === 502) throw new Error('服务暂时无法处理照片（502），请稍后重试');
+    if (error?.status === 502) throw new Error('照片暂时无法处理，请稍后重试');
     throw error;
   } finally { clearTimeout(timer); }
 }

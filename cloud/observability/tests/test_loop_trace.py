@@ -38,10 +38,11 @@ async def test_trace_records_dispatch_after_durable_pending_intent(tmp_path):
     assert all(event["trace_id"] == run.trace_id for event in events)
     assert records[0][1] == "pending"
     assert run.status == "ok"
-    assert run.response == "灯亮了"
+    assert run.response == ""
+    assert run.decision_draft == "灯亮了"
     validated = next(event for event in events if event["event"] == "reply.validated")
-    assert validated["reply"] == "灯亮了"
-    assert validated["changed"] is False
+    assert validated["reply"] == ""
+    assert validated["changed"] is True
 
 
 @pytest.mark.asyncio

@@ -106,7 +106,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section asset-section--space">
             <div className="asset-section__heading">
-              <div><small>SPACE ID · {space?.id || '—'}</small><h3>{space?.name || '当前空间'}</h3></div>
+              <div><small>空间设置</small><h3>{space?.name || '当前空间'}</h3></div>
               <span>{space?.device_ids?.length || 0} 台设备</span>
             </div>
             <form className="asset-inline-form" onSubmit={saveSpaceName}>
@@ -119,13 +119,15 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
               {feedback('space')}
             </form>
             <div className="space-members">
-              {(space?.device_ids || []).map(deviceId => <code key={deviceId}>{deviceId}</code>)}
+              {(space?.device_ids || []).map(deviceId => <span key={deviceId}>
+                {deviceCandidates.find(device => device.device_id === deviceId)?.name || '已加入设备'}
+              </span>)}
             </div>
           </section>
 
           <section className="asset-section asset-section--devices">
             <div className="asset-section__heading">
-              <div><small>SPACE DEVICES</small><h3>空间设备</h3></div>
+              <div><small>设备管理</small><h3>空间设备</h3></div>
               <span>{space?.device_ids?.length || 0} 台已加入</span>
             </div>
             <p className="asset-section__intro">从首页的管理菜单添加设备；这里可移除已加入的设备并管理标签。</p>
@@ -210,8 +212,8 @@ function DeviceLabelButton({ device }) {
     <button type="button" className="btn" onClick={load}>设备标签</button>
     {open && ReactDOM.createPortal(<div className="device-label-backdrop" onClick={() => setOpen(false)}>
       <section className="device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
-        <header><div><small>PHYSICAL DEVICE · {device.device_id}</small><h3>{device.name}设备标签</h3></div><button className="btn" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={14}/></button></header>
-        <p>保存或打印后贴在设备上。扫码时，设备仍需先发布能力卡。</p>
+        <header><div><small>设备标签</small><h3>{device.name}设备标签</h3></div><button className="btn" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={14}/></button></header>
+        <p>保存或打印后贴在设备上。扫码前请先启动设备。</p>
         {busy && !label && <small className="action-feedback" role="status">正在读取设备标签…</small>}
         {label && <div className="device-label-qr" ref={qrRef}/>}
         {!label && !busy && errorTarget === 'load' && error && <div className="feedback-button">

@@ -99,7 +99,7 @@ ps:
 
 logs:
 	@echo "=== Latest session ==="
-	@uv run python scripts/trace_task.py --latest --limit 12 || true
+	@uv run python scripts/trace_task.py --latest || true
 	@echo "=== Recent agent errors ==="
 	@uv run python scripts/trace_task.py --errors --limit 8 || true
 

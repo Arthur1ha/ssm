@@ -24,11 +24,15 @@ function App({ session, logout, refreshSession }) {
     connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
   const recentEvents = useSpaceActivity(agents);
-  const { thinking, thinkingText, send } = useSendIntent();
+  const { thinking, send } = useSendIntent();
   const currentHash = useHashLocal();
 
   const [activityLog, setActivityLog] = useState([]);
-  const autonomousSeen = useRef(new Set());
+  const seenReplies = useRef(new Set());
+  const completedRequests = useRef(new Set());
+  const traceRequests = useRef(new Map());
+  const pendingReplies = useRef([]);
+  const nextRequestId = useRef(0);
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
@@ -42,14 +46,45 @@ function App({ session, logout, refreshSession }) {
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
+  const updateRequestBubble = (requestId, text) => {
+    if (!text) return;
+    setActivityLog(prev => prev.map(entry =>
+      entry.type === 'ai' && entry.requestId === requestId && !entry.final
+        ? { ...entry, text } : entry));
+  };
+  const finishRequestBubble = (requestId, text) => {
+    completedRequests.current.add(requestId);
+    setActivityLog(prev => prev.map(entry =>
+      entry.type === 'ai' && entry.requestId === requestId
+        ? { ...entry, text, final: true } : entry));
+  };
+  const appendReply = (item) => {
+    if (!item?.text) return;
+    const requestId = traceRequests.current.get(item.trace_id);
+    const replyKey = item.event_id ? `${requestId || 'space'}:${item.event_id}` : '';
+    if (replyKey && seenReplies.current.has(replyKey)) return;
+    if (replyKey) seenReplies.current.add(replyKey);
+    if (requestId && ['orchestrator', 'cloud_orchestrator'].includes(item.agent_id)) {
+      completedRequests.current.add(requestId);
+      setActivityLog(prev => prev.map(entry =>
+        entry.type === 'ai' && entry.requestId === requestId
+          ? { ...entry, text: item.text, final: true } : entry));
+      return;
+    }
+    appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
+      eventId: item.event_id, traceId: item.trace_id });
+  };
   useEffect(() => {
     const onEvent = event => {
       const item = event.detail || {};
-      if (item.type !== 'agent_reply' || item.scope !== 'space' || !item.text
-          || autonomousSeen.current.has(item.event_id)) return;
-      autonomousSeen.current.add(item.event_id);
-      appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
-        eventId: item.event_id, traceId: item.trace_id });
+      if (item.type !== 'agent_reply' || !item.text) return;
+      if (item.scope === 'space' && item.source === 'autonomous') {
+        appendReply(item);
+      } else if (item.scope === 'session'
+          && ['orchestrator', 'delegated_skill'].includes(item.source)) {
+        if (traceRequests.current.has(item.trace_id)) appendReply(item);
+        else pendingReplies.current = [...pendingReplies.current.slice(-49), item];
+      }
     };
     apiClient.addEventListener('server-event', onEvent);
     return () => apiClient.removeEventListener('server-event', onEvent);
@@ -60,17 +95,36 @@ function App({ session, logout, refreshSession }) {
 
   const handleSend = (text, options = {}) => {
     const t = text.trim();
-    if (!t) return;
-    appendActivity({ type: 'user', text: t });
+    if (!t || thinking) return;
+    const requestId = ++nextRequestId.current;
+    setActivityLog(prev => [...prev,
+      { type: 'user', text: t },
+      { type: 'ai', agent: 'cloud_orchestrator', requestId,
+        text: '收到，我先看看怎么帮你处理。' },
+    ]);
     send(t, {
-      onMessage: (msg, agent, event) => appendActivity({ type: 'ai', agent: agent || 'cloud_orchestrator',
-        text: msg, eventId: event?.event_id, traceId: event?.trace_id }),
-      onProgress: event => appendActivity({ type: event.type, ...event }),
-      onStatus:      msg  => appendActivity({ type: 'system', text: msg }),
-      onTraceId: traceId => appendActivity({ type: 'trace', traceId }),
+      onMessage: (msg, agent, event) => appendReply({ ...event, text: msg,
+        agent_id: agent || 'cloud_orchestrator' }),
+      onProgress: event => {
+        if (completedRequests.current.has(requestId)) return;
+        updateRequestBubble(requestId, describeAgentStatus(event));
+        appendActivity({ ...event, type: event.type, requestId });
+      },
+      onStatus: msg => finishRequestBubble(requestId, msg),
+      onTraceId: traceId => {
+        traceRequests.current.set(traceId, requestId);
+        if (traceRequests.current.size > 20) traceRequests.current.delete(traceRequests.current.keys().next().value);
+        const pending = pendingReplies.current;
+        pendingReplies.current = pending.filter(item => item.trace_id !== traceId);
+        pending.filter(item => item.trace_id === traceId).forEach(appendReply);
+      },
       onPendingRule: rule => {
-        if (session.actor === 'admin') setPendingRule(rule);
-        else appendActivity({ type: 'system', text: '临时体验不会保存长期规则。你仍可以直接控制现有设备。' });
+        if (session.actor === 'admin') {
+          finishRequestBubble(requestId, '规则已经准备好，请确认是否保存。');
+          setPendingRule(rule);
+        } else {
+          finishRequestBubble(requestId, '临时体验不会保存长期规则，你仍可以直接控制现有设备。');
+        }
       },
       intentHint: options.intentHint,
     });
@@ -170,11 +224,7 @@ function App({ session, logout, refreshSession }) {
             </div>
           )}
 
-          <ActivityFeed
-            entries={activityLog}
-            thinking={thinking}
-            thinkingText={thinkingText}
-          />
+          <ActivityFeed entries={activityLog}/>
 
           {pendingRule && session.actor === 'admin' && (
             <div style={{ padding: '0 16px 10px' }}>
@@ -308,7 +358,7 @@ function DeviceScanDialog({ onClose, onBound }) {
     } catch (requestError) {
       setError(requestError.name === 'AbortError' ? '识别超时，请检查网络后重试'
         : requestError.status === 400 ? '这不是有效的设备二维码'
-        : requestError.status === 404 ? '还未发现这台设备，请先启动设备并等待能力卡发布'
+        : requestError.status === 404 ? '还未发现这台设备，请启动设备后重试'
         : apiErrorText(requestError, '设备识别失败，请重试'));
       setPasteOpen(true);
     } finally {

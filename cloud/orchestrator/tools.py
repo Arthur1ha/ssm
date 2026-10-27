@@ -68,7 +68,7 @@ def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "o
 def do_publish_ui_event(session_id: str, event_type: str, *, run_id: str,
                         trace_id: str, status: str, text: str = "", step_id: str = "",
                         stage: str = "", sequence: int = 0,
-                        reply_kind: str = "final") -> None:
+                        reply_kind: str = "final", **facts) -> None:
     if _peer_request.get():
         return
     if _mqtt is None:
@@ -80,6 +80,7 @@ def do_publish_ui_event(session_id: str, event_type: str, *, run_id: str,
                "sequence": sequence, "reply_kind": reply_kind,
                "event_id": "evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
                    f"{session_id}:{run_id}:{event_type}:{stage}:{step_id}:{sequence}:{reply_kind}").hex}
+    payload.update(facts)
     _mqtt.publish(f"ssm/feedback/{session_id}", json.dumps(payload, ensure_ascii=False), qos=1)
 
 

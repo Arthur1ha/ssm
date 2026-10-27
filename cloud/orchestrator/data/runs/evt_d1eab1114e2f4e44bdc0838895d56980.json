@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_d1eab1114e2f4e44bdc0838895d56980",
+  "session_id": "ses_mW2ji4CJhfzYM16fzMbCnoNp",
+  "goal": "有人来了",
+  "deadline": 1793071046.7278864,
+  "steps": [],
+  "status": "needs_clarification",
+  "response": "有人来了，我先没动。你是想让我招呼一下，还是先做点别的？",
+  "question": "有人来了，需要我帮你招呼一下，还是先做点什么？",
+  "trace_id": "tr_0450fdbab56f40b3ab5b4f08a5e6c0d0",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793070970.7605999
+}

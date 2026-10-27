@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_09608f65da404bfe916f68e54896fe2e",
+  "session_id": "ses_mW2ji4CJhfzYM16fzMbCnoNp",
+  "goal": "帮我把灯打开，然后让狗坐下",
+  "deadline": 1793070698.6257365,
+  "steps": [
+    {
+      "step_id": "95b31968a06a42c38cfcb74179e7d6c3",
+      "tool_call_id": "86bfcf49ee644d72a33c3c2f3ce22e84",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state",
+        "params": {
+          "state": "ON"
+        }
+      },
+      "fingerprint": "28b88f332c83103949d83d3845c12ca152a9e9005a12c6b21349b130cfaee728",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "ism_state": "ON",
+        "result": "ok",
+        "task_id": "95b31968a06a42c38cfcb74179e7d6c3",
+        "session_id": "ses_mW2ji4CJhfzYM16fzMbCnoNp",
+        "ts": 3015,
+        "error": "",
+        "unit_id": "esp32_desk_led",
+        "agent_reply": "行吧，灯给你开了，这下够亮了吧？",
+        "agent_reply_event_id": "evt_a02df7b56abb554fa553fcc0cbcbfc2a",
+        "query_endpoint": null,
+        "skill_id": "set_light_state"
+      }
+    }
+  ],
+  "status": "error",
+  "response": "灯已经帮你打开了，够亮了吧？  \n不过“让狗坐下”这一步没弄成，所以还没完成。",
+  "question": "",
+  "trace_id": "tr_1c77ddd8e56e48d09414d6eda6c3c7cb",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793070633.2690847
+}

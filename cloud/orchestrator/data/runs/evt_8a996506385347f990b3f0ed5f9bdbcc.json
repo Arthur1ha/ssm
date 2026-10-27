@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_8a996506385347f990b3f0ed5f9bdbcc",
+  "session_id": "ses_mW2ji4CJhfzYM16fzMbCnoNp",
+  "goal": "帮我把灯打开，让狗坐下",
+  "deadline": 1793071490.845787,
+  "steps": [
+    {
+      "step_id": "c6fc89602a62493b80c7470be399805c",
+      "tool_call_id": "844c36162a8b429c8b3393a6c0af482a",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state",
+        "params": {
+          "state": "ON"
+        }
+      },
+      "fingerprint": "28b88f332c83103949d83d3845c12ca152a9e9005a12c6b21349b130cfaee728",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "ism_state": "ON",
+        "result": "ok",
+        "task_id": "c6fc89602a62493b80c7470be399805c",
+        "session_id": "ses_mW2ji4CJhfzYM16fzMbCnoNp",
+        "ts": 3807,
+        "error": "",
+        "unit_id": "esp32_desk_led",
+        "agent_reply": "行吧，灯给你打开了，这下够亮了吧？可别再说看不清屏幕了嗷。",
+        "agent_reply_event_id": "evt_eaf581920f73572fbffe4a8d207230de",
+        "query_endpoint": null,
+        "skill_id": "set_light_state"
+      }
+    },
+    {
+      "step_id": "81bd96f6d4b64369b92d368e9fe30d33",
+      "tool_call_id": "b70d0eeb0191471b90693e94fb668445",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "go2",
+        "skill_id": "go2_chat",
+        "params": {
+          "message": "坐下"
+        }
+      },
+      "fingerprint": "c85831177d19b1e115c02bd646403003f1ebad8312e937f812945cefd8862da7",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "run_id": "81bd96f6d4b64369b92d368e9fe30d33",
+        "trace_id": "tr_8b28a0323da64e3883eaea3ef316e887",
+        "result": "blocked",
+        "response": "",
+        "event_id": null,
+        "actions_taken": [],
+        "tool_results": [],
+        "question": null,
+        "llm_available": true,
+        "task_id": "81bd96f6d4b64369b92d368e9fe30d33",
+        "query_endpoint": "/api/go2/chat",
+        "unit_id": "go2",
+        "skill_id": "go2_chat"
+      }
+    },
+    {
+      "step_id": "fedc531165164c6e8089b57f68e8a0a0",
+      "tool_call_id": "347f8c0ca721445ebb7a812e362e55ec",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "go2",
+        "skill_id": "go2_sport",
+        "params": {
+          "cmd": "StandDown"
+        }
+      },
+      "fingerprint": "5dda61e8aaa7361aba1feeb3a2b42766ffa2c516815a37804d60d1b72873af07",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "run_id": "fedc531165164c6e8089b57f68e8a0a0",
+        "trace_id": "tr_8b28a0323da64e3883eaea3ef316e887",
+        "result": "blocked",
+        "response": "",
+        "event_id": null,
+        "actions_taken": [],
+        "tool_results": [
+          {
+            "tool": "go2_sport",
+            "result": {
+              "result": "blocked",
+              "error": "device_precondition",
+              "message": "Go2 未连接"
+            },
+            "step_id": "d758ee0ddac3462b8fe86c575c5e908a"
+          }
+        ],
+        "question": null,
+        "llm_available": true,
+        "task_id": "fedc531165164c6e8089b57f68e8a0a0",
+        "query_endpoint": "/api/go2/chat",
+        "unit_id": "go2",
+        "skill_id": "go2_sport"
+      }
+    }
+  ],
+  "status": "partial",
+  "response": "灯已经打开了。不过机器狗现在没连上，没法让它坐下。",
+  "question": "",
+  "trace_id": "tr_8b28a0323da64e3883eaea3ef316e887",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "灯已经打开了；机器狗当前未连接，没法让它坐下。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793071437.5688992
+}

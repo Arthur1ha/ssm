@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_f150630d3e894761aa2c71f7516c4731",
+  "session_id": "ses_K4p-bopNLTDq3w2Cc_thgAne",
+  "goal": "把灯打开",
+  "deadline": 1793070334.4710631,
+  "steps": [
+    {
+      "step_id": "18048543bd7c478896763bf04798458a",
+      "tool_call_id": "e812baaf17a64697b5e59404ae944b81",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state",
+        "params": {
+          "state": "ON"
+        }
+      },
+      "fingerprint": "28b88f332c83103949d83d3845c12ca152a9e9005a12c6b21349b130cfaee728",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "ism_state": "ON",
+        "result": "ok",
+        "task_id": "18048543bd7c478896763bf04798458a",
+        "session_id": "ses_K4p-bopNLTDq3w2Cc_thgAne",
+        "ts": 2649,
+        "error": "",
+        "unit_id": "esp32_desk_led",
+        "agent_reply": "行吧，灯给你开了，这下总该看得清了吧？",
+        "agent_reply_event_id": "evt_49b03a6ddcff5b00acfac713d9fd7b67",
+        "query_endpoint": null,
+        "skill_id": "set_light_state"
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "灯已经帮你打开了。",
+  "question": "",
+  "trace_id": "tr_b4cc1db99dfe4affbbaaf89dc1aac6ac",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "好的，灯已打开。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793070258.406103
+}

@@ -475,7 +475,7 @@ body {
 .asset-inline-form input, .asset-action-row input, .person-enrol input, .person-enrol select { height: 40px; padding: 0 11px; }
 .asset-inline-form input:focus, .asset-action-row input:focus, .person-enrol input:focus, .person-enrol select:focus, .personality-editor textarea:focus { border-color: #4bd4ff; box-shadow: 0 0 0 3px rgba(75,212,255,.09); }
 .space-members { margin-top: 9px; display: flex; flex-wrap: wrap; gap: 6px; }
-.space-members code { padding: 4px 7px; border: 1px solid rgba(75,212,255,.13); border-radius: 5px; color: rgba(75,212,255,.72); background: rgba(75,212,255,.05); font: 8px var(--font-mono); }
+.space-members span { padding: 4px 7px; border: 1px solid rgba(75,212,255,.13); border-radius: 5px; color: rgba(75,212,255,.72); background: rgba(75,212,255,.05); font-size: 11px; }
 .asset-section__intro { margin: -5px 0 11px; color: var(--color-text-dim); font-size: 10px; line-height: 1.55; }
 .space-device-options { display: grid; gap: 7px; }
 .space-device-option { width: 100%; min-height: 58px; padding: 8px; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 9px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface-1); color: var(--color-text); text-align: left; cursor: pointer; transition: border-color .15s, background .15s; }

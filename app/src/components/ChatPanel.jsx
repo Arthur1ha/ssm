@@ -6,6 +6,8 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
   const [input,  setInput]  = useState('');
   const msgsRef  = useRef(null);
   const inputRef = useRef(null);
+  const latestRequestKey = [...messages].reverse().find(m =>
+    m.role === 'assistant' && m.requestKey)?.requestKey;
 
   useEffect(() => {
     if (msgsRef.current) {
@@ -35,28 +37,30 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
         display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.map((m, i) => {
           const agentColor = getAgentBubbleColor(m.agent);
+          const sticky = m.role === 'assistant' && Boolean(m.requestKey)
+            && m.requestKey === latestRequestKey;
           return (
           <div key={i} style={{ maxWidth: '82%',
             alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-            display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {m.role !== 'user' && m.role !== 'step' && (
+            display: 'flex', flexDirection: 'column', gap: 4,
+            position: sticky ? 'sticky' : 'relative',
+            top: sticky ? 0 : undefined,
+            zIndex: sticky ? 2 : undefined }}>
+            {m.role !== 'step' && (
               <div style={{
-                fontSize: 10, paddingLeft: 4,
-                color: agentColor, opacity: 0.75,
+                fontSize: 10, paddingLeft: m.role === 'user' ? 0 : 4,
+                paddingRight: m.role === 'user' ? 4 : 0,
+                color: m.role === 'user' ? 'var(--color-accent)' : agentColor,
+                opacity: 0.75, textAlign: m.role === 'user' ? 'right' : 'left',
                 fontFamily: 'var(--font-mono)', letterSpacing: '0.04em',
               }}>
-                {m.agentName || getAgentDisplayName(m.agent)}
+                {m.role === 'user' ? '你' : (m.agentName || getAgentDisplayName(m.agent))}
               </div>
             )}
             {m.role === 'step' ? (
-              <div style={{
-                padding: '6px 12px', fontSize: 12, lineHeight: 1.5,
-                borderRadius: 8,
-                background: `${agentColor}08`,
-                color: agentColor,
-                border: `1px solid ${agentColor}20`,
-                fontFamily: 'var(--font-mono)', opacity: 0.7,
-              }}>{m.text}</div>
+              <div style={{ padding: '6px 10px', fontSize: 11, lineHeight: 1.5,
+                borderLeft: '2px solid var(--color-border-strong)',
+                color: 'var(--color-text-dim)' }}>{m.text}</div>
             ) : (
             <div style={{
               padding: '10px 14px', fontSize: 14, lineHeight: 1.6,

@@ -10,6 +10,7 @@ import pytest
 from cloud.agent_runtime.loop import Run, run_loop
 from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt
 from cloud.agent_runtime.progress import submit_progress
+from cloud.agent_runtime.progress_facts import step_progress_facts
 from cloud.api import intents
 
 
@@ -70,6 +71,41 @@ def test_feedback_bridge_binds_session_and_orchestrator_identity(monkeypatch):
         owner.get_nowait()
 
 
+def test_orchestrator_progress_keeps_action_and_result_facts(monkeypatch):
+    broker = intents._EventBroker()
+    monkeypatch.setattr(intents, "_events", broker)
+    owner = broker.subscribe(_session("owner"))
+    step = {"tool": "invoke_skill", "params": {"unit_id": "esp32_desk_led",
+            "skill_id": "set_light_state", "params": {"state": "ON"}},
+            "result": {"result": "ok", "ism_state": "ON"}}
+    facts = step_progress_facts(step)
+    payload = {"type": "agent_progress", "agent_id": "cloud_orchestrator",
+               "run_id": "run", "trace_id": "trace", "step_id": "step",
+               "stage": "observed", "status": "ok", **facts}
+    assert intents.handle_mqtt_message("ssm/feedback/owner", json.dumps(payload))
+    event = owner.get_nowait()
+    assert event["target_unit_id"] == "esp32_desk_led"
+    assert event["skill_id"] == "set_light_state"
+    assert event["arguments"] == {"state": "ON"}
+    assert event["result_state"] == "ON"
+
+
+def test_progress_stage_is_subtype_not_sse_event_name():
+    assert intents._sse_event_name({"type": "agent_progress", "stage": "decision"}) == "agent_progress"
+    assert intents._sse_event_name({"type": "agent_progress", "stage": "observed"}) == "agent_progress"
+    assert intents._sse_event_name({"type": "agent_reply", "stage": "finished"}) == "agent_reply"
+    assert intents._sse_event_name({"stage": "planning"}) == "planning"
+
+
+def test_progress_facts_keep_delegated_goal_without_tool_output():
+    step = {"tool": "invoke_skill", "params": {"unit_id": "go2", "skill_id": "go2_chat",
+            "params": {"message": "坐下"}}, "result": {"result": "blocked", "tool_results": [
+                {"tool": "go2_sport", "result": {"result": "blocked", "message": "Go2 未连接"}}]}}
+    facts = step_progress_facts(step)
+    assert facts["requested_text"] == "坐下"
+    assert facts["reason"] == "Go2 未连接"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_status,expected", [
     ("ok", "ok"), ("rejected", "partial"), ("timeout", "timeout"),
@@ -93,7 +129,8 @@ async def test_final_claim_is_draft_and_persona_reads_verified_status(tool_statu
     assert f'"result": "{tool_status}"' in prompt
 
 
-def test_narrated_progress_uses_facts_and_drops_late_text():
+def test_narrated_progress_uses_facts_and_drops_late_text(monkeypatch):
+    monkeypatch.setattr("cloud.agent_runtime.progress._slots", threading.BoundedSemaphore(2))
     received = []
     arrived = threading.Event()
     closed = threading.Event()

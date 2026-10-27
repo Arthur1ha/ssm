@@ -49,7 +49,7 @@ function useSendIntent() {
       }
       if (payload.type === 'run_stage') {
         resetTimeout();
-        setThinkingText(STAGE_LABELS[payload.stage] || payload.stage || '正在处理');
+        setThinkingText(describeRunProgress(payload));
         active.callbacks.onProgress?.(payload);
         if (payload.stage === 'finished' && payload.status === 'needs_clarification') {
           pendingRunRef.current = payload.run_id || null;
@@ -58,6 +58,7 @@ function useSendIntent() {
       }
       if (payload.type === 'agent_progress') {
         resetTimeout();
+        setThinkingText(describeRunProgress(payload));
         active.callbacks.onProgress?.(payload);
         return;
       }
@@ -71,18 +72,10 @@ function useSendIntent() {
       const callbacks = active.callbacks;
       if (stage === 'planning' || stage === 'executing') {
         resetTimeout();
-        setThinkingText(STAGE_LABELS[stage]);
+        setThinkingText(`正在核对可用设备与当前状态，处理：${active.goal}`);
       } else if (stage === 'ack') {
         resetTimeout();
         setThinkingText(STAGE_LABELS.executing);
-      } else if (stage === 'step') {
-        resetTimeout();
-        const status = payload.result?.result || payload.status;
-        const labels = { ok: '已完成', accepted: '已发送，待确认', executing: '执行中',
-          blocked: '未执行', rejected: '未执行', timeout: '结果未确认',
-          cancelled: '已取消', error: '执行失败' };
-        callbacks.onProgress?.({ type: 'agent_progress', status, text: labels[status] || '状态已更新',
-          trace_id: payload.trace_id, step_id: payload.step_id, agent_id: 'cloud_orchestrator' });
       } else if (stage === 'question') {
         pendingRunRef.current = payload.run_id || null;
         if (!payload.question) callbacks.onStatus?.('请补充信息');
@@ -106,8 +99,9 @@ function useSendIntent() {
   const send = useCallback(async (text, callbacks = {}) => {
     if (!text.trim() || activeRef.current) return;
     setThinking(true);
-    setThinkingText(STAGE_LABELS.planning);
-    activeRef.current = { callbacks, timeoutId: null, traceId: null, pendingEvents: [] };
+    setThinkingText(`正在核对可用设备与当前状态，处理：${text.trim()}`);
+    activeRef.current = { callbacks, timeoutId: null, traceId: null,
+      goal: text.trim(), pendingEvents: [] };
     resetTimeout(150000);
     const body = { text: text.trim() };
     if (pendingRunRef.current) body.resume_run_id = pendingRunRef.current;

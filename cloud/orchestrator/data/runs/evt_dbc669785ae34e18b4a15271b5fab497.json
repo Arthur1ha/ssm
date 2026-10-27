@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_dbc669785ae34e18b4a15271b5fab497",
+  "session_id": "ses_mW2ji4CJhfzYM16fzMbCnoNp",
+  "goal": "有人来了",
+  "deadline": 1793071473.5226681,
+  "steps": [],
+  "status": "ok",
+  "response": "有人来了，我在呢。需要我接待或安排什么吗？",
+  "question": "",
+  "trace_id": "tr_1d876d0948304dddb139cec83255c51b",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "好的，有人来了。需要我接待或安排什么吗？",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793071390.2895455
+}

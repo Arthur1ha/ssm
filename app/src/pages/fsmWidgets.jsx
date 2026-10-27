@@ -15,7 +15,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
         setStatus({
           connected: (connectionField ? d[connectionField] : d.connected) === true,
           fsm_state: (stateField ? d[stateField] : d.fsm_state) || '',
-          error: d.error || '',
+          error: d.error ? apiErrorText({ message: d.error }, '设备连接暂时不可用') : '',
         });
         setChecked(true);
       })
@@ -24,7 +24,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
           ...prev,
           connected: false,
           fsm_state: 'offline',
-          error: '连接入口不可达，请确认 API 服务正在运行。',
+          error: '设备连接暂时不可用，请稍后重试。',
         }));
         setChecked(true);
       });
@@ -45,7 +45,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
       })
       .catch(err => setStatus(prev => ({
         ...prev,
-        error: err?.message || '连接请求没有送达，请检查 API 端口和 Go2 配置。',
+        error: apiErrorText(err, '连接没有完成，请稍后重试。'),
       })))
       .finally(() => setBusy(false));
   }, [busy, widget.connect_action, refresh]);
@@ -95,7 +95,9 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
           letterSpacing: '0.08em',
           fontFamily: 'var(--font-mono)',
         }}>
-          {(state || '状态待同步').toUpperCase()}
+          {({ connecting: '连接中', connected: '已连接', online: '已连接',
+            disconnected: '未连接', offline: '未连接', error: '连接异常' })[state]
+            || (connected ? '已连接' : '未连接')}
         </div>
         <div className="feedback-button"><button
           className="btn"

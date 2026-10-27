@@ -89,7 +89,9 @@ const apiClient = new ApiClient();
 
 function apiErrorText(error, fallback = '请求没有完成，请稍后再试') {
   if (error?.status === 401) return '会话已结束，请重新进入';
-  if (error?.status === 403) return error.message || '当前身份不能执行这个操作';
-  if (error?.status === 409 || error?.status === 423) return error.message || '设备正在被其他体验者使用';
-  return error?.message || fallback;
+  const readable = typeof error?.message === 'string'
+    && /^[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\s，。！？：；、（）“”·0-9]+$/.test(error.message);
+  if (error?.status === 403) return readable ? error.message : '当前身份不能执行这个操作';
+  if (error?.status === 409 || error?.status === 423) return readable ? error.message : '设备正在被其他体验者使用';
+  return readable ? error.message : fallback;
 }

@@ -44,11 +44,92 @@ function getAgentDisplayName(agent) {
     orchestrator: 'SSM 管家',
     cloud_orchestrator: 'SSM 管家',
     go2: '机器狗',
+    esp32_desk_led: '智能灯',
   };
   if (names[id]) return names[id];
   if (id.startsWith('esp32_')) return '桌面智能体';
   if (id.startsWith('go2_')) return '机器狗';
-  return id || '智能体';
+  return '智能体';
+}
+
+function describeAgentStatus(event) {
+  if (event.stage === 'planning') return '我在了解你的需求，看看可以怎么处理。';
+  if (event.stage === 'executing' || event.stage === 'decision') return '已经想好下一步，正在帮你安排。';
+  if (event.stage === 'dispatching') return '正在执行下一步，等待结果。';
+  if (event.stage === 'considering') return '正在核对进展，看看是否还需要继续处理。';
+  if (event.stage === 'observed' || event.stage === 'narrated') {
+    return event.status === 'ok' ? '已经收到处理结果，正在核对。'
+      : ['accepted', 'executing', 'timeout'].includes(event.status)
+        ? '已经发出请求，正在等设备确认结果。'
+        : '这一步没有完成，我在看看接下来怎么办。';
+  }
+  if (event.stage === 'summarizing') return '处理过程结束了，我在整理结果。';
+  if (event.stage === 'finished') {
+    if (event.status === 'needs_clarification') return '还需要你补充一点信息，我会接着处理。';
+    if (event.status === 'ok') return '处理好了，我来告诉你结果。';
+    if (event.status === 'partial') return '已完成一部分，我来告诉你具体结果。';
+    return '这次没能全部完成，我来说明情况。';
+  }
+  return '';
+}
+
+function describeRunProgress(event) {
+  if (['planning', 'executing', 'summarizing', 'finished'].includes(event.stage)) {
+    if (event.stage === 'planning') return `正在核对可用设备与当前状态，处理：${event.goal || '当前请求'}`;
+    if (event.stage === 'executing') return `已选定下一步，正在处理：${event.goal || '当前请求'}`;
+    if (event.stage === 'summarizing') return `正在核对执行结果：${event.completed_count || 0} 项完成，${event.failed_count || 0} 项未完成`;
+    if (event.stage === 'finished') {
+      if (event.status === 'needs_clarification') return '等待补充信息，已执行步骤的结果已保留';
+      const counts = `${event.completed_count || 0} 项完成，${event.failed_count || 0} 项未完成`;
+      return ['error', 'timeout', 'blocked'].includes(event.status)
+        ? `任务中断：${counts}` : `任务结束：${counts}`;
+    }
+    return event.stage || '处理中';
+  }
+  const targetName = event.target_unit_id ? getAgentDisplayName(event.target_unit_id) : '';
+  const actionId = event.skill_id || event.tool || '操作';
+  const action = ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
+    set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
+    go2_sport: '完成姿态动作', go2_move: '移动', go2_observe: '观察前方',
+    go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
+    get_space_context: '查看空间信息', read_state: '查看传感器状态',
+    await_result: '核对执行结果', request_peer_skill: '协同处理请求',
+    save_rule: '保存自动化规则', go2_chat: '回应当前问题' })[actionId] || '处理当前请求';
+  const argumentLabels = { brightness: '亮度', duration: '时长', duration_s: '时长', speed: '速度' };
+  const args = Object.entries(event.arguments || {}).filter(([key, value]) =>
+    argumentLabels[key] && typeof value === 'number' && Number.isFinite(value))
+    .map(([key, value]) => `${argumentLabels[key]} ${value}${key.startsWith('duration') ? ' 秒' : ''}`);
+  const detailArgs = args.length ? `（${args.join('，')}）` : '';
+  const state = event.arguments?.state;
+  const cmd = event.arguments?.cmd;
+  const sport = { StandDown: '坐下', StandUp: '站起来', Hello: '打招呼',
+    StopMove: '停止移动', Stretch: '伸展' };
+  const task = ['set_light_state', 'set_led_state'].includes(actionId) && targetName
+    ? `请${targetName}${state === 'ON' ? '开灯' : state === 'OFF' ? '关灯' : `调整灯光${detailArgs}`}`
+    : actionId === 'go2_chat' && targetName && event.requested_text
+      ? `请${targetName}处理“${event.requested_text}”`
+      : actionId === 'go2_sport' && sport[cmd]
+        ? `让${targetName || '机器狗'}${sport[cmd]}`
+        : `${targetName ? `请${targetName}` : '正在'}${action}${detailArgs}`;
+  if (event.stage === 'decision') return `接下来${task}`;
+  if (event.stage === 'dispatching') return `${task}，等待执行结果`;
+  if (event.stage === 'considering') {
+    const outcome = event.status === 'ok' ? '已确认完成'
+      : event.status === 'accepted' || event.status === 'executing' || event.status === 'timeout'
+        ? '完成情况未确认' : '未完成';
+    return `${task}${outcome}，正在判断下一步`;
+  }
+  const status = {
+    ok: '已完成', accepted: '已受理，等待完成反馈', executing: '仍在执行',
+    timeout: '等待结果超时，完成情况未确认', blocked: '未执行',
+    rejected: '被拒绝', cancelled: '已取消', error: '执行失败',
+  }[event.status] || '结果已更新';
+  const stateLabels = { ON: '已开启', OFF: '已关闭', BLINKING: '正在闪烁',
+    DIM: '柔光', BRIGHT: '亮光', COLOR: '彩光' };
+  const detail = stateLabels[event.result_state] ? `，设备${stateLabels[event.result_state]}` : '';
+  const reason = typeof event.reason === 'string' && /^[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\s，。！？：；、（）“”·0-9]+$/.test(event.reason)
+    ? `：${event.reason}` : '';
+  return `${task}：${status}${detail}${reason}`;
 }
 
 function isDeviceOnline(agent, unitData) {
@@ -80,15 +161,16 @@ function getStateLabel(agent, unitData) {
   const uid  = agent.unit_id;
   const s    = (unitData[uid] || {}).state || {};
   switch (agentKind(agent)) {
-    case 'robot':  return agent.state_machine?.views?.[s.fsm_state]?.label || s.fsm_state || '状态待同步';
+    case 'robot':  return agent.state_machine?.views?.[s.fsm_state]?.label || '状态待同步';
     case 'led': {
       const info = getLedStateInfo(s);
       return info.details && s.ism !== 'OFF' ? `${info.label} · ${info.details}` : info.label;
     }
-    case 'buzzer': return s.ism || '待命';
+    case 'buzzer': return ({ ON: '响铃中', OFF: '待命' })[s.ism] || '待命';
     case 'ir':     return s.presence !== undefined ? (s.presence ? '有人' : '无人') : '监测中';
     case 'sound':  return s.detected ? '检测到声音' : '静默';
-    case 'light':  return s.level || (s.lux !== undefined ? `${s.lux} lux` : '监测中');
+    case 'light':  return ({ DARK: '暗', DIM: '微亮', NORMAL: '明亮', BRIGHT: '强光' })[s.level]
+      || (s.lux !== undefined ? `照度 ${s.lux} 勒克斯` : '监测中');
     default:       return '状态待同步';
   }
 }

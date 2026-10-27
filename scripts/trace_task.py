@@ -50,18 +50,32 @@ def _error(event: dict) -> bool:
 
 def _brief(event: dict) -> str:
     parts = [str(event.get("ts", "?")), str(event.get("agent_id") or event.get("service") or "?"), str(event.get("event", "?"))]
+    kind = event.get("event")
     for key in ("turn", "tool", "target_unit_id", "initiator_unit_id", "skill_id",
                 "request_id", "task_id", "transport", "status", "duration_ms",
                 "goal", "input", "output", "decision", "params", "result",
                 "reply", "response", "question", "error", "cause", "message"):
         if key in event and event[key] is not None:
+            if kind == "model.request" and key == "input" and event.get("goal"):
+                continue  # The prompt is available with --json; the goal is the useful live summary.
             raw = event[key]
+            if key == "result" and isinstance(raw, dict) and kind == "tool.result":
+                raw = {name: raw[name] for name in
+                       ("result", "error", "message", "response", "task_id", "actions_taken")
+                       if name in raw}
+                nested = event[key].get("tool_results")
+                if isinstance(nested, list):
+                    raw["tool_results"] = [
+                        {"tool": item.get("tool"),
+                         "status": (item.get("result") or {}).get("result")}
+                        for item in nested[:12] if isinstance(item, dict)]
             value = (json.dumps(raw, ensure_ascii=False, default=str) if isinstance(raw, (dict, list))
                      else str(raw))
             value = value.replace("\n", " ")
-            limit = 1000 if key in {"decision", "params", "result"} else 320
-            preview = ("…" + value[-limit:] if key == "input" and isinstance(raw, str)
-                       and len(value) > limit else value[:limit])
+            limit = 1000 if key in {"decision", "params", "result", "reply", "response", "output"} else 320
+            preview = value[:limit]
+            if len(value) > limit:
+                preview += "…"
             parts.append(f"{key}={preview}")
     return "  ".join(parts)
 
@@ -81,8 +95,7 @@ def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
         events = [event for event in events if (event.get("session_id") or "system") == identifier
                   or event.get("trace_id") == identifier]
     if not args.json:
-        events = [event for event in events if event.get("event") not in
-                  {"persona.loaded", "reply.draft", "reply.validated"}]
+        events = [event for event in events if event.get("event") != "persona.loaded"]
     return events
 
 

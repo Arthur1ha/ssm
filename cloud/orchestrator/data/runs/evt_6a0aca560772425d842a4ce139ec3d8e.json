@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_6a0aca560772425d842a4ce139ec3d8e",
+  "session_id": "ses_K4p-bopNLTDq3w2Cc_thgAne",
+  "goal": "有人来了",
+  "deadline": 1793070413.9735403,
+  "steps": [],
+  "status": "error",
+  "response": "有人来了？我这边暂时没反应过来该做些什么，先别急，我再理一理。已经安排好的事不会乱动，你放心。",
+  "question": "",
+  "trace_id": "tr_f2aa95508b1a4b57961b38df510fe92c",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793070338.4544284
+}

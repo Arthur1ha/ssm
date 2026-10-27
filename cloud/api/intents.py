@@ -251,6 +251,15 @@ class _EventBroker:
 _events = _EventBroker()
 _cleanup_tasks: dict[str, asyncio.Task] = {}
 _ended_sessions: dict[str, float] = {}
+_TYPED_UI_EVENTS = frozenset({"agent_progress", "agent_reply", "reply_error", "run_stage"})
+
+
+def _sse_event_name(event: dict[str, Any]) -> str:
+    """Typed UI events keep their type; stage is a subtype in the payload."""
+    event_type = event.get("type")
+    if event_type in _TYPED_UI_EVENTS:
+        return event_type
+    return str(event.get("stage") or event_type or "message")
 
 
 def publish_agent_event(event_type: str, *, agent_id: str, status: str,
@@ -334,7 +343,10 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
             kind = payload["type"]
             trusted = {key: payload.get(key) for key in (
                 "agent_id", "status", "run_id", "trace_id", "parent_run_id",
-                "step_id", "source", "text", "event_id", "stage", "sequence", "reply_kind")}
+                "step_id", "source", "text", "event_id", "stage", "sequence", "reply_kind",
+                "tool", "target_unit_id", "skill_id", "arguments", "requested_text",
+                "reason", "result_state",
+                "goal", "completed_count", "failed_count", "step_number")}
             if trusted["agent_id"] != "cloud_orchestrator":
                 return True
             publish_agent_event(kind, session_id=session_id, scope="session",
@@ -344,7 +356,11 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
                                 step_id=trusted["step_id"] or "", source="orchestrator",
                                 text=trusted["text"] or "", event_id=trusted["event_id"] or "",
                                 stage=trusted["stage"], sequence=trusted["sequence"],
-                                reply_kind=trusted["reply_kind"] or "final")
+                                reply_kind=trusted["reply_kind"] or "final",
+                                **{key: trusted[key] for key in ("tool", "target_unit_id", "skill_id",
+                                    "arguments", "requested_text", "reason", "result_state", "goal",
+                                    "completed_count", "failed_count", "step_number")
+                                   if trusted[key] is not None})
             return True
         payload["session_id"] = session_id
         payload.setdefault("event_id", "evt_" + uuid.uuid4().hex)
@@ -786,7 +802,7 @@ async def session_events(request: Request, session: dict[str, Any] = Depends(req
                     yield ": heartbeat\n\n"
                     continue
                 event_id = str(event.get("event_id") or "evt_" + uuid.uuid4().hex)
-                event_name = str(event.get("stage") or event.get("type") or "message")
+                event_name = _sse_event_name(event)
                 yield f"id: {event_id}\nevent: {event_name}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             _events.unsubscribe(session_id, channel)
