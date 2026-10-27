@@ -42,6 +42,15 @@ class SemanticTaskRequest(BaseModel):
     parent_run_id: str | None = None
 
 
+class PhysicalReplyRequest(BaseModel):
+    task_id: str
+    goal: str
+    action: str
+    params: dict = Field(default_factory=dict)
+    trace_id: str
+    parent_run_id: str
+
+
 class PersonalityRequest(BaseModel):
     prompt: str
 
@@ -138,7 +147,6 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
     agent = _esp32_agent.get_agent()
     if agent is None:
         raise HTTPException(status_code=503, detail="lamp brain unavailable")
-
     from cloud.esp32.tasks import run_once
     trace_id = req.trace_id or "tr_" + uuid.uuid4().hex
     def work():
@@ -156,7 +164,8 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
         result = agent.run_user_loop(goal, unit_id, replace(context, persist=False),
                                      dispatch, lighting_only=True, run_id=req.task_id,
                                      trace_id=trace_id,
-                                     parent_run_id=req.parent_run_id)
+                                     parent_run_id=req.parent_run_id,
+                                     deadline=req.deadline)
         return {**result, "physical_task_id": result.get("task_id")}
     # FastAPI runs synchronous route handlers in its worker pool. Waiting for
     # the result here therefore leaves the API event loop free for MQTT/SSE.
@@ -179,3 +188,59 @@ async def get_lamp_semantic_task(unit_id: str, task_id: str,
             if physical:
                 result = update_late_result(task_id, context.session_id, physical) or result
     return result
+
+
+@internal_router.post("/{unit_id}/agent/replies", include_in_schema=False)
+def reply_to_physical_task(unit_id: str, req: PhysicalReplyRequest,
+                           context: ExecutionContext = Depends(require_service_context)):
+    """Let the lamp describe a verified delegated MQTT result before the parent sums up."""
+    _require_led_unit(unit_id)
+    if context.origin_kind != "user_delegated" or context.expires_at <= time.time():
+        raise HTTPException(status_code=403, detail="a live delegated session is required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", req.task_id):
+        raise HTTPException(status_code=400, detail="invalid task_id")
+    from cloud.api.main import _esp32_state
+    from cloud.api.intents import publish_agent_event
+    from cloud.agent_runtime.loop import Run
+    from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+    from cloud.esp32.agentcore.soul import load_personality
+    from langchain_core.messages import HumanMessage
+    agent = _esp32_agent.get_agent()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="lamp brain unavailable")
+    from cloud.cards.registry import get_registry
+    card = get_registry().get_card(unit_id)
+    if not card or not card.get("online"):
+        return {"result": "rejected", "error": "lamp_offline"}
+    physical = None
+    until = time.monotonic() + 2
+    while physical is None and time.monotonic() < until:
+        physical = _esp32_state.get_task_result(req.task_id)
+        if physical is None:
+            time.sleep(0.05)
+    if physical is None:
+        return {"result": "unknown", "error": "physical_result_unavailable"}
+    status = str(physical.get("result") or "unknown")
+    if status not in {"ok", "accepted", "executing", "timeout", "unknown", "blocked",
+                      "rejected", "cancelled", "error"}:
+        status = "unknown"
+    run = Run(req.task_id, context.session_id, req.goal, time.time() + 15,
+              steps=[{"step_id": req.task_id, "tool": req.action,
+                      "params": req.params, "result": physical}], status=status,
+              trace_id=req.trace_id, parent_run_id=req.parent_run_id,
+              agent_id=unit_id, origin_kind=context.origin_kind)
+    try:
+        persona, _, _ = load_personality()
+        answer = agent._llm.invoke([HumanMessage(content=persona_reply_prompt(persona, run))]).content
+        if not valid_persona_reply(answer):
+            raise ValueError("invalid_persona_reply")
+    except Exception:
+        publish_agent_event("reply_error", agent_id=unit_id, session_id=context.session_id,
+            status=status, run_id=req.task_id, trace_id=req.trace_id,
+            parent_run_id=req.parent_run_id, step_id=req.task_id, source="delegated_skill")
+        return {"result": status, "response": ""}
+    event = publish_agent_event("agent_reply", agent_id=unit_id,
+        session_id=context.session_id, status=status, run_id=req.task_id,
+        trace_id=req.trace_id, parent_run_id=req.parent_run_id,
+        step_id=req.task_id, source="delegated_skill", text=answer)
+    return {"result": status, "response": answer, "event_id": event["event_id"]}

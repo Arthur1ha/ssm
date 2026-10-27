@@ -28,6 +28,7 @@ function App({ session, logout, refreshSession }) {
   const currentHash = useHashLocal();
 
   const [activityLog, setActivityLog] = useState([]);
+  const autonomousSeen = useRef(new Set());
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
@@ -41,6 +42,18 @@ function App({ session, logout, refreshSession }) {
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
+  useEffect(() => {
+    const onEvent = event => {
+      const item = event.detail || {};
+      if (item.type !== 'agent_reply' || item.scope !== 'space' || !item.text
+          || autonomousSeen.current.has(item.event_id)) return;
+      autonomousSeen.current.add(item.event_id);
+      appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
+        eventId: item.event_id, traceId: item.trace_id });
+    };
+    apiClient.addEventListener('server-event', onEvent);
+    return () => apiClient.removeEventListener('server-event', onEvent);
+  }, []);
   const ready = !loadingAgents;
   const hasDevices = ready && agents.length > 0;
   const suggestions = hasDevices ? SUGGESTIONS : [];
@@ -50,12 +63,14 @@ function App({ session, logout, refreshSession }) {
     if (!t) return;
     appendActivity({ type: 'user', text: t });
     send(t, {
-      onMessage:     msg  => appendActivity({ type: 'ai', agent: 'orchestrator', text: msg }),
+      onMessage: (msg, agent, event) => appendActivity({ type: 'ai', agent: agent || 'cloud_orchestrator',
+        text: msg, eventId: event?.event_id, traceId: event?.trace_id }),
+      onProgress: event => appendActivity({ type: event.type, ...event }),
       onStatus:      msg  => appendActivity({ type: 'system', text: msg }),
       onTraceId: traceId => appendActivity({ type: 'trace', traceId }),
       onPendingRule: rule => {
         if (session.actor === 'admin') setPendingRule(rule);
-        else appendActivity({ type: 'ai', agent: 'orchestrator', text: '临时体验不会保存长期规则。你仍可以直接控制现有设备。' });
+        else appendActivity({ type: 'system', text: '临时体验不会保存长期规则。你仍可以直接控制现有设备。' });
       },
       intentHint: options.intentHint,
     });

@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_d5e978c2e0a145608a4c79ae131c7ece",
+  "session_id": "ses_R2m6jO2_TWnH-Iso2MXCv8kt",
+  "goal": "把灯打开，然后让狗坐下",
+  "deadline": 1793067970.7421834,
+  "steps": [
+    {
+      "step_id": "71dcde29755a40949996bcf20e3cd450",
+      "tool_call_id": "cc2ba4cf1da64a368db10e4d1b2d3040",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state",
+        "params": {
+          "state": "ON"
+        }
+      },
+      "fingerprint": "28b88f332c83103949d83d3845c12ca152a9e9005a12c6b21349b130cfaee728",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "ism_state": "ON",
+        "result": "ok",
+        "task_id": "71dcde29755a40949996bcf20e3cd450",
+        "session_id": "ses_R2m6jO2_TWnH-Iso2MXCv8kt",
+        "ts": 288,
+        "error": "",
+        "unit_id": "esp32_desk_led",
+        "query_endpoint": null,
+        "skill_id": "set_light_state"
+      }
+    },
+    {
+      "step_id": "697d116eb13b4e7c93af7d68518a4171",
+      "tool_call_id": "fd37da9bd25f43648c4f3517cc6f269a",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "go2",
+        "skill_id": "go2_sport",
+        "params": {
+          "cmd": "StandDown"
+        }
+      },
+      "fingerprint": "5dda61e8aaa7361aba1feeb3a2b42766ffa2c516815a37804d60d1b72873af07",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "run_id": "697d116eb13b4e7c93af7d68518a4171",
+        "trace_id": "tr_85da0439ca004b10ab41909914d07097",
+        "result": "error",
+        "response": "",
+        "event_id": null,
+        "actions_taken": [
+          "list_peers"
+        ],
+        "tool_results": [
+          {
+            "tool": "go2_sport",
+            "result": {
+              "result": "blocked",
+              "error": "device_precondition",
+              "message": "Go2 未连接"
+            },
+            "step_id": "23e18ccbea5b47b7a60bb1ff9a81ed6a"
+          },
+          {
+            "tool": "list_peers",
+            "result": {
+              "result": "ok",
+              "peers": [
+                {
+                  "unit_id": "cloud_orchestrator",
+                  "device_id": "cloud_orchestrator",
+                  "name": "云端编排器",
+                  "agent_type": "decision",
+                  "online": true,
+                  "device_connected": null,
+                  "skills": [
+                    {
+                      "id": "coordinate_request",
+                      "name": "跨设备协调",
+                      "tags": [
+                        "coordination"
+                      ],
+                      "params_schema": {
+                        "type": "object",
+                        "required": [
+                          "message"
+                        ],
+                        "properties": {
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    }
+                  ],
+                  "state_summary": {
+                    "status": "current",
+                    "as_of": 1793067880.525041,
+                    "ism": "ACTIVE"
+                  },
+                  "observed_at": 1793032445.4206164
+                },
+                {
+                  "unit_id": "esp32_desk_led",
+                  "device_id": "esp32_desk",
+                  "name": "智能灯",
+                  "agent_type": "actuator",
+                  "online": true,
+                  "device_connected": null,
+                  "skills": [
+                    {
+                      "id": "set_light_color",
+                      "name": "设置灯光颜色",
+                      "tags": [
+                        "actuator",
+                        "light"
+                      ],
+                      "params_schema": {
+                        "type": "object",
+                        "required": [
+                          "r",
+                          "g",
+                          "b"
+                        ],
+                        "properties": {
+                          "r": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "红色通道"
+                          },
+                          "g": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "绿色通道"
+                          },
+                          "b": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "蓝色通道"
+                          },
+                          "brightness": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "亮度，0-255 整数（与硬件量纲一致）"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "id": "set_light_state",
+                      "name": "开关灯",
+                      "tags": [
+                        "actuator",
+                        "light"
+                      ],
+                      "params_schema": {
+                        "type": "object",
+                        "required": [
+                          "state"
+                        ],
+                        "properties": {
+                          "state": {
+                            "enum": [
+                              "ON",
+                              "OFF"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "id": "blink_light",
+                      "name": "闪烁灯光",
+                      "tags": [
+                        "actuator",
+                        "light"
+                      ],
+                      "params_schema": {
+                        "type": "object",
+                        "required": [
+                          "count"
+                        ],
+                        "properties": {
+                          "r": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "红色通道"
+                          },
+                          "g": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "绿色通道"
+                          },
+                          "b": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255,
+                            "description": "蓝色通道"
+                          },
+                          "count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": "闪烁次数"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "id": "adjust_lighting",
+                      "name": "按目标调整照明",
+                      "tags": [
+                        "actuator",
+                        "light",
+                        "semantic"
+                      ],
+                      "params_schema": {
+                        "type": "object",
+                        "required": [
+                          "goal"
+                        ],
+                        "properties": {
+                          "goal": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    }
+                  ],
+                  "state_summary": {
+                    "status": "stale",
+                    "as_of": 288.0
+                  },
+                  "observed_at": 1793067611.2344604
+                }
+              ]
+            },
+            "step_id": "5a5f9283f5bd43449ecbf5945918bea9"
+          }
+        ],
+        "question": null,
+        "llm_available": false,
+        "task_id": "697d116eb13b4e7c93af7d68518a4171",
+        "query_endpoint": "/api/go2/chat",
+        "unit_id": "go2",
+        "skill_id": "go2_sport"
+      }
+    }
+  ],
+  "status": "partial",
+  "response": "已确认：第1步；未完成或未确认：第2步 (error)。",
+  "question": "",
+  "trace_id": "tr_85da0439ca004b10ab41909914d07097",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "updated_at": 1793067914.45321
+}

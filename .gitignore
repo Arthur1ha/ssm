@@ -23,6 +23,8 @@ __pycache__/
 tests/
 test_*.py
 *_test.py
+!cloud/api/tests/
+!cloud/api/tests/test_persona_sse.py
 
 # 运行时数据，不纳入版本控制
 *.db

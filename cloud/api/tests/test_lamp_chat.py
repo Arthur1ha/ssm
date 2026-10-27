@@ -66,7 +66,7 @@ def test_lamp_llm_does_not_retry_past_chat_deadline(monkeypatch):
     monkeypatch.setattr(esp32_agent, "ChatOpenAI", make_model)
     esp32_agent.ESP32Agent.__new__(esp32_agent.ESP32Agent)._make_llm()
 
-    assert captured["timeout"] == 20
+    assert captured["timeout"] == 35
     assert captured["max_retries"] == 0
 
 

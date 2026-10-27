@@ -77,6 +77,7 @@ def test_lamp_failed_step_gets_persona_reply(monkeypatch, tmp_path):
     ])
     model = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(content=next(decisions)))
     agent = agent_mod.ESP32Agent(ESP32State(), llm=model)
+    monkeypatch.setattr(agent, "_device_online", lambda: True)
     context = ExecutionContext("lamp-persona-failure", "admin", True,
                                "main", "user_delegated", int(time.time()) + 100)
     result = agent.run_user_loop("试一试", "esp32_desk_led", context,

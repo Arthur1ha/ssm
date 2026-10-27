@@ -18,7 +18,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
@@ -169,12 +169,25 @@ class _EventBroker:
         self._lock = threading.Lock()
         self._queues: dict[str, set[queue.Queue]] = defaultdict(set)
         self._buffers: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=100))
+        self._seen: dict[str, set[str]] = defaultdict(set)
+        self._sessions: dict[str, dict[str, Any]] = {}
 
-    def subscribe(self, session_id: str) -> queue.Queue:
+    def subscribe(self, session: dict[str, Any] | str, last_event_id: str = "") -> queue.Queue:
+        legacy = isinstance(session, str)
+        if isinstance(session, str):
+            session = {"session_id": session, "space_id": DEFAULT_SPACE_ID,
+                       "actor": "admin", "expires_at": time.time() + 60}
+        session_id = session["session_id"]
         channel: queue.Queue = queue.Queue(maxsize=100)
         with self._lock:
-            while self._buffers[session_id]:
-                channel.put_nowait(self._buffers[session_id].popleft())
+            self._sessions[session_id] = dict(session)
+            buffered = [] if legacy else list(self._buffers[session_id])
+            if last_event_id:
+                marker = next((i for i, item in enumerate(buffered)
+                               if item.get("event_id") == last_event_id), -1)
+                buffered = buffered[marker + 1:] if marker >= 0 else buffered
+            for item in buffered:
+                channel.put_nowait(item)
             self._queues[session_id].add(channel)
         return channel
 
@@ -188,10 +201,15 @@ class _EventBroker:
 
     def emit(self, session_id: str, event: dict[str, Any]) -> None:
         with self._lock:
-            channels = list(self._queues.get(session_id, ()))
-            if not channels:
-                self._buffers[session_id].append(event)
+            event_id = event.get("event_id")
+            if event_id in self._seen[session_id]:
                 return
+            if event_id:
+                if len(self._seen[session_id]) >= 200:
+                    self._seen[session_id] = {item.get("event_id") for item in self._buffers[session_id]}
+                self._seen[session_id].add(event_id)
+            self._buffers[session_id].append(dict(event))
+            channels = list(self._queues.get(session_id, ()))
         for channel in channels:
             try:
                 channel.put_nowait(event)
@@ -219,11 +237,50 @@ class _EventBroker:
     def clear(self, session_id: str) -> None:
         with self._lock:
             self._buffers.pop(session_id, None)
+            self._seen.pop(session_id, None)
+            self._sessions.pop(session_id, None)
+
+    def emit_space(self, space_id: str, event: dict[str, Any]) -> None:
+        with self._lock:
+            sessions = [sid for sid, session in self._sessions.items()
+                        if session.get("space_id") == space_id and session_is_active(session)]
+        for sid in sessions:
+            self.emit(sid, event)
 
 
 _events = _EventBroker()
 _cleanup_tasks: dict[str, asyncio.Task] = {}
 _ended_sessions: dict[str, float] = {}
+
+
+def publish_agent_event(event_type: str, *, agent_id: str, status: str,
+                        session_id: str = "", space_id: str = DEFAULT_SPACE_ID,
+                        scope: str = "session", run_id: str = "", trace_id: str = "",
+                        parent_run_id: str = "", step_id: str = "", source: str = "device_chat",
+                        text: str = "", event_id: str = "", **facts: Any) -> dict[str, Any]:
+    """Publish a trusted, structured UI event. Model output can fill text only."""
+    if event_type not in {"agent_reply", "agent_progress", "run_stage", "reply_error"}:
+        raise ValueError("invalid_event_type")
+    if agent_id not in {"cloud_orchestrator", "esp32_desk_led", "go2"}:
+        raise ValueError("invalid_agent_id")
+    if scope not in {"session", "space"} or (scope == "session" and not session_id):
+        raise ValueError("invalid_event_scope")
+    if event_type == "agent_reply" and not text.strip():
+        return {}
+    stable_key = ":".join((event_type, scope, session_id or space_id, run_id,
+                           agent_id, step_id, str(facts.get("reply_kind", "final")),
+                           str(facts.get("stage", "")), str(facts.get("sequence", ""))))
+    event = {"type": event_type, "event_id": event_id or "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex,
+             "agent_id": agent_id, "status": status, "session_id": session_id or None,
+             "space_id": space_id, "scope": scope, "run_id": run_id or None,
+             "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
+             "step_id": step_id or None, "source": source,
+             "text": text.strip(), "ts": time.time(), **facts}
+    if scope == "space":
+        _events.emit_space(space_id, event)
+    else:
+        _events.emit(session_id, event)
+    return event
 
 
 def schedule_session_cleanup(session: dict[str, Any]) -> None:
@@ -272,6 +329,22 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
     if len(parts) == 3 and parts[:2] == ["ssm", "feedback"]:
         session_id = parts[2]
         if not isinstance(payload, dict):
+            return True
+        if payload.get("type") in {"agent_reply", "agent_progress", "run_stage", "reply_error"}:
+            kind = payload["type"]
+            trusted = {key: payload.get(key) for key in (
+                "agent_id", "status", "run_id", "trace_id", "parent_run_id",
+                "step_id", "source", "text", "event_id", "stage", "sequence", "reply_kind")}
+            if trusted["agent_id"] != "cloud_orchestrator":
+                return True
+            publish_agent_event(kind, session_id=session_id, scope="session",
+                                agent_id="cloud_orchestrator", status=trusted["status"] or "unknown",
+                                run_id=trusted["run_id"] or "", trace_id=trusted["trace_id"] or "",
+                                parent_run_id=trusted["parent_run_id"] or "",
+                                step_id=trusted["step_id"] or "", source="orchestrator",
+                                text=trusted["text"] or "", event_id=trusted["event_id"] or "",
+                                stage=trusted["stage"], sequence=trusted["sequence"],
+                                reply_kind=trusted["reply_kind"] or "final")
             return True
         payload["session_id"] = session_id
         payload.setdefault("event_id", "evt_" + uuid.uuid4().hex)
@@ -467,8 +540,11 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
         raise HTTPException(status_code=400, detail="chat requires message")
     if run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
         raise HTTPException(status_code=400, detail="invalid run_id")
-    if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led") or _configured_card(unit_id) is None:
+    card = _configured_card(unit_id)
+    if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led") or card is None:
         raise HTTPException(status_code=404, detail="unit is not available in the current space")
+    if not card.get("online"):
+        raise HTTPException(status_code=503, detail="unit is offline")
     from cloud.esp32.agent import get_agent
 
     agent = get_agent()
@@ -636,6 +712,7 @@ async def get_lamp_chat_run(unit_id: str, run_id: str,
                 "steps": run.steps}
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": run.status, "reply": run.response,
+            "event_id": run.reply_event_id or None,
             "question": run.question or None, "steps": run.steps}
 
 @router.get("/api/commands/go2/tasks/{task_id}")
@@ -695,9 +772,9 @@ async def emergency_stop(session: dict[str, Any] = Depends(require_csrf)):
 
 
 @router.get("/api/events")
-async def session_events(session: dict[str, Any] = Depends(require_session)):
+async def session_events(request: Request, session: dict[str, Any] = Depends(require_session)):
     session_id = session["session_id"]
-    channel = _events.subscribe(session_id)
+    channel = _events.subscribe(session, request.headers.get("last-event-id", ""))
 
     async def generate():
         try:

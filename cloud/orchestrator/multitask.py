@@ -9,12 +9,14 @@ import logging
 import os
 import time
 import uuid
+import threading
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
 from cloud.agent_runtime.loop import Run, parse_decision, run_loop
 from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply
+from cloud.agent_runtime.progress import submit_progress
 from cloud.agent_runtime.store import RunStore
 from cloud.observability import bind_context, current_event_context, emit_agent_event
 from cloud.orchestrator.agentcore.llm import _make_llm
@@ -96,6 +98,29 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
         emit_agent_event("device.result", task_id=step_id, target_unit_id=unit_id,
                          status=result.get("result"), result=result,
                          completion_basis="edge_result" if result.get("result") != "timeout" else "unconfirmed")
+        if (unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+                and context.get("origin_kind", "user_delegated") == "user_delegated"
+                and result.get("result") in {"ok", "accepted", "executing", "timeout", "unknown",
+                                             "rejected", "blocked", "cancelled", "error"}):
+            correlation = current_event_context()
+            try:
+                voice = transport.do_http_dispatch(
+                    f"/api/internal/esp32/{unit_id}/agent/replies",
+                    {"session_id": context["session_id"], "actor": context.get("actor"),
+                     "persist": context.get("persist"), "space_id": context.get("space_id"),
+                     "origin_kind": "user_delegated", "expires_at": context.get("expires_at"),
+                     "task_id": step_id, "goal": arguments.get("message") or
+                     f"{skill_id}: {json.dumps(params, ensure_ascii=False)}",
+                     "action": (skill.get("invoke") or {}).get("action", ""),
+                     "params": params, "trace_id": correlation.get("trace_id") or "",
+                     "parent_run_id": correlation.get("run_id") or ""},
+                    min(12, max(2, deadline - time.time())))
+                if voice.get("response"):
+                    result["agent_reply"] = voice["response"]
+                    result["agent_reply_event_id"] = voice.get("event_id")
+            except Exception as exc:
+                logger.warning("lamp delegated reply unavailable step=%s error=%s",
+                               step_id, type(exc).__name__)
     elif kind == "http":
         correlation = current_event_context()
         body = {"session_id": context["session_id"], "actor": context.get("actor"),
@@ -108,7 +133,8 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                 "task_id": step_id, "deadline": min(deadline, time.time() + 90),
                 "trace_id": correlation.get("trace_id"),
                 "parent_run_id": correlation.get("run_id")}
-        timeout = min(_http_timeout_for(card, skill_id), max(1, deadline - time.time()))
+        timeout = (max(1, deadline - time.time()) if unit_id == "go2" or skill_id == "adjust_lighting"
+                   else min(_http_timeout_for(card, skill_id), max(1, deadline - time.time())))
         try:
             result = transport.do_http_dispatch(selected.get("endpoint", ""), body, timeout)
         except Exception as exc:
@@ -158,6 +184,9 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         context = {**context, "user_msg": run.goal}
     model = llm or _make_llm()
     transport.do_publish_feedback(session_id, "planning", "正在理解并执行目标…", run_id=run_id)
+    transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+        trace_id=run.trace_id or run_id, status="planning", stage="planning",
+        sequence=run.attempt)
 
     async def decide(current: Run) -> dict:
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
@@ -294,10 +323,38 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                                       tool=step["tool"], result=result,
                                       status=result["result"])
 
+    progress_closed = threading.Event()
+
+    def on_progress(phase: str, step: dict | None) -> None:
+        if step is None:
+            transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+                trace_id=run.trace_id or run_id, status=phase, stage=phase,
+                sequence=run.attempt)
+        else:
+            result = step.get("result") or {}
+            transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
+                trace_id=run.trace_id or run_id, status=result.get("result") or phase,
+                step_id=step["step_id"], stage=phase,
+                sequence=run.attempt * 10 + (0 if phase == "dispatching" else 1))
+            if phase == "observed":
+                status = result.get("result", "unknown")
+                def invoke_text(prompt):
+                    from cloud.orchestrator.agentcore.llm import _make_llm as fresh_model
+                    return fresh_model().invoke([HumanMessage(content=prompt)]).content
+                def publish_text(answer):
+                    transport.do_publish_ui_event(session_id, "agent_progress",
+                        run_id=run_id, trace_id=run.trace_id or run_id,
+                        status=status, text=answer, step_id=step["step_id"],
+                        stage="narrated", sequence=run.attempt * 10 + 2)
+                submit_progress(AGENT_PERSONA, run.goal, step, invoke_text,
+                                publish_text, progress_closed,
+                                min(run.deadline, time.time() + 4))
+
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
                       parent_run_id=run.parent_run_id or None, agent_id="orchestrator",
                       session_id=session_id, origin_kind=run.origin_kind):
         asyncio.run(run_loop(run, decide, execute, record=store.save, on_step=on_step,
+                             on_progress=on_progress,
                              effectful=lambda name: name in {"invoke_skill", "save_rule", "send_message",
                                                              "set_space_constraint", "clear_space_constraints"}))
     if needs_persona_reply(run):
@@ -329,9 +386,17 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
     stage = ("question" if run.status == "needs_clarification" else
              "done" if run.status == "ok" else
              "partial" if run.status == "partial" else "failed")
+    progress_closed.set()
     transport.do_publish_feedback(session_id, stage, run.response, run_id=run_id,
                                   trace_id=run.trace_id or run_id,
                                   status=run.status, question=run.question or None)
+    transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+        trace_id=run.trace_id or run_id, status=run.status, stage="finished",
+        sequence=run.attempt)
+    transport.do_publish_ui_event(session_id, "agent_reply" if run.response else "reply_error",
+        run_id=run_id, trace_id=run.trace_id or run_id, status=run.status,
+        text=run.response,
+        reply_kind="clarification" if run.status == "needs_clarification" else "final")
     if run.response:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                          run_id=run.run_id, agent_id="orchestrator", session_id=session_id,

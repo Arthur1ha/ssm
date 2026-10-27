@@ -247,6 +247,7 @@ class ReactiveMind:
         """
         from cloud.esp32.agentcore.memory import taught as _taught
         completed = []
+        reply_steps = []
         for call in tool_calls[:4]:
             if not isinstance(call, dict):
                 break
@@ -255,6 +256,10 @@ class ReactiveMind:
             started = time.monotonic()
             ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_unit)
             outcome = getattr(self, "_last_reactive_tool_result", {"result": "unknown"})
+            if call.get("tool") in {"set_led_state", "set_led_color", "blink_led", "speak"}:
+                reply_steps.append({"step_id": "auto_" + uuid.uuid4().hex,
+                                    "tool": call.get("tool"), "params": call.get("params", {}),
+                                    "result": outcome})
             emit_agent_event("tool.result", tool=call.get("tool"),
                              status=outcome.get("result", "unknown"), result=outcome,
                              task_id=outcome.get("task_id"), request_id=outcome.get("request_id"),
@@ -264,7 +269,42 @@ class ReactiveMind:
             completed.append(call.get("tool", ""))
             if ok and call.get("taught_id"):
                 _taught.touch(call["taught_id"])
+        if reply_steps and self._device_online():
+            threading.Thread(target=self._publish_autonomous_reply,
+                             args=(led_unit, reply_steps), daemon=True,
+                             name="lamp-autonomous-reply").start()
         return completed
+
+    def _publish_autonomous_reply(self, unit_id: str, steps: list[dict]) -> None:
+        from cloud.agent_runtime.loop import Run
+        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+        from cloud.api.intents import publish_agent_event
+
+        if not self._device_online() or not self._should_act():
+            return
+        run_id = "auto_" + uuid.uuid4().hex
+        status = "ok" if all((step.get("result") or {}).get("result") == "ok" for step in steps) else "partial"
+        run = Run(run_id, "", "根据当前环境自主调整桌面空间", time.time() + 15,
+                  steps=steps, status=status, agent_id=unit_id,
+                  origin_kind="agent_autonomous")
+        for index, step in enumerate(steps):
+            publish_agent_event("agent_progress", agent_id=unit_id,
+                scope="space", space_id="main", source="autonomous", status=(step["result"] or {}).get("result", "unknown"),
+                run_id=run_id, step_id=step["step_id"], stage="observed", sequence=index)
+        try:
+            persona, _, _ = load_personality()
+            answer = self._llm.invoke([HumanMessage(content=persona_reply_prompt(persona, run))]).content
+            if not valid_persona_reply(answer):
+                raise ValueError("invalid_persona_reply")
+        except Exception:
+            publish_agent_event("reply_error", agent_id=unit_id, scope="space",
+                space_id="main", source="autonomous", status=status, run_id=run_id)
+            return
+        if not self._device_online() or not self._should_act():
+            return
+        publish_agent_event("agent_reply", agent_id=unit_id, scope="space",
+            space_id="main", source="autonomous", status=status,
+            run_id=run_id, text=answer)
 
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()

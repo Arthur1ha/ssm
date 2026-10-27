@@ -39,6 +39,9 @@ class Run:
     origin_kind: str = ""
     reply_source: str = "runtime"
     reply_ready: bool = True
+    decision_draft: str = ""
+    reply_event_id: str = ""
+    attempt: int = 0
 
 
 def parse_decision(response: object) -> dict:
@@ -78,6 +81,7 @@ async def run_loop(
     max_effects: int = 6,
     effectful: Callable[[str], bool] = lambda _name: True,
     on_step: Callable[[dict], None] | None = None,
+    on_progress: Callable[[str, dict | None], None] | None = None,
 ) -> Run:
     """Run one verified step at a time; uncertain outcomes stop dependent work.
 
@@ -91,6 +95,8 @@ async def run_loop(
                          origin_kind=run.origin_kind or None, **fields)
 
     emit("run.started", goal=run.goal, resumed=bool(run.steps))
+    if on_progress:
+        on_progress("planning", None)
     effects = sum(bool(step.get("effectful")) for step in run.steps)
     for turn in range(max_turns):
         if time.time() >= run.deadline:
@@ -127,8 +133,9 @@ async def run_loop(
                                            for step in run.steps) else "ok")
             # A final claim cannot establish completion after a failed step.
             # The device adapter asks its persona to explain the recorded facts.
-            run.response = "" if run.status == "partial" else str(decision["final"])
-            run.reply_source = "model" if run.status == "ok" else "runtime"
+            run.decision_draft = str(decision["final"])
+            run.response = ""
+            run.reply_source = "runtime"
             emit("reply.validated", turn=turn + 1, reply=run.response,
                  changed=run.response != str(decision["final"]),
                  reason="execution_facts" if run.response != str(decision["final"]) else "unchanged",
@@ -160,6 +167,8 @@ async def run_loop(
         run.steps.append(step)
         if record:
             record(run, step)
+        if on_progress:
+            on_progress("dispatching", step)
         emit("tool.dispatch", turn=turn + 1, step_id=step_id,
              tool_call_id=step["tool_call_id"], tool=name, params=params,
              dispatch_status="pending", effectful=is_effect)
@@ -198,6 +207,8 @@ async def run_loop(
              duration_ms=round((time.monotonic() - tool_started) * 1000))
         if on_step:
             on_step(step)
+        if on_progress:
+            on_progress("observed", step)
         logger.info("agent run=%s step=%s tool=%s result=%s", run.run_id, step_id, name, result["result"])
         if result["result"] in UNCERTAIN:
             run.status = result["result"]
@@ -214,6 +225,8 @@ async def run_loop(
         run.status, run.response = "blocked", "模型轮次已达上限；其余步骤未执行。"
     if record:
         record(run, None)
+    if on_progress:
+        on_progress("summarizing", None)
     if run.status in {"error", "blocked", "timeout", "unknown"}:
         emit("reply.fallback", status=run.status, reply=run.response,
              reason="runtime_terminal_state", reply_kind="final")

@@ -70,6 +70,7 @@ class ApiClient extends EventTarget {
     [
       'planning', 'executing', 'ack', 'step', 'pending_rule', 'discovery_candidates',
       'done', 'partial', 'failed', 'denied', 'device', 'lease', 'session_ended',
+      'run_stage', 'agent_progress', 'agent_reply', 'reply_error',
     ].forEach(name => source.addEventListener(name, forward));
     source.onerror = () => {
       this.eventsConnected = false;

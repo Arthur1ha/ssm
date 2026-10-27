@@ -10,6 +10,7 @@ import os
 import time as _time
 import contextlib
 import contextvars
+import uuid
 from urllib.parse import quote, urlparse
 
 import requests
@@ -53,6 +54,8 @@ def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "o
     """
     if _peer_request.get():
         return
+    if _mqtt is None:
+        return
     payload = {"session_id": session_id, "stage": stage,
                "text": text, "status": status, "ts": int(_time.time())}
     payload.update(extra)
@@ -60,6 +63,24 @@ def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "o
         f"ssm/feedback/{session_id}",
         json.dumps(payload, ensure_ascii=False),
     )
+
+
+def do_publish_ui_event(session_id: str, event_type: str, *, run_id: str,
+                        trace_id: str, status: str, text: str = "", step_id: str = "",
+                        stage: str = "", sequence: int = 0,
+                        reply_kind: str = "final") -> None:
+    if _peer_request.get():
+        return
+    if _mqtt is None:
+        return
+    payload = {"type": event_type, "agent_id": "cloud_orchestrator",
+               "session_id": session_id, "source": "orchestrator",
+               "run_id": run_id, "trace_id": trace_id, "status": status,
+               "text": text, "step_id": step_id, "stage": stage,
+               "sequence": sequence, "reply_kind": reply_kind,
+               "event_id": "evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
+                   f"{session_id}:{run_id}:{event_type}:{stage}:{step_id}:{sequence}:{reply_kind}").hex}
+    _mqtt.publish(f"ssm/feedback/{session_id}", json.dumps(payload, ensure_ascii=False), qos=1)
 
 
 def do_publish_task(

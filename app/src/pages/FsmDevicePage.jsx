@@ -34,6 +34,54 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
   const [sending, setSending] = useState(false);
   const [pendingRunId, setPendingRunId] = useState(null);
   const [execution, setExecution] = useState('');
+  const [progress, setProgress] = useState([]);
+  const seenReplies = useRef(new Set());
+  const activeRun = useRef(null);
+  const pendingRuns = useRef(new Map());
+  const forgetRun = runId => {
+    clearTimeout(pendingRuns.current.get(runId));
+    pendingRuns.current.delete(runId);
+  };
+  useEffect(() => () => {
+    pendingRuns.current.forEach(timer => clearTimeout(timer));
+    pendingRuns.current.clear();
+  }, [unitId]);
+  useEffect(() => {
+    const onEvent = event => {
+      const item = event.detail || {};
+      if (item.agent_id !== unitId) return;
+      const autonomous = item.scope === 'space' && item.source === 'autonomous';
+      if (!autonomous && (item.source !== 'device_chat'
+          || !pendingRuns.current.has(item.run_id))) return;
+      if (item.type === 'agent_reply' && item.text) {
+        if (seenReplies.current.has(item.event_id)) return;
+        seenReplies.current.add(item.event_id);
+        setMessages(previous => [...previous, { role: 'assistant', agent: unitId,
+          text: item.text, eventId: item.event_id }]);
+        if (!autonomous) {
+          forgetRun(item.run_id);
+          if (activeRun.current === item.run_id) {
+            setSending(false);
+            setExecution('');
+            activeRun.current = null;
+          }
+        }
+      } else if (item.type === 'run_stage' || item.type === 'agent_progress') {
+        setProgress(previous => [...previous.slice(-15), item]);
+      } else if (item.type === 'reply_error') {
+        if (!autonomous) {
+          forgetRun(item.run_id);
+          if (activeRun.current === item.run_id) {
+            setExecution('回复生成失败，任务状态仍可查询');
+            setSending(false);
+            activeRun.current = null;
+          }
+        }
+      }
+    };
+    apiClient.addEventListener('server-event', onEvent);
+    return () => apiClient.removeEventListener('server-event', onEvent);
+  }, [unitId]);
   const [go2AssetsOpen, setGo2AssetsOpen] = useState(false);
   const [lampAssetsOpen, setLampAssetsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -138,7 +186,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     if (!text || sending) return;
     setMessages(prev => [...prev, { role: 'user', text }]);
     setSending(true);
-    const params = { message: text };
+    setExecution('正在等待设备回复…');
+    const runId = pendingRunId || (unitId === 'go2' ? 'go2_' : 'lamp_') +
+      crypto.randomUUID().replaceAll('-', '');
+    activeRun.current = runId;
+    pendingRuns.current.set(runId, null);
+    const params = { message: text, ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
     if (pendingRunId) {
       if (unitId === 'go2') params.resume_run_id = pendingRunId;
       else { params.run_id = pendingRunId; params.resume = true; }
@@ -146,11 +199,34 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     commandBus.command(unitId, 'chat', params)
       .then(result => {
         setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
-        const reply = result?.question || result?.reply || result?.response || result?.text;
-        if (reply) setMessages(prev => [...prev, { role: 'assistant', agent: unitId, text: reply }]);
-        else setExecution(commandBus.describe(result));
+        if (!pendingRuns.current.has(runId)) return;
+        const reply = result?.reply || result?.response;
+        if (result?.event_id && reply && !seenReplies.current.has(result.event_id)) {
+          seenReplies.current.add(result.event_id);
+          setMessages(previous => [...previous, { role: 'assistant', agent: unitId,
+            text: reply, eventId: result.event_id }]);
+          setExecution('');
+          setSending(false);
+          activeRun.current = null;
+          forgetRun(runId);
+        } else if (!result?.event_id) {
+          setExecution(commandBus.describe(result));
+          setSending(false);
+          activeRun.current = null;
+          // HTTP/query can finish before the matching SSE event. Keep its ID
+          // briefly so a late reply or error still attaches to this task.
+          pendingRuns.current.set(runId, setTimeout(() => forgetRun(runId), 180000));
+        }
       })
-      .finally(() => setSending(false));
+      .catch(error => {
+        if (!pendingRuns.current.has(runId)) return;
+        setExecution(apiErrorText(error));
+        if (activeRun.current === runId) {
+          setSending(false);
+          activeRun.current = null;
+        }
+        pendingRuns.current.set(runId, setTimeout(() => forgetRun(runId), 180000));
+      });
   };
 
   const isGo2 = unitId === 'go2' || card?.device_id === 'go2'; // dedicated asset settings only
@@ -201,6 +277,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       </div>
 
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
+      {progress.length > 0 && <div role="status" style={{ padding: '4px 16px', fontSize: 11,
+        color: 'var(--color-text-dim)' }}>
+        <strong>{({ planning: '规划中', executing: '执行中', summarizing: '汇总中', finished: '已结束' })[
+          [...progress].reverse().find(item => item.type === 'run_stage')?.stage] || '处理中'}</strong>
+        {progress.filter(item => item.type === 'agent_progress').slice(-3).map(item =>
+          <div key={item.event_id}>{item.text || ({ dispatching: '已派发', observed: '已收到结果' })[item.stage] || item.status}</div>)}
+      </div>}
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
         <div className={`device-state-workspace${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
@@ -231,8 +314,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
       <div className="device-chat-heading">与{card?.name || unitId}对话</div>
       <ChatPanel
         messages={messages}
-        thinking={sending}
-        thinkingText={sending ? '正在回应…' : ''}
+        thinking={false}
+        thinkingText=""
         thinkingAgent={unitId}
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : '告诉设备要做什么…'}

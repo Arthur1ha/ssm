@@ -8,6 +8,8 @@ import logging
 import os
 import time
 import uuid
+import threading
+import asyncio
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -52,6 +54,7 @@ def _result(run: Run) -> dict:
                        if s["result"]["result"] != "ok"), "error")
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status, "response": run.response if run.reply_source != "runtime" else "",
+            "event_id": run.reply_event_id or None,
             "actions_taken": [s["tool"] for s in steps if s["result"]["result"] == "ok"],
             "tool_results": steps, "question": run.question or None,
             "llm_available": status != "error"}
@@ -160,9 +163,43 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
                       parent_run_id=run.parent_run_id or None, agent_id="go2",
                       session_id=session_id, origin_kind=run.origin_kind):
+        from cloud.api.intents import publish_agent_event
+        from cloud.agent_runtime.progress import submit_progress
+        autonomous = context.origin_kind == "agent_autonomous"
+        event_session = "" if autonomous else session_id
+        event_source = "autonomous" if autonomous else (
+            "delegated_skill" if run.parent_run_id else "device_chat")
+        progress_closed = threading.Event()
+        def progress(phase, step):
+            kind = "run_stage" if step is None else "agent_progress"
+            result = (step or {}).get("result") or {}
+            publish_agent_event(kind, agent_id="go2", session_id=event_session,
+                scope="space" if autonomous else "session", space_id=context.space_id,
+                status=result.get("result") or phase, run_id=run.run_id,
+                trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+                step_id=(step or {}).get("step_id", ""), source=event_source,
+                stage=phase if step is None else None, tool=(step or {}).get("tool"),
+                event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
+                    f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
+            if phase == "observed" and step is not None:
+                persona, _, _ = load_system_prompt()
+                status = (step.get("result") or {}).get("result", "unknown")
+                def publish_text(answer):
+                    publish_agent_event("agent_progress", agent_id="go2",
+                        session_id=event_session, scope="space" if autonomous else "session",
+                        space_id=context.space_id, status=status, run_id=run.run_id,
+                        trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+                        step_id=step["step_id"], source=event_source, stage="narrated",
+                        sequence=run.attempt * 10 + 2, text=answer)
+                def invoke_text(prompt):
+                    from cloud.go2.agentcore.llm import get_text_llm as fresh_model
+                    return asyncio.run(fresh_model().ainvoke([HumanMessage(content=prompt)])).content
+                submit_progress(persona, run.goal, step, invoke_text, publish_text,
+                                progress_closed, min(run.deadline, time.time() + 4))
         await run_loop(run, decide, execute, record=store.save, on_step=on_step,
+                       on_progress=progress,
                        effectful=lambda name: name not in _READ_ONLY)
-    if needs_persona_reply(run):
+    if needs_persona_reply(run) and go2.is_connected:
         try:
             persona, _, _ = load_system_prompt()
             prompt = persona_reply_prompt(persona, run)
@@ -187,6 +224,36 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             run.reply_source = "runtime"
             store.save(run)
     result = _result(run)
+    progress_closed.set()
+    progress("finished", None)
+    # A cloud service can be reachable while the physical robot is disconnected.
+    # Pure conversation remains possible; physical failures caused by disconnection
+    # are represented by structured status rather than a fabricated robot line.
+    disconnected_action = not go2.is_connected
+    publish_allowed = not run.parent_run_id or time.time() < run.deadline
+    if publish_allowed and not disconnected_action and result["response"]:
+        published = publish_agent_event("agent_reply", agent_id="go2",
+            session_id=event_session, scope="space" if autonomous else "session",
+            space_id=context.space_id, status=result["result"], run_id=run.run_id,
+            trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+            source=event_source,
+            text=result["response"],
+            reply_kind="clarification" if result["result"] == "needs_clarification" else "final")
+        result["event_id"] = published.get("event_id")
+        run.reply_event_id = result["event_id"] or ""
+        store.save(run)
+    elif publish_allowed and not disconnected_action:
+        publish_agent_event("reply_error", agent_id="go2", session_id=event_session,
+            scope="space" if autonomous else "session", space_id=context.space_id,
+            status=result["result"], run_id=run.run_id, trace_id=run.trace_id or run.run_id,
+            parent_run_id=run.parent_run_id,
+            source=event_source)
+    else:
+        result["response"] = ""
+        if disconnected_action or not publish_allowed:
+            run.response = ""
+            run.reply_source = "runtime"
+            store.save(run)
     if result["response"]:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                          run_id=run.run_id, agent_id="go2", session_id=session_id,

@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import replace
 from enum import Enum
 from typing import Optional
@@ -68,7 +69,44 @@ class Drive:
             return {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
         result = await execute_tool(name, params, context=self._context)
         self._last_execution_result = result.get("result", "error")
+        if go2.is_connected:
+            asyncio.create_task(self._publish_motion_reply(name, params, result))
         return result
+
+    async def _publish_motion_reply(self, name: str, params: dict, result: dict) -> None:
+        from cloud.agent_runtime.loop import Run
+        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+        from cloud.api.intents import publish_agent_event
+        from cloud.go2.agentcore.soul import load_system_prompt
+
+        if not go2.is_connected or self.user_interrupt:
+            return
+        run_id = "auto_" + uuid.uuid4().hex
+        status = str(result.get("result") or "unknown")
+        run = Run(run_id, "", "根据环境自主探索与互动", time.time() + 15,
+                  steps=[{"step_id": run_id, "tool": name, "params": params,
+                          "result": result}], status=status, agent_id="go2",
+                  origin_kind="agent_autonomous")
+        publish_agent_event("agent_progress", agent_id="go2", scope="space",
+            space_id=self._context.space_id, source="autonomous", status=status,
+            run_id=run_id, step_id=run_id, stage="observed")
+        try:
+            persona, _, _ = load_system_prompt()
+            response = await get_text_llm().ainvoke([
+                HumanMessage(content=persona_reply_prompt(persona, run))])
+            answer = response.content
+            if not valid_persona_reply(answer):
+                raise ValueError("invalid_persona_reply")
+        except Exception:
+            publish_agent_event("reply_error", agent_id="go2", scope="space",
+                space_id=self._context.space_id, source="autonomous",
+                status=status, run_id=run_id)
+            return
+        if self.user_interrupt or not go2.is_connected:
+            return
+        publish_agent_event("agent_reply", agent_id="go2", scope="space",
+            space_id=self._context.space_id, source="autonomous",
+            status=status, run_id=run_id, text=answer)
 
     async def _navigate(self, name: str) -> dict:
         from cloud.go2.navigation.navigator import navigator
@@ -298,7 +336,7 @@ class Drive:
                 f"      何时用：逛够了、满足了、或累了想回家休息。\n\n"
                 f"【移动策略】视觉上有趣 ≠ 走得过去。✗受阻方向的兴趣点要远观+标记，不要用 explore_direction 硬闯：\n"
                 f"  发现✗受阻方向有趣 → go2_observe 远看 → go2_tag_location 标记 → 换★开阔方向继续。\n\n"
-                f"reason 用第一人称、带点情绪和好奇心写（这是你的心里话，会被说出来让主人听见），别写成干巴巴的功能描述。\n"
+                f"reason 记录你的动作理由；用户可见回复会在真实结果返回后单独生成。\n"
                 f"直接输出 JSON，不含代码块：\n"
                 f"{{\"tool\": \"工具名\", \"params\": {{...}}, \"reason\": \"一句话\", \"done\": false}}"
             )

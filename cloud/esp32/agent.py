@@ -248,7 +248,8 @@ class ESP32Agent(ReactiveMind):
                       dispatch, *, lighting_only: bool = False,
                       run_id: str | None = None, resume: bool = False,
                       trace_id: str | None = None,
-                      parent_run_id: str | None = None) -> dict:
+                      parent_run_id: str | None = None,
+                      deadline: float | None = None) -> dict:
         """Run one lamp/peer tool at a time against observed results."""
         import uuid
         from cloud.agent_runtime.loop import Run, parse_decision, run_loop
@@ -263,12 +264,13 @@ class ESP32Agent(ReactiveMind):
                 or context.actor not in {"admin", "visitor", "agent"}
                 or (context.origin_kind == "agent_autonomous" and context.persist)
                 or context.expires_at <= time.time()):
-            return {"result": "rejected", "error": "invalid_context", "reply": "当前会话已失效。"}
+            return {"result": "rejected", "error": "invalid_context", "reply": ""}
         store = RunStore(DATA_DIR / "runs")
         previous = store.get(run_id, context.session_id) if run_id else None
         if previous and not resume:
             return {"run_id": previous.run_id, "result": previous.status,
                     "reply": previous.response if previous.reply_source != "runtime" else "",
+                    "event_id": previous.reply_event_id or None,
                     "steps": previous.steps}
         if resume and (previous is None or previous.status != "needs_clarification"):
             return {"result": "rejected", "error": "run_not_resumable"}
@@ -283,7 +285,7 @@ class ESP32Agent(ReactiveMind):
                              session_id=context.session_id, supplement=text)
         else:
             run = Run(run_id or uuid.uuid4().hex, context.session_id,
-                      text, min(float(context.expires_at), time.time() + 90))
+                      text, min(float(context.expires_at), deadline or time.time() + 90))
             run.reply_ready = False
             run.trace_id = trace_id or "tr_" + uuid.uuid4().hex
             run.parent_run_id = parent_run_id or ""
@@ -292,7 +294,8 @@ class ESP32Agent(ReactiveMind):
             if not store.create(run):
                 existing = store.get(run.run_id, context.session_id)
                 return ({"run_id": existing.run_id, "result": existing.status,
-                         "reply": existing.response, "steps": existing.steps} if existing else
+                         "reply": existing.response, "event_id": existing.reply_event_id or None,
+                         "steps": existing.steps} if existing else
                         {"result": "rejected", "error": "run_id_conflict"})
             emit_agent_event("task.received", trace_id=run.trace_id,
                              run_id=run.run_id, parent_run_id=run.parent_run_id or None,
@@ -359,9 +362,42 @@ class ESP32Agent(ReactiveMind):
         with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
                           parent_run_id=run.parent_run_id or None, agent_id=unit_id,
                           session_id=context.session_id, origin_kind=run.origin_kind):
-            asyncio.run(run_loop(run, decide, execute, record=store.save,
+            from cloud.api.intents import publish_agent_event
+            from cloud.agent_runtime.progress import submit_progress
+            autonomous = context.origin_kind == "agent_autonomous"
+            event_session = "" if autonomous else context.session_id
+            event_source = "autonomous" if autonomous else (
+                "delegated_skill" if run.parent_run_id else "device_chat")
+            progress_closed = threading.Event()
+            def progress(phase, step):
+                kind = "run_stage" if step is None else "agent_progress"
+                result = (step or {}).get("result") or {}
+                publish_agent_event(kind, agent_id=unit_id, session_id=event_session,
+                    scope="space" if autonomous else "session", space_id=context.space_id,
+                    status=result.get("result") or phase, run_id=run.run_id,
+                    trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+                    step_id=(step or {}).get("step_id", ""), source=event_source,
+                    stage=phase if step is None else None, tool=(step or {}).get("tool"),
+                    event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
+                        f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
+                if phase == "observed" and step is not None:
+                    persona, _, _ = load_personality()
+                    status = (step.get("result") or {}).get("result", "unknown")
+                    def publish_text(answer):
+                        publish_agent_event("agent_progress", agent_id=unit_id,
+                            session_id=event_session, scope="space" if autonomous else "session",
+                            space_id=context.space_id, status=status, run_id=run.run_id,
+                            trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+                            step_id=step["step_id"], source=event_source, stage="narrated",
+                            sequence=run.attempt * 10 + 2, text=answer)
+                    def invoke_text(prompt):
+                        return get_text_llm(ChatOpenAI).invoke([HumanMessage(content=prompt)]).content
+                    submit_progress(persona, run.goal, step, invoke_text, publish_text,
+                                    progress_closed, min(run.deadline, time.time() + 4))
+            asyncio.run(run_loop(run, decide, execute, record=store.save, on_progress=progress,
                                  effectful=lambda name: name not in {"list_peers", "get_space_context"}))
-        if needs_persona_reply(run):
+        publish_allowed = not run.parent_run_id or time.time() < run.deadline
+        if needs_persona_reply(run) and self._device_online() and publish_allowed:
             try:
                 persona, _, _ = load_personality()
                 prompt = persona_reply_prompt(persona, run)
@@ -389,17 +425,42 @@ class ESP32Agent(ReactiveMind):
                 store.save(run)
         run.reply_ready = True
         store.save(run)
+        progress_closed.set()
+        progress("finished", None)
         status = run.status
         if status == "partial":
             status = next((step["result"]["result"] for step in reversed(run.steps)
                            if step.get("result", {}).get("result") != "ok"), "error")
         reply = run.response
+        publish_allowed = not run.parent_run_id or time.time() < run.deadline
+        if not self._device_online() or not publish_allowed:
+            reply = ""
+            run.response = ""
+            run.reply_source = "runtime"
+            store.save(run)
+        source = event_source
+        if reply:
+            published = publish_agent_event("agent_reply", agent_id=unit_id,
+                session_id=event_session, scope="space" if autonomous else "session",
+                space_id=context.space_id, status=status, run_id=run.run_id,
+                trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+                source=source, text=reply,
+                reply_kind="clarification" if status == "needs_clarification" else "final")
+            run.reply_event_id = published.get("event_id", "")
+            store.save(run)
+        else:
+            published = publish_agent_event("reply_error", agent_id=unit_id,
+                session_id=event_session, scope="space" if autonomous else "session",
+                space_id=context.space_id, status=status, run_id=run.run_id,
+                trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
+                source=source)
         if reply:
             emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
                              reply_kind="final", channel="http", reply=reply)
         return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
                 "result": status, "reply": reply,
+                "event_id": published.get("event_id"),
                 "question": run.question or None, "steps": run.steps,
                 "task_id": next((s.get("result", {}).get("task_id") for s in reversed(run.steps)
                                  if s.get("result", {}).get("task_id")), None)}

@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import replace
 from typing import Optional
 
@@ -99,17 +100,58 @@ class ReactiveMind:
                 result = await execute_tool("go2_sport", {"cmd": action}, context=self._context)
             else:
                 result = await execute_tool("go2_move", _TURN_ACTIONS[action], context=self._context)
+            if self._active and (generation is None or generation == self._generation):
+                asyncio.create_task(self._publish_action_reply(action, reason, result))
             if result.get("result") != "ok":
                 self._action_cooldowns[action] = time.time()
                 return
         except Exception as exc:
             logger.warning("[ReactiveMind] 执行失败: %s", exc)
+            if self._active and (generation is None or generation == self._generation):
+                asyncio.create_task(self._publish_action_reply(
+                    action, reason, {"result": "error", "error": type(exc).__name__}))
             return
         self._action_cooldowns[action] = time.time()
         if rule_id:
             record_rule_completion(rule_id)
         episode_memory.add(EventType.ACTION_TAKEN, f"{source}：执行了 {action}（{reason}）")
         logger.info("[ReactiveMind] %s 执行 %s：%s", source, action, reason)
+
+    async def _publish_action_reply(self, action: str, reason: str, result: dict) -> None:
+        from cloud.agent_runtime.loop import Run
+        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+        from cloud.api.intents import publish_agent_event
+        from cloud.go2.agentcore.soul import load_system_prompt
+        from cloud.go2.connection import go2
+
+        if not go2.is_connected:
+            return
+        run_id = "auto_" + uuid.uuid4().hex
+        status = str(result.get("result") or "unknown")
+        run = Run(run_id, "", reason, time.time() + 15,
+                  steps=[{"step_id": run_id, "tool": action,
+                          "params": {"reason": reason}, "result": result}], status=status,
+                  agent_id="go2", origin_kind="agent_autonomous")
+        publish_agent_event("agent_progress", agent_id="go2", status=status,
+            scope="space", space_id=self._context.space_id, run_id=run_id,
+            step_id=run_id, source="autonomous", stage="observed")
+        try:
+            persona, _, _ = load_system_prompt()
+            response = await get_text_llm().ainvoke([
+                HumanMessage(content=persona_reply_prompt(persona, run))])
+            answer = response.content
+            if not valid_persona_reply(answer):
+                raise ValueError("invalid_persona_reply")
+        except Exception:
+            publish_agent_event("reply_error", agent_id="go2", status=status,
+                scope="space", space_id=self._context.space_id, run_id=run_id,
+                source="autonomous")
+            return
+        if not self._active or not go2.is_connected:
+            return
+        publish_agent_event("agent_reply", agent_id="go2", status=status,
+            scope="space", space_id=self._context.space_id, run_id=run_id,
+            source="autonomous", text=answer)
 
     # ── 同步入口，由 vision_loop 回调 ─────────────────────────────
 

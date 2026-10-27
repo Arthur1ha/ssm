@@ -1,4 +1,8 @@
-"""Go2 指令智能体：Planner → Executor 两节点 LangGraph 图。"""
+"""Legacy Go2 LangGraph prototype, kept for diagnostics and migration tests.
+
+No HTTP route calls run_agent or run_agent_stream. User and delegated replies
+use cloud.go2.multitask.run_go2_loop and its result-driven SSE path.
+"""
 import asyncio
 import json
 import logging

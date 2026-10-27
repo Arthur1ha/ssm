@@ -30,6 +30,18 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
   return (
     <div style={{ padding: '0 16px' }}>
       {entries.map((e, i) => {
+        if (e.type === 'run_stage' || e.type === 'agent_progress') {
+          const labels = { planning: '规划中', executing: '执行中', summarizing: '汇总中',
+            finished: '已结束', dispatching: '已派发', observed: '已收到结果',
+            ok: '已完成', accepted: '已受理', timeout: '结果未确认',
+            rejected: '已拒绝', error: '执行失败' };
+          return <div key={e.event_id || i} style={{ margin: '4px 16px 8px', padding: '6px 10px',
+            borderLeft: '2px solid var(--color-border-strong)', color: 'var(--color-text-dim)',
+            fontSize: e.type === 'run_stage' ? 12 : 11 }}>
+            {e.type === 'agent_progress' && e.agent_id ? `${getAgentDisplayName(e.agent_id)} · ` : ''}
+            {e.text || labels[e.stage] || labels[e.status] || '状态已更新'}
+          </div>;
+        }
         if (e.type === 'trace') {
           return <div key={i} style={{ textAlign: 'center', marginBottom: 8 }}>
             <button type="button" onClick={() => navigator.clipboard?.writeText(e.traceId)}
@@ -110,39 +122,10 @@ function ActivityFeed({ entries, thinking, thinkingText }) {
         return null;
       })}
 
-      {thinking && (() => {
-        const oc = getAgentBubbleColor('orchestrator');
-        return (
-        <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
-          <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
-            <ButlerAvatar/>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
-                fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                {getAgentDisplayName('orchestrator')}
-              </div>
-              <div style={{
-                padding: '10px 14px', borderRadius: 'var(--radius-card)',
-                background: `${oc}10`, border: `1px solid ${oc}25`,
-                display: 'flex', flexDirection: 'column', gap: 6,
-              }}>
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                  <span className="typing-dot" style={{ background: oc, opacity: 0.6 }}/>
-                  <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.14s' }}/>
-                  <span className="typing-dot" style={{ background: oc, opacity: 0.6, animationDelay: '.28s' }}/>
-                </div>
-                {thinkingText && (
-                  <span style={{ fontSize: 11, color: oc, opacity: 0.7,
-                    fontFamily: 'var(--font-mono)' }}>
-                  {thinkingText}
-                </span>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-        );
-      })()}
+      {thinking && <div role="status" style={{ margin: '6px 16px 10px',
+        fontSize: 11, color: 'var(--color-text-dim)' }}>
+        {thinkingText || '正在处理'}
+      </div>}
 
       <div ref={bottomRef}/>
     </div>

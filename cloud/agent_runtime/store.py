@@ -60,7 +60,8 @@ class RunStore:
             data = read_record(path)
             if data is None or data.get("session_id") != session_id or data.get("status") != "needs_clarification":
                 return None
-            data.update(status="executing", question="", updated_at=time.time())
+            data.update(status="executing", question="", response="", reply_event_id="",
+                        attempt=int(data.get("attempt", 0)) + 1, updated_at=time.time())
             write_record(path, data)
             return self._run(data)
 

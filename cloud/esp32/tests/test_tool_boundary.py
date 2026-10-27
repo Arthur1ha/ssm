@@ -54,8 +54,8 @@ def test_speech_validates_text_and_returns_acceptance(monkeypatch):
     context = ExecutionContext("s", "admin", False, "main", "user_delegated", 2**63)
     sent = []
     monkeypatch.setattr("cloud.esp32.tools.publish_speech", lambda text: sent.append(text))
-    monkeypatch.setattr("cloud.esp32.tools.publish_thought", lambda *args, **kw: None)
-    assert execute_auxiliary(unit_id="esp32_desk_led", tool="speak", params={"text": "你好"}, context=context)["result"] == "accepted"
+    spoken = execute_auxiliary(unit_id="esp32_desk_led", tool="speak", params={"text": "你好"}, context=context)
+    assert spoken == {"result": "accepted", "subtitle": "你好"}
     assert execute_auxiliary(unit_id="esp32_desk_led", tool="speak", params={"text": ""}, context=context)["result"] == "rejected"
     assert sent == ["你好"]
 
