@@ -1,12 +1,43 @@
 """Space activity lifecycle with simulated devices and no broker or hardware."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
 from cloud.api import activity as api
 from cloud.space.activity import ActivityStore
+
+
+def test_activity_cards_reads_registry_values(monkeypatch):
+    card = {"unit_id": "esp32_desk_led", "device_id": "esp32_desk", "online": True,
+            "modes": [{"id": "autonomy", "options": [{"value": "reactive"}]}]}
+    monkeypatch.setattr(api, "get_registry", lambda: SimpleNamespace(
+        get_all_cards=lambda: {card["unit_id"]: card}))
+    monkeypatch.setattr(api, "get_space_registry", lambda: SimpleNamespace(
+        get_space=lambda: {"device_ids": ["esp32_desk"]}))
+    assert api._activity_cards() == [card]
+
+
+def test_card_discovery_failure_does_not_leave_starting_activity(tmp_path, monkeypatch):
+    store = ActivityStore(tmp_path / "activity.json")
+    monkeypatch.setattr(api, "get_activity_store", lambda: store)
+
+    def unavailable_cards():
+        raise RuntimeError("discovery_failed")
+
+    monkeypatch.setattr(api, "_activity_cards", unavailable_cards)
+
+    async def scenario():
+        source = "evt_" + "f" * 32
+        revision = await api.user_intervention(source)
+        with pytest.raises(RuntimeError, match="discovery_failed"):
+            await api.start_activity("我要工作了", source, revision, "ses_a")
+        assert store.current() is None
+        assert store.get(store.latest_id())["end_reason"] == "start_failed"
+
+    asyncio.run(scenario())
 
 
 def test_activity_is_open_ended_partial_and_ends_before_next_request(tmp_path, monkeypatch):
@@ -84,3 +115,16 @@ def test_restart_finishes_interrupted_ending_state(tmp_path, monkeypatch):
     assert recovered.current() is None
     assert recovered.get(activity_id)["status"] == "ended"
     assert published[-1]["activity"] is None
+
+
+def test_restart_finishes_interrupted_starting_state(tmp_path, monkeypatch):
+    path = tmp_path / "activity.json"
+    store = ActivityStore(path)
+    source = "evt_" + "e" * 32
+    store.note_user_intervention(source)
+    activity_id = store.begin("我要工作了", source, 1)["activity_id"]
+    recovered = ActivityStore(path)
+    monkeypatch.setattr(api, "get_activity_store", lambda: recovered)
+    asyncio.run(api.reconcile_current_activity())
+    assert recovered.current() is None
+    assert recovered.get(activity_id)["status"] == "ended"

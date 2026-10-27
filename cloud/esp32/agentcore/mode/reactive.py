@@ -86,8 +86,8 @@ class ReactiveMind:
                 for r in taught_rules
             )
             taught_str = (
-                "\n\n主人教过的规矩（命中时，在对应工具调用里加 "
-                '"taught_id" 字段标明依据的规矩 id）：\n' + taught_lines
+                "\n\n主人教过的规矩（命中时，在工具调用对象顶层加 "
+                '"taught_id" 标明规矩 id，不要放进 params）：\n' + taught_lines
             )
         else:
             taught_str = ""
@@ -251,14 +251,19 @@ class ReactiveMind:
         for call in tool_calls[:4]:
             if not isinstance(call, dict):
                 break
+            params = call.get("params", {})
+            taught_id = call.get("taught_id")
+            if isinstance(params, dict) and "taught_id" in params:
+                taught_id = taught_id or params["taught_id"]
+                params = {key: value for key, value in params.items() if key != "taught_id"}
             emit_agent_event("tool.dispatch", tool=call.get("tool"),
-                             params=call.get("params", {}), dispatch_status="pending")
+                             params=params, dispatch_status="pending")
             started = time.monotonic()
-            ok = self._dispatch_tool(call.get("tool", ""), call.get("params", {}), led_unit)
+            ok = self._dispatch_tool(call.get("tool", ""), params, led_unit)
             outcome = getattr(self, "_last_reactive_tool_result", {"result": "unknown"})
             if call.get("tool") in {"set_led_state", "set_led_color", "blink_led", "speak"}:
                 reply_steps.append({"step_id": "auto_" + uuid.uuid4().hex,
-                                    "tool": call.get("tool"), "params": call.get("params", {}),
+                                    "tool": call.get("tool"), "params": params,
                                     "result": outcome})
             emit_agent_event("tool.result", tool=call.get("tool"),
                              status=outcome.get("result", "unknown"), result=outcome,
@@ -267,8 +272,8 @@ class ReactiveMind:
             if not ok:
                 break  # do not narrate success or run dependent actions after a failed command
             completed.append(call.get("tool", ""))
-            if ok and call.get("taught_id"):
-                _taught.touch(call["taught_id"])
+            if ok and taught_id:
+                _taught.touch(taught_id)
         if reply_steps and self._device_online():
             threading.Thread(target=self._publish_autonomous_reply,
                              args=(led_unit, reply_steps), daemon=True,

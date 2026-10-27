@@ -50,6 +50,22 @@ def test_reactive_user_hold_and_offline_prevent_publish(monkeypatch):
     assert calls == []
 
 
+def test_reactive_taught_id_inside_params_does_not_block_online_lamp(monkeypatch):
+    agent, _ = _agent(monkeypatch)
+    calls = []
+    touched = []
+    monkeypatch.setattr("cloud.esp32.tools.set_led_state", lambda **kw: calls.append(kw) or "auto_taught")
+    monkeypatch.setattr(migrated_taught, "touch", lambda rule_id: touched.append(rule_id))
+    monkeypatch.setattr(agent, "_device_online", lambda: False)
+
+    completed = agent._execute([{"tool": "set_led_state", "params": {
+        "state": "ON", "taught_id": "tb_work"}}], "esp32_desk_led")
+
+    assert completed == ["set_led_state"]
+    assert calls == [{"unit_id": "esp32_desk_led", "state": "ON"}]
+    assert touched == ["tb_work"]
+
+
 def test_speech_validates_text_and_returns_acceptance(monkeypatch):
     context = ExecutionContext("s", "admin", False, "main", "user_delegated", 2**63)
     sent = []

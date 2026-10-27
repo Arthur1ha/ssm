@@ -24,12 +24,14 @@ function App({ session, logout, refreshSession }) {
     connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
   const recentEvents = useSpaceActivity(agents);
-  const { activity: currentActivity, events: activityEvents, ending: activityEnding,
+  const { activity: currentActivity, displayActivity, events: activityEvents, ending: activityEnding,
     error: activityError, endActivity } = useActivityTimeline();
   const { thinking, send } = useSendIntent();
   const currentHash = useHashLocal();
 
   const [activityLog, setActivityLog] = useState([]);
+  const [activityHistory, setActivityHistory] = useState([]);
+  const lastVisibleActivity = useRef(null);
   const seenReplies = useRef(new Set());
   const completedRequests = useRef(new Set());
   const traceRequests = useRef(new Map());
@@ -44,6 +46,21 @@ function App({ session, logout, refreshSession }) {
   const [activityQuestion, setActivityQuestion] = useState(null);
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
+
+  const visibleActivityId = displayActivity?.activity_id || activityEvents[0]?.activity_id;
+  useEffect(() => {
+    if (!visibleActivityId) return;
+    const previous = lastVisibleActivity.current;
+    if (previous && previous.id !== visibleActivityId) {
+      setActivityHistory(history => [...history.filter(item => item.id !== previous.id), {
+        ...previous,
+        activity: previous.activity ? { ...previous.activity, status: 'ended' } : null,
+      }].slice(-3));
+    }
+    lastVisibleActivity.current = {
+      id: visibleActivityId, activity: displayActivity, events: activityEvents,
+    };
+  }, [visibleActivityId, displayActivity, activityEvents]);
 
   /* 退出动画：保留即将消失的 uid，待动画完成后清除 */
   const [exitingUid, setExitingUid] = useState(null);
@@ -102,7 +119,7 @@ function App({ session, logout, refreshSession }) {
     if (!t || thinking) return;
     const requestId = ++nextRequestId.current;
     setActivityLog(prev => [...prev,
-      { type: 'user', text: t },
+      { type: 'user', text: t, requestId },
       { type: 'ai', agent: 'cloud_orchestrator', requestId,
         text: '收到，我先看看怎么帮你处理。' },
     ]);
@@ -115,8 +132,11 @@ function App({ session, logout, refreshSession }) {
         appendActivity({ ...event, type: event.type, requestId });
       },
       onStatus: msg => finishRequestBubble(requestId, msg),
-      onTraceId: traceId => {
+      onTraceId: (traceId, eventId) => {
         traceRequests.current.set(traceId, requestId);
+        if (eventId) setActivityLog(prev => prev.map(entry =>
+          entry.type === 'user' && entry.requestId === requestId
+            ? { ...entry, intentEventId: eventId } : entry));
         if (traceRequests.current.size > 20) traceRequests.current.delete(traceRequests.current.keys().next().value);
         const pending = pendingReplies.current;
         pendingReplies.current = pending.filter(item => item.trace_id !== traceId);
@@ -222,20 +242,20 @@ function App({ session, logout, refreshSession }) {
           {!loadingAgents && !agentsError && !hasDevices &&
             <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}
 
-          <SpaceActivityFeed activity={currentActivity} events={activityEvents}
-            ending={activityEnding} error={activityError} onEnd={endActivity}
-            onAnswer={event => {
-              setActivityQuestion(event);
-              navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
-            }}/>
-
-          {activityLog.length > 0 && (
+          {(activityLog.length > 0 || activityHistory.length > 0 || displayActivity || activityEvents.length > 0 || activityError) && (
             <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
               <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
             </div>
           )}
 
-          <ActivityFeed entries={activityLog}/>
+          <ActivityFeed entries={activityLog} activity={displayActivity}
+            activityHistory={activityHistory}
+            activityEvents={activityEvents} activityEnding={activityEnding}
+            activityError={activityError} onEndActivity={endActivity}
+            onAnswerActivity={event => {
+              setActivityQuestion(event);
+              navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
+            }}/>
 
           {pendingRule && session.actor === 'admin' && (
             <div style={{ padding: '0 16px 10px' }}>

@@ -1,13 +1,15 @@
-/* A space activity outlives a browser session. Rehydrate its bounded, visible
- * history on entry and after SSE reconnect, then merge live events by event_id.
+/* Restore a live space activity after reload. Keep ended activity cards only
+ * when this page has already seen them active, so they stay with its dialogue.
  */
 function useActivityTimeline() {
   const { useEffect, useRef, useState, useCallback } = React;
   const [activity, setActivity] = useState(null);
+  const [displayActivity, setDisplayActivity] = useState(null);
   const [events, setEvents] = useState([]);
   const [ending, setEnding] = useState(false);
   const [error, setError] = useState('');
   const activityIdRef = useRef(null);
+  const seenActiveIdsRef = useRef(new Set());
   const loadSeq = useRef(0);
 
   const mergeEvents = useCallback(incoming => {
@@ -36,12 +38,24 @@ function useActivityTimeline() {
       const data = await apiClient.request('/api/activity/current');
       if (seq !== loadSeq.current) return;
       const current = data.activity || null;
-      const id = current?.activity_id || data.latest_activity_id || null;
+      if (current?.activity_id) seenActiveIdsRef.current.add(current.activity_id);
+      const latestSeen = data.latest_activity_id &&
+        seenActiveIdsRef.current.has(data.latest_activity_id);
+      const priorSeen = activityIdRef.current &&
+        seenActiveIdsRef.current.has(activityIdRef.current);
+      const id = current?.activity_id ||
+        (latestSeen ? data.latest_activity_id : priorSeen ? activityIdRef.current : null);
       setActivity(current);
       setError('');
       if (activityIdRef.current !== id) {
         activityIdRef.current = id;
         setEvents([]);
+        setDisplayActivity(current);
+      } else if (current) {
+        setDisplayActivity(current);
+      } else {
+        setDisplayActivity(previous => previous?.activity_id === id
+          ? (previous.status === 'ended' ? previous : { ...previous, status: 'ended' }) : null);
       }
       if (id) await loadEvents(id);
     } catch (requestError) {
@@ -57,9 +71,8 @@ function useActivityTimeline() {
       const item = outer.payload || outer.data || outer;
       if (item.type !== 'activity' || !item.event_id || !item.activity_id) return;
       if (activityIdRef.current !== item.activity_id) {
-        activityIdRef.current = item.activity_id;
-        setEvents([]);
-        loadEvents(item.activity_id).catch(() => {});
+        refresh();
+        return;
       }
       mergeEvents([item]);
       if (['started', 'ended', 'device_joined', 'device_left', 'device_failed',
@@ -90,6 +103,6 @@ function useActivityTimeline() {
     }
   }, [activity, ending, refresh]);
 
-  return { activity, events, ending, error, endActivity };
+  return { activity, displayActivity, events, ending, error, endActivity };
 }
 window.useActivityTimeline = useActivityTimeline;

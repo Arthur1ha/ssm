@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_49f125c389ce437f81b35ac129999d15",
+  "session_id": "ses_Kq6K7L-0pfnNyiu3_uGFPti_",
+  "goal": "我要工作了",
+  "deadline": 1793095894.9655998,
+  "steps": [
+    {
+      "step_id": "8cde717cb3c541a29186f3d7d8a1839c",
+      "tool_call_id": "e7a4045904cd4b6582edc46c429053b6",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_740f180aa8df44f7b7aaa46e0ee40a97",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_49f125c389ce437f81b35ac129999d15",
+          "source_session_id": "ses_Kq6K7L-0pfnNyiu3_uGFPti_",
+          "started_at": 1793095807.2495499,
+          "revision": 1793095807274,
+          "status": "partial",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "unavailable",
+              "owner": "",
+              "error": "RuntimeError"
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "offline",
+              "owner": "",
+              "error": "device_offline"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "工作模式已经帮你启动了。不过 Go2 机器狗和桌面灯现在都没连上，等它们恢复后会自动加入。",
+  "question": "",
+  "trace_id": "tr_12cb139acccc490f99c9b721df1c7404",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "工作模式已启动。Go2 机器狗当前不可用，桌面灯离线，等它们恢复后会自动加入。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793095813.5313034
+}

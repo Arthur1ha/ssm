@@ -47,7 +47,7 @@ def _selected_mode(card: dict[str, Any]) -> str | None:
 
 def _activity_cards() -> list[dict[str, Any]]:
     configured = set(get_space_registry().get_space()["device_ids"])
-    return [card for card in get_registry().get_all_cards()
+    return [card for card in get_registry().get_all_cards().values()
             if card_device_id(card) in configured and _selected_mode(card)]
 
 
@@ -107,7 +107,7 @@ async def reconcile_current_activity() -> None:
         record = store.current()
         if not record:
             return
-        if record["status"] == "ending":
+        if record["status"] in {"starting", "ending"}:
             await _end_locked("recovery")
             return
         activity_id = record["activity_id"]
@@ -151,7 +151,12 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         activity_id = record["activity_id"]
-        for card in _activity_cards():
+        try:
+            cards = _activity_cards()
+        except Exception:
+            await _end_locked("start_failed")
+            raise
+        for card in cards:
             if not store.matches_user_request(source_event_id, user_revision):
                 await _end_locked("superseded_user_request")
                 raise HTTPException(status_code=409, detail="activity request was superseded")

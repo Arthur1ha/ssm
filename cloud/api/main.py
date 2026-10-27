@@ -110,7 +110,7 @@ def _on_esp32_message(client, userdata, msg):
             activity = get_activity_store().current()
             if activity:
                 from cloud.space.registry import card_device_id
-                for card in get_registry().get_all_cards():
+                for card in get_registry().get_all_cards().values():
                     member = card.get("unit_id")
                     state = activity.get("devices", {}).get(member)
                     if (state and state.get("status") == "joined"

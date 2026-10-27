@@ -37,6 +37,22 @@ class ConsoleFormatter(logging.Formatter):
         super().__init__("%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
 
 
+class _DowngradeUnitreeDataChannelLogs(logging.Filter):
+    """Move the Go2 library's raw telemetry from INFO to opt-in DEBUG."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        raw_telemetry = (
+            record.name == "root"
+            and record.levelno == logging.INFO
+            and record.msg == "Received message on data channel: %s"
+        )
+        if raw_telemetry:
+            logging.getLogger("unitree_webrtc_connect.telemetry").debug(
+                record.msg, *record.args,
+            )
+        return not raw_telemetry
+
+
 def _cleanup_old_sessions(log_dir: Path) -> None:
     cutoff = time.time() - RETENTION_DAYS * 86400
     for path in log_dir.glob("session-*.jsonl"):
@@ -92,6 +108,11 @@ def configure_logging(service: str, *, log_dir: Path | None = None) -> None:
     )
     root = logging.getLogger()
     root.setLevel(logging.INFO)
+    for existing in tuple(root.filters):
+        if isinstance(existing, _DowngradeUnitreeDataChannelLogs):
+            root.removeFilter(existing)
+    if service == "api":
+        root.addFilter(_DowngradeUnitreeDataChannelLogs())
     if not any(getattr(h, "_ssm_process_handler", False) for h in root.handlers):
         stream = logging.StreamHandler(sys.stdout)
         stream.setFormatter(ConsoleFormatter())

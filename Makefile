@@ -52,7 +52,7 @@ api:
 	@if pgrep -f "[u]vicorn cloud.api.main" >/dev/null; then \
 		echo "API 进程未在 15 秒内退出，请检查旧进程"; exit 1; \
 	fi
-	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload --timeout-graceful-shutdown 10 2>&1 | tee $(LOG_DIR)/api.log
+	uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --reload --reload-include 'cloud/.env' --timeout-graceful-shutdown 10 2>&1 | tee $(LOG_DIR)/api.log
 
 api-bg:
 	$(call bg,[u]vicorn cloud.api.main,uv run uvicorn cloud.api.main:app --host 127.0.0.1 --port 8082 --timeout-graceful-shutdown 10,api)

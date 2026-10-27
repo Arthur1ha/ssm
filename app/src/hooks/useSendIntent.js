@@ -112,7 +112,7 @@ function useSendIntent() {
       if (activeRef.current) {
         if (accepted.trace_id) {
           activeRef.current.traceId = accepted.trace_id;
-          callbacks.onTraceId?.(accepted.trace_id);
+          callbacks.onTraceId?.(accepted.trace_id, accepted.event_id);
           const buffered = activeRef.current.pendingEvents.splice(0);
           buffered.forEach(payload => apiClient.dispatchEvent(Object.assign(
             new Event('server-event'), { detail: payload })));

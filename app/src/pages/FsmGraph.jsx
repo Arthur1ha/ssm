@@ -132,10 +132,13 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
           : isReachable ? `rgba(${rgb},0.85)`
           : 'rgba(255,255,255,0.28)';
 
-        const singleArc = isReachable
-          ? outgoing.filter(tr => tr.dst === s && tr.action)
-          : [];
-        const trigger = singleArc.length === 1 ? singleArc[0].trigger : null;
+        // Multiple actions may reach the same state (for example, ON via
+        // CMD_ON or CMD_COLOR). The Card's first action is the node default;
+        // the labeled edges remain available for other actions.
+        const nodeTransition = isReachable
+          ? outgoing.find(tr => tr.dst === s && tr.action)
+          : null;
+        const trigger = nodeTransition?.trigger;
         const label = views[s]?.label || s;
         const selectPreview = typeof onSelectState === 'function';
         const nodeAction = selectPreview
@@ -147,8 +150,8 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
           <g key={s} className={`fsm-graph__node${trigger ? ' is-reachable' : ''}${selectPreview ? ' is-previewable' : ''}`}
             role={nodeAction ? 'button' : undefined} tabIndex={nodeAction ? 0 : undefined}
             aria-label={selectPreview
-              ? `${label}，${trigger ? `${singleArc[0].label}并` : ''}查看预览`
-              : trigger ? `${label}，${singleArc[0].label}` : label}
+              ? `${label}，${trigger ? `${nodeTransition.label}并` : ''}查看预览`
+              : trigger ? `${label}，${nodeTransition.label}` : label}
             aria-pressed={selectPreview ? isSelected : undefined}
             onClick={nodeAction || undefined}
             onKeyDown={nodeAction ? onKey(nodeAction) : undefined}>

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_bc2d155b658d4d8bac014bd483f1e13c",
+  "session_id": "ses_4MWiJozGDKyJ96JQ1PegmNml",
+  "goal": "我要工作了",
+  "deadline": 1793091879.8391542,
+  "steps": [
+    {
+      "step_id": "e31d40aee7414c7b9001dbcd6987edc4",
+      "tool_call_id": "d723f2cb60244d399665fabfdf5121e1",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "rejected",
+        "error": "activity_start_unavailable_or_stale"
+      }
+    },
+    {
+      "step_id": "6afdebbecdb844388e3a3c1d01676a3c",
+      "tool_call_id": "3cad80a94b884cf8988da5c878a0ecac",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "rejected",
+        "error": "activity_already_started_for_intent"
+      }
+    }
+  ],
+  "status": "error",
+  "response": "抱歉，工作暂时没能开始，似乎有正在进行的安排或状态还没就绪。需要我帮你看看吗？",
+  "question": "",
+  "trace_id": "tr_2ebebb973d544ad9b2dc2d4cf0fbae9b",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793091822.126997
+}

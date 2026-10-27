@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_0e637aadd2374681a627c52c11124f57",
+  "session_id": "ses_Kq6K7L-0pfnNyiu3_uGFPti_",
+  "goal": "我要工作了",
+  "deadline": 1793092310.763948,
+  "steps": [
+    {
+      "step_id": "ee530399c52f4db88abae0f138ef65df",
+      "tool_call_id": "98370d35a9324d16a577ba5e8c42e6c7",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_d3c667d7a79d4f4998991a63dd266f02",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_0e637aadd2374681a627c52c11124f57",
+          "source_session_id": "ses_Kq6K7L-0pfnNyiu3_uGFPti_",
+          "started_at": 1793092222.2339146,
+          "revision": 1793092222251,
+          "status": "partial",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "unavailable",
+              "owner": "",
+              "error": "RuntimeError"
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "joined",
+              "owner": "act_d3c667d7a79d4f4998991a63dd266f02",
+              "error": ""
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "工作模式已开启，桌边灯已经就位；不过机器狗这会儿状态不太好，就先不打扰它了。",
+  "question": "",
+  "trace_id": "tr_b1f01c020ae64a48b70c465a98198821",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "智能灯已加入工作模式；Go2 机器狗暂时不可用，先不打扰它了。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793092226.6943905
+}

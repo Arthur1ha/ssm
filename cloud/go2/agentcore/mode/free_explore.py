@@ -60,6 +60,7 @@ class Drive:
         self._last_execution_result: str = "ok"
         self._last_prompt_metadata: dict | None = None
         self._pending_question_id: str | None = None
+        self._vision_retry_after = 0.0
 
     @staticmethod
     def _result_text(result: dict) -> str:
@@ -231,7 +232,7 @@ class Drive:
                     await self._do_social()
 
             elif self._state == MotivationalState.IDLE:
-                if self._curiosity >= _CURIOSITY_THRESHOLD:
+                if self._curiosity >= _CURIOSITY_THRESHOLD and time.time() >= self._vision_retry_after:
                     self._curiosity = 0
                     # 改动 1a：curiosity 达阈值时先看有无人脸，有则直接进 SOCIAL
                     if self._person_engaging:
@@ -262,8 +263,16 @@ class Drive:
         # 进入探索前先观察一次，让第一步决策有视觉上下文
         try:
             initial_obs = await go2_observe("描述当前看到的场景，有什么值得探索的")
+            if not initial_obs or initial_obs.startswith("无可用视频帧"):
+                raise RuntimeError("video_frame_unavailable")
         except Exception as exc:
-            initial_obs = f"观察失败：{exc}"
+            logger.warning("[Drive] 探索初始观察失败: %s", exc)
+            self._vision_retry_after = time.time() + 60
+            message = ("摄像头画面暂不可用，已暂停自主探索，稍后再试。"
+                       if str(exc) == "video_frame_unavailable" else
+                       "视觉服务暂不可用，已暂停自主探索，稍后再试。")
+            self._activity_event("message", message, status="error")
+            return
         episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
         self._activity_event("observation", initial_obs)
         logger.info("[Drive] 探索初始观察：%s", initial_obs)

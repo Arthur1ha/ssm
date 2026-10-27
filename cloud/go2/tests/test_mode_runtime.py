@@ -66,6 +66,31 @@ def test_free_explore_motion_uses_executor_and_interrupt_gate(monkeypatch):
     assert calls == [("go2_move", {"direction": "forward"})]
 
 
+def test_explore_vision_error_stops_before_motion_and_hides_provider_detail(monkeypatch):
+    from cloud.space import activity as activity_module
+
+    events = []
+    store = SimpleNamespace(
+        current=lambda: {"activity_id": "act_vision"},
+        record_event=lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+    monkeypatch.setattr(activity_module, "get_activity_store", lambda: store)
+    monkeypatch.setattr(free_explore, "go2_observe", AsyncMock(
+        side_effect=RuntimeError("403 Free quota exhausted")))
+    monkeypatch.setattr(free_explore, "get_text_llm", lambda: (_ for _ in ()).throw(
+        AssertionError("exploration must stop before planning")))
+    drive = free_explore.Drive()
+    drive.owner_session_id = "act_vision"
+
+    asyncio.run(drive._do_explore())
+
+    assert drive._vision_retry_after > 0
+    assert len(events) == 1
+    assert events[0][0][1] == "message"
+    assert "视觉服务暂不可用" in events[0][1]["text"]
+    assert "403" not in events[0][1]["text"]
+
+
 def test_explore_blocked_direction_never_falls_back_to_forward_motion(monkeypatch):
     drive = free_explore.Drive()
     monkeypatch.setattr(free_explore, "go2", SimpleNamespace(

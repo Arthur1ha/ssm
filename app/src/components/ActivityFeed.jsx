@@ -1,18 +1,68 @@
 /* ActivityFeed — 主屏活动流组件 */
-function ActivityFeed({ entries }) {
+function ActivityFeed({ entries, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
+  onEndActivity, onAnswerActivity }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
+  const hasActivity = Boolean(activity || activityEvents.length || activityError);
+  const currentCard = hasActivity ? {
+    id: activity?.activity_id || activityEvents[0]?.activity_id || 'recent',
+    activity, events: activityEvents, ending: activityEnding, error: activityError,
+  } : null;
+  const cards = [...activityHistory, ...(currentCard ? [currentCard] : [])];
+  const findAnchor = card => {
+    if (!card.activity) return -1;
+    const started = card.events.find(event => event.event_type === 'started');
+    const context = card.activity?.context || card.activity?.text || started?.text || '';
+    const owner = card.activity?.source_event_id
+      ? entries.find(entry => entry.type === 'user' && entry.intentEventId === card.activity.source_event_id)
+      : null;
+    if (owner) {
+      return entries.findIndex(entry => entry.type === 'ai' && entry.requestId === owner.requestId);
+    }
+    if (context) {
+      for (let index = entries.length - 1; index >= 0; index--) {
+        if (entries[index].type === 'user' && entries[index].text === context) {
+          return entries.findIndex(entry =>
+            entry.type === 'ai' && entry.requestId === entries[index].requestId);
+        }
+      }
+    }
+    return -1;
+  };
+  const activityAnchor = currentCard ? findAnchor(currentCard) : -1;
+  const cardsAt = new Map();
+  cards.forEach(card => {
+    const position = findAnchor(card) + 1;
+    cardsAt.set(position, [...(cardsAt.get(position) || []), card]);
+  });
+  const rows = [];
+  for (let index = 0; index <= entries.length; index++) {
+    (cardsAt.get(index) || []).forEach(card => rows.push({ entry: { type: 'space_activity', card }, index: -1 }));
+    if (index < entries.length) rows.push({ entry: entries[index], index });
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [entries]);
 
-  if (entries.length === 0) return null;
+  useEffect(() => {
+    if (hasActivity && (entries.length === 0 || activityAnchor === entries.length - 1)) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [activityEvents.length, activity?.status, hasActivity, activityAnchor, entries.length]);
+
+  if (rows.length === 0) return null;
   const latestRequestId = [...entries].reverse().find(e => e.type === 'ai' && e.requestId)?.requestId;
 
   return (
     <div style={{ padding: '0 16px' }}>
-      {entries.map((e, i) => {
+      {rows.map(({ entry: e, index: i }) => {
+        if (e.type === 'space_activity') {
+          const card = e.card;
+          return <SpaceActivityFeed key={`activity-${card.id}`}
+            activity={card.activity} events={card.events} ending={card.ending}
+            error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}/>;
+        }
         if (e.type === 'run_stage' || e.type === 'agent_progress') {
           return <div key={e.event_id || i} style={{ margin: '4px 16px 8px', padding: '6px 10px',
             borderLeft: '2px solid var(--color-border-strong)', color: 'var(--color-text-dim)',
@@ -145,25 +195,46 @@ function activityStatusText(event, name) {
 /* Device speech, observations and confirmed state use different treatments.
  * An invitation therefore never looks like an action that already happened. */
 function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer }) {
-  if (!activity && events.length === 0 && !error) return null;
+  const { useEffect, useState } = React;
+  const [expanded, setExpanded] = useState(false);
   const context = activity?.context || activity?.user_text || activity?.text ||
     events.find(event => event.event_type === 'started')?.text || '';
-  const isActive = activity && !['ending', 'ended'].includes(activity.status);
+  const activityId = activity?.activity_id || events[0]?.activity_id || '';
+  const isActive = Boolean(activity && !['ending', 'ended'].includes(activity.status));
+  const isEnding = Boolean(activity?.status === 'ending' || ending);
+  const isEnded = activity?.status === 'ended' || events.some(event => event.event_type === 'ended');
+  const isPending = !activity && !isEnded && events.length > 0;
+  const showTimeline = isActive || isEnding || isPending || expanded;
+  const summaryEvent = [...events].reverse().find(event =>
+    ['device_left', 'action_result'].includes(event.event_type));
+  const summary = summaryEvent
+    ? activityStatusText(summaryEvent, summaryEvent.unit_id
+      ? getAgentDisplayName(summaryEvent.unit_id) : '空间管家')
+    : '本次活动已结束';
+  useEffect(() => setExpanded(false), [activityId, isActive, isEnding]);
+  if (!activity && events.length === 0 && !error) return null;
   const timeLabel = ts => ts ? new Date(Number(ts) < 1e11 ? Number(ts) * 1000 : Number(ts))
     .toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
 
-  return <section className="space-activity" aria-label="空间活动">
+  return <section className={`space-activity${isActive || isEnding || isPending ? ' space-activity--live' : ' space-activity--ended'}`} aria-label="空间活动">
     <div className="space-activity__heading">
       <div>
         <small>空间活动</small>
-        <h2>{context || '最近的空间活动'}{isActive ? <span className="space-activity__live">进行中</span> : null}</h2>
+        <h2>{context || '最近的空间活动'}{(activity || events.length > 0) &&
+          <span className="space-activity__live">
+            {isEnding ? '正在结束' : isActive ? '进行中' : isPending ? '同步中' : '已结束'}</span>}</h2>
       </div>
       {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>
         {ending ? '正在结束…' : '结束活动'}
       </button>}
+      {isEnded && events.length > 0 && <button type="button"
+        className="space-activity__toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+        {expanded ? '收起记录' : '查看记录'}
+      </button>}
     </div>
     {error && <div className="space-activity__error" role="alert">{error}</div>}
-    <div className="space-activity__timeline">
+    {!showTimeline && events.length > 0 && <div className="space-activity__summary">{summary}</div>}
+    {showTimeline && <div className="space-activity__timeline">
       {events.map(event => {
         const kind = activityEventKind(event);
         const unitId = event.unit_id || event.agent_id || '';
@@ -189,7 +260,7 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer })
           </div>
         </div>;
       })}
-    </div>
+    </div>}
   </section>;
 }
 window.SpaceActivityFeed = SpaceActivityFeed;
