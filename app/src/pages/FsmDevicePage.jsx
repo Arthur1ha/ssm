@@ -2,7 +2,7 @@
  * 固定控制区展示 Card 声明的状态与转移；当前态内容和对话排在其后。
  * 核心控制由 Agent Card 的 transport / state_machine 驱动。
  */
-function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
+function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuestion }) {
   const { useState, useEffect, useRef } = React;
 
   /* Card from /api/devices and SSE is authoritative. Fetch only fills a missing snapshot. */
@@ -221,7 +221,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
     setSending(true);
     activeRun.current = runId;
     pendingRuns.current.set(runId, { key: requestKey, timer: null });
-    const params = { message: text, ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
+    const answerText = activityQuestion && unitId === 'go2'
+      ? `回答你刚才的问题「${activityQuestion.text}」（${activityQuestion.question_id || activityQuestion.event_id}）：${text}`
+      : text;
+    const params = { message: answerText, ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
     if (pendingRunId) {
       if (unitId === 'go2') params.resume_run_id = pendingRunId;
       else { params.run_id = pendingRunId; params.resume = true; }
@@ -344,6 +347,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor }) {
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
       <div className="device-chat-heading">与{card?.name || getAgentDisplayName(unitId)}对话</div>
+      {activityQuestion && <div className="device-activity-question">
+        <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
+        <span>{activityQuestion.text}</span>
+        {activityMediaUrl(activityQuestion) && <a href={activityMediaUrl(activityQuestion)}
+          target="_blank" rel="noopener noreferrer">查看截图</a>}
+      </div>}
       <ChatPanel
         messages={messages}
         thinking={false}

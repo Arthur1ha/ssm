@@ -41,7 +41,7 @@ def test_space_context_keeps_freshness_and_scoped_requirement(monkeypatch):
                                "expires_at": 1100}, now=1000)
     result = get_space_context("esp32_desk_led", state=_State(), registry=_Cards(),
                                constraints=constraints, now=1000)
-    assert set(result) == {"peers", "environment", "constraints"}
+    assert set(result) == {"peers", "environment", "constraints", "activity"}
     assert {peer["unit_id"] for peer in result["peers"]} == {"go2", "esp32_desk_led"}
     model_view = get_space_context("esp32_desk_led", state=_State(), registry=_Cards(),
                                    constraints=constraints, now=1000, include_self=False)
@@ -116,4 +116,20 @@ def test_space_context_accepts_partial_runtime_stubs():
                                state=SimpleNamespace(actuator_snapshot=lambda: {}),
                                registry=SimpleNamespace(), constraints=ConstraintStore(),
                                now=1000)
-    assert result == {"peers": [], "environment": [], "constraints": []}
+    assert result == {"peers": [], "environment": [], "constraints": [], "activity": None}
+
+
+def test_space_context_shares_current_activity_without_private_session_details(monkeypatch):
+    class _ActivityStore:
+        def current(self, space_id):
+            assert space_id == "main"
+            return {"activity_id": "act_one", "space_id": "main", "context": "我要学习了",
+                    "started_at": 1000, "revision": 9, "status": "active",
+                    "source_session_id": "private-session", "devices": {}}
+
+    monkeypatch.setattr("cloud.space.context.get_activity_store", lambda: _ActivityStore())
+    view = get_space_context("go2", state=SimpleNamespace(), registry=SimpleNamespace(),
+                             constraints=ConstraintStore(), now=1000)
+    assert view["activity"] == {"activity_id": "act_one", "space_id": "main",
+                                 "context": "我要学习了", "started_at": 1000,
+                                 "revision": 9, "status": "active"}

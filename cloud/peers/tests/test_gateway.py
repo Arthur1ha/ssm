@@ -3,9 +3,35 @@
 import json
 import time
 
+import pytest
+
 from cloud.peers import gateway
 from cloud.mqtt_signing import sign_message, verify_message
 from cloud.space.execution import ExecutionContext
+
+
+def test_autonomous_dance_requires_both_agents_in_current_activity(monkeypatch):
+    from cloud.space import activity as activity_module
+    from cloud.go2 import router as go2_router
+    from cloud.esp32 import router as lamp_router
+
+    current = {"activity_id": "act_test"}
+    owners = {"go2": "act_test", "lamp": None}
+    monkeypatch.setattr(activity_module, "get_activity_store",
+                        lambda: type("Store", (), {"current": lambda self: current})())
+    monkeypatch.setattr(go2_router, "get_activity_mode_owner", lambda: owners["go2"])
+    monkeypatch.setattr(lamp_router, "get_activity_mode_owner", lambda: owners["lamp"])
+
+    with pytest.raises(PermissionError):
+        gateway._skill_policy("esp32_desk_led", "go2", "go2_sport",
+                              {"cmd": "Dance1"}, "agent_autonomous")
+    owners["lamp"] = "act_test"
+    gateway._skill_policy("esp32_desk_led", "go2", "go2_sport",
+                          {"cmd": "Dance1"}, "agent_autonomous")
+    current = None
+    with pytest.raises(PermissionError):
+        gateway._skill_policy("esp32_desk_led", "go2", "go2_sport",
+                              {"cmd": "Dance1"}, "agent_autonomous")
 
 
 class _Cards:

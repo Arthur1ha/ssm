@@ -53,7 +53,76 @@ _active_rule_cb  = None
 _active_drive_cb = None
 _active_identity_cb = None
 _autonomy_mode   = "manual"  # "manual" | "reactive" | "free_explore"
+_activity_mode_owner: str | None = None
 _connect_task: asyncio.Task | None = None
+
+
+def get_activity_mode_owner() -> str | None:
+    return _activity_mode_owner
+
+
+async def set_activity_mode(mode: str, activity_id: str) -> dict:
+    """Switch Go2 autonomy for a server-validated space activity.
+
+    This in-process path never accepts a model-supplied actor. Ownership is
+    checked again on release so a later direct user choice is not overwritten.
+    """
+    global _autonomy_mode, _activity_mode_owner
+    if not activity_id.startswith("act_") or mode not in {"manual", "free_explore"}:
+        raise ValueError("invalid activity mode request")
+    if mode == "manual":
+        if _activity_mode_owner != activity_id:
+            return {"ok": False, "mode": _autonomy_mode, "reason": "not_activity_owned"}
+        _activity_mode_owner = None
+        _autonomy_mode = "manual"
+        try:
+            _configure_vision_consumers("manual")
+        except Exception:
+            logging.exception("[Go2/Activity] failed to stop autonomous consumers")
+            drive.user_interrupt = True
+            try:
+                drive.stop()
+            except Exception:
+                logging.exception("[Go2/Activity] drive stop failed")
+        from cloud.peers.gateway import cancel_pending
+        cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous",
+                       reason="activity_ended")
+        if not go2.is_connected:
+            control_lease.release(activity_id)
+            return {"ok": True, "mode": "manual", "physical_stop": "unknown"}
+        try:
+            stop = await go2.send_command("StopMove", completion_timeout=5.0)
+        except Exception as exc:
+            logging.warning("[Go2/Activity] stop not confirmed: %s", exc)
+            return {"ok": True, "mode": "manual", "physical_stop": "unknown"}
+        if stop.get("result") == "ok":
+            control_lease.release(activity_id)
+        return {"ok": True, "mode": "manual",
+                "physical_stop": "confirmed" if stop.get("result") == "ok" else "unknown"}
+    if not go2.is_connected:
+        return {"ok": False, "mode": _autonomy_mode, "reason": "offline"}
+    if _autonomy_mode != "manual" and _activity_mode_owner != activity_id:
+        return {"ok": False, "mode": _autonomy_mode, "reason": "mode_owned_elsewhere"}
+    lease = control_lease.snapshot()
+    if lease is not None and lease.owner_session_id != activity_id:
+        return {"ok": False, "mode": _autonomy_mode, "reason": "motion_busy"}
+    if _activity_mode_owner == activity_id and _autonomy_mode == mode:
+        return {"ok": True, "mode": mode, "owner": activity_id}
+    _autonomy_mode = mode
+    _activity_mode_owner = activity_id
+    activity_context = ExecutionContext(activity_id, "visitor", False,
+                                        "main", "agent_autonomous", 0)
+    try:
+        _configure_vision_consumers(mode, owner_session_id=activity_id, context=activity_context)
+    except Exception:
+        _autonomy_mode = "manual"
+        _activity_mode_owner = None
+        try:
+            _configure_vision_consumers("manual")
+        except Exception:
+            logging.exception("[Go2/Activity] failed to roll back autonomous consumers")
+        raise
+    return {"ok": _autonomy_mode == mode, "mode": _autonomy_mode, "owner": activity_id}
 
 # Continuous identity vision is global device activity, not an administrator
 # request. It must inherit a non-persistent context. Explicit admin-triggered
@@ -66,6 +135,16 @@ _IDENTITY_VISION_CONTEXT = ExecutionContext(
 def _normalize_context(context) -> ExecutionContext:
     """Direct Python calls are already trusted; HTTP always supplies a verified context."""
     return context if isinstance(context, ExecutionContext) else SYSTEM_CONTEXT
+
+
+async def require_intervening_service_context(
+    context: ExecutionContext = Depends(require_service_context),
+) -> ExecutionContext:
+    """A verified new user write takes priority over an ongoing activity."""
+    if context.origin_kind == "user_delegated" and context.expires_at > time.time():
+        from cloud.api.activity import user_intervention
+        await user_intervention()
+    return context
 
 
 def _cancel_pending_peer_requests(context: ExecutionContext) -> None:
@@ -218,7 +297,7 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
 
 
 @router.post("/connection")
-async def go2_connect(context: ExecutionContext = Depends(require_service_context)):
+async def go2_connect(context: ExecutionContext = Depends(require_intervening_service_context)):
     global _connect_task
     if go2.is_connected:
         return {"status": "connected"}
@@ -234,7 +313,7 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
     go2._last_error = None
 
     def _on_connect_done(t: asyncio.Task) -> None:
-        global _autonomy_mode, _connect_task
+        global _autonomy_mode, _activity_mode_owner, _connect_task
         _connect_task = None
         if t.cancelled():
             _publish_go2_state()
@@ -253,6 +332,7 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
 
         # 默认完全遥控，但已启用的身份消费者仍保持视觉检测。
         _autonomy_mode = "manual"
+        _activity_mode_owner = None
         if identity_skill.enabled:
             asyncio.create_task(_initialize_identity_vision())
         else:
@@ -267,13 +347,14 @@ async def go2_connect(context: ExecutionContext = Depends(require_service_contex
 
 
 @router.delete("/connection")
-async def go2_disconnect(context: ExecutionContext = Depends(require_service_context)):
-    global _autonomy_mode
+async def go2_disconnect(context: ExecutionContext = Depends(require_intervening_service_context)):
+    global _autonomy_mode, _activity_mode_owner
     from cloud.peers.gateway import cancel_pending
     cancel_pending(initiator_unit_id="go2", reason="mode_changed")
     await go2.disconnect()
     _configure_vision_consumers("manual")
     _autonomy_mode   = "manual"
+    _activity_mode_owner = None
     _publish_go2_card()
     _publish_go2_state()
     _publish_go2_status()
@@ -316,6 +397,17 @@ async def go2_video_snapshot(context=Depends(require_authenticated_read)):
     )
 
 
+@router.get("/activity-media/{activity_id}/{question_id}")
+async def go2_activity_media(activity_id: str, question_id: str,
+                             context=Depends(require_authenticated_read)):
+    """Serve a captured question frame to an authenticated space member."""
+    from cloud.go2.activity_media import load_snapshot
+    frame = load_snapshot(activity_id, question_id)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
 @router.get("/connection/stream")
 async def go2_state(context=Depends(require_authenticated_read)):
     async def sse_gen():
@@ -356,7 +448,7 @@ class VelocityRequest(BaseModel):
 
 
 @router.post("/commands")
-async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(require_service_context)):
+async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     cmd = req.action or req.cmd
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
@@ -379,7 +471,7 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
 
 
 @router.post("/velocity")
-async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends(require_service_context)):
+async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     """WIRELESS_CONTROLLER 速度控制，无 ack，适合摇杆实时输入。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -432,7 +524,7 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 
 
 @router.post("/chat")
-async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
+async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     from cloud.go2.multitask import run_go2_loop
     context = _normalize_context(context)
     if req.trace_id is not None and not re.fullmatch(r"tr_[A-Fa-f0-9]{32}", req.trace_id):
@@ -494,7 +586,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
 
 
 @router.get("/tasks/{task_id}")
-async def go2_task_status(task_id: str, context: ExecutionContext = Depends(require_service_context)):
+async def go2_task_status(task_id: str, context: ExecutionContext = Depends(require_intervening_service_context)):
     from cloud.go2.tasks import chat_tasks
     from cloud.go2.multitask import get_store, _result
     context = _normalize_context(context)
@@ -510,7 +602,7 @@ async def go2_task_status(task_id: str, context: ExecutionContext = Depends(requ
 
 @router.post("/tasks/{task_id}/resume")
 async def go2_task_resume(task_id: str, req: ChatRequest,
-                          context: ExecutionContext = Depends(require_service_context)):
+                          context: ExecutionContext = Depends(require_intervening_service_context)):
     from cloud.go2.multitask import run_go2_loop
     context = _normalize_context(context)
     return await run_go2_loop(context.session_id, req.message, context=context,
@@ -518,7 +610,7 @@ async def go2_task_resume(task_id: str, req: ChatRequest,
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(require_service_context)):
+async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(require_intervening_service_context)):
     from cloud.go2.tasks import chat_tasks
     context = _normalize_context(context)
     record = chat_tasks.get(task_id, context.session_id)
@@ -529,7 +621,7 @@ async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(requ
 
 
 @router.post("/chat/stream")
-async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
+async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
     from cloud.go2.multitask import run_go2_loop
 
@@ -648,7 +740,7 @@ class PersonalityRequest(BaseModel):
 
 
 @router.post("/navigation/locations")
-async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = Depends(require_service_context)):
+async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
     if not go2.is_connected:
@@ -669,7 +761,7 @@ async def nav_list_locations(context=Depends(require_authenticated_read)):
 
 
 @router.delete("/navigation/locations/{name}")
-async def nav_delete_location(name: str, context: ExecutionContext = Depends(require_service_context)):
+async def nav_delete_location(name: str, context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
     from cloud.go2.agentcore.memory import spatial as spatial_memory
@@ -681,7 +773,7 @@ async def nav_delete_location(name: str, context: ExecutionContext = Depends(req
 
 
 @router.post("/navigation/go")
-async def nav_go(req: NavigateRequest, context: ExecutionContext = Depends(require_service_context)):
+async def nav_go(req: NavigateRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
@@ -693,7 +785,7 @@ async def nav_go(req: NavigateRequest, context: ExecutionContext = Depends(requi
 
 
 @router.post("/navigation/patrol")
-async def nav_start_patrol(req: PatrolRequest, context: ExecutionContext = Depends(require_service_context)):
+async def nav_start_patrol(req: PatrolRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     if not req.stops:
@@ -708,7 +800,7 @@ async def nav_start_patrol(req: PatrolRequest, context: ExecutionContext = Depen
 
 
 @router.delete("/navigation/patrol")
-async def nav_stop(context: ExecutionContext = Depends(require_service_context)):
+async def nav_stop(context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     from cloud.go2.navigation.navigator import navigator
     stopped = navigator.stop(owner_session_id=context.session_id)
@@ -719,14 +811,15 @@ async def nav_stop(context: ExecutionContext = Depends(require_service_context))
 
 
 @router.post("/stop")
-async def emergency_stop(context: ExecutionContext = Depends(require_service_context)):
+async def emergency_stop(context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
-    global _autonomy_mode
+    global _autonomy_mode, _activity_mode_owner
     from cloud.peers.gateway import cancel_pending
     cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     from cloud.go2.navigation.navigator import navigator
     navigator.stop()
     _autonomy_mode = "manual"
+    _activity_mode_owner = None
     _configure_vision_consumers(_autonomy_mode)
     if go2.is_connected:
         go2.stop_velocity()
@@ -741,7 +834,7 @@ async def go2_control_lease(context=Depends(require_authenticated_read)):
 
 
 @router.post("/control/lease/heartbeat")
-async def go2_control_lease_heartbeat(context: ExecutionContext = Depends(require_service_context)):
+async def go2_control_lease_heartbeat(context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     try:
         return asdict(control_lease.heartbeat(context))
@@ -760,7 +853,7 @@ async def nav_state(context=Depends(require_authenticated_read)):
 
 
 @router.put("/led")
-async def set_led(req: LedRequest, context: ExecutionContext = Depends(require_service_context)):
+async def set_led(req: LedRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     try:
@@ -791,8 +884,8 @@ async def go2_autonomy_get(context=Depends(require_authenticated_read)):
 
 
 @router.put("/autonomy")
-async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Depends(require_service_context)):
-    global _autonomy_mode
+async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
+    global _autonomy_mode, _activity_mode_owner
     context = _normalize_context(context)
     _require_admin_persist(context)
     if req.mode not in ("manual", "reactive", "free_explore"):
@@ -804,6 +897,7 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
         cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous",
                        reason="mode_changed")
     if req.mode == _autonomy_mode:
+        _activity_mode_owner = None
         return {"ok": True, "mode": _autonomy_mode}
 
     if req.mode == "manual":
@@ -814,6 +908,7 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
         logging.info("[Go2] 自主模式 → 自由探索")
 
     _autonomy_mode = req.mode
+    _activity_mode_owner = None
     _configure_vision_consumers(_autonomy_mode, owner_session_id=context.session_id, context=context)
     return {"ok": True, "mode": _autonomy_mode}
 
@@ -826,7 +921,7 @@ async def go2_identity_get(context=Depends(require_authenticated_read)):
 
 
 @router.post("/identity/recognize")
-async def go2_identity_recognize(context: ExecutionContext = Depends(require_service_context)):
+async def go2_identity_recognize(context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     with use_context(context):
         snapshot = await identity_skill.recognize_now()
@@ -842,7 +937,7 @@ async def go2_personality_get(context=Depends(require_admin_read)):
 
 
 @router.post("/personality")
-async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_service_context)):
+async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
     from cloud.go2.agentcore.soul import set_personality
@@ -885,7 +980,7 @@ async def go2_debug_voxel_map(context=Depends(require_admin_read)):
 
 
 @router.put("/navigation/home")
-async def nav_set_home(context: ExecutionContext = Depends(require_service_context)):
+async def nav_set_home(context: ExecutionContext = Depends(require_intervening_service_context)):
     """把当前位置重新标记为 home。"""
     context = _normalize_context(context)
     _require_admin_persist(context)
@@ -901,7 +996,7 @@ async def nav_set_home(context: ExecutionContext = Depends(require_service_conte
 
 
 @router.post("/navigation/home/go")
-async def nav_go_home(context: ExecutionContext = Depends(require_service_context)):
+async def nav_go_home(context: ExecutionContext = Depends(require_intervening_service_context)):
     """归位：导航回 home 点。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")

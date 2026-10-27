@@ -9,6 +9,7 @@ from typing import Any
 from cloud.cards.registry import CardRegistry, get_registry
 from cloud.peers.view import STATE_MAX_AGE_S, list_peers
 from cloud.space.constraints import ConstraintStore, get_constraint_store
+from cloud.space.activity import get_activity_store
 
 _VALUES = ("ism", "fsm_state", "connected", "battery_soc", "brightness",
            "r", "g", "b", "value", "level", "detected", "presence")
@@ -61,5 +62,12 @@ def get_space_context(
             if len(environment) >= _MAX_UNITS:
                 break
             environment.append(_summarize(source, entry, instant))
+    current = get_activity_store().current(space_id="main")
+    activity = None
+    if current and current.get("status") in {"starting", "active", "partial"}:
+        activity = {key: current[key] for key in
+                    ("activity_id", "space_id", "context", "started_at", "revision", "status")
+                    if key in current}
     return {"peers": peers, "environment": environment,
-            "constraints": requirements.list_for(unit_id, now=instant)}
+            "constraints": requirements.list_for(unit_id, now=instant),
+            "activity": activity}

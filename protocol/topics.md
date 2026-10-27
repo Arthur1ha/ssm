@@ -87,11 +87,19 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 |-------|--------|------|
 | `ssm/space/main/constraints/current` | 编排器（已验证用户意图，retained + QoS 1） | 签名 JSON `{space_id,revision,issued_at,constraints:[...]}`；每项含 `constraint_id`、`text`、`source_session_id`、`targets`（成员 ID 或 `*`）、`issued_at`、`expires_at`。空列表清除要求。接收端验证签名并按有效期过滤；同伴消息不能创建此类要求。 |
 
+### 空间活动（当前状态，retained）
+
+| Topic | 发布者 | 格式 |
+|-------|--------|------|
+| `ssm/space/{space_id}/activity/current` | API（已验证用户请求，retained + QoS 1） | HMAC 签名 JSON `{space_id,revision,activity,ts,_mqtt_auth}`。`activity` 包含 `activity_id`、用户原话 `context`、`started_at`、`status`（`starting/active/partial/ending`）、每设备实际模式和归属；结束时用更高 `revision` 发布 `activity:null`。活动没有 `expires_at`；旧快照不能覆盖更高版本，也不能凭 retained 快照重发物理动作。 |
+
+API 在 `/api/intents` 签名正文加入 `user_revision`，编排器启动活动时必须带原 `event_id` 和该版本调用内部受控入口。用户再次介入后版本递增，旧模型运行的启动请求被拒绝。活动过程通过同空间 `/api/events` SSE 发送 `type=activity` 事件并保留有界记录；每条带 `event_id`、`activity_id`、`ts`、`event_type`，按类型附 `unit_id`、`message_id/conversation_id`、`task_id`、`media_ref`。图片通过 HTTP 数据面取，MQTT 当前状态和设备消息中不嵌原图。
+
 ### 智能体定向消息（内部，非 retained）
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/agents/{target_unit_id}/message` | 灯、Go2、编排器所在云端进程 | HMAC 签名 JSON；正文消息含 `kind=message`、`message_id`、`conversation_id`、`reply_to`、`reply_kind`、`sender`、`target`、`content`、`deadline`、`round`。同一主题的 `received`、`progress`、`result` 消息引用原 `message_id`；进度带 `task_id`，最终结果带 `result` 与可选 `reason`。收信端校验签名、同空间成员、目标在线、截止时间、长度和重放。QoS 1；投递成功仅表示发出，不表示目标答应或动作完成。 |
+| `ssm/agents/{target_unit_id}/message` | 灯、Go2、编排器所在云端进程 | HMAC 签名 JSON；正文消息含 `kind=message`、`message_id`、`conversation_id`、`reply_to`、`reply_kind`、`sender`、`target`、`content`、`deadline`、`round`，活动期间另带 `activity_id` 供当前活动过程关联。同一主题的 `received`、`progress`、`result` 消息引用原 `message_id`；进度带 `task_id`，最终结果带 `result` 与可选 `reason`。收信端校验签名、同空间成员、目标在线、截止时间、长度和重放。QoS 1；投递成功仅表示发出，不表示目标答应或动作完成。 |
 
 运行期按消息 ID 跟踪 `waiting_reply`、`waiting_start`、`waiting_result` 与最终结果。接收者受理物理任务后必须回传原 `task_id`，完成后回传最终结果。结果丢失时按原任务 ID 查询，不重新发布动作。消息不走 `request_peer_skill` 的任务网关，也不授予设备或用户权限。
 

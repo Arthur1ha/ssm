@@ -285,6 +285,27 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
              "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
              "step_id": step_id or None, "source": source,
              "text": text.strip(), "ts": time.time(), **facts}
+    if scope == "space" and source == "autonomous" and agent_id in {"go2", "esp32_desk_led"}:
+        from cloud.space.activity import get_activity_store
+        activity = get_activity_store().current(space_id)
+        activity_id = activity.get("activity_id") if activity else None
+        if activity_id:
+            if agent_id == "go2":
+                from cloud.go2.router import get_activity_mode_owner
+            else:
+                from cloud.esp32.router import get_activity_mode_owner
+            if get_activity_mode_owner() == activity_id:
+                event["activity_id"] = activity_id
+                if event_type == "agent_reply":
+                    get_activity_store().record_event(activity_id, "message", unit_id=agent_id,
+                                                      text=event["text"], status=status)
+                elif event_type == "agent_progress" and agent_id == "esp32_desk_led":
+                    kind = ("action_result" if status in {"ok", "error", "blocked", "cancelled",
+                                                           "timeout", "rejected", "unknown"}
+                            else "action_progress")
+                    get_activity_store().record_event(activity_id, kind, unit_id=agent_id,
+                                                      text=event["text"], status=status,
+                                                      task_id=step_id or run_id)
     if scope == "space":
         _events.emit_space(space_id, event)
     else:
@@ -415,11 +436,14 @@ async def create_intent(
             else:
                 previous.trace_id = trace_id
                 store.save(previous)
+    from cloud.api.activity import user_intervention
+    user_revision = await user_intervention(event_id)
     payload: dict[str, Any] = {
         "text": req.text,
         "context": _context(session),
         "event_id": event_id,
         "trace_id": trace_id,
+        "user_revision": user_revision,
     }
     if req.intent_hint:
         payload["intent_hint"] = req.intent_hint
@@ -433,7 +457,7 @@ async def create_intent(
                      entry="/api/intents", event_id=event_id)
     _mqtt_publish_signed(f"ssm/intent/{session['session_id']}", payload)
     return {"accepted": True, "event_id": event_id, "trace_id": trace_id,
-            "session_id": session["session_id"]}
+            "session_id": session["session_id"], "user_revision": user_revision}
 
 
 def _configured_card(unit_id: str) -> dict[str, Any] | None:
@@ -660,6 +684,8 @@ async def create_command(
 ):
     if "/" in unit_id or not unit_id.strip():
         raise HTTPException(status_code=400, detail="invalid unit id")
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     from cloud.peers.gateway import cancel_pending
     cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     if unit_id == "go2":
@@ -746,6 +772,8 @@ async def resume_go2_command_task(task_id: str, req: CommandRequest,
     message = str(req.params.get("message") or "").strip()
     if req.action.lower() != "chat" or not message:
         raise HTTPException(status_code=400, detail="chat requires message")
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     return await _internal_request(f"/api/go2/tasks/{task_id}/resume", "POST", session,
                                    {"message": message})
 
@@ -775,11 +803,15 @@ async def get_lamp_command_task(unit_id: str, task_id: str,
 async def cancel_go2_command_task(task_id: str, session: dict[str, Any] = Depends(require_csrf)):
     if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     return await _internal_request(f"/api/go2/tasks/{task_id}/cancel", "POST", session, {})
 
 
 @router.post("/api/emergency-stop")
 async def emergency_stop(session: dict[str, Any] = Depends(require_csrf)):
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     from cloud.peers.gateway import cancel_pending
     cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     result = await _internal_request("/api/go2/stop", "POST", session, {})

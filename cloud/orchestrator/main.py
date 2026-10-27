@@ -28,6 +28,7 @@ from cloud.orchestrator.multitask import build_intent_run_context, run_intent_lo
 from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message
 from cloud.peers.messaging import AgentMessenger
 from cloud.space.constraints import CURRENT_CONSTRAINTS_TOPIC, get_constraint_store
+from cloud.space.activity import CURRENT_ACTIVITY_TOPIC, get_activity_store
 from cloud.space.registry import get_space_registry
 from trusted_context import (
     TrustedContextError,
@@ -193,6 +194,7 @@ def _subscribe_and_announce(client):
         ("ssm/peer/cancel/+", 0),
         ("ssm/agents/+/message", 0),
         (CURRENT_CONSTRAINTS_TOPIC, 0),
+        (CURRENT_ACTIVITY_TOPIC, 0),
     ])
     # card 和 manifest topic 由 CardRegistry 统一订阅
     registry.subscribe(client)
@@ -219,6 +221,9 @@ def on_message(client, userdata, msg):
         return
     if topic == CURRENT_CONSTRAINTS_TOPIC:
         get_constraint_store().handle_message(topic, raw)
+        return
+    if topic == CURRENT_ACTIVITY_TOPIC:
+        get_activity_store().handle_message(topic, raw)
         return
     try:
         payload = json.loads(raw)

@@ -141,6 +141,15 @@ def _skill_policy(initiator: str, target: str, skill_id: str, params: dict, orig
                 return
             raise PermissionError("Go2 peer movement requires bounded direction, duration and speed")
         allowed = {"Hello"} if origin == "agent_autonomous" else {"Hello", "Dance1", "Dance2"}
+        if origin == "agent_autonomous":
+            from cloud.space.activity import get_activity_store
+            from cloud.go2.router import get_activity_mode_owner as go2_owner
+            from cloud.esp32.router import get_activity_mode_owner as lamp_owner
+            activity = get_activity_store().current()
+            activity_id = activity.get("activity_id") if activity else None
+            if activity_id and go2_owner() == activity_id and (
+                    initiator == "go2" or lamp_owner() == activity_id):
+                allowed |= {"Dance1", "Dance2"}
         if skill_id != "go2_sport" or params.get("cmd") not in allowed:
             raise PermissionError("Go2 peer motion is outside the permitted skill set")
         return

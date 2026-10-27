@@ -41,6 +41,13 @@ cloud/go2/agentcore/traits.json
 .claude/
 .vscode/
 docs/
+!docs/
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+docs/superpowers/plans/*
+!docs/superpowers/plans/2026-10-27-space-activity-lifecycle.md
 paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin
@@ -70,6 +77,7 @@ cloud/space/space.json
 !cloud/api/tests/
 !cloud/api/tests/test_lamp_chat.py
 !cloud/api/tests/test_lamp_task_query.py
+!cloud/api/tests/test_activity_lifecycle.py
 !cloud/cards/tests/
 !cloud/cards/tests/test_contract_v1.py
 !cloud/peers/tests/
@@ -90,6 +98,7 @@ cloud/orchestrator/tests/*
 !cloud/orchestrator/tests/test_peer_coordination.py
 !cloud/orchestrator/tests/test_tools_context.py
 !cloud/orchestrator/tests/test_multitask_dispatch.py
+!cloud/orchestrator/tests/test_multitask_empty_response.py
 !cloud/observability/tests/
 !cloud/observability/tests/test_events.py
 !cloud/observability/tests/test_loop_trace.py

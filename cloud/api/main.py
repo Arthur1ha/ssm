@@ -35,6 +35,7 @@ from cloud.api.rules import router as rules_router
 from cloud.api.people import router as people_router
 from cloud.api.devices import router as devices_router
 from cloud.api.sessions import router as sessions_router
+from cloud.api.activity import router as activity_router, reconcile_current_activity
 from cloud.api import intents as intents_module
 from cloud.api.intents import router as intents_router
 from cloud.cards.registry import get_registry
@@ -42,6 +43,8 @@ from cloud.peers import gateway as peer_gateway
 from cloud.peers.messaging import AgentMessenger
 from cloud.peers.inbound import handle_api_peer_message
 from cloud.space.constraints import CURRENT_CONSTRAINTS_TOPIC, get_constraint_store
+from cloud.space.activity import CURRENT_ACTIVITY_TOPIC, get_activity_store
+from cloud.mqtt_signing import sign_message
 from cloud.space.registry import get_space_registry
 
 _esp32_state: ESP32State = ESP32State()
@@ -70,6 +73,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
             ("ssm/peer/result/+",   0),
             ("ssm/agents/+/message", 0),
             (CURRENT_CONSTRAINTS_TOPIC, 0),
+            (CURRENT_ACTIVITY_TOPIC, 0),
         ])
         # card 和 manifest topic 由 CardRegistry 统一管理订阅
         get_registry().subscribe(client)
@@ -91,6 +95,7 @@ def _on_esp32_message(client, userdata, msg):
     # CardRegistry 处理 card 和 manifest topic（更新设备注册表）
     get_registry().handle_message(topic, raw)
     get_constraint_store().handle_message(topic, raw)
+    get_activity_store().handle_message(topic, raw)
     if _agent_messenger is not None and _agent_messenger.handle_message(topic, raw):
         return
     if peer_gateway.handle_peer_result(topic, raw):
@@ -101,6 +106,20 @@ def _on_esp32_message(client, userdata, msg):
     if len(parts) == 4 and parts[0] == "ssm" and parts[1] == "agents":
         unit_id  = parts[2]
         msg_type = parts[3]
+        if msg_type == "status" and raw.strip() != "online":
+            activity = get_activity_store().current()
+            if activity:
+                from cloud.space.registry import card_device_id
+                for card in get_registry().get_all_cards():
+                    member = card.get("unit_id")
+                    state = activity.get("devices", {}).get(member)
+                    if (state and state.get("status") == "joined"
+                            and (member == unit_id or card_device_id(card) == unit_id)):
+                        get_activity_store().set_device(
+                            activity["activity_id"], member, mode=state.get("mode", ""),
+                            status="offline", owner=state.get("owner", ""),
+                            error="device_offline")
+                        get_activity_store().activate(activity["activity_id"])
         if unit_id == "go2" and msg_type == "status":
             online = raw.strip() == "online"
             if not online:
@@ -170,6 +189,15 @@ async def lifespan(app):
     _esp32_mqtt_client.reconnect_delay_set(min_delay=5, max_delay=30)
     go2_router_module.init_mqtt(_esp32_mqtt_client)
     intents_module.init_mqtt(_esp32_mqtt_client)
+    def publish_activity(snapshot):
+        signed = sign_message(CURRENT_ACTIVITY_TOPIC, snapshot)
+        info = _esp32_mqtt_client.publish(CURRENT_ACTIVITY_TOPIC,
+                                          json.dumps(signed, ensure_ascii=False), qos=1, retain=True)
+        if getattr(info, "rc", 0) != 0:
+            raise RuntimeError("failed to publish retained activity")
+
+    get_activity_store().configure(publish=publish_activity,
+                                   emit=lambda event: intents_module._events.emit_space(event["space_id"], event))
     peer_gateway.init(_esp32_mqtt_client, _esp32_state)
     _agent_messenger = AgentMessenger(
         _esp32_mqtt_client, get_registry(), get_space_registry(),
@@ -193,6 +221,12 @@ async def lifespan(app):
     agent = esp32_agent_mod.init(_esp32_state)
     agent.start()
 
+    async def reconcile_activity_once():
+        await asyncio.sleep(2)
+        await reconcile_current_activity()
+
+    activity_reconcile = asyncio.create_task(reconcile_activity_once())
+
     async def publish_go2_heartbeat():
         while True:
             await asyncio.sleep(30)
@@ -203,6 +237,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        activity_reconcile.cancel()
         go2_heartbeat.cancel()
         try:
             await go2_heartbeat
@@ -213,6 +248,7 @@ async def lifespan(app):
         _esp32_mqtt_client.loop_stop()
         _esp32_mqtt_client.disconnect()
         intents_module.init_mqtt(None)
+        get_activity_store().configure()
         peer_gateway.shutdown()
         if _agent_messenger is not None:
             _agent_messenger.close()
@@ -229,6 +265,7 @@ app.include_router(rules_router)
 app.include_router(devices_router)
 app.include_router(sessions_router)
 app.include_router(intents_router)
+app.include_router(activity_router)
 
 _allowed_origins = [
     origin.strip() for origin in os.getenv("SSM_ALLOWED_ORIGINS", "").split(",") if origin.strip()

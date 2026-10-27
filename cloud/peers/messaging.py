@@ -130,10 +130,21 @@ class AgentMessenger:
                 "sender": sender, "target": target, "content": content.strip(),
                 "deadline": expires, "round": round_number,
             }
+            from cloud.space.activity import get_activity_store
+            activity = get_activity_store().current()
+            if activity:
+                payload["activity_id"] = activity["activity_id"]
             if not self._publish(payload):
                 return {"result": "error", "error": "mqtt_publish_failed"}
             self._outgoing[message_id] = {**payload, "state": "waiting_reply", "received": False,
                                           "task_id": None, "result": None, "updated_at": now}
+            if payload.get("activity_id") and "cloud_orchestrator" not in self._local_ids:
+                from cloud.space.activity import get_activity_store
+                get_activity_store().record_event(
+                    payload["activity_id"], "message", unit_id=sender,
+                    text=payload["content"], target_unit_id=target,
+                    message_id=message_id, conversation_id=payload["conversation_id"],
+                    reply_to=reply_to, reply_kind=reply_kind)
         return {"result": "accepted", "message_id": message_id,
                 "conversation_id": payload["conversation_id"], "state": "waiting_reply"}
 
@@ -262,6 +273,14 @@ class AgentMessenger:
                     return True
                 self._seen[message_id] = now
                 self._inbound[message_id] = dict(payload)
+                if (payload.get("activity_id") and "cloud_orchestrator" not in self._local_ids
+                        and sender not in self._local_ids):
+                    from cloud.space.activity import get_activity_store
+                    get_activity_store().record_event(
+                        payload["activity_id"], "message", unit_id=sender,
+                        text=content.strip(), target_unit_id=target,
+                        message_id=message_id, conversation_id=conversation_id,
+                        reply_to=reply_to, reply_kind=payload["reply_kind"])
                 self._publish({"kind": "received", "message_id": message_id,
                                "conversation_id": conversation_id, "sender": target,
                                "target": sender, "deadline": deadline})
@@ -282,6 +301,12 @@ class AgentMessenger:
                 if prior["task_id"] not in (None, task_id):
                     return True
                 prior["task_id"], prior["state"] = task_id, "waiting_result"
+                if prior.get("activity_id") and "cloud_orchestrator" not in self._local_ids:
+                    from cloud.space.activity import get_activity_store
+                    get_activity_store().record_event(
+                        prior["activity_id"], "action_progress", unit_id=sender,
+                        text="设备已接收动作请求", task_id=task_id,
+                        message_id=message_id, status="accepted")
             else:
                 result = payload.get("result")
                 task_id = payload.get("task_id")
@@ -292,6 +317,13 @@ class AgentMessenger:
                     return True
                 prior["task_id"], prior["state"], prior["result"] = (
                     task_id or prior["task_id"], result, {"result": result, "reason": payload.get("reason")})
+                if prior.get("activity_id") and "cloud_orchestrator" not in self._local_ids:
+                    from cloud.space.activity import get_activity_store
+                    get_activity_store().record_event(
+                        prior["activity_id"], "action_result", unit_id=sender,
+                        text=str(payload.get("reason") or result),
+                        task_id=task_id or prior["task_id"],
+                        message_id=message_id, status=result)
             prior["updated_at"] = now
             if kind in {"progress", "result"}:
                 self._workers.submit(self._on_message, dict(payload))

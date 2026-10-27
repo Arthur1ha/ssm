@@ -24,6 +24,8 @@ function App({ session, logout, refreshSession }) {
     connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
   const recentEvents = useSpaceActivity(agents);
+  const { activity: currentActivity, events: activityEvents, ending: activityEnding,
+    error: activityError, endActivity } = useActivityTimeline();
   const { thinking, send } = useSendIntent();
   const currentHash = useHashLocal();
 
@@ -39,6 +41,7 @@ function App({ session, logout, refreshSession }) {
   const [peopleOpen,  setPeopleOpen]  = useState(false);
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const [deviceNotice, setDeviceNotice] = useState('');
+  const [activityQuestion, setActivityQuestion] = useState(null);
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
 
@@ -79,6 +82,7 @@ function App({ session, logout, refreshSession }) {
       const item = event.detail || {};
       if (item.type !== 'agent_reply' || !item.text) return;
       if (item.scope === 'space' && item.source === 'autonomous') {
+        if (item.activity_id && item.activity_id === currentActivity?.activity_id) return;
         appendReply(item);
       } else if (item.scope === 'session'
           && ['orchestrator', 'delegated_skill'].includes(item.source)) {
@@ -88,7 +92,7 @@ function App({ session, logout, refreshSession }) {
     };
     apiClient.addEventListener('server-event', onEvent);
     return () => apiClient.removeEventListener('server-event', onEvent);
-  }, []);
+  }, [currentActivity?.activity_id]);
   const ready = !loadingAgents;
   const hasDevices = ready && agents.length > 0;
   const suggestions = hasDevices ? SUGGESTIONS : [];
@@ -218,6 +222,13 @@ function App({ session, logout, refreshSession }) {
           {!loadingAgents && !agentsError && !hasDevices &&
             <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}
 
+          <SpaceActivityFeed activity={currentActivity} events={activityEvents}
+            ending={activityEnding} error={activityError} onEnd={endActivity}
+            onAnswer={event => {
+              setActivityQuestion(event);
+              navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
+            }}/>
+
           {activityLog.length > 0 && (
             <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
               <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
@@ -316,6 +327,8 @@ function App({ session, logout, refreshSession }) {
             liveState={unitData[displayUid]}
             onBack={() => handleBack(displayUid)}
             actor={session.actor}
+            activityQuestion={activityQuestion?.unit_id === displayUid &&
+              activityQuestion.activity_id === currentActivity?.activity_id ? activityQuestion : null}
           />
         </div>
       )}

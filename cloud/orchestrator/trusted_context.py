@@ -94,6 +94,9 @@ def parse_trusted_intent(
     if trace_id is not None and (not isinstance(trace_id, str)
                                  or re.fullmatch(r"tr_[A-Fa-f0-9]{32}", trace_id) is None):
         raise TrustedContextError("invalid trace_id")
+    user_revision = unsigned.get("user_revision")
+    if user_revision is not None and (type(user_revision) is not int or user_revision < 1):
+        raise TrustedContextError("invalid user_revision")
 
     return {
         "session_id": session_id,
@@ -107,6 +110,7 @@ def parse_trusted_intent(
         "intent_hint": unsigned.get("intent_hint", ""),
         "device_hint": unsigned.get("device_hint", ""),
         "event_id": unsigned.get("event_id", ""),
+        "user_revision": user_revision,
         "trace_id": trace_id or unsigned.get("event_id", ""),
         "resume_run_id": resume_run_id,
     }

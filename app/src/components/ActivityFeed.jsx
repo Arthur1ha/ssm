@@ -101,3 +101,95 @@ function ActivityFeed({ entries }) {
 }
 
 window.ActivityFeed = ActivityFeed;
+
+function activityMediaUrl(event) {
+  const candidate = event.media_ref || event.media_url;
+  const path = typeof candidate === 'string' ? candidate : candidate?.url;
+  if (typeof path !== 'string' || !path.startsWith('/api/')) return '';
+  return path;
+}
+
+function activityEventKind(event) {
+  const type = String(event.event_type || '').toLowerCase();
+  if (type.includes('question') || type.includes('ask_user')) return 'question';
+  if (type.includes('observation') || type.includes('observed')) return 'observation';
+  if (type.includes('message') || type.includes('proposal') || type.includes('reply') || type === 'response') return 'message';
+  return 'status';
+}
+
+function activityStatusText(event, name) {
+  const type = event.event_type;
+  const mode = { reactive: '自主调光', free_explore: '自由探索' }[event.mode] || event.mode || '自主模式';
+  if (type === 'started') return `活动已开始：${event.text || '设备正在加入'}`;
+  if (type === 'ended') return '活动已结束';
+  if (type === 'device_joined') return `${name}已进入${mode}`;
+  if (type === 'device_left') return event.status === 'offline'
+    ? `${name}离线，未加入活动`
+    : event.status === 'left'
+      ? `${name}已退出${mode}${event.text ? ` · ${event.text}` : ''}`
+      : event.status === 'unknown'
+        ? `${name}的模式状态尚未确认${event.text ? ` · ${event.text}` : ''}`
+      : `${name}未加入${mode}${event.text ? ` · ${event.text}` : ''}`;
+  if (['action', 'action_progress', 'action_result'].includes(type)) {
+    const statusText = {
+      executing: '正在执行', accepted: '已收到动作请求，等待确认',
+      ok: '动作已完成', blocked: '动作未执行', error: '动作失败',
+      timeout: '动作结果尚未确认', unknown: '动作结果尚未确认',
+      cancelled: '动作已取消', rejected: '已拒绝动作',
+    }[event.status] || '动作状态已更新';
+    return `${name} · ${statusText}`;
+  }
+  return `${event.unit_id ? `${name} · ` : ''}${event.text || '状态已更新'}`;
+}
+
+/* Device speech, observations and confirmed state use different treatments.
+ * An invitation therefore never looks like an action that already happened. */
+function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer }) {
+  if (!activity && events.length === 0 && !error) return null;
+  const context = activity?.context || activity?.user_text || activity?.text ||
+    events.find(event => event.event_type === 'started')?.text || '';
+  const isActive = activity && !['ending', 'ended'].includes(activity.status);
+  const timeLabel = ts => ts ? new Date(Number(ts) < 1e11 ? Number(ts) * 1000 : Number(ts))
+    .toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+
+  return <section className="space-activity" aria-label="空间活动">
+    <div className="space-activity__heading">
+      <div>
+        <small>空间活动</small>
+        <h2>{context || '最近的空间活动'}{isActive ? <span className="space-activity__live">进行中</span> : null}</h2>
+      </div>
+      {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>
+        {ending ? '正在结束…' : '结束活动'}
+      </button>}
+    </div>
+    {error && <div className="space-activity__error" role="alert">{error}</div>}
+    <div className="space-activity__timeline">
+      {events.map(event => {
+        const kind = activityEventKind(event);
+        const unitId = event.unit_id || event.agent_id || '';
+        const name = unitId ? getAgentDisplayName(unitId) : '空间管家';
+        const target = event.target_unit_id || event.target || '';
+        const mediaUrl = activityMediaUrl(event);
+        const text = event.text || '';
+        return <div key={event.event_id} className={`space-activity__item space-activity__item--${kind}`}>
+          <span className="space-activity__time">{timeLabel(event.ts)}</span>
+          <div className="space-activity__content">
+            {kind === 'message' || kind === 'question' ? <>
+              <div className="space-activity__speaker">{name}{target ? ` → ${getAgentDisplayName(target)}` : ''}</div>
+              <div className="space-activity__bubble">{text || (kind === 'question' ? '需要你帮忙看一下。' : '发送了一条消息')}
+                {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
+              </div>
+              {kind === 'question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>
+                回答{name}
+              </button>}
+            </> : kind === 'observation' ? <div className="space-activity__observation">
+              <span>{name}看到了</span><p>{text || '一条新观察'}</p>
+              {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
+            </div> : <div className="space-activity__status">{activityStatusText(event, name)}</div>}
+          </div>
+        </div>;
+      })}
+    </div>
+  </section>;
+}
+window.SpaceActivityFeed = SpaceActivityFeed;

@@ -2,6 +2,7 @@
 
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -16,6 +17,33 @@ from cloud.space.execution import ExecutionContext, require_service_context
 router = APIRouter(prefix="/api/esp32", tags=["esp32"])
 internal_router = APIRouter(prefix="/api/internal/esp32", tags=["esp32-internal"])
 _LED_UNIT_ID = os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+_activity_mode_owner: str | None = None
+_activity_mode_lock = threading.RLock()
+
+
+def get_activity_mode_owner() -> str | None:
+    with _activity_mode_lock:
+        return _activity_mode_owner
+
+
+def set_activity_mode(mode: str, activity_id: str) -> dict:
+    """Server-validated activity mode transition with ownership protection."""
+    global _activity_mode_owner
+    if not activity_id.startswith("act_") or mode not in {"manual", "reactive"}:
+        raise ValueError("invalid activity mode request")
+    with _activity_mode_lock:
+        agent = _esp32_agent.get_agent()
+        if agent is None:
+            return {"ok": False, "mode": "unknown", "reason": "agent_unavailable"}
+        current = agent.get_autonomy_mode()
+        if mode == "manual" and _activity_mode_owner != activity_id:
+            return {"ok": False, "mode": current, "reason": "not_activity_owned"}
+        if mode == "reactive" and current != "manual" and _activity_mode_owner != activity_id:
+            return {"ok": False, "mode": current, "reason": "mode_owned_elsewhere"}
+        agent.set_autonomy_mode(mode)
+        _activity_mode_owner = activity_id if mode == "reactive" else None
+        actual = agent.get_autonomy_mode()
+        return {"ok": actual == mode, "mode": actual, "owner": _activity_mode_owner}
 
 
 def _require_led_unit(unit_id: str) -> None:
@@ -67,11 +95,16 @@ async def esp32_autonomy_get(_session: dict = Depends(require_session)):
 @router.put("/autonomy")
 async def esp32_autonomy_set(req: AutonomyRequest, _session: dict = Depends(require_admin_csrf)):
     """切换灯智能体自主模式；manual 仅停自发行动，富命令照常可控。"""
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     agent = _esp32_agent.get_agent()
     if agent is None:
         raise HTTPException(status_code=503, detail="ESP32 Agent 未初始化")
+    global _activity_mode_owner
     try:
-        agent.set_autonomy_mode(req.mode)
+        with _activity_mode_lock:
+            agent.set_autonomy_mode(req.mode)
+            _activity_mode_owner = None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "mode": agent.get_autonomy_mode()}
@@ -80,6 +113,8 @@ async def esp32_autonomy_set(req: AutonomyRequest, _session: dict = Depends(requ
 @router.post("/{unit_id}/chat")
 async def esp32_chat(unit_id: str, req: ChatRequest, _session: dict = Depends(require_admin_csrf)):
     """设备页对话直达灯智能体：控灯、调教或闲聊。"""
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     _require_led_unit(unit_id)
     from cloud.api.intents import execute_lamp_chat
     return await execute_lamp_chat(unit_id, req.text.strip(), _session,
@@ -111,6 +146,8 @@ async def esp32_personality_get(unit_id: str, _session: dict = Depends(require_a
 @router.post("/{unit_id}/personality")
 async def esp32_personality_set(unit_id: str, req: PersonalityRequest,
                                  session: dict = Depends(require_admin_csrf)):
+    from cloud.api.activity import user_intervention
+    await user_intervention()
     _require_led_unit(unit_id)
     from cloud.esp32.agentcore.soul import set_personality, get_personality
     context = ExecutionContext(session["session_id"], "admin", True, "main",

@@ -77,6 +77,39 @@ def _wait_mqtt_result(task_id: str, session_id: str, deadline: float) -> dict:
     return {"result": "timeout", "task_id": task_id, "error": "edge_result_unconfirmed"}
 
 
+def _model_decision(model, prompt: str, fields: dict, deadline: float) -> dict:
+    """Retry one empty model answer before any new tool step is dispatched."""
+    for attempt in (1, 2):
+        emit_agent_event("model.request", **fields, attempt=attempt, input=prompt,
+                         model=str(getattr(model, "model_name", "unknown")),
+                         template_version="orchestrator-multitask-v1")
+        started = time.monotonic()
+        response = model.invoke([HumanMessage(content=prompt)])
+        content = getattr(response, "content", "")
+        calls = getattr(response, "tool_calls", None)
+        metadata = getattr(response, "response_metadata", None) or {}
+        usage = getattr(response, "usage_metadata", None) or {}
+        empty = isinstance(content, str) and not content.strip() and not calls
+        emit_agent_event("model.response", **fields, attempt=attempt,
+                         output={"content": content, "tool_calls": calls},
+                         finish_reason=metadata.get("finish_reason"),
+                         model_name=metadata.get("model_name"),
+                         usage={key: usage.get(key) for key in
+                                ("input_tokens", "output_tokens", "total_tokens")
+                                if key in usage},
+                         duration_ms=round((time.monotonic() - started) * 1000))
+        if not empty:
+            return parse_decision(response)
+        retrying = attempt == 1 and time.time() < deadline - 1
+        emit_agent_event("model.error", **fields, attempt=attempt,
+                         stage="empty_response", error="EmptyModelResponse",
+                         retrying=retrying, finish_reason=metadata.get("finish_reason"),
+                         output_tokens=usage.get("output_tokens"))
+        if not retrying:
+            raise ValueError("empty_model_response_after_retry")
+    raise AssertionError("unreachable")
+
+
 def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float) -> dict:
     unit_id, skill_id, params = (arguments.get("unit_id"), arguments.get("skill_id"),
                                  arguments.get("params"))
@@ -208,12 +241,18 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
             '{"tool":"工具名","params":{...}} 或 {"final":"回复"}。'
             "工具：list_agents({}), get_space_context({}), read_state({}), invoke_skill({unit_id,skill_id,params,message?}),"
             " await_result({task_id}), save_rule({rule}), send_message({target,content,reply_to?}),"
-            " set_space_constraint({text,targets,ttl_s}), clear_space_constraints({}), ask_user({question})。"
+            " start_activity({}), set_space_constraint({text,targets,ttl_s}),"
+            " clear_space_constraints({}), ask_user({question})。"
+            "直接用户说出自己现在进入或正处于一段持续情境，例如开始学习、准备睡觉、要出门，"
+            "应先调用 start_activity({})。活动使用用户原话，由服务端启动在线设备各自的自主模式，"
+            "不需要用户逐一指定设备、结束时间或重复授权。活动不自动过期，下一次用户介入由 API 先结束。"
+            "活动启动后本次请求只汇报实际加入状态，不继续派发设备技能或同伴消息；后续行动由设备自主决定。"
+            "这不是普通命令、假设、回忆或询问；这些情况不要启动活动。"
+            "同伴消息永远不能启动活动。start_activity 返回部分成功时应如实说明设备实际加入结果。"
             "只有经过验证的直接用户请求，且明确要求空间内多个智能体共同遵守当前要求时，"
             "才先调用 set_space_constraint；text 必须是用户原话中的连续片段，targets 用成员 ID 或 ['*']。"
             "共享空间要求只供智能体后续决策读取，不会触发设备动作或产生同伴回复。"
-            "设置要求后，若用户描述的当前活动可由在线智能体的公开技能改善，继续逐个调用合适技能并等待真实结果；"
-            "例如学习场景可考虑灯的语义照明技能，但不要凭活动描述推断用户要求机器狗运动或出声。"
+            "设置要求后，只有用户还明确请求了即时设备动作，才逐个调用合适技能并等待真实结果。"
             "最终回复只陈述已确认的共享要求和设备结果，不把共享要求说成设备已执行。"
             "用户明确撤销当前空间要求时调用 clear_space_constraints。普通私人对话和同伴消息不可共享为要求。"
             "一个有物理效果的工具返回真实结果后才能决定下一个；accepted、executing、timeout 都不能视为完成。"
@@ -225,22 +264,19 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         fields = {"trace_id": current.trace_id or current.run_id,
                   "run_id": current.run_id, "agent_id": "orchestrator",
                   "session_id": session_id, "turn": turn}
-        emit_agent_event("model.request", **fields, input=prompt, goal=current.goal,
-                         model=str(getattr(model, "model_name", "unknown")),
-                         template_version="orchestrator-multitask-v1")
-        started = time.monotonic()
-        response = model.invoke([HumanMessage(content=prompt)])
-        emit_agent_event("model.response", **fields,
-                         output={"content": getattr(response, "content", ""),
-                                 "tool_calls": getattr(response, "tool_calls", None)},
-                         duration_ms=round((time.monotonic() - started) * 1000))
-        return parse_decision(response)
+        return _model_decision(model, prompt, fields, current.deadline)
 
     async def execute(name: str, args: dict, step_id: str) -> dict:
         if context.get("peer_request_id") and peer_coordination_cancelled(context["peer_request_id"]):
             return {"result": "cancelled", "error": "higher_priority_user_request"}
         if context.get("expires_at") and context["expires_at"] <= time.time():
             return {"result": "timeout", "error": "session_expired"}
+        if name in {"invoke_skill", "send_message", "set_space_constraint",
+                    "clear_space_constraints", "save_rule"} and any(
+                        step.get("tool") == "start_activity" and
+                        (step.get("result") or {}).get("result") == "ok"
+                        for step in run.steps):
+            return {"result": "rejected", "error": "activity_started_for_this_intent"}
         if name == "list_agents":
             return {"result": "ok", "agents": _public_view(_cards(context))}
         if name == "get_space_context":
@@ -248,6 +284,23 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                 return {"result": "rejected", "error": "invalid_arguments"}
             return {"result": "ok", "space": get_space_context(
                 "cloud_orchestrator", state=transport._state, registry=transport._registry)}
+        if name == "start_activity":
+            if (args or resume or context.get("origin_kind", "user_delegated") != "user_delegated"
+                    or context.get("peer_request_id") or not context.get("event_id")
+                    or type(context.get("user_revision")) is not int):
+                return {"result": "rejected", "error": "verified_current_user_intent_required"}
+            if any(step.get("tool") == "start_activity" and step.get("step_id") != step_id
+                   for step in run.steps):
+                return {"result": "rejected", "error": "activity_already_started_for_intent"}
+            try:
+                started = await asyncio.to_thread(
+                    transport.do_start_activity, context, run.goal,
+                    context["event_id"], context["user_revision"],
+                    min(12.0, max(1.0, run.deadline - time.time())))
+            except Exception as exc:
+                logger.warning("activity start failed run=%s error=%s", run_id, type(exc).__name__)
+                return {"result": "rejected", "error": "activity_start_unavailable_or_stale"}
+            return {"result": "ok", "activity": started["activity"]}
         if name == "send_message":
             messenger = getattr(transport, "_messenger", None)
             if messenger is None:
@@ -368,7 +421,7 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                       session_id=session_id, origin_kind=run.origin_kind):
         asyncio.run(run_loop(run, decide, execute, record=store.save, on_step=on_step,
                              on_progress=on_progress,
-                             effectful=lambda name: name in {"invoke_skill", "save_rule", "send_message",
+                             effectful=lambda name: name in {"invoke_skill", "save_rule", "send_message", "start_activity",
                                                              "set_space_constraint", "clear_space_constraints"}))
     if needs_persona_reply(run):
         try:

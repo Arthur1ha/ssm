@@ -59,16 +59,33 @@ class Drive:
         self._context: ExecutionContext = SYSTEM_CONTEXT
         self._last_execution_result: str = "ok"
         self._last_prompt_metadata: dict | None = None
+        self._pending_question_id: str | None = None
 
     @staticmethod
     def _result_text(result: dict) -> str:
         return str(result.get("message") or result.get("error") or result.get("result"))
 
+    def _activity_id(self) -> str | None:
+        from cloud.space.activity import get_activity_store
+        activity = get_activity_store().current()
+        activity_id = activity.get("activity_id") if activity else None
+        return activity_id if activity_id and self.owner_session_id == activity_id else None
+
+    def _activity_event(self, event_type: str, text: str = "", **facts) -> None:
+        activity_id = self._activity_id()
+        if activity_id:
+            from cloud.space.activity import get_activity_store
+            get_activity_store().record_event(activity_id, event_type, unit_id="go2",
+                                              text=str(text)[:500], **facts)
+
     async def _execute_motion(self, name: str, params: dict) -> dict:
         if self.user_interrupt or not go2.is_connected:
             return {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
+        self._activity_event("action_progress", name, action=name, status="executing")
         result = await execute_tool(name, params, context=self._context)
         self._last_execution_result = result.get("result", "error")
+        self._activity_event("action_result", self._result_text(result), action=name,
+                             task_id=result.get("task_id"), status=self._last_execution_result)
         if go2.is_connected:
             asyncio.create_task(self._publish_motion_reply(name, params, result))
         return result
@@ -196,7 +213,7 @@ class Drive:
         """主驱动循环，每秒推进好奇心计数并根据状态触发对应行为。"""
         while True:
             await asyncio.sleep(1)
-            if self.user_interrupt:
+            if self.user_interrupt or self._pending_question_id:
                 continue
 
             self._curiosity += 1
@@ -237,7 +254,7 @@ class Drive:
         logger.info("[Drive] 开始自主探索会话")
 
         # 改动 3：进入时先检查打断条件，避免不必要的 LLM 调用
-        if self.user_interrupt or self._person_engaging:
+        if self.user_interrupt or self._person_engaging or self._pending_question_id:
             logger.info("[Drive] 探索进入即被打断（user_interrupt=%s person_engaging=%s），跳过",
                         self.user_interrupt, self._person_engaging)
             return
@@ -248,6 +265,7 @@ class Drive:
         except Exception as exc:
             initial_obs = f"观察失败：{exc}"
         episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
+        self._activity_event("observation", initial_obs)
         logger.info("[Drive] 探索初始观察：%s", initial_obs)
 
         for step in range(_MAX_STEPS):
@@ -332,6 +350,10 @@ class Drive:
                 f"             每次移动到位后系统已自动观察一次，只在「想凑近再看看」时才单独用，别浪费步数。\n"
                 f"  go2_navigate_to   → name: 回到一个已标记的地点\n"
                 f"      何时用：想回到之前 go2_tag_location 标过的某个地点（只能去「已知地点」里列出来的）。\n"
+                f"  send_message      → target: 在线同伴 ID, content: 简短提议或分享\n"
+                f"      何时用：发现值得分享的事或想邀请同伴配合；发送不代表对方接受。\n"
+                f"  ask_user          → question: 简短问题\n"
+                f"      何时用：看到了无法判断且需要用户辨认的物体；发问题和截图后暂停探索。\n"
                 f"  stop              → 结束探索\n"
                 f"      何时用：逛够了、满足了、或累了想回家休息。\n\n"
                 f"【移动策略】视觉上有趣 ≠ 走得过去。✗受阻方向的兴趣点要远观+标记，不要用 explore_direction 硬闯：\n"
@@ -370,6 +392,11 @@ class Drive:
 
             logger.info("[Drive] EXPLORING step=%d  tool=%s  reason=%s", step, tool, reason)
             result = await self._exec_explore_tool(tool, decision.get("params", {}))
+            if tool in {"explore_direction", "go2_navigate_to"}:
+                self._activity_event("action_result", result, action=tool,
+                                     status=self._last_execution_result)
+            elif tool == "go2_observe":
+                self._activity_event("observation", result)
             logger.info("[Drive] EXPLORING step=%d  result=%s", step, result)
 
             history.append({"step": step + 1, "tool": tool, "reason": reason, "result": result})
@@ -406,6 +433,33 @@ class Drive:
                 if not odom:
                     return "无法标记：odom 数据不可用"
                 return spatial_memory.tag_location(params.get("name", "unknown"), odom)
+            elif tool == "send_message":
+                if not self._activity_id():
+                    self._last_execution_result = "blocked"
+                    return "当前没有空间活动"
+                from cloud.go2.agentcore.tools.tools import send_message
+                target = str(params.get("target") or "")
+                content = str(params.get("content") or "")
+                outcome = send_message(target, content)
+                status = outcome.get("result", "error")
+                self._last_execution_result = "ok" if status == "accepted" else status
+                return ("消息已发送，尚未确认同伴回复" if status == "accepted"
+                        else self._result_text(outcome))
+            elif tool == "ask_user":
+                activity_id = self._activity_id()
+                question = str(params.get("question") or "").strip()[:400]
+                if not activity_id or not question:
+                    self._last_execution_result = "blocked"
+                    return "问题不可用"
+                from cloud.go2.activity_media import save_snapshot
+                question_id = "q_" + uuid.uuid4().hex
+                media_ref = save_snapshot(activity_id, question_id, go2._latest_frame)
+                self._activity_event("question", question, question_id=question_id,
+                                     media_ref=media_ref)
+                self._pending_question_id = question_id
+                episode_memory.add(EventType.OBSERVATION, f"向用户提问：{question}")
+                self._last_execution_result = "paused"
+                return "等待用户回答；探索已暂停"
             else:
                 return f"未知工具: {tool}"
         except Exception as exc:
@@ -559,6 +613,7 @@ class Drive:
         self.owner_session_id  = owner_session_id
         self._context = replace(context or SYSTEM_CONTEXT, origin_kind="agent_autonomous")
         self.user_interrupt = False
+        self._pending_question_id = None
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self, owner_session_id: str | None = None) -> bool:
@@ -568,6 +623,7 @@ class Drive:
         owned_session = self.owner_session_id
         active = self._task is not None
         self.user_interrupt = True
+        self._pending_question_id = None
         if active:
             self._task.cancel()
             self._task = None

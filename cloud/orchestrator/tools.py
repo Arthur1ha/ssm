@@ -202,6 +202,37 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     return {"result": "executing", "task_id": task_id}
 
 
+def do_start_activity(context: dict, text: str, source_event_id: str,
+                      user_revision: int, timeout: float = 12.0) -> dict:
+    """Send one authenticated user activity request to the API's state owner."""
+    token = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
+    if len(token) < 16:
+        raise RuntimeError("SSM_INTERNAL_SERVICE_TOKEN is not configured")
+    headers = {
+        "X-SSM-Service-Token": token,
+        "X-SSM-Session-Id": str(context["session_id"]),
+        "X-SSM-Actor": str(context["actor"]),
+        "X-SSM-Persist": "true" if context.get("persist") is True else "false",
+        "X-SSM-Space-Id": str(context["space_id"]),
+        "X-SSM-Origin-Kind": "user_delegated",
+        "X-SSM-Expires-At": str(int(context["expires_at"])),
+    }
+    response = requests.post(
+        f"{GO2_API_BASE}/api/internal/activity/start",
+        json={"text": text, "source_event_id": source_event_id,
+              "user_revision": user_revision},
+        headers=headers, timeout=timeout, allow_redirects=False,
+        proxies={"http": None, "https": None},
+    )
+    if response.is_redirect:
+        raise RuntimeError("refusing redirected internal HTTP request")
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict) or data.get("ok") is not True or not isinstance(data.get("activity"), dict):
+        raise ValueError("invalid activity start response")
+    return data
+
+
 def do_http_task_status(endpoint: str, task_id: str, context: dict, timeout: float = 5.0) -> dict:
     """Query an already dispatched task by its original ID; never POST it again."""
     if endpoint == "/api/go2/chat":
