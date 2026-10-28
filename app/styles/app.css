@@ -96,17 +96,13 @@ body {
   min-height: 100vh;
 }
 
-/* A request has one changing status, grouped device steps, then a reply. */
-.run-status { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; align-self: flex-start; margin: 3px 4px 7px; color: var(--color-text-muted); font-size: 11px; line-height: 1.5; }
-.run-status__dot { width: 6px; height: 6px; flex: 0 0 6px; margin-right: 3px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 8px var(--color-accent-glow); animation: pulse 1.8s ease-in-out infinite; }
-.run-status--finished { color: var(--color-text-dim); }
-.run-status--finished .run-status__dot { background: var(--color-text-dim); box-shadow: none; animation: none; }
-.run-status__separator { color: var(--color-text-dim); }
-.run-step { --run-color: var(--color-accent); align-self: flex-start; max-width: min(100%, 560px); min-width: 0; margin: 1px 4px 5px 13px; padding: 2px 0 3px 13px; border-left: 1px solid color-mix(in srgb, var(--run-color) 45%, transparent); }
-.run-step__agent { margin-bottom: 4px; color: var(--run-color); font-size: 11px; font-weight: 600; line-height: 1.35; }
-.run-step__detail { display: flex; gap: 9px; align-items: baseline; color: var(--color-text-muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
-.run-step__marker { width: 5px; height: 5px; flex: 0 0 5px; position: relative; top: -2px; border: 1px solid var(--run-color); border-radius: 50%; }
-@media (prefers-reduced-motion: reduce) { .run-status__dot { animation: none; } }
+/* Each process event keeps its place on the rail; only the reply uses a bubble. */
+.run-process { --run-color: var(--color-accent); align-self: flex-start; width: min(calc(100% - 17px), 560px); min-width: 0; margin: 0 4px 0 13px; padding: 4px 0 5px 13px; border-left: 1px solid color-mix(in srgb, var(--run-color) 45%, transparent); }
+.run-process__agent { margin-bottom: 4px; color: var(--run-color); font-size: 11px; font-weight: 600; line-height: 1.35; }
+.run-process__detail { display: flex; gap: 9px; align-items: baseline; color: var(--color-text-muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.run-process__marker { width: 5px; height: 5px; flex: 0 0 5px; position: relative; top: -2px; border: 1px solid var(--run-color); border-radius: 50%; }
+.run-process--terminal .run-process__marker { background: var(--run-color); }
+.chat-messages .run-process + .run-process { margin-top: -10px; padding-top: 14px; }
 
 /* 实色卡片层（替代毛玻璃：背景已是实色，靠边框建立纵深） */
 .glass {

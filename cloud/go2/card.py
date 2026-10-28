@@ -34,7 +34,7 @@ CARD_SKILLS = {
     "go2_navigate": {
         "tool_name": "go2_navigate_to",
         "name": "导航到命名地点",
-        "description": "导航到已保存的地点",
+        "description": "仅在当前会话拥有可信定位与已知安全路线时导航；条件不足会拒绝移动",
         "tags": ["navigation", "robot"],
         "invoke": {"action": "NAVIGATE"},
     },
@@ -201,7 +201,7 @@ def _build_go2_card() -> dict:
             "options": [
                 {"value": "manual",       "label": "完全遥控", "description": "由用户/编排器遥控决定行动"},
                 {"value": "reactive",     "label": "自主反应", "description": "机器狗根据视觉输入自主做即时反应"},
-                {"value": "free_explore", "label": "自由探索", "description": "机器狗自主探索环境"},
+                {"value": "free_explore", "label": "自由探索", "description": "需要可信定位和已知可通行地图；当前地图不足时拒绝移动"},
             ],
             "get": "/api/go2/autonomy",
             "set": "/api/go2/autonomy",

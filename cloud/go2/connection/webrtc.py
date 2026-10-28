@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import time
+import uuid
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
@@ -30,17 +31,19 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._motion_epoch = 0
         self._velocity_timer = None
         self._move_control_active = False
+        self._odom_session_id = uuid.uuid4().hex
 
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
         self._move_control_active = False
+        self._odom_session_id = uuid.uuid4().hex
         self._last_state_received_at = None
-        self._voxel_raw = None
-        self._voxel_received_at = None
+        self.reset_sensor_epoch()
         self.fsm_state = "connecting"
         if self._conn:
             await self._conn.disconnect()
+            self.reset_sensor_epoch()
 
         self._conn = UnitreeWebRTCConnection(
             WebRTCConnectionMethod.Remote,
@@ -104,8 +107,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self.is_connected = False
         self.fsm_state = "offline"
         self._last_state_received_at = None
-        self._voxel_raw = None
-        self._voxel_received_at = None
+        self.reset_sensor_epoch()
         if self._status_task and not self._status_task.done():
             if self._status_task is not asyncio.current_task():
                 self._status_task.cancel()
@@ -122,6 +124,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             except Exception:
                 pass
             self._conn = None
+        self.reset_sensor_epoch()
         logger.info("[Go2/Conn] 已断开")
 
     # ── 定时状态快照 ──────────────────────────────────────────────────────

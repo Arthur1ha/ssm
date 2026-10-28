@@ -30,28 +30,21 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
 
       {/* 消息气泡区 */}
-      <div ref={msgsRef} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px',
+      <div ref={msgsRef} className="chat-messages" style={{ flex: 1, overflowY: 'auto', padding: '12px 16px',
         display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.map((m, i) => {
           const agentColor = getAgentBubbleColor(m.agent);
           const displayName = m.agentName || (m.agent === thinkingAgent && deviceName)
             || getAgentDisplayName(m.agent);
-          if (m.role === 'status') return <div key={m.id || i}
-            className={`run-status${m.final ? ' run-status--finished' : ''}`}
-            role={m.final ? undefined : 'status'}>
-            <span className="run-status__dot" aria-hidden="true"/>
-            <span>{displayName}</span>
-            <span className="run-status__separator">·</span><span>{m.text}</span>
-          </div>;
-          if (m.role === 'step') {
+          if (m.role === 'process') {
             const previous = messages[i - 1];
-            const startsGroup = previous?.role !== 'step' || previous.requestKey !== m.requestKey
+            const startsGroup = previous?.role !== 'process' || previous.requestKey !== m.requestKey
               || previous.agent !== m.agent;
-            return <div key={m.id || i} className="run-step"
+            return <div key={m.id || i} className={`run-process${m.terminal ? ' run-process--terminal' : ''}`}
               style={{ '--run-color': agentColor }}>
-              {startsGroup && <div className="run-step__agent">{displayName}</div>}
-              <div className="run-step__detail"><span className="run-step__marker" aria-hidden="true"/>
-                {m.narrative || (m.event ? describeRunProgress(m.event, true) : m.text)}
+              {startsGroup && <div className="run-process__agent">{displayName}</div>}
+              <div className="run-process__detail"><span className="run-process__marker" aria-hidden="true"/>
+                {m.text}
               </div>
             </div>;
           }

@@ -35,10 +35,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
   const [pendingRunId, setPendingRunId] = useState(null);
   const [execution, setExecution] = useState('');
   const seenReplies = useRef(new Set());
-  const seenProgress = useRef(new Set());
   const activeRun = useRef(null);
   const pendingRuns = useRef(new Map());
   const nextRequestId = useRef(0);
+  const nextProcessId = useRef(0);
   const forgetRun = runId => {
     clearTimeout(pendingRuns.current.get(runId)?.timer);
     pendingRuns.current.delete(runId);
@@ -58,55 +58,42 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     }
     return [...rows, row];
   };
+  const appendProcess = (requestKey, text, eventId) => {
+    if (!text) return;
+    const row = { id: `${requestKey}:process:${eventId || ++nextProcessId.current}`,
+      role: 'process', agent: unitId, requestKey, text, eventId };
+    setMessages(previous => {
+      if (eventId && previous.some(message => message.role === 'process'
+        && message.requestKey === requestKey && message.eventId === eventId)) return previous;
+      const endIndex = previous.findIndex(message => message.requestKey === requestKey
+        && (message.terminal || message.role === 'assistant'));
+      if (endIndex >= 0) return [...previous.slice(0, endIndex), row,
+        ...previous.slice(endIndex)];
+      return insertAfterRequest(previous, requestKey, row);
+    });
+  };
   const finishMessage = (requestKey, text, eventId, isError = false) => {
     if (!text) return;
     setMessages(previous => {
-      const status = previous.map(message => message.role === 'status'
-        && message.requestKey === requestKey
-        ? { ...message, text: '处理结束', final: true } : message);
-      const finalIndex = status.findIndex(message => message.role === 'assistant'
+      const hasTerminal = previous.some(message => message.requestKey === requestKey
+        && message.terminal);
+      const finalBefore = previous.findIndex(message => message.role === 'assistant'
+        && message.requestKey === requestKey);
+      const terminal = { id: `${requestKey}:terminal`, role: 'process', agent: unitId,
+        requestKey, text: '处理结束', terminal: true };
+      const rows = hasTerminal ? previous : finalBefore >= 0
+        ? [...previous.slice(0, finalBefore), terminal, ...previous.slice(finalBefore)]
+        : insertAfterRequest(previous, requestKey, terminal);
+      const finalIndex = rows.findIndex(message => message.role === 'assistant'
         && message.requestKey === requestKey);
       if (finalIndex >= 0) {
-        if (isError && !status[finalIndex].isError) return status;
-        return status.map((message, index) => index === finalIndex
+        if (isError && !rows[finalIndex].isError) return rows;
+        return rows.map((message, index) => index === finalIndex
           ? { ...message, text, eventId, final: true, isError } : message);
       }
-      return insertAfterRequest(status, requestKey,
+      return insertAfterRequest(rows, requestKey,
         { id: `${requestKey}:reply`, role: 'assistant', agent: unitId,
           requestKey, text, eventId, final: true, isError });
-    });
-  };
-  const updateStatus = (requestKey, text) => {
-    if (!text) return;
-    setMessages(previous => {
-      const status = previous.find(message => message.role === 'status'
-        && message.requestKey === requestKey);
-      if (status?.final) return previous;
-      if (status) return previous.map(message => message === status
-        ? { ...message, text } : message);
-      const finalIndex = previous.findIndex(message => message.role === 'assistant'
-        && message.requestKey === requestKey);
-      const row = { id: `${requestKey}:status`, role: 'status', agent: unitId,
-        requestKey, text: finalIndex < 0 ? text : '处理结束', final: finalIndex >= 0 };
-      if (finalIndex < 0) return insertAfterRequest(previous, requestKey, row);
-      return [...previous.slice(0, finalIndex), row, ...previous.slice(finalIndex)];
-    });
-  };
-  const updateStep = (requestKey, item) => {
-    const stepId = item.step_id || item.event_id;
-    if (!stepId) return;
-    setMessages(previous => {
-      const index = previous.findIndex(message => message.role === 'step'
-        && message.requestKey === requestKey && message.stepId === stepId);
-      if (index >= 0) return previous.map((message, at) => at === index
-        ? mergeRunStep(message, item) : message);
-      const row = { id: `${requestKey}:step:${stepId}`, role: 'step', agent: unitId,
-        requestKey, stepId, event: item,
-        narrative: item.stage === 'narrated' ? item.text : '' };
-      const finalIndex = previous.findIndex(message => message.role === 'assistant'
-        && message.requestKey === requestKey);
-      if (finalIndex < 0) return insertAfterRequest(previous, requestKey, row);
-      return [...previous.slice(0, finalIndex), row, ...previous.slice(finalIndex)];
     });
   };
   useEffect(() => () => {
@@ -134,11 +121,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           }
         }
       } else if (item.type === 'run_stage' || item.type === 'agent_progress') {
-        const progressKey = `${requestKey}:${item.event_id}`;
-        if (seenProgress.current.has(progressKey)) return;
-        seenProgress.current.add(progressKey);
-        if (item.step_id) updateStep(requestKey, item);
-        else updateStatus(requestKey, describeAgentStatus(item) || '正在处理');
+        if (item.stage !== 'finished') {
+          appendProcess(requestKey, processEventText(item), item.event_id);
+        }
       } else if (item.type === 'reply_error') {
         const message = '这次没能给出完整回复，请稍后再试。';
         finishMessage(requestKey, message, item.event_id, true);
@@ -261,8 +246,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     if (pendingRuns.current.has(runId)) forgetRun(runId);
     const requestKey = `chat:${++nextRequestId.current}`;
     setMessages(prev => [...prev, { id: `${requestKey}:user`, role: 'user', text },
-      { id: `${requestKey}:status`, role: 'status', agent: unitId, requestKey,
-        text: '正在了解你的需求' }]);
+      { id: `${requestKey}:initial`, role: 'process', agent: unitId, requestKey,
+        text: '已收到请求', eventId: `initial:${requestKey}` }]);
     setSending(true);
     activeRun.current = runId;
     pendingRuns.current.set(runId, { key: requestKey, timer: null });
@@ -290,7 +275,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           const fallback = reply || result?.question || apiErrorText(
             { message: commandBus.describe(result) }, '设备暂时无法完成处理，请稍后重试。');
           if (['accepted', 'executing', 'timeout'].includes(result?.result)) {
-            updateStatus(requestKey, fallback);
+            appendProcess(requestKey, fallback, `pending:${result?.result}`);
           } else {
             finishMessage(requestKey, fallback, result?.event_id,
               !reply && !result?.question);

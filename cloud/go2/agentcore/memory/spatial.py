@@ -32,11 +32,15 @@ def _save(data: dict) -> None:
 def tag_location(name: str, odom: dict) -> str:
     """把当前位置保存为命名地点，同名覆盖。"""
     require_persist("save a location")
+    if not odom.get("session_id"):
+        raise ValueError("当前位置没有有效 odom 会话，不能保存地点")
     data = _load()
     data[name] = {
         "x":           odom["x"],
         "y":           odom["y"],
         "heading":     odom["heading"],
+        "frame_id":    "odom",
+        "session_id":  odom["session_id"],
         "description": "",
         "ts":          time.time(),
     }
@@ -50,7 +54,9 @@ async def find_location(query: str) -> Optional[dict]:
     data = _load()
     if query in data:
         v = data[query]
-        return {"name": query, "x": v["x"], "y": v["y"], "heading": v["heading"]}
+        return {"name": query, "x": v["x"], "y": v["y"], "heading": v["heading"],
+                "frame_id": v.get("frame_id"), "session_id": v.get("session_id"),
+                "legacy_unanchored": not bool(v.get("session_id"))}
     return await _llm_find(query)
 
 
@@ -83,7 +89,9 @@ def list_locations() -> list[dict]:
     """列出所有命名地点，按保存时间倒序。"""
     data = _load()
     items = [
-        {"name": name, "x": v["x"], "y": v["y"], "heading": v["heading"], "ts": v["ts"]}
+        {"name": name, "x": v["x"], "y": v["y"], "heading": v["heading"], "ts": v["ts"],
+         "frame_id": v.get("frame_id"), "session_id": v.get("session_id"),
+         "legacy_unanchored": not bool(v.get("session_id"))}
         for name, v in data.items()
     ]
     items.sort(key=lambda r: r["ts"], reverse=True)

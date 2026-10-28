@@ -185,25 +185,34 @@ async def go2_tag_location(name: str) -> str:
     if not go2.is_connected:
         return "Go2 未连接"
     odom = go2.odom
-    if not odom:
+    if (not odom or go2.odom_received_at is None or
+            time.monotonic() - go2.odom_received_at > 1.0 or
+            go2.odom_frame_id != "odom"):
         return "暂无位置数据，请确认 Odom 订阅正常"
     from cloud.go2.agentcore.memory import spatial as spatial_memory
     return spatial_memory.tag_location(name, odom)
 
 
-async def go2_navigate_to(name: str) -> str:
+async def go2_navigate_to(name: str) -> dict:
     if not go2.is_connected:
         raise RuntimeError("Go2 未连接")
     context = current_context()
     control_lease.acquire(context)
     from cloud.go2.navigation.navigator import navigator
-    try:
-        result = await asyncio.wait_for(
-            navigator.go_to(name, owner_session_id=context.session_id), timeout=25.0
-        )
-        return {"result": "ok" if result.startswith("已到达") else "error", "message": result}
-    except asyncio.TimeoutError:
-        return {"result": "timeout", "error": "navigation_timeout"}
+    result = await navigator.go_to(name, owner_session_id=context.session_id)
+    return {"result": "ok" if result["status"] == "succeeded" else
+            "error" if result["status"] == "failed" else result["status"], **result}
+
+
+async def go2_navigate_to_coordinate(x: float, y: float) -> dict:
+    if not go2.is_connected:
+        raise RuntimeError("Go2 未连接")
+    context = current_context()
+    control_lease.acquire(context)
+    from cloud.go2.navigation.navigator import navigator
+    result = await navigator.go_to_coordinate(x, y, owner_session_id=context.session_id)
+    return {"result": "ok" if result["status"] == "succeeded" else
+            "error" if result["status"] == "failed" else result["status"], **result}
 
 
 def go2_list_locations() -> str:
@@ -308,6 +317,7 @@ TOOL_FN_MAP = {
     "go2_list_rules":             go2_list_rules,
     "go2_tag_location":           go2_tag_location,
     "go2_navigate_to":            go2_navigate_to,
+    "go2_navigate_to_coordinate": go2_navigate_to_coordinate,
     "go2_list_locations":         go2_list_locations,
     "go2_set_led":                go2_set_led,
     "go2_recognize_person":       go2_recognize_person,

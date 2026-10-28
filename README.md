@@ -167,11 +167,11 @@ make tunnel-url    # 输出公网地址（https://ssm.eliottxu.top）
 make ps / logs     # 查看进程 / 日志
 ```
 
-> 服务建议在 tmux 窗口中前台运行，便于观察日志；带 `-bg` 的目标为后台幂等启动。
+> 服务建议在 tmux 窗口中前台运行，便于观察日志；带 `-bg` 的目标为后台幂等启动。`make api` 的 `--reload` 只在代码变更时重载，Ctrl+C 会停止前台 API。API 窗口直接显示日志，并同时写入 `logs/api.log`。
 
 ### 按会话查看日志
 
-使用 `make trace-task ID=<session_id>` 查看一个会话内灯、机器狗和编排器的步骤；加 `JSON=1` 可看脱敏后的完整字段，加 `FOLLOW=1` 可持续跟踪。也可用 `trace_id` 定位某一次任务。默认输出包含模型输入输出、决策、工具参数、接收方与结果摘要。`make logs` 显示最近会话及错误摘要。在现有 tmux 会话内运行 `make tmux-windows` 会按名称增补 `session_trace`、`errors`、`api-log`、`mqtt-trace` 窗口；`make tmux-windows ID=<session_id>` 将任务窗口切到指定会话。也可从会话外设置 `SSM_TMUX_SESSION=<会话名>`；设置 `SERIAL_PORT=<设备端口>` 时增补 ESP32 串口窗口。重复执行不会重启 `api`、`orchestrator` 或 `broker` 服务窗口。
+使用 `make trace-task ID=<session_id>` 查看一个会话内灯、机器狗和编排器的步骤；加 `JSON=1` 可看脱敏后的完整字段，加 `FOLLOW=1` 可持续跟踪。也可用 `trace_id` 定位某一次任务。默认输出包含模型输入输出、决策、工具参数、接收方与结果摘要。`make logs` 显示最近会话及错误摘要。在现有 tmux 会话内运行 `make tmux-windows` 会按名称增补 `session_trace`、`errors`、`mqtt-trace` 窗口；`make tmux-windows ID=<session_id>` 将任务窗口切到指定会话。也可从会话外设置 `SSM_TMUX_SESSION=<会话名>`；设置 `SERIAL_PORT=<设备端口>` 时增补 ESP32 串口窗口。重复执行不会重启 `api`、`orchestrator` 或 `broker` 服务窗口。
 
 任务事件在首次发生时追加到 `logs/session-<session_id>.jsonl`，API 与编排器共享同一个会话文件；没有会话 ID 的自主任务写入 `logs/session-system.jsonl`。每条事件写完立即关闭文件，不会因进程启动产生空文件，文件删除后下一个事件会重新创建。启动时清理 14 天未更新的会话日志。运行状态 JSON 位于各智能体的 `data/runs/`，不随日志清理删除。`make rotate-logs` 对 API、编排器等 stdout 和 Broker 日志执行独立轮转；真实设备验收后可将其纳入每日定时任务。API 普通日志写入 `api.log`（包含云端灯和机器狗），编排器普通日志写入 `orchestrator.log`；Broker/串口原始日志各自保留。
 

@@ -22,6 +22,9 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
       ? [...entries].reverse().find(entry => entry.type === 'user' && entry.text === context)?.requestId
       : null);
     if (!requestId) return -1;
+    const terminalIndex = entries.findIndex(entry => entry.type === 'process'
+      && entry.requestId === requestId && entry.terminal);
+    if (terminalIndex >= 0) return terminalIndex;
     const finalIndex = entries.findIndex(entry => entry.type === 'ai'
       && entry.requestId === requestId && entry.final);
     if (finalIndex >= 0) return finalIndex;
@@ -63,25 +66,16 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
             error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
             getName={getName}/>;
         }
-        if (e.type === 'run_status') {
-          return <div key={`status-${e.requestId}`} className={`run-status${e.final ? ' run-status--finished' : ''}`}
-            role={e.final ? undefined : 'status'}>
-            <span className="run-status__dot" aria-hidden="true"/>
-            <span>SSM 管家</span><span className="run-status__separator">·</span><span>{e.text}</span>
-          </div>;
-        }
-        if (e.type === 'step') {
-          const agent = e.event?.target_unit_id || e.agent || 'cloud_orchestrator';
+        if (e.type === 'process') {
+          const agent = e.agent || 'cloud_orchestrator';
           const previous = rows[rowIndex - 1]?.entry;
-          const previousAgent = previous?.event?.target_unit_id || previous?.agent;
-          const startsGroup = previous?.type !== 'step' || previous.requestId !== e.requestId
-            || previousAgent !== agent;
+          const startsGroup = previous?.type !== 'process' || previous.requestId !== e.requestId
+            || previous.agent !== agent;
           const color = getAgentBubbleColor(agent);
-          const text = e.narrative || describeRunProgress(e.event, true);
-          return <div key={`step-${e.requestId}-${e.runId}-${e.agent}-${e.stepId}`} className="run-step"
+          return <div key={e.eventId || `process-${i}`} className={`run-process${e.terminal ? ' run-process--terminal' : ''}`}
             style={{ '--run-color': color }}>
-            {startsGroup && <div className="run-step__agent">{getName(agent)}</div>}
-            <div className="run-step__detail"><span className="run-step__marker" aria-hidden="true"/>{text}</div>
+            {startsGroup && <div className="run-process__agent">{getName(agent)}</div>}
+            <div className="run-process__detail"><span className="run-process__marker" aria-hidden="true"/>{e.text}</div>
           </div>;
         }
         if (e.type === 'user') {

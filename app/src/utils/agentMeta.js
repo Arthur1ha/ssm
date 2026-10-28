@@ -52,31 +52,12 @@ function getAgentDisplayName(agent) {
   return '智能体';
 }
 
-function describeAgentStatus(event) {
-  if (event.stage === 'planning') return '我在了解你的需求，看看可以怎么处理。';
-  if (event.stage === 'executing' || event.stage === 'decision') return '已经想好下一步，正在帮你安排。';
-  if (event.stage === 'dispatching') return '正在执行下一步，等待结果。';
-  if (event.stage === 'considering') return '正在核对进展，看看是否还需要继续处理。';
-  if (event.stage === 'observed' || event.stage === 'narrated') {
-    return event.status === 'ok' ? '已经收到处理结果，正在核对。'
-      : ['accepted', 'executing', 'timeout'].includes(event.status)
-        ? '已经发出请求，正在等设备确认结果。'
-        : '这一步没有完成，我在看看接下来怎么办。';
-  }
-  if (event.stage === 'summarizing') return '处理过程结束了，我在整理结果。';
-  if (event.stage === 'finished') {
-    if (event.status === 'needs_clarification') return '还需要你补充一点信息，我会接着处理。';
-    if (event.status === 'ok') return '处理好了，我来告诉你结果。';
-    if (event.status === 'partial') return '已完成一部分，我来告诉你具体结果。';
-    return '这次没能全部完成，我来说明情况。';
-  }
-  return '';
-}
-
 function describeRunProgress(event, compact = false) {
   if (['planning', 'executing', 'summarizing', 'finished'].includes(event.stage)) {
-    if (event.stage === 'planning') return `正在核对可用设备与当前状态，处理：${event.goal || '当前请求'}`;
-    if (event.stage === 'executing') return `已选定下一步，正在处理：${event.goal || '当前请求'}`;
+    if (event.stage === 'planning') return compact ? '正在核对可用设备与当前状态'
+      : `正在核对可用设备与当前状态，处理：${event.goal || '当前请求'}`;
+    if (event.stage === 'executing') return compact ? '正在执行计划'
+      : `已选定下一步，正在处理：${event.goal || '当前请求'}`;
     if (event.stage === 'summarizing') return `正在核对执行结果：${event.completed_count || 0} 项完成，${event.failed_count || 0} 项未完成`;
     if (event.stage === 'finished') {
       if (event.status === 'needs_clarification') return '等待补充信息，已执行步骤的结果已保留';
@@ -119,6 +100,9 @@ function describeRunProgress(event, compact = false) {
         ? '完成情况未确认' : '未完成';
     return `${task}${outcome}，正在判断下一步`;
   }
+  if (event.status === 'timeout' && event.reason === 'edge_result_unconfirmed') {
+    return `${task}：等待设备执行回执超时，无法确认是否完成`;
+  }
   const status = {
     ok: '已完成', accepted: '已受理，等待完成反馈', executing: '仍在执行',
     timeout: '等待结果超时，完成情况未确认', blocked: '未执行',
@@ -132,15 +116,9 @@ function describeRunProgress(event, compact = false) {
   return `${task}：${status}${detail}${reason}`;
 }
 
-function mergeRunStep(entry, event) {
-  const order = { decision: 0, dispatching: 1, observed: 2, narrated: 2, considering: 3 };
-  const current = order[entry.event?.stage] ?? -1;
-  const incoming = order[event.stage] ?? -1;
-  return {
-    ...entry,
-    event: event.stage === 'narrated' || incoming < current ? entry.event : event,
-    narrative: event.stage === 'narrated' ? event.text || entry.narrative : entry.narrative,
-  };
+function processEventText(event) {
+  return event.stage === 'narrated' && event.text
+    ? event.text : describeRunProgress(event, true);
 }
 
 function isDeviceOnline(agent, unitData) {

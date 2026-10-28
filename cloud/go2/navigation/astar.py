@@ -14,9 +14,6 @@ def astar(
     goal: tuple[int, int],
 ) -> Optional[list[tuple[int, int]]]:
     """在占用栅格上搜索从 start 到 goal 的最短路径，不可达时返回 None。"""
-    if start == goal:
-        return [start]
-
     ny, nx = grid.shape
 
     def in_bounds(ix, iy):
@@ -24,6 +21,11 @@ def astar(
 
     def passable(ix, iy):
         return in_bounds(ix, iy) and not grid[iy, ix]
+
+    if not passable(*start) or not passable(*goal):
+        return None
+    if start == goal:
+        return [start]
 
     def h(ix, iy):
         dx = abs(ix - goal[0])
@@ -57,6 +59,9 @@ def astar(
         for dx, dy, cost in DIRS:
             nb = (current[0] + dx, current[1] + dy)
             if not passable(*nb):
+                continue
+            if dx and dy and (not passable(current[0] + dx, current[1])
+                              or not passable(current[0], current[1] + dy)):
                 continue
             new_g = g_score[current] + cost
             if new_g < g_score.get(nb, float("inf")):

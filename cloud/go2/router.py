@@ -756,7 +756,9 @@ async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = 
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     odom = go2.odom
-    if not odom:
+    if (not odom or go2.odom_received_at is None or
+            time.monotonic() - go2.odom_received_at > 1.0 or
+            go2.odom_frame_id != "odom"):
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
     from cloud.go2.agentcore.memory import spatial as spatial_memory
     with use_context(context):
@@ -789,9 +791,10 @@ async def nav_go(req: NavigateRequest, context: ExecutionContext = Depends(requi
     context = _normalize_context(context)
     _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
-    task = asyncio.create_task(navigator.go_to(req.name, owner_session_id=context.session_id))
-    session_tasks.track(context.session_id, task)
-    return {"ok": True, "message": f"开始导航到「{req.name}」"}
+    task_id = navigator.start_go_to(req.name, owner_session_id=context.session_id)
+    if navigator._task is not None:
+        session_tasks.track(context.session_id, navigator._task)
+    return {"ok": True, "task_id": task_id, "status": "accepted", "message": f"已受理导航到「{req.name}」"}
 
 
 @router.post("/navigation/patrol")
@@ -803,10 +806,8 @@ async def nav_start_patrol(req: PatrolRequest, context: ExecutionContext = Depen
     context = _normalize_context(context)
     _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
-    await navigator.start_patrol(req.stops, owner_session_id=context.session_id)
-    if navigator._task is not None:
-        session_tasks.track(context.session_id, navigator._task)
-    return {"ok": True, "stops": req.stops}
+    result = await navigator.start_patrol(req.stops, owner_session_id=context.session_id)
+    return {"ok": False, "stops": req.stops, **result}
 
 
 @router.delete("/navigation/patrol")
@@ -860,6 +861,15 @@ async def nav_state(context=Depends(require_authenticated_read)):
     from cloud.go2.navigation.navigator import navigator
     s = navigator.state
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
+
+
+@router.get("/navigation/tasks/{task_id}")
+async def nav_task_result(task_id: str, context=Depends(require_authenticated_read)):
+    from cloud.go2.navigation.navigator import navigator
+    result = navigator.task_result(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="导航任务不存在")
+    return result
 
 
 @router.put("/led")
@@ -1076,6 +1086,8 @@ async def go2_map_debug(context=Depends(require_admin_read)):
     if raw is None:
         return {"error": "no voxel data yet"}
 
+    import numpy as np
+
     def _summarize(obj, depth=0):
         if depth > 4:
             return "..."
@@ -1087,9 +1099,14 @@ async def go2_map_debug(context=Depends(require_admin_read)):
                 return []
             sample = obj[:6]
             return {"__len__": length, "__sample__": [_summarize(x, depth + 1) for x in sample]}
+        if isinstance(obj, np.ndarray):
+            return {"__shape__": list(obj.shape), "__dtype__": str(obj.dtype),
+                    "__sample__": _summarize(obj.reshape(-1)[:6].tolist(), depth + 1)}
+        if isinstance(obj, np.generic):
+            return obj.item()
         return obj
 
-    return _summarize(raw)
+    return {"diagnostics": _summarize(go2.sensor_diagnostics), "voxel": _summarize(raw)}
 
 
 @router.get("/map.png")
@@ -1108,6 +1125,9 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
 
     grid_obj = go2.occupancy_grid
     odom     = go2.odom
+    if (go2.odom_received_at is None or time.monotonic() - go2.odom_received_at > 1.0 or
+            go2.odom_frame_id != grid_obj.frame_id):
+        odom = {}
 
     if grid_obj is None:
         raise HTTPException(status_code=503, detail="地图数据尚未就绪")
@@ -1116,11 +1136,12 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
     W, H   = nx * SCALE, ny * SCALE
 
     # 翻转行让 Y 轴朝上（北朝上）与世界坐标一致
-    arr = np.where(
-        grid_obj.grid[::-1, :, None],
-        np.array([70, 70, 70], dtype=np.uint8),   # 障碍：灰
-        np.array([14, 18, 28], dtype=np.uint8),   # 自由：深蓝黑
-    ).astype(np.uint8)
+    from cloud.go2.navigation.occupancy_grid import FREE, OCCUPIED
+    arr = np.empty((ny, nx, 3), dtype=np.uint8)
+    arr[:] = (14, 18, 28)  # unknown
+    arr[grid_obj.cells == FREE] = (34, 65, 70)
+    arr[grid_obj.cells == OCCUPIED] = (100, 100, 100)
+    arr = arr[::-1]
     img = Image.fromarray(arr, "RGB").resize((W, H), Image.NEAREST)
     d   = ImageDraw.Draw(img)
 
@@ -1133,13 +1154,22 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
     if len(global_path) > 1:
         pts = []
         for wp in global_path:
-            gx, gy = grid_obj.odom_to_grid(wp["x"], wp["y"])
-            pts.append(g2i(gx, gy))
-        d.line(pts, fill=(30, 120, 255), width=2)
+            try:
+                gx, gy = grid_obj.odom_to_grid(wp["x"], wp["y"])
+                pts.append(g2i(gx, gy))
+            except ValueError:
+                continue
+        if len(pts) > 1:
+            d.line(pts, fill=(30, 120, 255), width=2)
 
     # 保存的地点
     for loc in spatial_memory.list_locations():
-        lx, ly = grid_obj.odom_to_grid(loc["x"], loc["y"])
+        if loc.get("session_id") != getattr(go2, "_odom_session_id", None):
+            continue
+        try:
+            lx, ly = grid_obj.odom_to_grid(loc["x"], loc["y"])
+        except ValueError:
+            continue
         px, py = g2i(lx, ly)
         r = 5
         color  = (255, 200, 0) if navigator.target == loc["name"] else (160, 200, 80)
@@ -1148,18 +1178,19 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
 
     # 机器人（绿圆 + 朝向箭头）
     if odom:
-        rix, riy = grid_obj.odom_to_grid(odom["x"], odom["y"])
-    else:
-        rix, riy = nx // 2, ny // 2
-    px, py = g2i(rix, riy)
-    r = 7
-    d.ellipse([px-r, py-r, px+r, py+r], fill=(0, 220, 100), outline=(0, 255, 80), width=2)
-    if odom:
-        heading = odom.get("heading", 0.0)
-        L = 14
-        ax = px + int(_math.cos(heading) * L)
-        ay = py - int(_math.sin(heading) * L)
-        d.line([px, py, ax, ay], fill=(0, 255, 80), width=3)
+        try:
+            rix, riy = grid_obj.odom_to_grid(odom["x"], odom["y"])
+        except ValueError:
+            odom = {}
+        else:
+            px, py = g2i(rix, riy)
+            r = 7
+            d.ellipse([px-r, py-r, px+r, py+r], fill=(0, 220, 100), outline=(0, 255, 80), width=2)
+            heading = odom["heading"]
+            L = 14
+            ax = px + int(_math.cos(heading) * L)
+            ay = py - int(_math.sin(heading) * L)
+            d.line([px, py, ax, ay], fill=(0, 255, 80), width=3)
 
     # 调试信息叠加
     obs_total = int(grid_obj.grid.sum())

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_ab41530e5984481e889b00d447ea2959",
+  "session_id": "ses_Iylyay5Q7_KYLo2XpLzS9Yja",
+  "goal": "打开灯，然后让狗坐下",
+  "deadline": 1793152499.28666,
+  "steps": [
+    {
+      "step_id": "5b48fef3f0cf44889fa7bde539b74eb1",
+      "tool_call_id": "2ac9cc39300f43c6ad91c6d9440dfd84",
+      "tool": "set_light_state",
+      "params": {
+        "state": "ON"
+      },
+      "fingerprint": "71aa5ab5c5b82b7dae36f68faeb3283374a60826f0f0a93ffab26643fe02d581",
+      "effectful": false,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "rejected",
+        "error": "unknown_tool"
+      }
+    }
+  ],
+  "status": "error",
+  "response": "抱歉，灯没打开，狗也没能坐下。操作遇到点问题，我重新确认一下再告诉你。",
+  "question": "",
+  "trace_id": "tr_739e1865852f4be287bb3bc8a7fdae41",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793152459.2963722
+}

@@ -27,6 +27,8 @@ def persona_reply_prompt(persona: str, run: Run) -> str:
         f"{persona}\n你正在以自己的身份向用户回复。只输出自然语言文本。"
         "根据下面的真实执行记录解释结果：ok 才表示完成；accepted、executing、timeout、unknown "
         "均不能说成完成。失败或被拒绝的动作不能说成已执行。若只有部分成功，说明哪些已完成、哪些未完成。"
+        "若记录中有错误或超时原因，要用自然语言明确说出；edge_result_unconfirmed 表示未收到设备执行回执，"
+        "不能断言设备动作失败。后续步骤因结果未确认而暂停时也要说明。没有实际发起后续操作，就不要承诺会继续查看或重试。"
         "不要把运行时说明照抄给用户，也不要假装其他智能体已回复。\n"
         + json.dumps(facts, ensure_ascii=False, default=str)
     )

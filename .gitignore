@@ -49,6 +49,7 @@ docs/superpowers/*
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-10-27-space-activity-lifecycle.md
 !docs/superpowers/plans/2026-10-27-personality-driven-peer-interaction.md
+!docs/superpowers/plans/2026-10-28-go2-navigation-closed-loop.md
 paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin
@@ -74,6 +75,10 @@ cloud/space/space.json
 !cloud/go2/tests/test_mode_runtime.py
 !cloud/go2/tests/test_posture_confirmation.py
 !cloud/go2/tests/test_social_drive.py
+!cloud/go2/tests/test_navigation_safety.py
+!cloud/go2/tests/test_navigator.py
+!cloud/go2/tests/test_spatial_memory.py
+!cloud/go2/tests/test_drive.py
 
 # Peer request and discovery regression tests are part of this implementation.
 !cloud/api/tests/

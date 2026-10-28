@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_abab4f2644664b73a04f6f14e689aa8b",
+  "session_id": "ses_Iylyay5Q7_KYLo2XpLzS9Yja",
+  "goal": "把灯打开让狗坐下",
+  "deadline": 1793153053.7900538,
+  "steps": [
+    {
+      "step_id": "5767bc4cef08471592ee343a470383d0",
+      "tool_call_id": "e8648785c5ef41d69e750656a8539064",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state",
+        "params": {
+          "state": "ON"
+        }
+      },
+      "fingerprint": "28b88f332c83103949d83d3845c12ca152a9e9005a12c6b21349b130cfaee728",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "timeout",
+        "task_id": "5767bc4cef08471592ee343a470383d0",
+        "error": "edge_result_unconfirmed",
+        "query_endpoint": null,
+        "unit_id": "esp32_desk_led",
+        "skill_id": "set_light_state"
+      }
+    }
+  ],
+  "status": "timeout",
+  "response": "抱歉，灯这边还没确认打开，狗也没来得及安排坐下。我再去看看情况，稍等一下。",
+  "question": "",
+  "trace_id": "tr_10cc5c3bfd0d41d9bde41e3f25739a8d",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793152996.3589773
+}

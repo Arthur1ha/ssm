@@ -210,10 +210,12 @@ class Drive:
             space_id=self._context.space_id, source="autonomous",
             status=status, run_id=run_id, text=answer)
 
-    async def _navigate(self, name: str) -> dict:
+    async def _navigate(self, name: str | None = None, coordinate: tuple[float, float] | None = None) -> dict:
         from cloud.go2.navigation.navigator import navigator
         owner_session_id = self.owner_session_id
-        nav_task = asyncio.create_task(self._execute_motion("go2_navigate_to", {"name": name}))
+        tool, params = (("go2_navigate_to_coordinate", {"x": coordinate[0], "y": coordinate[1]})
+                        if coordinate is not None else ("go2_navigate_to", {"name": name}))
+        nav_task = asyncio.create_task(self._execute_motion(tool, params))
         try:
             while not nav_task.done():
                 if self.user_interrupt or self._person_engaging or not go2.is_connected:
@@ -434,9 +436,9 @@ class Drive:
                 f"  explore_direction → direction: {'/'.join(frontier_mod.DIRECTIONS)}\n"
                 f"      何时用：【只】从★开阔或○可通行方向里选，绝不朝✗受阻方向（家具底部、墙角、狭窄通道）走。\n"
                 f"             系统自动计算安全目标并导航过去。返回「路径不通」或「建议远观」时，\n"
-                f"             立刻用 go2_observe 远观 + go2_tag_location 标记，然后换★开阔方向，不要重试同一方向。\n"
-                f"  go2_tag_location  → name: 给当前位置起名并记下来\n"
-                f"      何时用：边走边记。走到值得记住的地方就标下来——独特的物体、有趣的角落、显眼的家具、你喜欢的位置等。\n"
+                f"             用 go2_observe 远观并记录观察，然后换★开阔方向；远处物体不能标成当前位置。\n"
+                f"  go2_tag_location  → name: 仅在已经站到该地点时，给当前脚下位置起名\n"
+                f"      何时用：走到值得记住的位置并停稳后，再标记脚下位置。远处物体只记为观察。\n"
                 f"             起个好记的名字（如「窗边」「红椅子旁」）。已知地点里已经有的就别重复标。\n"
                 f"  go2_sport         → cmd: {', '.join(sorted(_VALID_SPORT_CMDS))}\n"
                 f"      何时用：用动作表达情绪。看到喜欢/有趣的东西可以 Hello、Stretch、Dance1/Dance2 撒个欢；\n"
@@ -450,8 +452,8 @@ class Drive:
                 f"      何时用：看到了无法判断且需要用户辨认的物体；发问题和截图后暂停探索。\n"
                 f"  stop              → 结束探索\n"
                 f"      何时用：逛够了、满足了、或累了想回家休息。\n\n"
-                f"【移动策略】视觉上有趣 ≠ 走得过去。✗受阻方向的兴趣点要远观+标记，不要用 explore_direction 硬闯：\n"
-                f"  发现✗受阻方向有趣 → go2_observe 远看 → go2_tag_location 标记 → 换★开阔方向继续。\n\n"
+                f"【移动策略】视觉上有趣 ≠ 走得过去。✗受阻方向的兴趣点只能远观，不要用 explore_direction 硬闯：\n"
+                f"  发现✗受阻方向有趣 → go2_observe 远看并记录观察 → 换★开阔方向继续。\n\n"
                 f"reason 记录你的动作理由；用户可见回复会在真实结果返回后单独生成。\n"
                 f"直接输出 JSON，不含代码块：\n"
                 f"{{\"tool\": \"工具名\", \"params\": {{...}}, \"reason\": \"一句话\", \"done\": false}}"
@@ -525,7 +527,9 @@ class Drive:
             elif tool == "go2_tag_location":
                 from cloud.go2.agentcore.memory import spatial as spatial_memory
                 odom = go2.odom
-                if not odom:
+                if (not odom or getattr(go2, "odom_received_at", None) is None or
+                        time.monotonic() - go2.odom_received_at > 1.0 or
+                        getattr(go2, "odom_frame_id", None) != "odom"):
                     return "无法标记：odom 数据不可用"
                 return spatial_memory.tag_location(params.get("name", "unknown"), odom)
             elif tool == "send_message":
@@ -576,9 +580,8 @@ class Drive:
     async def _exec_explore_direction(self, direction: str) -> str:
         """explore_direction 工具的实现：用地图算出安全目标坐标，Navigator 闭环导过去。
 
-        地图不可用时降级为定时前进（2s）。
+        地图不可用或无已知安全路线时拒绝移动。
         """
-        from cloud.go2.agentcore.memory import spatial as spatial_memory
         from cloud.go2.navigation.navigator import navigator
 
         odom = go2.odom
@@ -592,45 +595,34 @@ class Drive:
             self._last_execution_result = "blocked"
             return (
                 f"方向「{direction}」路径不通，不能向前移动。"
-                "建议先远观并标记兴趣点，再选择地图中的可通行方向。"
+                "建议先远观并记录观察，再选择地图中的可通行方向。"
             )
 
         if grid_obj is None:
-            # 仅地图缺席时尝试短距移动，仍走统一参数校验与停止确认。
-            logger.info("[Drive] explore_direction 无地图，降级前进 2s")
-            move_result = await self._execute_motion("go2_move", {"direction": "forward", "speed": 0.3, "duration": 2.0})
-            if move_result.get("result") != "ok":
-                return self._result_text(move_result)
-            new_odom = go2.odom
-            pos = f"({new_odom['x']:.2f}, {new_odom['y']:.2f})" if new_odom else "未知"
-            nav_summary = f"地图不可用，短距前进完成，当前位置 {pos}"
-            observation = await go2_observe("描述当前看到的场景，有什么值得继续探索的")
-            return f"{nav_summary} | 到达后观察：{observation}"
+            self._last_execution_result = "blocked"
+            return "地图不可用，不能安全探索该方向"
 
         target_x, target_y = target
 
         # A* 可达性预检查：射线通畅不等于路径可规划，提前排除障碍包围的目的地
         from cloud.go2.navigation.astar import astar
         from cloud.go2.navigation.navigator import _nearest_free_cell
-        start_cell = grid_obj.odom_to_grid(odom["x"], odom["y"])
-        goal_raw   = grid_obj.odom_to_grid(target_x, target_y)
+        try:
+            start_cell = grid_obj.odom_to_grid(odom["x"], odom["y"])
+            goal_raw = grid_obj.odom_to_grid(target_x, target_y)
+        except ValueError:
+            self._last_execution_result = "blocked"
+            return "探索目标超出当前地图，不能移动"
         goal_cell  = _nearest_free_cell(grid_obj, goal_raw, max_r=20)
         if goal_cell is None or not astar(grid_obj.grid, start_cell, goal_cell):
             logger.info("[Drive] explore_direction=%s A*预检查不通，引导远观绕行", direction)
             return (
                 f"方向「{direction}」路径不通，走不过去。"
-                f"建议：先用 go2_observe 远观该方向的兴趣点，"
-                f"再用 go2_tag_location 标记下来，"
+                f"建议：用 go2_observe 远观该方向的兴趣点并记录观察，"
                 f"然后从★开阔或○可通行方向继续探索。"
             )
 
-        tmp_name = f"_explore_{int(time.time())}"
-        spatial_memory.tag_location(tmp_name, {"x": target_x, "y": target_y, "heading": 0.0})
-
-        try:
-            nav_result = await self._navigate(tmp_name)
-        finally:
-            spatial_memory.delete_location(tmp_name)
+        nav_result = await self._navigate(coordinate=(target_x, target_y))
         if nav_result.get("result") != "ok":
             return self._result_text(nav_result)
         result = self._result_text(nav_result)

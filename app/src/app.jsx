@@ -67,35 +67,39 @@ function App({ session, logout, refreshSession }) {
   const [exitingUid, setExitingUid] = useState(null);
 
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
-  const updateRequestStatus = (requestId, text) => {
+  const insertBeforeRequestEnd = (entries, requestId, row) => {
+    const endIndex = entries.findIndex(entry => entry.requestId === requestId
+      && (entry.terminal || entry.type === 'ai' && entry.final));
+    if (endIndex >= 0) return [...entries.slice(0, endIndex), row, ...entries.slice(endIndex)];
+    for (let index = entries.length - 1; index >= 0; index--) {
+      if (entries[index].requestId === requestId) {
+        return [...entries.slice(0, index + 1), row, ...entries.slice(index + 1)];
+      }
+    }
+    return [...entries, row];
+  };
+  const appendProcess = (requestId, agent, text, eventId) => {
     if (!text) return;
-    setActivityLog(prev => prev.map(entry =>
-      entry.type === 'run_status' && entry.requestId === requestId && !entry.final
-        ? { ...entry, text } : entry));
+    setActivityLog(prev => {
+      if (eventId && prev.some(entry => entry.type === 'process'
+        && entry.requestId === requestId && entry.eventId === eventId)) return prev;
+      return insertBeforeRequestEnd(prev, requestId,
+        { type: 'process', requestId, agent, text, eventId });
+    });
   };
   const finishRequest = (requestId, text, eventId) => {
     if (!text || completedRequests.current.has(requestId)) return;
     completedRequests.current.add(requestId);
-    setActivityLog(prev => [...prev.map(entry =>
-      entry.type === 'run_status' && entry.requestId === requestId
-        ? { ...entry, text: '处理结束', final: true } : entry),
-      { type: 'ai', agent: 'cloud_orchestrator', requestId, text, final: true, eventId }]);
-  };
-  const recordProgressStep = (requestId, event) => {
-    if (!event.step_id) return;
     setActivityLog(prev => {
-      const agent = event.agent_id || 'cloud_orchestrator';
-      const index = prev.findIndex(entry => entry.type === 'step'
-        && entry.requestId === requestId && entry.stepId === event.step_id
-        && entry.agent === agent && entry.runId === event.run_id);
-      if (index >= 0) return prev.map((entry, at) => at === index
-        ? mergeRunStep(entry, event) : entry);
-      const row = { type: 'step', requestId, stepId: event.step_id, runId: event.run_id, agent,
-        event, narrative: event.stage === 'narrated' ? event.text : '' };
-      const finalIndex = prev.findIndex(entry => entry.type === 'ai'
-        && entry.requestId === requestId);
-      if (finalIndex < 0) return [...prev, row];
-      return [...prev.slice(0, finalIndex), row, ...prev.slice(finalIndex)];
+      let position = prev.length;
+      for (let index = prev.length - 1; index >= 0; index--) {
+        if (prev[index].requestId === requestId) { position = index + 1; break; }
+      }
+      return [...prev.slice(0, position),
+        { type: 'process', agent: 'cloud_orchestrator', requestId,
+          text: '处理结束', terminal: true, eventId: `terminal:${requestId}` },
+        { type: 'ai', agent: 'cloud_orchestrator', requestId, text, final: true, eventId },
+        ...prev.slice(position)];
     });
   };
   const appendReply = (item) => {
@@ -108,15 +112,12 @@ function App({ session, logout, refreshSession }) {
       finishRequest(requestId, item.text, item.event_id);
       return;
     }
-    const row = { type: 'ai', agent: item.agent_id, text: item.text,
-      eventId: item.event_id, traceId: item.trace_id, requestId };
-    if (!requestId) { appendActivity(row); return; }
-    setActivityLog(prev => {
-      const finalIndex = prev.findIndex(entry => entry.type === 'ai'
-        && entry.requestId === requestId && entry.final);
-      if (finalIndex < 0) return [...prev, row];
-      return [...prev.slice(0, finalIndex), row, ...prev.slice(finalIndex)];
-    });
+    if (requestId) {
+      appendProcess(requestId, item.agent_id, item.text, item.event_id);
+    } else {
+      appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
+        eventId: item.event_id, traceId: item.trace_id });
+    }
   };
   useEffect(() => {
     const onEvent = event => {
@@ -131,9 +132,13 @@ function App({ session, logout, refreshSession }) {
           replyTo: item.reply_to, text: item.text, eventId: item.event_id });
         return;
       }
-      if (item.type === 'agent_progress' && item.step_id && item.trace_id) {
+      if (['agent_progress', 'run_stage'].includes(item.type) && item.trace_id
+          && item.stage !== 'finished') {
         const requestId = traceRequests.current.get(item.trace_id);
-        if (requestId && completedRequests.current.has(requestId)) recordProgressStep(requestId, item);
+        if (requestId && completedRequests.current.has(requestId)) {
+          appendProcess(requestId, item.target_unit_id || item.agent_id || 'cloud_orchestrator',
+            processEventText(item), item.event_id);
+        }
         return;
       }
       if (item.type !== 'agent_reply' || !item.text) return;
@@ -159,17 +164,17 @@ function App({ session, logout, refreshSession }) {
     const requestId = ++nextRequestId.current;
     setActivityLog(prev => [...prev,
       { type: 'user', text: t, requestId },
-      { type: 'run_status', agent: 'cloud_orchestrator', requestId,
-        text: '正在了解你的需求' },
+      { type: 'process', agent: 'cloud_orchestrator', requestId,
+        text: '已收到请求', eventId: `initial:${requestId}` },
     ]);
     send(t, {
       onMessage: (msg, agent, event) => appendReply({ ...event, text: msg,
         agent_id: agent || 'cloud_orchestrator' }),
       onProgress: event => {
-        if (event.step_id) recordProgressStep(requestId, event);
-        else if (!completedRequests.current.has(requestId)) {
-          updateRequestStatus(requestId, describeAgentStatus(event));
-        }
+        if (event.stage === 'finished') return;
+        appendProcess(requestId,
+          event.target_unit_id || event.agent_id || 'cloud_orchestrator',
+          processEventText(event), event.event_id);
       },
       onStatus: msg => finishRequest(requestId, msg),
       onTraceId: (traceId, eventId) => {
