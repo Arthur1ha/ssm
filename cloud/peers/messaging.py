@@ -271,8 +271,9 @@ class AgentMessenger:
                             or prior["conversation_id"] != conversation_id
                             or round_number != prior["round"] + 1):
                         return True
-                    prior["state"] = {"accepted": "waiting_start", "declined": "rejected"}.get(
-                        payload["reply_kind"], "answered")
+                    if prior["state"] not in _TERMINAL:
+                        prior["state"] = {"accepted": "waiting_start", "declined": "rejected"}.get(
+                            payload["reply_kind"], "answered")
                     prior["updated_at"] = now
                 elif round_number != 1 or conversation_id != message_id:
                     return True

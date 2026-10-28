@@ -250,7 +250,10 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
     # are represented by structured status rather than a fabricated robot line.
     disconnected_action = not go2.is_connected
     publish_allowed = not run.parent_run_id or time.time() < run.deadline
-    if publish_allowed and not disconnected_action and result["response"]:
+    if context.session_id.startswith("peer_"):
+        # The messenger emits the peer reply once; keep this run's response for it.
+        pass
+    elif publish_allowed and not disconnected_action and result["response"]:
         published = publish_agent_event("agent_reply", agent_id="go2",
             session_id=event_session, scope="space" if autonomous else "session",
             space_id=context.space_id, status=result["result"], run_id=run.run_id,

@@ -9,6 +9,10 @@ import pytest
 from cloud.go2.navigation.astar import astar
 from cloud.go2.navigation.occupancy_grid import OccupancyGrid, FREE, UNKNOWN
 from cloud.go2.navigation import navigator as nav_module
+from cloud.go2.navigation import frontier as frontier_module
+from cloud.go2.navigation.frontier import (
+    _raycast, find_exploration_target, find_frontier_target, raycast_directions,
+)
 
 
 def _voxel(points=None):
@@ -26,6 +30,128 @@ def test_voxel_without_free_evidence_remains_unknown():
     assert grid.has_free_space_evidence is False
     with pytest.raises(ValueError):
         grid.odom_to_grid(1.0, 0.0)
+
+
+def test_measured_floor_opens_short_exploration_path_but_unknown_stays_blocked():
+    floor = [[x / 20, y / 20, -0.3]
+             for x in range(-6, 21) for y in range(-8, 9)]
+    grid = OccupancyGrid(_voxel(floor), robot_pose={"x": 0, "y": 0})
+    assert grid.has_free_space_evidence
+    target = find_exploration_target(grid, {"x": 0, "y": 0, "heading": 0}, "forward")
+    assert target
+    assert astar(grid.grid, grid.odom_to_grid(0, 0), grid.odom_to_grid(*target))
+    assert not grid.is_free(*grid.odom_to_grid(-0.85, 0))
+
+
+def test_nearby_measured_floor_bridges_only_local_sensor_blind_gap():
+    floor = [[x * 0.05, y * 0.05, -0.3]
+             for x in range(-16, 21) for y in range(-12, 13)
+             if (x * 0.05) ** 2 + (y * 0.05) ** 2 >= 0.38 ** 2]
+    grid = OccupancyGrid(_voxel(floor), robot_pose={"x": 0, "y": 0})
+    summary = raycast_directions(grid, {"x": 0, "y": 0, "heading": 0})
+    assert summary["forward"] >= 0.6
+    assert find_frontier_target(grid, {"x": 0, "y": 0, "heading": 0})
+    assert grid.cells[20, 20] == FREE
+    assert grid.cells[20, 36] == FREE  # measured floor beyond the blind gap
+
+
+def test_frontier_prefers_reachable_forward_target_before_rear_turn(monkeypatch):
+    cells = np.full((40, 40), FREE, dtype=np.uint8)
+    cells[18:23, 5:8] = UNKNOWN    # larger unknown patch behind the robot
+    cells[20, 32] = UNKNOWN        # smaller frontier ahead
+    grid = SimpleNamespace(
+        cells=cells, width=(40, 40),
+        odom_to_grid=lambda x, y: (int((x + 1) / 0.05), int((y + 1) / 0.05)),
+    )
+    monkeypatch.setattr(frontier_module, "_reachable_candidates", lambda _grid, _odom: {
+        "forward": [(0.55, 0.55, 0.0)],
+        "backward": [(0.55, -0.55, 0.0)],
+    })
+    assert find_frontier_target(grid, {"x": 0.0, "y": 0.0, "heading": 0.0}) == (0.55, 0.0)
+
+
+def test_frontier_does_not_request_rear_turn_when_body_cannot_spin(monkeypatch):
+    cells = np.full((40, 40), FREE, dtype=np.uint8)
+    cells[18:23, 5:8] = UNKNOWN
+    grid = SimpleNamespace(
+        cells=cells, width=(40, 40), is_turn_clear=lambda *_: False,
+        odom_to_grid=lambda x, y: (int((x + 1) / 0.05), int((y + 1) / 0.05)),
+    )
+    monkeypatch.setattr(frontier_module, "_reachable_candidates", lambda _grid, _odom: {
+        "backward": [(0.55, -0.55, 0.0)],
+    })
+    assert find_frontier_target(grid, {"x": 0.0, "y": 0.0, "heading": 0.0}) is None
+
+
+def test_local_floor_bridge_does_not_clear_obstacle():
+    floor = [[x * 0.05, y * 0.05, -0.3]
+             for x in range(-16, 21) for y in range(-12, 13)
+             if (x * 0.05) ** 2 + (y * 0.05) ** 2 >= 0.38 ** 2]
+    grid = OccupancyGrid(_voxel(floor + [[0.36, 0, 0.1]]),
+                         robot_pose={"x": 0, "y": 0})
+    assert not grid.is_free(*grid.odom_to_grid(0.36, 0))
+
+
+def test_measured_floor_does_not_clear_inflated_obstacle():
+    floor = [[x / 20, y / 20, -0.3]
+             for x in range(-6, 21) for y in range(-8, 9)]
+    grid = OccupancyGrid(_voxel(floor + [[0.55, 0, 0.3]]), robot_pose={"x": 0, "y": 0})
+    assert not grid.is_free(*grid.odom_to_grid(0.55, 0))
+    target = find_exploration_target(grid, {"x": 0, "y": 0, "heading": 0}, "forward")
+    if target is not None:
+        path = astar(grid.grid, grid.odom_to_grid(0, 0), grid.odom_to_grid(*target))
+        assert path and all(grid.is_free(*cell) for cell in path)
+
+
+def test_narrow_straight_corridor_uses_width_clearance_but_rejects_turn():
+    floor = [[x * 0.05, y * 0.05, -0.3]
+             for x in range(-6, 29) for y in range(-6, 7)]
+    walls = [[x * 0.05, y * 0.3, 0.3]
+             for x in range(-6, 29) for y in (-1, 1)]
+    voxel = {"data": {"resolution": 0.05, "origin": [-1, -1, 0],
+                      "width": [60, 60, 38], "frame_id": "odom",
+                      "data": {"points": np.asarray(floor + walls)}}}
+    grid = OccupancyGrid(voxel, robot_pose={"x": 0, "y": 0})
+    odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
+    assert raycast_directions(grid, odom)["forward"] > 1.0
+    assert find_frontier_target(grid, odom) is not None
+    assert grid.is_body_clear(0, 0, 0)
+    assert not grid.is_body_clear(0, 0, np.pi / 2)
+    assert not grid.is_turn_clear(0, 0)
+
+
+def test_exploration_uses_connected_route_around_bend():
+    """A visible known-free route can turn around a wall before heading forward."""
+    resolution = 0.05
+    origin = (-1.5, -1.5)
+    blocked = np.ones((60, 60), dtype=bool)
+    for iy in range(60):
+        y = origin[1] + (iy + 0.5) * resolution
+        for ix in range(60):
+            x = origin[0] + (ix + 0.5) * resolution
+            if -0.15 <= x <= 1.0 and -0.15 <= y <= 0.55:
+                blocked[iy, ix] = False
+            if 0.25 <= x <= 0.35 and -0.15 <= y <= 0.3:
+                blocked[iy, ix] = True
+    def odom_to_grid(x, y):
+        return int((x - origin[0]) // resolution), int((y - origin[1]) // resolution)
+    grid = SimpleNamespace(
+        resolution=resolution, origin=origin, width=(60, 60), grid=blocked,
+        odom_to_grid=odom_to_grid,
+        grid_to_odom=lambda ix, iy: (origin[0] + (ix + 0.5) * resolution,
+                                    origin[1] + (iy + 0.5) * resolution),
+        is_free=lambda ix, iy: 0 <= ix < 60 and 0 <= iy < 60 and not blocked[iy, ix],
+    )
+    odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
+    assert _raycast(grid, 0.0, 0.0, 0.0) < 0.5
+    distances = raycast_directions(grid, odom)
+    assert distances["forward"] >= 0.625
+    target = find_exploration_target(grid, odom, "forward")
+    assert target is not None and target[0] > 0.5
+    assert astar(grid.grid, grid.odom_to_grid(0, 0), grid.odom_to_grid(*target))
+    # A detached island of free cells is not offered as a destination.
+    blocked[:, 38:] = True
+    assert find_exploration_target(grid, odom, "forward") is None
 
 
 def test_astar_rejects_blocked_endpoints_and_corner_cutting():
@@ -139,6 +265,19 @@ def test_navigation_velocity_has_deadman_and_timeout_stops(monkeypatch):
     assert commands[-1][:3] == (0, 0, 0)
 
 
+def test_navigation_rejects_turn_without_body_clearance(monkeypatch):
+    commands = []
+    robot = _synthetic_robot(commands)
+    robot.odom["heading"] = np.pi / 2
+    robot.occupancy_grid.is_body_clear = lambda *_: True
+    robot.occupancy_grid.is_turn_clear = lambda *_: False
+    monkeypatch.setattr(nav_module, "go2", robot)
+    result = asyncio.run(nav_module.Navigator().go_to_coordinate(0.8, 0.0))
+    assert result["status"] == "blocked"
+    assert result["reason"] == "turn_clearance_unavailable"
+    assert commands and all(x == 0 for x, _, _, _ in commands)
+
+
 def test_stop_cancels_navigation_and_sends_zero(monkeypatch):
     commands = []
     robot = _synthetic_robot(commands)
@@ -177,6 +316,30 @@ def test_single_pose_frame_cannot_confirm_arrival(monkeypatch):
     assert all(x == 0 for x, _, _, _ in commands)
 
 
+def test_arrival_confirmation_waits_for_deceleration_then_fresh_stable_pose(monkeypatch):
+    commands = []
+    robot = _synthetic_robot(commands)
+    monkeypatch.setattr(nav_module, "go2", robot)
+
+    async def scenario():
+        async def odom_updates():
+            for x in (0.08, 0.16, 0.19, 0.19, 0.19, 0.19):
+                await asyncio.sleep(0.12)
+                robot.odom = {"x": x, "y": 0.0, "heading": 0.0}
+                robot.odom_received_at = time.monotonic()
+
+        nav = nav_module.Navigator()
+        update = asyncio.create_task(odom_updates())
+        confirmed = await nav._confirm_stopped((0.2, 0.0), None)
+        await update
+        return confirmed, nav.last_trusted_pose
+
+    confirmed, pose = asyncio.run(scenario())
+    assert confirmed
+    assert pose["x"] == 0.19
+    assert commands[0][:3] == (0, 0, 0)
+
+
 def test_malformed_pose_is_not_substituted_with_zero_coordinates():
     from cloud.go2.connection.sensors import Go2Sensors
     sensors = Go2Sensors()
@@ -188,6 +351,14 @@ def test_malformed_pose_is_not_substituted_with_zero_coordinates():
                                 "pose": {"position": {"x": float("nan"), "y": 0}}}})
     assert sensors.odom == {}
     assert sensors.odom_received_at is None
+
+
+def test_reconnect_clears_previous_path_overlay():
+    from cloud.go2.connection.sensors import Go2Sensors
+    sensors = Go2Sensors()
+    sensors._global_path = [{"x": 1.0, "y": 0.0}]
+    sensors.reset_sensor_epoch()
+    assert sensors.global_path == []
 
 
 def test_map_debug_serializes_numpy_sample(monkeypatch):

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_7138320d0e8141a08001ee7705c13d38",
+  "session_id": "ses_is3n2-4Rc_e_4sRl-MqscssE",
+  "goal": "我要工作了",
+  "deadline": 1793172027.1319404,
+  "steps": [
+    {
+      "step_id": "caf2fa9c04334f93a0ea34c1316cf619",
+      "tool_call_id": "67c2c82c8f4e411a9e8449aff152b61b",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_17d9f42c0a9940389ff0b2655d75f510",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_7138320d0e8141a08001ee7705c13d38",
+          "source_session_id": "ses_is3n2-4Rc_e_4sRl-MqscssE",
+          "started_at": 1793171938.0516381,
+          "revision": 1793171938080,
+          "status": "active",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "joined",
+              "owner": "act_17d9f42c0a9940389ff0b2655d75f510",
+              "error": "",
+              "joined_at": 1793171938.0631483
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "joined",
+              "owner": "act_17d9f42c0a9940389ff0b2655d75f510",
+              "error": "",
+              "joined_at": 1793171938.071567
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "好的，工作模式已经开好了，灯会配合节奏，机器狗会自己安静活动。你安心忙，有事叫我。",
+  "question": "",
+  "trace_id": "tr_5bbb8d38fd4a4631b58d5c2c367b0f2a",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "好的，你安心工作。灯和机器狗都已经进入自主模式，灯会跟着节奏配合，机器狗会自己安静活动，有事叫我。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793171942.1742213
+}

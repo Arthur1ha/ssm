@@ -1,8 +1,10 @@
 """Peer promises do not become physical completion claims."""
 
 import time
+from types import SimpleNamespace
 
-from cloud.peers.inbound import _finish, handle_api_peer_message
+from cloud.peers.inbound import _finish, _publish_go2_reply_ack, handle_api_peer_message
+from cloud.space.activity import ActivityStore
 
 
 class Messenger:
@@ -53,6 +55,33 @@ def test_expired_peer_message_never_starts_agent(monkeypatch):
 def test_reply_is_recorded_but_never_starts_a_new_agent_turn():
     messenger = Messenger()
     handle_api_peer_message(messenger, {**MESSAGE, "reply_to": "msg_previous"}, None)
+    assert messenger.calls == []
+
+
+def test_go2_peer_reply_creates_one_local_bubble_without_sending_again(tmp_path, monkeypatch):
+    store = ActivityStore(tmp_path / "activity.json")
+    store.note_user_intervention("evt_test")
+    activity = store.begin("我要工作了", "evt_test", 1)
+    store.set_device(activity["activity_id"], "go2", mode="free_explore", status="joined")
+    store.set_device(activity["activity_id"], "esp32_desk_led", mode="reactive", status="joined")
+    store.activate(activity["activity_id"])
+    monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: store)
+    monkeypatch.setattr("cloud.go2.agentcore.soul.load_system_prompt",
+                        lambda: ("我是机器狗", "test", None))
+    class Model:
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="灯的回复收到了，我继续找能走的路。")
+    monkeypatch.setattr("cloud.go2.agentcore.llm.get_text_llm", lambda: Model())
+    messenger = Messenger()
+    reply = {**MESSAGE, "sender": "esp32_desk_led", "target": "go2",
+             "content": "灯光已调好", "reply_to": "msg_original",
+             "activity_id": activity["activity_id"], "reply_kind": "reply"}
+    _publish_go2_reply_ack(messenger, reply)
+    rows = [event for event in store.events(activity["activity_id"])
+            if event.get("source") == "peer_reply_ack"]
+    assert len(rows) == 1
+    assert rows[0]["unit_id"] == "go2"
+    assert rows[0]["reply_to"] == reply["message_id"]
     assert messenger.calls == []
 
 

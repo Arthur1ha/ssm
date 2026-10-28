@@ -187,6 +187,21 @@ class Navigator:
                     vx, yaw = 0.0, math.copysign(TURN_SPEED, heading_error)
                 else:
                     vx, yaw = min(WALK_SPEED, max(MIN_LINEAR_VEL, dist * 0.8)), max(-TURN_SPEED, min(TURN_SPEED, KP_YAW * heading_error))
+                body_clear = getattr(fresh_grid, "is_body_clear", None)
+                if body_clear is not None:
+                    if not body_clear(odom["x"], odom["y"], odom["heading"]):
+                        return self._finish("blocked", "body_clearance_unavailable",
+                                            "当前机身朝向与障碍距离不足，已停止", task_id)
+                    if vx == 0 and yaw != 0:
+                        turn_clear = getattr(fresh_grid, "is_turn_clear", None)
+                        if turn_clear is not None and not turn_clear(odom["x"], odom["y"]):
+                            return self._finish("blocked", "turn_clearance_unavailable",
+                                                "原地转身空间不足，已停止", task_id)
+                    predicted_x = odom["x"] + vx * 0.3 * math.cos(odom["heading"])
+                    predicted_y = odom["y"] + vx * 0.3 * math.sin(odom["heading"])
+                    if not body_clear(predicted_x, predicted_y, odom["heading"] + yaw * 0.3):
+                        return self._finish("blocked", "body_clearance_unavailable",
+                                            "下一步机身空间不足，已停止", task_id)
                 go2.move_velocity(vx, 0, yaw, deadman_s=0.3)
                 await asyncio.sleep(0.1)
             return self._finish("failed", "navigation_timeout", "导航超时，已停止", task_id)
@@ -271,24 +286,28 @@ class Navigator:
         previous_stamp = getattr(go2, "odom_received_at", None)
         previous_pose = go2.odom
         samples = 0
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline and samples < 3:
             await asyncio.sleep(0.1)
-            snapshot, reason = self._snapshot()
-            if reason:
-                return False
-            pose, _ = snapshot
             stamp = getattr(go2, "odom_received_at", None)
+            if (not getattr(go2, "is_connected", False) or stamp is None
+                    or time.monotonic() - stamp > POSE_STALE_S
+                    or getattr(go2, "odom_frame_id", None) != "odom"):
+                return False
             if stamp == previous_stamp:
                 continue
-            if math.hypot(pose["x"] - goal[0], pose["y"] - goal[1]) >= ARRIVAL_THRESHOLD:
+            pose = go2.odom
+            if (not pose or not all(isinstance(pose.get(key), (int, float))
+                                    and math.isfinite(pose[key]) for key in ("x", "y", "heading"))):
                 return False
-            if heading is not None and abs(_normalize_angle(pose["heading"] - heading)) > HEADING_THRESHOLD:
-                return False
-            if math.hypot(pose["x"] - previous_pose["x"], pose["y"] - previous_pose["y"]) > 0.02:
-                return False
+            self.last_trusted_pose = pose.copy()
+            near_goal = math.hypot(pose["x"] - goal[0], pose["y"] - goal[1]) < ARRIVAL_THRESHOLD
+            heading_ok = (heading is None or
+                          abs(_normalize_angle(pose["heading"] - heading)) <= HEADING_THRESHOLD)
+            still = math.hypot(pose["x"] - previous_pose["x"],
+                               pose["y"] - previous_pose["y"]) <= 0.02
+            samples = samples + 1 if near_goal and heading_ok and still else 0
             previous_stamp, previous_pose = stamp, pose
-            samples += 1
         return samples == 3
 
     def _finish(self, status: str, reason: str | None, message: str, task_id: str | None) -> dict:

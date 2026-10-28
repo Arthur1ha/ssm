@@ -42,6 +42,7 @@ class Go2Sensors:
         self._voxel_frame_id = None
         self._voxel_interval_s = None
         self._voxel_count = 0
+        self._global_path = []
         self._low_state = {}
         self._low_state_received_at = None
         self._low_state_interval_s = None

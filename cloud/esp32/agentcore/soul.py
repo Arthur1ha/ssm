@@ -21,6 +21,19 @@ AGENT_PERSONA = """
 _DEFAULT_SOCIAL_INITIATIVE = 70
 
 
+def ensure_personality_profile() -> None:
+    """Give the lamp a durable profile on first startup without replacing edits."""
+    PERSONALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with PERSONALITY_FILE.open("x", encoding="utf-8") as stream:
+            json.dump({"prompt": AGENT_PERSONA, "social_initiative": _DEFAULT_SOCIAL_INITIATIVE},
+                      stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        pass
+
+
 def get_personality_view() -> dict:
     try:
         data = json.loads(PERSONALITY_FILE.read_text(encoding="utf-8"))

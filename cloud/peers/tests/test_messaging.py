@@ -89,6 +89,24 @@ def test_reply_progress_and_result_are_distinct(monkeypatch):
         lamp.close()
 
 
+def test_terminal_result_survives_later_reply_message(monkeypatch):
+    clock, cards, bus, go2, lamp, got, ready = pair(monkeypatch)
+    try:
+        sent = go2.send_message("go2", "esp32_desk_led", "调灯")
+        bus.deliver(go2, lamp)
+        assert ready.wait(1)
+        assert lamp.send_result(sent["message_id"], "ok")["result"] == "accepted"
+        bus.deliver(go2, lamp)
+        assert go2.get_status(sent["message_id"])["state"] == "ok"
+        assert lamp.send_message("esp32_desk_led", "go2", "已经调好",
+                                 sent["message_id"])["result"] == "accepted"
+        bus.deliver(go2, lamp)
+        assert go2.get_status(sent["message_id"])["state"] == "ok"
+    finally:
+        go2.close()
+        lamp.close()
+
+
 def test_offline_scope_replay_and_expiry(monkeypatch):
     clock, cards, bus, go2, lamp, got, ready = pair(monkeypatch)
     try:

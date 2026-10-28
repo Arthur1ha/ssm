@@ -1,7 +1,6 @@
 """
-机器人内驱动系统，根据视觉感知自主切换行为状态。
-状态机：IDLE → SOCIAL（检测到人）/ EXPLORING（长时间无事件）。
-SOCIAL 状态下每 5s 观察并决策是否互动；EXPLORING 状态下 LLM 驱动最多 15 步自主探索。
+机器人内驱动系统：空闲时按好奇心定期探索地图边界。
+视觉与 LLM 处理互动和到达后的场景描述，不控制地图导航的启动或停止。
 """
 import asyncio
 import json
@@ -16,7 +15,9 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.tools.tools import go2_observe, get_text_llm, _VALID_SPORT_CMDS
+from cloud.go2.agentcore.tools.tools import (
+    go2_observe, get_text_llm, _VALID_SPORT_CMDS, _normalize_sport_action,
+)
 from cloud.go2.agentcore.tools.executor import execute_tool
 from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
 from cloud.go2.agentcore.perception.vision import VisionFrame
@@ -30,8 +31,7 @@ from cloud.peers.social import SocialState, activity_peers
 logger = logging.getLogger(__name__)
 
 _CURIOSITY_THRESHOLD   = 10   # 10s 无事件 → EXPLORING
-_SOCIAL_CHECK_INTERVAL = 5    # SOCIAL 状态下每 5s 主动检查
-_ENGAGE_GONE_TIMEOUT   = 3    # 人脸消失 3s → 从 SOCIAL 回 IDLE
+_SOCIAL_CHECK_INTERVAL = 5    # 空闲期间有人脸信号时每 5 tick 评估互动
 
 
 class MotivationalState(str, Enum):
@@ -50,7 +50,6 @@ class Drive:
         self._person_present   = False   # HOG 检测到人体（含远处背景人）
         self._person_engaging  = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
         self._last_person_ts   = 0.0
-        self._last_engaging_ts = time.time()  # 人脸最后一次消失的时间戳（用于 SOCIAL→IDLE 超时判断）
         self._last_action_ts   = 0.0
         self._social_tick      = 0
         self.user_interrupt    = False
@@ -116,6 +115,8 @@ class Drive:
                     "skills": (peer.get("skills") or [])[:5]} for peer in peers]
         prompt = (
             f"{get_personality_view()['prompt']}\n"
+            f"你的社交主动性：{score}/100。此值影响主动开口的倾向，"
+            "但每条消息仍应与情境和同伴能力相关。\n"
             "你正在活动内评估是否主动向同伴说一句有价值的话。"
             "只根据当前活动和可靠发现判断；工作或睡觉等情境可保持安静。"
             "不能声称动作已完成或从普通视觉描述推断人物身份、偏好。"
@@ -158,8 +159,8 @@ class Drive:
         outcome = send_message(target, message)
         if outcome.get("result") == "accepted":
             self._social_state.sent(target, topic)
-            logger.info("[Drive/Social] sent message=%s conversation=%s",
-                        outcome.get("message_id"), outcome.get("conversation_id"))
+            logger.info("[Drive/Social] sent target=%s content=%s message=%s conversation=%s",
+                        target, message, outcome.get("message_id"), outcome.get("conversation_id"))
         else:
             logger.info("[Drive/Social] delivery rejected: %s", outcome)
 
@@ -218,7 +219,7 @@ class Drive:
         nav_task = asyncio.create_task(self._execute_motion(tool, params))
         try:
             while not nav_task.done():
-                if self.user_interrupt or self._person_engaging or not go2.is_connected:
+                if self.user_interrupt or not go2.is_connected:
                     nav_task.cancel()
                     await asyncio.gather(nav_task, return_exceptions=True)
                     if owner_session_id is not None:
@@ -246,19 +247,18 @@ class Drive:
     # ── Vision 回调 ────────────────────────────────────────────────
 
     def on_vision_frame(self, frame: VisionFrame) -> None:
-        """处理视觉帧：区分"远处背景人"和"主动互动人"，避免背景人打断探索。
+        """Record visual context for interaction without controlling map motion.
 
         _person_present：HOG 检测到人体（含远距坐着工作的人）
         _person_engaging：人脸检测到，表示对方近距且面向镜头，判定为主动互动意图
-        仅 _person_engaging 才触发 SOCIAL 状态切换和探索中断。
+        人脸检测可能误判，不能让它独占自由探索或中断地图导航。
         """
         currently_present  = frame["persons"]["detected"]
         currently_engaging = frame["faces"]["detected"]
 
-        # 追踪人体 presence（用于 SOCIAL→IDLE 超时判断）
+        # 追踪人体 presence，供对话上下文使用。
         if currently_present and not self._person_present:
             self._person_present = True
-            self._curiosity = 0
             episode_memory.add(
                 EventType.VISION_CHANGE,
                 f"检测到 {frame['persons']['count']} 人进入画面",
@@ -271,13 +271,9 @@ class Drive:
         # 追踪主动互动信号（人脸可见）
         if currently_engaging and not self._person_engaging:
             self._person_engaging = True
-            if self._state == MotivationalState.IDLE:
-                self._state = MotivationalState.SOCIAL
-                self._social_tick = 0
-            episode_memory.add(EventType.VISION_CHANGE, "检测到面向镜头的人，进入社交模式")
+            episode_memory.add(EventType.VISION_CHANGE, "检测到面向镜头的人，可评估互动")
         elif not currently_engaging and self._person_engaging:
             self._person_engaging = False
-            self._last_engaging_ts = time.time()
 
         if frame["changed"] and frame["change_type"] != "none" and not currently_present and not self._person_present:
             episode_memory.add(EventType.VISION_CHANGE, f"视觉变化：{frame['change_type']}")
@@ -308,205 +304,85 @@ class Drive:
             self._curiosity += 1
             self._social_tick += 1
 
-            if self._state == MotivationalState.SOCIAL:
-                # 改动 2：用人脸消失超时（_ENGAGE_GONE_TIMEOUT）替代人体消失超时退出 SOCIAL
-                if (not self._person_engaging and
-                        time.time() - self._last_engaging_ts >= _ENGAGE_GONE_TIMEOUT):
+            # Exploration is scheduled by curiosity and the live map. Face
+            # detection only schedules a separate social check between trips.
+            if self._curiosity >= _CURIOSITY_THRESHOLD:
+                self._curiosity = 0
+                self._state = MotivationalState.EXPLORING
+                try:
+                    await self._do_explore()
+                finally:
                     self._state = MotivationalState.IDLE
-                    self._curiosity = 0
-                    self._social_tick = 0
-                elif self._social_tick >= _SOCIAL_CHECK_INTERVAL:
-                    self._social_tick = 0
-                    await self._do_social()
-
-            elif self._state == MotivationalState.IDLE:
-                if self._curiosity >= _CURIOSITY_THRESHOLD and time.time() >= self._vision_retry_after:
-                    self._curiosity = 0
-                    # 改动 1a：curiosity 达阈值时先看有无人脸，有则直接进 SOCIAL
-                    if self._person_engaging:
-                        self._state = MotivationalState.SOCIAL
-                        self._social_tick = 0
-                    else:
-                        self._state = MotivationalState.EXPLORING
-                        await self._do_explore()
-                        # 改动 1b：探索结束后根据 person_engaging 决定下一状态
-                        if self._person_engaging:
-                            self._state = MotivationalState.SOCIAL
-                            self._social_tick = 0
-                        else:
-                            self._state = MotivationalState.IDLE
+            elif self._person_engaging and self._social_tick >= _SOCIAL_CHECK_INTERVAL:
+                self._social_tick = 0
+                await self._do_social()
 
     async def _do_explore(self) -> None:
-        """EXPLORING 状态：LLM 驱动的多步自主探索，最多 15 步，被人打断或用户打断时提前结束。"""
-        _MAX_STEPS = 15
-        history: list[dict] = []
-        logger.info("[Drive] 开始自主探索会话")
+        """Explore measured map frontiers; vision describes arrivals separately."""
+        from cloud.go2.navigation.navigator import navigator
 
-        # 改动 3：进入时先检查打断条件，避免不必要的 LLM 调用
-        if self.user_interrupt or self._person_engaging or self._pending_question_id:
-            logger.info("[Drive] 探索进入即被打断（user_interrupt=%s person_engaging=%s），跳过",
-                        self.user_interrupt, self._person_engaging)
+        if self.user_interrupt or self._pending_question_id:
+            logger.info("[Drive] 探索进入即被打断")
             return
 
-        # 进入探索前先观察一次，让第一步决策有视觉上下文
-        try:
-            initial_obs = await go2_observe("描述当前看到的场景，有什么值得探索的")
-            if not initial_obs or initial_obs.startswith("无可用视频帧"):
-                raise RuntimeError("video_frame_unavailable")
-        except Exception as exc:
-            logger.warning("[Drive] 探索初始观察失败: %s", exc)
-            self._vision_retry_after = time.time() + 60
-            message = ("摄像头画面暂不可用，已暂停自主探索，稍后再试。"
-                       if str(exc) == "video_frame_unavailable" else
-                       "视觉服务暂不可用，已暂停自主探索，稍后再试。")
-            self._activity_event("message", message, status="error")
-            return
-        episode_memory.add(EventType.OBSERVATION, f"探索开始：{initial_obs}")
-        initial_event = self._activity_event("observation", initial_obs)
-        await self._evaluate_social(initial_event)
-        logger.info("[Drive] 探索初始观察：%s", initial_obs)
-
-        for step in range(_MAX_STEPS):
-            if self.user_interrupt or self._person_engaging:
-                logger.info("[Drive] EXPLORING 被打断 step=%d（用户打断或检测到互动意图）", step)
+        visited: list[tuple[float, float]] = []
+        rejected: list[tuple[float, float]] = []
+        logger.info("[Drive] 开始地图驱动的自主探索")
+        for step in range(15):
+            if self.user_interrupt or not go2.is_connected:
                 break
-
-            from cloud.go2.agentcore.memory import spatial as spatial_memory
-            odom = go2.odom
-            odom_str = (
-                f"x={odom['x']:.2f}, y={odom['y']:.2f}, heading={odom['heading']:.2f}rad"
-                if odom else "未知"
-            )
-            locations = spatial_memory.list_locations()
-            loc_str = ", ".join(l["name"] for l in locations) if locations else "无"
-            history_str = "\n".join(
-                f"  步骤{h['step']}: [{h['tool']}] {h['reason']} → {h['result']}"
-                for h in history
-            ) or "  （尚未执行任何步骤）"
-
-            # 射线投射：告诉 LLM 各方向实际可行距离，并按开阔度分级
-            grid_obj = go2.occupancy_grid
-            if grid_obj and odom:
-                dir_free = frontier_mod.raycast_directions(grid_obj, odom)
-                _adj = {
-                    "forward":        ("forward_left",  "forward_right"),
-                    "forward_right":  ("forward",       "right"),
-                    "right":          ("forward_right", "backward_right"),
-                    "backward_right": ("right",         "backward"),
-                    "backward":       ("backward_right","backward_left"),
-                    "backward_left":  ("backward",      "left"),
-                    "left":           ("backward_left", "forward_left"),
-                    "forward_left":   ("left",          "forward"),
-                }
-                open_dirs, pass_dirs, block_dirs = [], [], []
-                for d, v in dir_free.items():
-                    a1, a2   = _adj[d]
-                    adj_min  = min(dir_free[a1], dir_free[a2])
-                    if v >= 1.5 and adj_min >= 0.6:
-                        open_dirs.append(f"{d}({v:.1f}m)")
-                    elif v >= 0.8:
-                        pass_dirs.append(f"{d}({v:.1f}m)")
-                    else:
-                        block_dirs.append(f"{d}({v:.1f}m)")
-                dir_lines = []
-                if open_dirs:
-                    dir_lines.append(f"  ★开阔（优先）：{', '.join(open_dirs)}")
-                if pass_dirs:
-                    dir_lines.append(f"  ○可通行：{', '.join(pass_dirs)}")
-                if block_dirs:
-                    dir_lines.append(f"  ✗受阻：{', '.join(block_dirs)}")
-                dir_str = "\n".join(dir_lines) if dir_lines else "所有方向均受阻"
-            else:
-                dir_str = "地图未就绪"
-
-            # 最新观察：上一步导航结果中已含到达后观察，否则用初始观察
-            last_obs = history[-1]["result"] if history else initial_obs
-
-            prompt = (
-                f"{episode_memory.format_context()}\n\n"
-                f"{self._identity_context()}\n"
-                f"你正在自主探索环境，当前第 {step + 1} 步（最多 {_MAX_STEPS} 步）。\n"
-                f"当前位置：{odom_str}\n"
-                f"已知地点：{loc_str}\n"
-                f"各方向可行空间（★开阔 = 自身及相邻方向均宽敞，优先选择；"
-                f"数值仅代表射线通畅距离，不保证目的地完全可达）：\n{dir_str}\n"
-                f"当前观察：{last_obs}\n\n"
-                f"本次探索历史：\n{history_str}\n\n"
-                f"可用工具（每个都标注了「何时用」，按当前场景选最合适的一个）：\n"
-                f"  explore_direction → direction: {'/'.join(frontier_mod.DIRECTIONS)}\n"
-                f"      何时用：【只】从★开阔或○可通行方向里选，绝不朝✗受阻方向（家具底部、墙角、狭窄通道）走。\n"
-                f"             系统自动计算安全目标并导航过去。返回「路径不通」或「建议远观」时，\n"
-                f"             用 go2_observe 远观并记录观察，然后换★开阔方向；远处物体不能标成当前位置。\n"
-                f"  go2_tag_location  → name: 仅在已经站到该地点时，给当前脚下位置起名\n"
-                f"      何时用：走到值得记住的位置并停稳后，再标记脚下位置。远处物体只记为观察。\n"
-                f"             起个好记的名字（如「窗边」「红椅子旁」）。已知地点里已经有的就别重复标。\n"
-                f"  go2_sport         → cmd: {', '.join(sorted(_VALID_SPORT_CMDS))}\n"
-                f"      何时用：用动作表达情绪。看到喜欢/有趣的东西可以 Hello、Stretch、Dance1/Dance2 撒个欢；\n"
-                f"             累了想歇就 StandDown。这是你表达心情的方式，不必每步都做。\n"
-                f"  go2_observe       → question: 想看清什么\n"
-                f"      何时用：想把✗受阻方向的兴趣点看仔细（远观但不走过去），或拿不准是否值得标记时。\n"
-                f"             每次移动到位后系统已自动观察一次，只在「想凑近再看看」时才单独用，别浪费步数。\n"
-                f"  go2_navigate_to   → name: 回到一个已标记的地点\n"
-                f"      何时用：想回到之前 go2_tag_location 标过的某个地点（只能去「已知地点」里列出来的）。\n"
-                f"  ask_user          → question: 简短问题\n"
-                f"      何时用：看到了无法判断且需要用户辨认的物体；发问题和截图后暂停探索。\n"
-                f"  stop              → 结束探索\n"
-                f"      何时用：逛够了、满足了、或累了想回家休息。\n\n"
-                f"【移动策略】视觉上有趣 ≠ 走得过去。✗受阻方向的兴趣点只能远观，不要用 explore_direction 硬闯：\n"
-                f"  发现✗受阻方向有趣 → go2_observe 远看并记录观察 → 换★开阔方向继续。\n\n"
-                f"reason 记录你的动作理由；用户可见回复会在真实结果返回后单独生成。\n"
-                f"直接输出 JSON，不含代码块：\n"
-                f"{{\"tool\": \"工具名\", \"params\": {{...}}, \"reason\": \"一句话\", \"done\": false}}"
-            )
-
-            try:
-                bundle = build_prompt(
-                    "free_explore", personality=get_system_prompt(),
-                    device_state=prompt + "\n当前空间现状：" + prompt_space_context(),
-                    tool_results=history_str, tool_version="go2-tools-v1",
-                )
-                self._last_prompt_metadata = bundle.metadata
-                logger.info("[Go2/Prompt] %s", bundle.metadata)
-                resp = await get_text_llm().ainvoke([
-                    SystemMessage(content=bundle.system),
-                    HumanMessage(content=bundle.human),
-                ])
-                content = re.sub(r"```(?:json)?\n?", "", resp.content.strip()).strip().rstrip("`")
-                decision = json.loads(content)
-            except Exception as exc:
-                logger.warning("[Drive] 探索推理失败 step=%d: %s", step, exc)
+            snapshot, reason = navigator._snapshot()
+            if snapshot is None:
+                logger.info("[Drive] 探索暂停：地图或定位不可用 reason=%s", reason)
                 break
-
-            tool   = decision.get("tool", "")
-            reason = decision.get("reason", "")
-
-            if decision.get("done") or tool == "stop":
-                logger.info("[Drive] EXPLORING 自主结束 step=%d：%s", step, reason)
-                episode_memory.add(EventType.ACTION_TAKEN, f"探索结束：{reason}")
-                await self._return_home()
+            odom, grid_obj = snapshot
+            target = frontier_mod.find_frontier_target(grid_obj, odom, visited + rejected)
+            if target is None:
+                turn_check = getattr(grid_obj, "is_turn_clear", None)
+                if callable(turn_check) and not turn_check(odom["x"], odom["y"]):
+                    logger.info("[Drive] 探索暂停：当前转身空间不足，也没有无需转身的可达边界")
+                else:
+                    logger.info("[Drive] 探索暂停：当前位置没有可达的未知边界")
                 break
-
-            logger.info("[Drive] EXPLORING step=%d  tool=%s  reason=%s", step, tool, reason)
-            result = await self._exec_explore_tool(tool, decision.get("params", {}))
-            if tool in {"explore_direction", "go2_navigate_to"}:
-                self._activity_event("action_result", result, action=tool,
-                                     status=self._last_execution_result)
-            elif tool == "go2_observe":
-                observed_event = self._activity_event("observation", result)
-                await self._evaluate_social(observed_event)
-            logger.info("[Drive] EXPLORING step=%d  result=%s", step, result)
-
-            history.append({"step": step + 1, "tool": tool, "reason": reason, "result": result})
+            logger.info("[Drive] 地图边界目标 step=%d x=%.2f y=%.2f", step, *target)
+            result = await self._navigate(coordinate=target)
+            status = result.get("result")
             episode_memory.add(
                 EventType.ACTION_TAKEN,
-                f"探索步骤{step + 1}[{tool}]：{reason} → {result}",
+                f"地图边界探索步骤{step + 1}：目标({target[0]:.2f},{target[1]:.2f}) → "
+                f"{self._result_text(result)}",
             )
             self._last_action_ts = time.time()
-            if self._last_execution_result not in {"ok", "blocked"}:
-                logger.info("[Drive] 动作未确认，结束本次探索：%s", self._last_execution_result)
+            if status != "ok":
+                logger.info("[Drive] 边界导航未完成 step=%d status=%s reason=%s",
+                            step, status, result.get("reason"))
+                if result.get("reason") in {"turn_clearance_unavailable",
+                                            "body_clearance_unavailable"}:
+                    # A new goal does not change the body's current clearance.
+                    # Wait for a later map/pose instead of trying more turns now.
+                    break
+                if status == "blocked" and len(rejected) < 3:
+                    rejected.append(target)
+                    continue
                 break
-
-        logger.info("[Drive] 探索会话结束，共 %d 步", len(history))
+            visited.append(target)
+            self._activity_event("action_result", self._result_text(result),
+                                 action="explore_frontier", status="ok")
+            # The camera reports what was reached; its availability never
+            # changes the map target or authorizes movement.
+            if time.time() >= self._vision_retry_after:
+                try:
+                    observation = await go2_observe("描述当前位置看到的场景，有什么值得记录的")
+                    if observation and not observation.startswith("无可用视频帧"):
+                        episode_memory.add(EventType.OBSERVATION, observation)
+                        event = self._activity_event("observation", observation)
+                        await self._evaluate_social(event)
+                    else:
+                        self._vision_retry_after = time.time() + 60
+                except Exception as exc:
+                    logger.warning("[Drive] 到达后视觉观察失败: %s", type(exc).__name__)
+                    self._vision_retry_after = time.time() + 60
+        logger.info("[Drive] 地图探索会话结束，已到达 %d 个目标", len(visited))
 
     async def _exec_explore_tool(self, tool: str, params: dict) -> str:
         """执行探索中 LLM 决策的工具调用，导航工具可被打断。"""
@@ -588,8 +464,12 @@ class Drive:
         if not odom:
             return "无法移动：odom 不可用"
 
-        grid_obj = go2.occupancy_grid
-        target   = frontier_mod.find_exploration_target(grid_obj, odom, direction) if grid_obj is not None else None
+        trusted_map, map_reason = navigator._snapshot()
+        if trusted_map is None:
+            self._last_execution_result = "blocked"
+            return f"地图或定位未就绪（{map_reason}），不能安全探索该方向"
+        odom, grid_obj = trusted_map
+        target = frontier_mod.find_exploration_target(grid_obj, odom, direction)
 
         if grid_obj is not None and target is None:
             self._last_execution_result = "blocked"
@@ -597,10 +477,6 @@ class Drive:
                 f"方向「{direction}」路径不通，不能向前移动。"
                 "建议先远观并记录观察，再选择地图中的可通行方向。"
             )
-
-        if grid_obj is None:
-            self._last_execution_result = "blocked"
-            return "地图不可用，不能安全探索该方向"
 
         target_x, target_y = target
 
@@ -682,13 +558,17 @@ class Drive:
         action = decision.get("action")
         reason = decision.get("reason", "")
         if action:
+            canonical = _normalize_sport_action(str(action))
+            if canonical is None:
+                logger.info("[Drive] SOCIAL 忽略无效姿态动作：%s", action)
+                return
             try:
-                result = await self._execute_motion("go2_sport", {"cmd": action})
+                result = await self._execute_motion("go2_sport", {"cmd": canonical})
                 if result.get("result") != "ok":
                     return
                 self._last_action_ts = time.time()
-                episode_memory.add(EventType.ACTION_TAKEN, f"社交互动：执行了 {action}（{reason}）")
-                logger.info("[Drive] SOCIAL 执行 %s：%s", action, reason)
+                episode_memory.add(EventType.ACTION_TAKEN, f"社交互动：执行了 {canonical}（{reason}）")
+                logger.info("[Drive] SOCIAL 执行 %s：%s", canonical, reason)
             except Exception as exc:
                 logger.warning("[Drive] 社交执行失败: %s", exc)
         else:
@@ -704,7 +584,6 @@ class Drive:
         self._curiosity        = 0
         self._person_present   = False
         self._person_engaging  = False
-        self._last_engaging_ts = time.time()
         self._task             = asyncio.create_task(self._run_loop())
         self.owner_session_id  = owner_session_id
         self._context = replace(context or SYSTEM_CONTEXT, origin_kind="agent_autonomous")

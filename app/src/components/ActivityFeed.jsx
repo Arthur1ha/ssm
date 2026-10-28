@@ -51,10 +51,6 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [entries]);
 
-  useEffect(() => {
-    if (hasActivity) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activityEvents.length, activity?.status, hasActivity]);
-
   if (rows.length === 0) return null;
   return (
     <div style={{ padding: '0 16px' }}>
@@ -203,8 +199,14 @@ function activityStatusText(event, name, compact = false) {
  * An invitation therefore never looks like an action that already happened. */
 function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
   getName = getAgentDisplayName }) {
-  const { useEffect, useState } = React;
+  const { useEffect, useRef, useState } = React;
   const [expanded, setExpanded] = useState(false);
+  const latestMessageRef = useRef(null);
+  let latestMessageIndex = -1;
+  events.forEach((event, index) => {
+    if (activityEventKind(event) === 'message') latestMessageIndex = index;
+  });
+  const latestMessageId = events[latestMessageIndex]?.event_id;
   const context = activity?.context || activity?.user_text || activity?.text ||
     events.find(event => event.event_type === 'started')?.text || '';
   const activityId = activity?.activity_id || events[0]?.activity_id || '';
@@ -220,6 +222,11 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
       ? getName(summaryEvent.unit_id) : '空间管家')
     : '本次活动已结束';
   useEffect(() => setExpanded(false), [activityId, isActive, isEnding]);
+  useEffect(() => {
+    if (isActive && showTimeline && latestMessageId) {
+      latestMessageRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [activityId, isActive, showTimeline, latestMessageId]);
   if (!activity && events.length === 0 && !error) return null;
   const timeLabel = ts => ts ? new Date(Number(ts) < 1e11 ? Number(ts) * 1000 : Number(ts))
     .toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
@@ -254,7 +261,9 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
           && (previous.target_unit_id || previous.target || '') !== target;
         const mediaUrl = activityMediaUrl(event);
         const text = event.text || '';
-        return <div key={event.event_id} className={`space-activity__item space-activity__item--${kind}`}>
+        return <div key={event.event_id}
+          ref={index === latestMessageIndex ? latestMessageRef : null}
+          className={`space-activity__item space-activity__item--${kind}`}>
           <span className="space-activity__time">{timeLabel(event.ts)}</span>
           <div className="space-activity__content">
             {showSpeaker && <div className="space-activity__speaker">{name}{target ? ` → ${getName(target)}` : ''}

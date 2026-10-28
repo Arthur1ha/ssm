@@ -3,7 +3,7 @@
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
@@ -107,7 +107,7 @@ def test_free_explore_motion_uses_executor_and_interrupt_gate(monkeypatch):
     assert calls == [("go2_move", {"direction": "forward"})]
 
 
-def test_explore_vision_error_stops_before_motion_and_hides_provider_detail(monkeypatch):
+def test_explore_vision_error_does_not_block_map_motion(monkeypatch):
     from cloud.space import activity as activity_module
 
     events = []
@@ -119,25 +119,53 @@ def test_explore_vision_error_stops_before_motion_and_hides_provider_detail(monk
     monkeypatch.setattr(free_explore, "go2_observe", AsyncMock(
         side_effect=RuntimeError("403 Free quota exhausted")))
     monkeypatch.setattr(free_explore, "get_text_llm", lambda: (_ for _ in ()).throw(
-        AssertionError("exploration must stop before planning")))
+        AssertionError("map exploration must not ask the LLM to choose motion")))
+    from cloud.go2.navigation.navigator import navigator
+    odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
+    monkeypatch.setattr(free_explore.go2, "is_connected", True)
+    monkeypatch.setattr(navigator, "_snapshot", lambda: ((odom, object()), None))
+    monkeypatch.setattr(free_explore.frontier_mod, "find_frontier_target",
+                        MagicMock(side_effect=[(0.8, 0.0), None]))
     drive = free_explore.Drive()
     drive.owner_session_id = "act_vision"
+    drive._navigate = AsyncMock(return_value={"result": "ok", "message": "已到达"})
 
     asyncio.run(drive._do_explore())
 
+    drive._navigate.assert_awaited_once_with(coordinate=(0.8, 0.0))
     assert drive._vision_retry_after > 0
     assert len(events) == 1
-    assert events[0][0][1] == "message"
-    assert "视觉服务暂不可用" in events[0][1]["text"]
-    assert "403" not in events[0][1]["text"]
+    assert events[0][0][1] == "action_result"
+    assert "403" not in str(events)
+
+
+def test_clearance_block_stops_same_cycle_retries(monkeypatch):
+    from cloud.go2.navigation.navigator import navigator
+
+    monkeypatch.setattr(free_explore.go2, "is_connected", True)
+    monkeypatch.setattr(navigator, "_snapshot", lambda: ((
+        {"x": 0.0, "y": 0.0, "heading": 0.0}, object()), None))
+    targets = MagicMock(return_value=(0.8, 0.0))
+    monkeypatch.setattr(free_explore.frontier_mod, "find_frontier_target", targets)
+    drive = free_explore.Drive()
+    drive._navigate = AsyncMock(return_value={
+        "result": "blocked", "reason": "turn_clearance_unavailable",
+        "message": "原地转身空间不足"})
+    asyncio.run(drive._do_explore())
+    drive._navigate.assert_awaited_once()
+    assert targets.call_count == 1
 
 
 def test_explore_blocked_direction_never_falls_back_to_forward_motion(monkeypatch):
     drive = free_explore.Drive()
+    from cloud.go2.navigation.navigator import navigator
+    fake_odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
+    fake_grid = object()
     monkeypatch.setattr(free_explore, "go2", SimpleNamespace(
-        odom={"x": 0.0, "y": 0.0, "heading": 0.0}, occupancy_grid=object(),
+        odom=fake_odom, occupancy_grid=fake_grid,
         is_connected=True,
     ))
+    monkeypatch.setattr(navigator, "_snapshot", lambda: ((fake_odom, fake_grid), None))
     monkeypatch.setattr(free_explore.frontier_mod, "find_exploration_target", lambda *args: None)
     execute = AsyncMock(return_value={"result": "ok"})
     monkeypatch.setattr(free_explore, "execute_tool", execute)

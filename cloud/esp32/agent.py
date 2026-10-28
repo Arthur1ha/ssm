@@ -26,6 +26,7 @@ from cloud.space.execution import ExecutionContext
 from cloud.observability import bind_context, emit_agent_event
 
 USER_HOLD_TTL = 300   # 用户/编排器命令后，自主层让位时长（秒）
+PEER_HOLD_TTL = 60    # 同伴控灯请求执行期间，避免自主调光覆盖其结果
 _VALID_AUTONOMY_MODES = ("manual", "reactive")
 
 LLM_UNAVAILABLE_REPLY = (
@@ -48,6 +49,8 @@ def get_agent() -> Optional["ESP32Agent"]:
 
 class ESP32Agent(ReactiveMind):
     def __init__(self, state: ESP32State, llm=None):
+        from cloud.esp32.agentcore.soul import ensure_personality_profile
+        ensure_personality_profile()
         self._state = state
         self._llm   = llm if llm is not None else self._make_llm()
         self._event_queue: queue.Queue = queue.Queue()
@@ -95,6 +98,13 @@ class ESP32Agent(ReactiveMind):
         cancel_pending(initiator_unit_id=unit_id, origin_kind="agent_autonomous",
                        reason="user_takeover")
         logger.info("user command on %s → 自主层让位 %ds", unit_id, USER_HOLD_TTL)
+
+    def mark_peer_command(self, unit_id: str) -> None:
+        """Peer requests get a shorter reactive hold without cancelling peer work."""
+        if self._autonomy_mode != "reactive":
+            return
+        self._user_hold_until = max(self._user_hold_until, time.time() + PEER_HOLD_TTL)
+        logger.info("peer command on %s → 自主调光让位 %ds", unit_id, PEER_HOLD_TTL)
 
     def wait_task_result(self, task_id: str, timeout: float = 20.0) -> dict:
         """供设备页对话等待 ESP32 的实际执行反馈。"""
@@ -450,7 +460,10 @@ class ESP32Agent(ReactiveMind):
             run.reply_source = "runtime"
             store.save(run)
         source = event_source
-        if reply:
+        if context.session_id.startswith("peer_"):
+            # The messenger publishes the peer reply as one activity bubble.
+            published = {}
+        elif reply:
             published = publish_agent_event("agent_reply", agent_id=unit_id,
                 session_id=event_session, scope="space" if autonomous else "session",
                 space_id=context.space_id, status=status, run_id=run.run_id,

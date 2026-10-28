@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_857fdb5dfca649daa015c06bd26cf89a",
+  "session_id": "ses_euCc28JdIHhx_Sdr0efUBBFj",
+  "goal": "我要工作了",
+  "deadline": 1793174112.0335875,
+  "steps": [
+    {
+      "step_id": "38bca1699d6b4ca8b80e55d909a6c3e6",
+      "tool_call_id": "5a4bc616be3341a9a51c70fa5d957c25",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_64a2d1a8452e4c9690450122d21810c2",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_857fdb5dfca649daa015c06bd26cf89a",
+          "source_session_id": "ses_euCc28JdIHhx_Sdr0efUBBFj",
+          "started_at": 1793174023.8760157,
+          "revision": 1793174023899,
+          "status": "active",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "joined",
+              "owner": "act_64a2d1a8452e4c9690450122d21810c2",
+              "error": "",
+              "joined_at": 1793174023.8857887
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "joined",
+              "owner": "act_64a2d1a8452e4c9690450122d21810c2",
+              "error": "",
+              "joined_at": 1793174023.8928437
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "好，工作模式已经开好了，机器狗和桌面台灯都接上了，你安心忙。",
+  "question": "",
+  "trace_id": "tr_e86547e6d7b34732876acb0d510cd973",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "好，工作模式已开启，台灯和机器狗都已加入，会自己配合着来。你安心忙。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793174027.6092865
+}

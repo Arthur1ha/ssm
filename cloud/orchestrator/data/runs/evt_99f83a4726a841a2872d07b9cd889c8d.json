@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_99f83a4726a841a2872d07b9cd889c8d",
+  "session_id": "ses_fPlO0qsv-CsKq1FRwIhakb3j",
+  "goal": "我要工作了",
+  "deadline": 1793170882.5002441,
+  "steps": [
+    {
+      "step_id": "3d73fc38d7fd46aba341e745e8622259",
+      "tool_call_id": "db1a5dc01f6640d8a51d1d1f09ab64cd",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_7aa0d5d35cae4b8fa35434eb6b38e73b",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_99f83a4726a841a2872d07b9cd889c8d",
+          "source_session_id": "ses_fPlO0qsv-CsKq1FRwIhakb3j",
+          "started_at": 1793170795.00462,
+          "revision": 1793170795140,
+          "status": "partial",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "joined",
+              "owner": "act_7aa0d5d35cae4b8fa35434eb6b38e73b",
+              "error": "",
+              "joined_at": 1793170795.1215897
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "offline",
+              "owner": "",
+              "error": "device_offline"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "工作模式已经启动，Go2 已进入自主模式；桌面灯现在离线，暂时还没加入，等它上线后再说。",
+  "question": "",
+  "trace_id": "tr_c48e17776cb440da8dc38bee3309e215",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "工作模式已启动：Go2 已加入自主模式；桌面灯当前离线，暂时没加入。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793170798.1691628
+}

@@ -9,6 +9,16 @@ from cloud.esp32.agentcore import soul as lamp_soul
 from cloud.go2.agentcore import soul as go2_soul
 
 
+def test_lamp_first_start_persists_score_without_replacing_admin_profile(tmp_path, monkeypatch):
+    path = tmp_path / "soul" / "personality.json"
+    monkeypatch.setattr(lamp_soul, "PERSONALITY_FILE", path)
+    lamp_soul.ensure_personality_profile()
+    assert json.loads(path.read_text(encoding="utf-8"))["social_initiative"] == 70
+    path.write_text(json.dumps({"prompt": "管理员人设", "social_initiative": 92}), encoding="utf-8")
+    lamp_soul.ensure_personality_profile()
+    assert lamp_soul.get_personality_view() == {"prompt": "管理员人设", "social_initiative": 92}
+
+
 def test_lamp_legacy_profile_and_score_preservation(tmp_path, monkeypatch):
     path = tmp_path / "lamp.json"
     path.write_text(json.dumps({"prompt": "旧人设"}), encoding="utf-8")

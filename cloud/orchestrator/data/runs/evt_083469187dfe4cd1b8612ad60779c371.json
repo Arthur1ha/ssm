@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_083469187dfe4cd1b8612ad60779c371",
+  "session_id": "ses_MFoAyFXmdS13fLxXhmlro8gu",
+  "goal": "我要工作了",
+  "deadline": 1793174745.522473,
+  "steps": [
+    {
+      "step_id": "f0b63a1505dc415d92ae474c9e741229",
+      "tool_call_id": "77c74b5c138c41108ff605c9c5b82f76",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_de35cfbcff1c47f9bdada2c85ae5e715",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_083469187dfe4cd1b8612ad60779c371",
+          "source_session_id": "ses_MFoAyFXmdS13fLxXhmlro8gu",
+          "started_at": 1793174656.5801384,
+          "revision": 1793174656741,
+          "status": "active",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "joined",
+              "owner": "act_de35cfbcff1c47f9bdada2c85ae5e715",
+              "error": "",
+              "joined_at": 1793174656.68131
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "joined",
+              "owner": "act_de35cfbcff1c47f9bdada2c85ae5e715",
+              "error": "",
+              "joined_at": 1793174656.7332768
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "好，工作模式已经开起来了：桌面灯和 Go2 都加入进来了。你安心干活，有事喊我。",
+  "question": "",
+  "trace_id": "tr_e587ec9a46814f2482fcfc87da87a8cf",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "好，工作模式已经开起来了：桌面灯和 Go2 都加入进来了，各忙各的去了。你安心干活，有事喊我。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793174659.3585691
+}

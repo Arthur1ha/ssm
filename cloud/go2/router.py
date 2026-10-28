@@ -1106,7 +1106,28 @@ async def go2_map_debug(context=Depends(require_admin_read)):
             return obj.item()
         return obj
 
-    return {"diagnostics": _summarize(go2.sensor_diagnostics), "voxel": _summarize(raw)}
+    try:
+        grid_obj = getattr(go2, "occupancy_grid", None)
+        grid_summary = ({"floor_z": grid_obj.measured_floor_z,
+                         "has_free_space_evidence": grid_obj.has_free_space_evidence,
+                         "free_cells": int(np.count_nonzero(grid_obj.cells == 1)),
+                         "unknown_cells": int(np.count_nonzero(grid_obj.cells == 0)),
+                         "occupied_cells": int(np.count_nonzero(grid_obj.cells == 2))}
+                        if grid_obj is not None else None)
+        odom = getattr(go2, "odom", None)
+        if grid_summary is not None and odom and grid_obj.has_free_space_evidence:
+            from cloud.go2.navigation.frontier import (
+                find_frontier_target, raycast_directions, reachable_summary,
+            )
+            grid_summary["reachable_directions_m"] = raycast_directions(grid_obj, odom)
+            grid_summary.update(reachable_summary(grid_obj, odom))
+            grid_summary["frontier_target"] = find_frontier_target(grid_obj, odom)
+            grid_summary["body_clear"] = grid_obj.is_body_clear(
+                odom["x"], odom["y"], odom.get("heading", 0.0))
+    except (ValueError, TypeError):
+        grid_summary = None
+    return {"diagnostics": _summarize(go2.sensor_diagnostics),
+            "voxel": _summarize(raw), "grid": grid_summary}
 
 
 @router.get("/map.png")
@@ -1193,8 +1214,8 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
             d.line([px, py, ax, ay], fill=(0, 255, 80), width=3)
 
     # 调试信息叠加
-    obs_total = int(grid_obj.grid.sum())
-    obs_pct   = obs_total * 100 // (nx * ny)
+    free_total = int(np.count_nonzero(grid_obj.cells == FREE))
+    known_total = int(np.count_nonzero(grid_obj.cells != 0))
     if odom:
         d.text((4, H - 14),
                f"x={odom['x']:.2f} y={odom['y']:.2f} h={_math.degrees(odom['heading']):.0f}°",
@@ -1204,8 +1225,13 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
            f"Z={grid_obj.origin[2]:.2f}~{grid_obj.origin[2]+grid_obj.width[2]*grid_obj.resolution:.2f}m",
            fill=(80, 80, 100))
     d.text((4, 18),
-           f"obs={obs_total}/{nx*ny} ({obs_pct}%)",
+           f"known={known_total}/{nx*ny} free={free_total} floor={grid_obj.measured_floor_z}",
            fill=(180, 80, 80))
+    _, nav_reason = navigator._snapshot()
+    map_age = time.monotonic() - go2.voxel_received_at
+    d.text((4, 32),
+           f"nav={nav_reason or 'ready'} map_age={map_age:.1f}s",
+           fill=(0, 200, 100) if nav_reason is None else (255, 140, 80))
 
     buf = io.BytesIO()
     img.save(buf, "PNG")

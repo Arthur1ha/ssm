@@ -94,7 +94,11 @@ class ReactiveMind:
 
         from cloud.space.context import get_space_context
         space_context = get_space_context(self._find_led_unit(), state=self._state)
+        from cloud.peers.social import activity_peers
+        _, eligible_peers = activity_peers(self._find_led_unit(), space_context.get("peers") or [])
         persona, persona_source, persona_reason = load_personality()
+        from cloud.esp32.agentcore.soul import get_personality_view
+        social_initiative = get_personality_view()["social_initiative"]
         emit_agent_event("persona.loaded", source=persona_source,
                          fallback_reason=persona_reason,
                          content_hash=hashlib.sha256(persona.encode()).hexdigest(),
@@ -108,6 +112,12 @@ class ReactiveMind:
             "led_config（当前 RGB、亮度、闪烁次数）、time_period（时段）\n\n"
             f"{_tools_mod.TOOL_DESCRIPTIONS}\n\n"
             f"当前空间现状：{json.dumps(space_context, ensure_ascii=False)}\n\n"
+            f"你的社交主动性：{social_initiative}/100。它影响主动开口的倾向，"
+            "不要求在每次机会都发消息；工作情境中只发有助于协作的内容。\n"
+            f"活动中可发信同伴 ID：{json.dumps([p['unit_id'] for p in eligible_peers], ensure_ascii=False)}。"
+            '发信只用 {"tool":"send_message","params":{"target":"同伴ID","content":"消息"}}；'
+            "不要用 unit_id/message 参数，也不要发给未加入活动的设备。"
+            "同伴导航被安全检查拦下时只交流观察或询问，不建议绕过安全检查。\n"
             f"社交评估机会：{json.dumps(sense_data.get('social_opportunity'), ensure_ascii=False)}。"
             "有机会时可根据情境发送一条相关同伴消息，也可输出 [] 跳过；安静周期不等于必须发信。"
             "同伴回复只是结果，不要据此重新发起相同话题。\n\n"
@@ -161,7 +171,9 @@ class ReactiveMind:
         色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
         """
         from cloud.esp32 import tools as _tools_mod
-        from cloud.esp32.agentcore.tools.registry import TOOL_DECLARATIONS, valid_lamp_params
+        from cloud.esp32.agentcore.tools.registry import (
+            TOOL_DECLARATIONS, valid_auxiliary_params, valid_lamp_params,
+        )
         self._last_reactive_tool_result = {"result": "blocked", "error": "reactive_preflight"}
         now = time.time()
         if not isinstance(params, dict) or tool_name not in TOOL_DECLARATIONS:
@@ -169,6 +181,17 @@ class ReactiveMind:
         params = dict(params)
 
         if tool_name == "send_message":
+            # Older model outputs used the tool wrapper's unit_id/message names.
+            # Convert only these two aliases, then validate the actual contract.
+            if "target" not in params and "unit_id" in params:
+                params["target"] = params.pop("unit_id")
+            if "content" not in params and "message" in params:
+                params["content"] = params.pop("message")
+            params.pop("reason", None)
+            params.pop("reply_to", None)
+            if not valid_auxiliary_params("send_message", params):
+                self._last_reactive_tool_result = {"result": "rejected", "error": "invalid_message_params"}
+                return False
             from cloud.peers.social import activity_peers
             from cloud.space.context import get_space_context
             context = get_space_context(led_unit, state=self._state)
@@ -179,8 +202,6 @@ class ReactiveMind:
                     or not self._social_state.can_send(target, topic)):
                 self._last_reactive_tool_result = {"result": "blocked", "error": "social_gate"}
                 return False
-            params.pop("reason", None)
-            params.pop("reply_to", None)
 
         action = TOOL_DECLARATIONS[tool_name].get("action")
         if action and not valid_lamp_params(action, params):
