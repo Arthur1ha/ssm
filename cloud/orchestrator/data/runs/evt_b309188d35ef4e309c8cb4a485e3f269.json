@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_b309188d35ef4e309c8cb4a485e3f269",
+  "session_id": "ses_RaC8g4O9VmI9OOXNeTyUJ5aH",
+  "goal": "我要工作了",
+  "deadline": 1793359536.1453686,
+  "steps": [
+    {
+      "step_id": "386ad72e1c7c446e9d1c8d3b74e3339e",
+      "tool_call_id": "654e72de7dd54f359cf04908bf7c30a6",
+      "tool": "start_activity",
+      "params": {},
+      "fingerprint": "0ed226ef9e72da08a7e4160b48709939cb7eb262b160fbcf9ada8a7b491e14c1",
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "activity": {
+          "activity_id": "act_70d2e73461ca40f3b87c63c70b5784eb",
+          "space_id": "main",
+          "context": "我要工作了",
+          "text": "我要工作了",
+          "source_event_id": "evt_b309188d35ef4e309c8cb4a485e3f269",
+          "source_session_id": "ses_RaC8g4O9VmI9OOXNeTyUJ5aH",
+          "started_at": 1793359447.1785514,
+          "revision": 1793359447200,
+          "status": "partial",
+          "devices": {
+            "go2": {
+              "mode": "free_explore",
+              "status": "unavailable",
+              "owner": "",
+              "error": "RuntimeError"
+            },
+            "esp32_desk_led": {
+              "mode": "reactive",
+              "status": "joined",
+              "owner": "act_70d2e73461ca40f3b87c63c70b5784eb",
+              "error": "",
+              "joined_at": 1793359447.1930008
+            }
+          }
+        }
+      }
+    }
+  ],
+  "status": "ok",
+  "response": "工作模式已经开起来了，桌面灯也切到了状态跟随模式。机器狗这次没连上，提示运行异常，暂时没加进来。你先安心忙，需要什么随时喊我。",
+  "question": "",
+  "trace_id": "tr_0a96cc725272482c9ab3047b215f5be9",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "工作模式已经开起来了，桌面灯已切到状态跟随模式。机器狗这次没连上，暂时没加入。你安心忙，需要什么随时喊我。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793359449.5706894
+}

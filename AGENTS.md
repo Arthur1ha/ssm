@@ -9,7 +9,7 @@
 **核心业务逻辑**：
 1. ESP32 启动时探测引脚 → 为已接智能体发布 retained manifest；传感器仅发布独立的 state/event，不产生设备卡
 2. 云端 API 订阅 manifest、card、status、state、event 等 MQTT 主题，仅为智能体维护设备卡；手机 PWA 经 `/api/devices` 与 `/api/events`（SSE）自动发现和展示智能体
-3. 用户语音/文字 → PWA 请求 `/api/intents` → API 发布 MQTT `ssm/intent/{session_id}` → 编排器 Planner（一次 LLM 完成 act/chat/define_rule 分类）→ Dispatcher→Evaluator→Responder 执行并反馈
+3. 用户语音/文字 → PWA 请求 `/api/intents` → API 发布 MQTT `ssm/intent/{session_id}` → 编排器逐轮选择一个工具、等待真实结果、继续规划，最后生成人格回复
 4. `reactive` 模式下，传感器事件也可触发云端 ESP32 智能体自主决策；默认 `manual` 不自发控灯
 5. 云端离线时 ESP32 本地规则接管（兜底层）
 6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{unit_id}/agent`）暴露能力，供编排器与 PWA 动态发现
@@ -23,7 +23,7 @@
 | 边缘端 | MicroPython on ESP32 | MicroPython ≥1.23，ESP32 DevKit |
 | 边缘库 | `umqtt.robust`、`neopixel`、`machine`、`ujson` | 内置于 MicroPython |
 | 消息代理 | Mosquitto | 运行于云服务器 `47.116.137.202`，TCP 1883 / WS 9001 |
-| 云端 AI | LangGraph + LangChain + ChatOpenAI（兼容接口） | langgraph≥0.2、langchain≥0.3 |
+| 云端 AI | 共享逐步任务循环 + LangChain + ChatOpenAI（兼容接口） | langchain≥0.3 |
 | LLM（编排/Go2/ESP32 智能体） | 火山方舟 Ark `deepseek-v4-flash` / `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
 | Go2 机器狗 | `unitree-webrtc-connect`（WebRTC）+ YOLO（ultralytics）视觉 | HTTP REST，非 MQTT |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
@@ -54,23 +54,24 @@ ssm/
 │   │   ├── rules.py     ← `/api/rules` 自动化规则 CRUD
 │   │   └── devices.py   ← `/api/devices` + `/api/devices/{unit_id}/agent`（★ A2A Agent Card，数据取自 cards/）
 │   ├── cards/           ← ★ A2A 设备卡注册表：registry.py（订阅 card/manifest/status，全局单一真相）、builder.py（manifest→AgentCard）、schema.py
-│   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + LangGraph）
-│   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 编排图
-│   │   ├── graph.py     ← LangGraph：Planner→Dispatcher→Evaluator→Responder（支持 ESP32/MQTT 与 Go2/HTTP）
-│   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助（供图节点使用）
+│   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + 逐步任务循环）
+│   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → multitask
+│   │   ├── multitask.py ← 逐轮规划、派发、核对结果、生成管家回复
+│   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助
 │   │   ├── shared_state.py ← 线程安全传感器/执行器/任务快照（按 manifest agent_type 分桶）
 │   │   ├── devices.json ← 预留：文件型非 MQTT 设备注册表（当前为空，go2 已走 MQTT card）
 │   │   └── rules.json   ← 自动化规则存储
 │   ├── esp32/           ← ESP32 桌面空间智能体（云端侧，原 orchestrator/desk_agent）
-│   │   ├── agent.py     ← 带 persona 的 sense→reason→act 智能体
+│   │   ├── agent.py     ← 灯实例与自主模式状态
+│   │   ├── multitask.py ← 灯的逐步问答和委派任务循环
 │   │   ├── router.py    ← `/api/esp32/autonomy`（灯自主模式 manual/reactive）
 │   │   ├── state.py     ← ESP32 设备/任务状态
 │   │   ├── tools.py     ← MQTT 发布辅助
 │   │   └── tts.py       ← TTS 合成封装
 │   └── go2/             ← Go2 机器狗智能体（数据面 HTTP；控制面 card/status 仍走 MQTT）
-│       ├── agent.py     ← Planner→Executor LangGraph（独立于编排器）
+│       ├── multitask.py ← Go2 的逐步问答和委派任务循环
 │       ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
-│       ├── agentcore/   ← 智能体内核（当前 go2 专属）：soul（性格+演化）、memory（episode/spatial/daily_summary）、tools、skills（vision/reactive）
+│       ├── agentcore/   ← Go2 内核：personality、soul（特质演化）、memory、tools、mode（vision/reactive）
 │       ├── navigation/  ← astar / frontier / occupancy_grid / navigator / drive
 │       └── connection/  ← webrtc / video / sensors / fsm
 ├── app/                 ← 用户端 PWA（跑在手机/浏览器）
@@ -93,7 +94,7 @@ ssm/
 └── docs/                ← superpowers/（plans + specs）、research/、*.html 状态机图（无 ARCHITECTURE.md）
 ```
 
-**云端有三个 LLM 智能体**：编排器（`orchestrator/`，统筹全局）、ESP32 桌面智能体（`esp32/agent.py`，自主感知决策）、Go2 机器狗（`go2/agent.py`）。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。
+**云端有三个 LLM 智能体**：编排器（`orchestrator/multitask.py`，统筹全局）、ESP32 桌面智能体（`esp32/agent.py` 管自主模式，`esp32/multitask.py` 管对话）、Go2 机器狗（`go2/multitask.py`）。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。
 
 **当前接线**（以 `config.py` 为准）：
 
@@ -118,7 +119,7 @@ ssm/
 | MQTT topic | `ssm/agents/{unit_id}/{type}` | `ssm/agents/esp32_desk_led/state` |
 | Python 变量/函数 | `snake_case` | `probe_digital`, `ism_light` |
 | MicroPython 常量 | `UPPER_SNAKE` | `WS2812_PIN`, `UNIT_CONFIGS` |
-| LangGraph 节点 | `{role}_node` | `planner_node`, `evaluator_node` |
+| 智能体任务循环 | `run_{agent}_loop` | `run_go2_loop`, `run_lamp_loop` |
 
 ### MicroPython 特定注意事项
 
@@ -163,13 +164,13 @@ ssm/
 
 **避免**：在 `probe.py`、`agent_manifest.py`、`bsm.py` 里硬编码具体 unit 名称或引脚号。
 
-### 4. LangGraph Planner→Dispatcher→Evaluator→Responder（意图编排）
+### 4. 逐步任务循环（意图编排）
 
-**决策**：用有向图而不是单一 LLM 调用处理用户意图；每个节点职责单一。
+**决策**：三个云端智能体共用 `cloud/agent_runtime/loop.py`；每轮由模型选择一个工具或最终回答，观察工具真实结果后再决定下一轮。管家、灯、Go2 各自在 `multitask.py` 组装提示词和执行设备专属工具。
 
-**原因**：Planner 只生成任务列表；Dispatcher 按设备传输类型派发 MQTT/HTTP；Evaluator 只校验结果；Responder 只组织回复。每个节点可以独立更换模型或逻辑。LLM fallback 链（多模型按顺序重试）也在图内透明处理。
+**原因**：灯完成后再让 Go2 行动等依赖关系必须由实际回执决定。统一循环记录每步结果，并在末尾用共享回复模板与各自的人设组织答复。
 
-**避免**：在一个节点里同时做规划+执行+评估；在 tools.py 里写业务逻辑（tools 只做 MQTT 操作和状态查询）。
+**避免**：重新建立独立的旧编排图或第二套问答入口；在传输辅助 `tools.py` 里写智能体业务逻辑。
 
 ### 5. PWA 无"订阅"UI 状态
 
@@ -215,7 +216,7 @@ make tunnel-url
 **可以做：**
 - 在 `UNIT_CONFIGS` 新增设备条目
 - 在 `TriggerMap` 新增事件→动作路由
-- 在 `graph.py` 调整 LangGraph 节点逻辑
+- 在三个智能体的 `multitask.py` 调整逐步任务逻辑
 - 修改 PWA UI 样式和交互（app.jsx）
 
 **不能做：**

@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cloud.go2 import agent
 from cloud.go2.agentcore.tools.executor import execute_tool
 from cloud.go2.agentcore.tools.registry import TOOL_REGISTRY
 from cloud.go2.connection import go2
@@ -18,15 +17,6 @@ ADMIN = ExecutionContext("runtime-admin", "admin", True)
 VISITOR = ExecutionContext("runtime-visitor", "visitor", False)
 
 
-def _state(**changes):
-    state = {
-        "session_id": "runtime-admin", "user_msg": "站起来", "skill_id": "",
-        "params": {}, "memory_context": "", "planned_tools": [], "tool_results": [],
-        "response_text": "", "early_exit": False, "llm_available": True,
-        "error": "", "actor": "admin", "persist": True,
-    }
-    state.update(changes)
-    return state
 
 
 @pytest.fixture
@@ -77,34 +67,8 @@ async def test_sport_accepted_is_not_completion(robot):
     robot.assert_awaited_once_with("Hello")
 
 
-@pytest.mark.asyncio
-async def test_accepted_motion_blocks_next_motion(robot):
-    state = _state(planned_tools=[
-        {"tool": "go2_sport", "params": {"cmd": "Hello"}},
-        {"tool": "go2_sport", "params": {"cmd": "Dance1"}},
-    ])
-    results = [item async for item in agent._execute_calls(state, ADMIN)]
-    assert [item["result"]["result"] for item in results] == ["accepted", "blocked"]
-    robot.assert_awaited_once_with("Hello")
 
 
-@pytest.mark.asyncio
-async def test_peer_request_waits_for_final_ok_before_dependent_action(monkeypatch, robot):
-    from cloud.go2.agentcore.tools import tools as tool_impl
-
-    async def peer_result(*_args, **_kwargs):
-        return {"result": "timeout", "request_id": "peer-1"}
-
-    monkeypatch.setitem(tool_impl.TOOL_FN_MAP, "request_peer_skill", peer_result)
-    state = _state(planned_tools=[
-        {"tool": "request_peer_skill", "params": {
-            "target_unit_id": "esp32_desk_led", "skill_id": "set_state", "params": {"state": "ON"},
-        }},
-        {"tool": "go2_sport", "params": {"cmd": "Hello"}},
-    ])
-    results = [item async for item in agent._execute_calls(state, ADMIN)]
-    assert [item["result"]["result"] for item in results] == ["timeout"]
-    robot.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -167,118 +131,22 @@ async def test_unknown_tool_is_structured_error(robot):
     robot.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_invalid_planner_json_is_error_not_empty_plan(monkeypatch, robot):
-    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content="not json")))
-    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
-    state = await agent.planner_node(_state(actor="visitor", persist=False))
-    assert state["error"] == "invalid_planner_json"
-    assert state["early_exit"] is True
 
 
-@pytest.mark.asyncio
-async def test_single_peer_tool_object_is_planned_without_dispatch(monkeypatch, robot):
-    call = ('{"tool":"request_peer_skill","params":{'
-            '"target_unit_id":"esp32_desk_led","skill_id":"set_light_state",'
-            '"params":{"state":"OFF"}}}')
-    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content=call)))
-    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
-    state = await agent.planner_node(_state(user_msg="关掉灯"))
-    assert state["planned_tools"] == [{
-        "tool": "request_peer_skill",
-        "params": {"target_unit_id": "esp32_desk_led", "skill_id": "set_light_state",
-                   "params": {"state": "OFF"}},
-    }]
-    robot.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_peer_params_array_is_wrapped_as_tool_call(monkeypatch, robot):
-    # This is the shape the live model returned for "帮我把灯打开".
-    content = ('[{"target_unit_id":"esp32_desk_led","skill_id":"set_light_state",'
-               '"params":{"state":"ON"},"request_id":"open_light_20260711_001"}]')
-    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content=content)))
-    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
-    state = await agent.planner_node(_state(user_msg="帮我把灯打开"))
-    assert state["planned_tools"] == [{"tool": "request_peer_skill", "params": {
-        "target_unit_id": "esp32_desk_led", "skill_id": "set_light_state",
-        "params": {"state": "ON"}, "request_id": "open_light_20260711_001",
-    }}]
-    robot.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_peer_reply_prompt_uses_personality_and_confirmed_result(monkeypatch):
-    result = [{"tool": "request_peer_skill", "result": {
-        "result": "ok", "request_id": "req_internal_1",
-        "target_unit_id": "esp32_desk_led", "task_id": "req_internal_1",
-    }}]
-    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content="汪，灯已经弄好啦。")))
-    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
-    monkeypatch.setattr(agent, "get_system_prompt", lambda: "好奇、活泼的小狗")
-    reply, available = await agent._generate_response("帮我把灯打开", "", result)
-    messages = model.ainvoke.await_args.args[0]
-    assert available and reply == "汪，灯已经弄好啦。"
-    assert "好奇、活泼的小狗" in messages[1].content
-    assert '"overall_result": "ok"' in messages[1].content
-    assert "req_internal_1" not in messages[1].content
-    assert "esp32_desk_led" not in messages[1].content
-    assert "不要把 ok 说成尚未确认" in messages[0].content
 
 
-@pytest.mark.asyncio
-async def test_peer_reply_does_not_repeat_unconfirmed_claim_or_internal_id(monkeypatch):
-    result = [{"tool": "request_peer_skill", "result": {"result": "ok"}}]
-    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(
-        content="请求编号 req_internal_1 已发送，但还没得到完成确认。")))
-    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
-    reply, available = await agent._generate_response("把灯打开", "", result)
-    assert available and reply == "汪，交给我的事已经办妥啦。"
 
 
-@pytest.mark.asyncio
-async def test_tool_call_limit_is_enforced(monkeypatch, robot):
-    calls = '[{"tool":"go2_status"},{"tool":"go2_status"},{"tool":"go2_status"},{"tool":"go2_status"}]'
-    model = MagicMock(ainvoke=AsyncMock(return_value=MagicMock(content=calls)))
-    monkeypatch.setattr(agent, "get_text_llm", lambda: model)
-    state = await agent.planner_node(_state(actor="visitor", persist=False))
-    assert state["error"] == "tool_call_limit_exceeded"
 
 
-@pytest.mark.asyncio
-async def test_unknown_skill_and_ambiguous_steps_never_move(robot):
-    unknown = await agent.planner_node(_state(skill_id="go2_fly"))
-    assert unknown["error"] == "unknown_skill"
-    unclear = await agent.planner_node(_state(user_msg="移动两步", session_id="steps-session"))
-    assert unclear["result_override"] == "needs_clarification"
-    assert "duration" in unclear["missing_fields"]
-    robot.assert_not_called()
 
 
-def test_clarification_requires_both_fields_and_resumes_goal():
-    first = _state(user_msg="移动两步", session_id="clarify-session")
-    assert agent._clarification(first)["missing_fields"] == ["direction", "duration"]
-    duration = _state(user_msg="2秒", session_id="clarify-session")
-    assert agent._clarification(duration)["missing_fields"] == ["direction"]
-    direction = _state(user_msg="向前", session_id="clarify-session")
-    assert agent._clarification(direction) is None
-    assert direction["user_msg"].startswith("向前移动2秒")
 
 
-@pytest.mark.asyncio
-async def test_sse_and_standard_chat_report_same_accepted_status(monkeypatch, robot):
-    async def planned(state):
-        return {**state, "planned_tools": [{"tool": "go2_sport", "params": {"cmd": "Hello"}}],
-                "early_exit": False}
-    monkeypatch.setattr(agent, "planner_node", planned)
-    context = ExecutionContext("same-status", "visitor", False)
-    normal = await agent.run_agent("same-status", "打招呼", context=context)
-    events = [event async for event in agent.run_agent_stream("same-status", "打招呼", context=context)]
-    assert normal["result"] == "accepted"
-    assert normal["actions_taken"] == []
-    assert next(event for event in events if event["type"] == "tool_done")["result"]["result"] == "accepted"
-    assert events[-1]["result"] == "accepted"
-    assert robot.await_count == 2
 
 
 @pytest.mark.asyncio

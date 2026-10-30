@@ -238,16 +238,28 @@ def reply_to_physical_task(unit_id: str, req: PhysicalReplyRequest,
     from cloud.api.main import _esp32_state
     from cloud.api.intents import publish_agent_event
     from cloud.agent_runtime.loop import Run
-    from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
-    from cloud.esp32.agentcore.soul import load_personality
+    from cloud.agent_runtime.replies import (
+        factual_fallback, persona_reply_prompt, valid_persona_reply,
+    )
+    from cloud.esp32.agentcore.personality.profile import get_profile
     from langchain_core.messages import HumanMessage
     agent = _esp32_agent.get_agent()
+    def publish_reply(status: str, answer: str) -> dict:
+        event = publish_agent_event("agent_reply", agent_id=unit_id,
+            session_id=context.session_id, status=status, run_id=req.task_id,
+            trace_id=req.trace_id, parent_run_id=req.parent_run_id,
+            step_id=req.task_id, source="delegated_skill", text=answer)
+        return {"result": status, "response": answer, "event_id": event["event_id"]}
+
     if agent is None:
-        raise HTTPException(status_code=503, detail="lamp brain unavailable")
+        return {**publish_reply("unknown", factual_fallback(unit_id, "unknown")),
+                "error": "lamp_brain_unavailable"}
+
     from cloud.cards.registry import get_registry
     card = get_registry().get_card(unit_id)
     if not card or not card.get("online"):
-        return {"result": "rejected", "error": "lamp_offline"}
+        return {**publish_reply("rejected", factual_fallback(unit_id, "rejected")),
+                "error": "lamp_offline"}
     physical = None
     until = time.monotonic() + 2
     while physical is None and time.monotonic() < until:
@@ -255,7 +267,8 @@ def reply_to_physical_task(unit_id: str, req: PhysicalReplyRequest,
         if physical is None:
             time.sleep(0.05)
     if physical is None:
-        return {"result": "unknown", "error": "physical_result_unavailable"}
+        return {**publish_reply("unknown", factual_fallback(unit_id, "unknown")),
+                "error": "physical_result_unavailable"}
     status = str(physical.get("result") or "unknown")
     if status not in {"ok", "accepted", "executing", "timeout", "unknown", "blocked",
                       "rejected", "cancelled", "error"}:
@@ -266,17 +279,14 @@ def reply_to_physical_task(unit_id: str, req: PhysicalReplyRequest,
               trace_id=req.trace_id, parent_run_id=req.parent_run_id,
               agent_id=unit_id, origin_kind=context.origin_kind)
     try:
-        persona, _, _ = load_personality()
-        answer = agent._llm.invoke([HumanMessage(content=persona_reply_prompt(persona, run))]).content
-        if not valid_persona_reply(answer):
+        current = get_profile()
+        answer = agent._llm.invoke([HumanMessage(content=persona_reply_prompt(
+            current["prompt"], run, traits=current["traits"]))]).content
+        if not valid_persona_reply(answer, run):
             raise ValueError("invalid_persona_reply")
     except Exception:
         publish_agent_event("reply_error", agent_id=unit_id, session_id=context.session_id,
             status=status, run_id=req.task_id, trace_id=req.trace_id,
             parent_run_id=req.parent_run_id, step_id=req.task_id, source="delegated_skill")
-        return {"result": status, "response": ""}
-    event = publish_agent_event("agent_reply", agent_id=unit_id,
-        session_id=context.session_id, status=status, run_id=req.task_id,
-        trace_id=req.trace_id, parent_run_id=req.parent_run_id,
-        step_id=req.task_id, source="delegated_skill", text=answer)
-    return {"result": status, "response": answer, "event_id": event["event_id"]}
+        answer = factual_fallback(unit_id, status)
+    return publish_reply(status, answer)

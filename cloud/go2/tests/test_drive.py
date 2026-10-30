@@ -187,8 +187,19 @@ async def test_memory_endpoint_returns_taught_and_today(client):
     assert isinstance(data["today"], str)
 
 
+def _isolate_personality_profile(tmp_path, monkeypatch):
+    from cloud.agent_runtime.personality import ProfileStore
+    from cloud.go2.agentcore.personality import profile
+
+    monkeypatch.setattr(profile, "_store", ProfileStore(
+        agent_id="go2", path=tmp_path / "personality" / "profile.json",
+        prompt=profile.DEFAULT_PROMPT, trait_specs=profile.TRAIT_SPECS,
+        migration=lambda: {}))
+
+
 @pytest.mark.asyncio
-async def test_personality_get_returns_prompt(client):
+async def test_personality_get_returns_prompt(client, tmp_path, monkeypatch):
+    _isolate_personality_profile(tmp_path, monkeypatch)
     r = await client.get("/api/go2/personality")
     assert r.status_code == 200
     assert "prompt" in r.json()
@@ -197,7 +208,7 @@ async def test_personality_get_returns_prompt(client):
 @pytest.mark.asyncio
 async def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
     import cloud.go2.agentcore.soul as pers_mod
-    monkeypatch.setattr(pers_mod, "_PERSONALITY_FILE", tmp_path / "p.json")
+    _isolate_personality_profile(tmp_path, monkeypatch)
     r = await client.post("/api/go2/personality", json={"prompt": "严肃、话少的机器狗"})
     assert r.status_code == 200
     assert pers_mod.get_system_prompt() == "严肃、话少的机器狗"
@@ -207,11 +218,12 @@ async def test_personality_post_updates_system_prompt(client, tmp_path, monkeypa
 
 
 def test_face_signal_does_not_prevent_curiosity_exploration():
-    from cloud.go2.agentcore.mode.free_explore import Drive, _CURIOSITY_THRESHOLD
+    from cloud.go2.agentcore.mode import free_explore
+    from cloud.go2.agentcore.personality.behavior import exploration_interval
 
-    drive = Drive()
+    drive = free_explore.Drive()
     drive._person_engaging = True
-    drive._curiosity = _CURIOSITY_THRESHOLD - 1
+    drive._curiosity = exploration_interval(70) - 1
 
     async def run_one_tick():
         with patch.object(drive, "_evaluate_social", new_callable=AsyncMock), \
@@ -223,7 +235,8 @@ def test_face_signal_does_not_prevent_curiosity_exploration():
                 count += 1
                 if count > 1:
                     raise asyncio.CancelledError()
-            with patch("cloud.go2.agentcore.mode.free_explore.asyncio.sleep", side_effect=one_sleep):
+            with patch.object(free_explore, "get_profile", return_value={"traits": {"curiosity": 70}, "revision": 1}), \
+                 patch("cloud.go2.agentcore.mode.free_explore.asyncio.sleep", side_effect=one_sleep):
                 with pytest.raises(asyncio.CancelledError):
                     await drive._run_loop()
             explore.assert_awaited_once()

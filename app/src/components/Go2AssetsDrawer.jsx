@@ -2,8 +2,6 @@
 function Go2AssetsDrawer({ open, onClose }) {
   const { useCallback, useEffect, useState } = React;
   const [locations, setLocations] = useState([]);
-  const [personality, setPersonality] = useState('');
-  const [socialInitiative, setSocialInitiative] = useState(45);
   const [memory, setMemory] = useState({ taught: [], today: '' });
   const [locationName, setLocationName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -15,16 +13,11 @@ function Go2AssetsDrawer({ open, onClose }) {
     setMessage(null);
     const requests = [
       apiClient.request('/api/go2/navigation/locations'),
-      apiClient.request('/api/go2/personality'),
       apiClient.request('/api/go2/memory'),
     ];
-    const [locationResult, personalityResult, memoryResult] = await Promise.allSettled(requests);
+    const [locationResult, memoryResult] = await Promise.allSettled(requests);
     if (locationResult.status === 'fulfilled') {
       setLocations(Array.isArray(locationResult.value) ? locationResult.value : []);
-    }
-    if (personalityResult.status === 'fulfilled') {
-      setPersonality(personalityResult.value?.prompt || '');
-      setSocialInitiative(personalityResult.value?.social_initiative ?? 45);
     }
     if (memoryResult.status === 'fulfilled') {
       setMemory({
@@ -32,7 +25,7 @@ function Go2AssetsDrawer({ open, onClose }) {
         today: memoryResult.value?.today || '（今天暂无记录）',
       });
     }
-    const failures = [locationResult, personalityResult, memoryResult]
+    const failures = [locationResult, memoryResult]
       .filter(result => result.status === 'rejected');
     if (failures.length) {
       setMessage({
@@ -77,14 +70,6 @@ function Go2AssetsDrawer({ open, onClose }) {
     if (await runGo2Action('tag-location', 'tag_location', { name }, `已保存当前位置为「${name}」`)) {
       setLocationName('');
     }
-  };
-
-  const savePersonality = async event => {
-    event.preventDefault();
-    const prompt = personality.trim();
-    if (!prompt) return;
-    await runGo2Action('personality', 'set_personality',
-      { prompt, social_initiative: Number(socialInitiative) }, 'Go2 人设已更新');
   };
 
   const formatCoordinate = value => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
@@ -154,22 +139,10 @@ function Go2AssetsDrawer({ open, onClose }) {
 
           <section className="asset-section">
             <div className="asset-section__heading">
-              <div><small>SOUL PROFILE</small><h3>Go2 人设</h3></div>
+              <div><small>PERSONALITY</small><h3>Go2 人格与特质</h3></div>
               <span>长期生效</span>
             </div>
-            <form className="personality-editor" onSubmit={savePersonality}>
-              <textarea value={personality} onChange={event => setPersonality(event.target.value)}
-                rows="5" maxLength="4000" placeholder="描述 Go2 的性格、表达方式和行为偏好…"/>
-              <label>社交主动性 {socialInitiative} · {socialInitiative < 35 ? '低' : socialInitiative < 70 ? '中' : '高'}
-                <input type="range" min="0" max="100" value={socialInitiative}
-                  onChange={event => setSocialInitiative(Number(event.target.value))}/>
-              </label>
-              <div><small>{personality.length} / 4000</small>
-                <button className="btn btn--accent" disabled={busy === 'personality' || !personality.trim()}>
-                  {busy === 'personality' ? '更新中…' : '更新人设'}
-                </button></div>
-              {feedback('personality')}
-            </form>
+            <AgentPersonalitySettings agentId="go2" active={open}/>
           </section>
 
           <section className="asset-section asset-section--memory">

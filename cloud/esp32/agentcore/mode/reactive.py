@@ -13,6 +13,8 @@ from langchain_core.messages import HumanMessage
 
 from cloud.esp32 import tools as _tools
 from cloud.esp32.agentcore.soul import load_personality
+from cloud.esp32.agentcore.personality.profile import get_profile
+from cloud.esp32.agentcore.personality.behavior import light_change_bucket
 from cloud.esp32.agentcore.perception.sensors import sense as sense_sensors
 from cloud.observability import bind_context, emit_agent_event
 
@@ -96,9 +98,10 @@ class ReactiveMind:
         space_context = get_space_context(self._find_led_unit(), state=self._state)
         from cloud.peers.social import activity_peers
         _, eligible_peers = activity_peers(self._find_led_unit(), space_context.get("peers") or [])
-        persona, persona_source, persona_reason = load_personality()
-        from cloud.esp32.agentcore.soul import get_personality_view
-        social_initiative = get_personality_view()["social_initiative"]
+        profile = get_profile()
+        persona, persona_source, persona_reason = profile["prompt"], "profile", None
+        social_initiative = profile["traits"]["social_initiative"]
+        sensitivity = profile["traits"]["adjustment_sensitivity"]
         emit_agent_event("persona.loaded", source=persona_source,
                          fallback_reason=persona_reason,
                          content_hash=hashlib.sha256(persona.encode()).hexdigest(),
@@ -114,6 +117,8 @@ class ReactiveMind:
             f"当前空间现状：{json.dumps(space_context, ensure_ascii=False)}\n\n"
             f"你的社交主动性：{social_initiative}/100。它影响主动开口的倾向，"
             "不要求在每次机会都发消息；工作情境中只发有助于协作的内容。\n"
+            f"调光敏感度：{sensitivity}/100。它只影响环境变化后是否重新评估；"
+            "亮度和颜色仍应根据实际观测判断，不按分数直接换算。\n"
             f"活动中可发信同伴 ID：{json.dumps([p['unit_id'] for p in eligible_peers], ensure_ascii=False)}。"
             '发信只用 {"tool":"send_message","params":{"target":"同伴ID","content":"消息"}}；'
             "不要用 unit_id/message 参数，也不要发给未加入活动的设备。"
@@ -321,7 +326,7 @@ class ReactiveMind:
 
     def _publish_autonomous_reply(self, unit_id: str, steps: list[dict]) -> None:
         from cloud.agent_runtime.loop import Run
-        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply, factual_fallback
         from cloud.api.intents import publish_agent_event
 
         if not self._device_online() or not self._should_act():
@@ -338,12 +343,10 @@ class ReactiveMind:
         try:
             persona, _, _ = load_personality()
             answer = self._llm.invoke([HumanMessage(content=persona_reply_prompt(persona, run))]).content
-            if not valid_persona_reply(answer):
+            if not valid_persona_reply(answer, run):
                 raise ValueError("invalid_persona_reply")
         except Exception:
-            publish_agent_event("reply_error", agent_id=unit_id, scope="space",
-                space_id="main", source="autonomous", status=status, run_id=run_id)
-            return
+            answer = factual_fallback(unit_id, status, run)
         if not self._device_online() or not self._should_act():
             return
         publish_agent_event("agent_reply", agent_id=unit_id, scope="space",
@@ -434,12 +437,12 @@ class ReactiveMind:
 
                 from cloud.space.context import get_space_context
                 from cloud.peers.social import activity_peers
-                from cloud.esp32.agentcore.soul import get_personality_view
+                profile = get_profile()
                 social_context = get_space_context(self._find_led_unit(), state=self._state)
                 activity, eligible = activity_peers(self._find_led_unit(), social_context["peers"])
                 opportunity = self._social_state.opportunity(
                     activity, eligible, social_context["recent_discoveries"],
-                    get_personality_view()["social_initiative"],
+                    profile["traits"]["social_initiative"],
                     unit_id=self._find_led_unit())
                 if opportunity:
                     sense["social_opportunity"] = opportunity
@@ -456,7 +459,9 @@ class ReactiveMind:
                 peer_sig = tuple((peer.get("unit_id"), peer.get("online"),
                                   (peer.get("state_summary") or {}).get("fsm_state"))
                                  for peer in peers)
-                sig = (sense["light_level"], sense["time_period"],
+                lux_bucket = light_change_bucket(
+                    sense.get("light_lux"), profile["traits"]["adjustment_sensitivity"])
+                sig = (profile["revision"], sense["light_level"], lux_bucket, sense["time_period"],
                        sense["sound_detected"], sense["led_state"],
                        tuple(led_config.get(k) for k in ("r", "g", "b", "brightness", "count")),
                        rule_sig, peer_sig,
@@ -465,6 +470,9 @@ class ReactiveMind:
                 if sig == self._last_reason_sig:
                     logger.debug("no material change %s, skip LLM", sig)
                     continue
+                logger.info("reactive candidate revision=%s sensitivity=%s lux_bucket=%s",
+                            profile["revision"], profile["traits"]["adjustment_sensitivity"],
+                            lux_bucket)
                 if time.time() - self._last_reason_ts < 10:
                     logger.debug("reason rate limit, wait for next tick")
                     continue

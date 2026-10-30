@@ -1,5 +1,5 @@
 /* SpaceMenu — space management actions in the main header. */
-function SpaceMenu({ onShareSpace, onRules, onSpaceSettings, onPeople, onExit }) {
+function SpaceMenu({ onShareSpace, onRules, onSpaceSettings, onOrchestratorSettings, onPeople, onExit }) {
   const { useEffect, useRef, useState } = React;
   const [open, setOpen] = useState(false);
   const triggerRef = useRef(null);
@@ -78,6 +78,11 @@ function SpaceMenu({ onShareSpace, onRules, onSpaceSettings, onPeople, onExit })
               <button type="button" className="space-menu__item" onClick={() => select(onSpaceSettings)}>
                 <span className="space-menu__item-icon"><Icon name="settings" size={18}/></span>
                 <span className="space-menu__item-copy"><strong>空间设置</strong><small>名称与设备</small></span>
+                <Icon name="arrow" size={16}/>
+              </button>
+              <button type="button" className="space-menu__item" onClick={() => select(onOrchestratorSettings)}>
+                <span className="space-menu__item-icon"><Icon name="sparkles" size={18}/></span>
+                <span className="space-menu__item-copy"><strong>空间管家</strong><small>人格与特质</small></span>
                 <Icon name="arrow" size={16}/>
               </button>
               <button type="button" className="space-menu__item" onClick={() => select(onPeople)}>

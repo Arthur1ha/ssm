@@ -17,8 +17,8 @@ def test_drive_social_join_sends_once_and_skip_consumes_opportunity(monkeypatch)
     monkeypatch.setattr(free_explore.go2, "is_connected", True)
     monkeypatch.setattr(free_explore, "activity_peers", lambda _unit, _peers: (activity, [peer]))
     monkeypatch.setattr("cloud.space.context.get_space_context", lambda *a, **k: context)
-    monkeypatch.setattr("cloud.go2.agentcore.soul.get_personality_view",
-                        lambda: {"prompt": "简短说话", "social_initiative": 80})
+    monkeypatch.setattr(free_explore, "get_profile",
+                        lambda: {"prompt": "简短说话", "traits": {"extraversion": 80}})
     monkeypatch.setattr(free_explore, "prompt_space_context", lambda: "{}")
     sent = []
     monkeypatch.setattr("cloud.go2.agentcore.tools.tools.send_message",

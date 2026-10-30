@@ -36,6 +36,7 @@ from cloud.api.people import router as people_router
 from cloud.api.devices import router as devices_router
 from cloud.api.sessions import router as sessions_router
 from cloud.api.activity import router as activity_router, reconcile_current_activity
+from cloud.api.personality import router as personality_router
 from cloud.api import intents as intents_module
 from cloud.api.intents import router as intents_router
 from cloud.cards.registry import get_registry
@@ -275,6 +276,7 @@ app.include_router(devices_router)
 app.include_router(sessions_router)
 app.include_router(intents_router)
 app.include_router(activity_router)
+app.include_router(personality_router)
 
 _allowed_origins = [
     origin.strip() for origin in os.getenv("SSM_ALLOWED_ORIGINS", "").split(",") if origin.strip()

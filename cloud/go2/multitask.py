@@ -14,12 +14,11 @@ import asyncio
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cloud.agent_runtime.loop import Run, parse_decision, run_loop
-from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply
+from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply, factual_fallback
 from cloud.agent_runtime.store import RunStore
 from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.agentcore.llm import get_text_llm
 from cloud.go2.agentcore.prompts import build_prompt
-from cloud.go2.agentcore.soul import load_system_prompt
 from cloud.go2.agentcore.tools.executor import execute_tool
 from cloud.go2.agentcore.tools.registry import TOOL_REGISTRY, tool_descriptions
 from cloud.go2.connection import go2
@@ -53,7 +52,7 @@ def _result(run: Run) -> dict:
         status = next((s["result"]["result"] for s in reversed(steps)
                        if s["result"]["result"] != "ok"), "error")
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
-            "result": status, "response": run.response if run.reply_source != "runtime" else "",
+            "result": status, "response": run.response,
             "event_id": run.reply_event_id or None,
             "actions_taken": [s["tool"] for s in steps if s["result"]["result"] == "ok"],
             "tool_results": steps, "question": run.question or None,
@@ -107,7 +106,10 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             if skill.get("tool_name"):
                 return {"tool": skill["tool_name"], "params": params or {},
                         "decision_source": "public_skill"}
-        persona, persona_source, persona_reason = load_system_prompt()
+        from cloud.go2.agentcore.personality.profile import get_profile
+        from cloud.go2.agentcore.personality.behavior import decision_persona
+        persona = decision_persona(get_profile())
+        persona_source, persona_reason = "profile", None
         prompt = build_prompt(
             "loop", personality=persona, user_input=current.goal,
             tools=tool_descriptions() + '\n- ask_user: 暂停并向用户追问；参数 {"question": string}',
@@ -189,7 +191,9 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                 event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
                     f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
             if phase == "observed" and step is not None:
-                persona, _, _ = load_system_prompt()
+                from cloud.go2.agentcore.personality.profile import get_profile
+                from cloud.go2.agentcore.personality.behavior import reply_persona
+                persona = reply_persona(get_profile())
                 status = (step.get("result") or {}).get("result", "unknown")
                 def publish_text(answer):
                     publish_agent_event("agent_progress", agent_id="go2",
@@ -208,10 +212,23 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
         await run_loop(run, decide, execute, record=store.save, on_step=on_step,
                        on_progress=progress,
                        effectful=lambda name: name not in _READ_ONLY)
-    if needs_persona_reply(run) and go2.is_connected:
+    offline_unconfirmed = (not go2.is_connected and run.status == "ok" and not any(
+        step.get("effectful") and (step.get("result") or {}).get("result") == "ok"
+        for step in run.steps))
+    if offline_unconfirmed:
+        # A no-step model final cannot establish that an offline robot moved.
+        run.status = "blocked"
+        run.response = factual_fallback("go2", "offline")
+        run.reply_source = "runtime"
+        store.save(run)
+    if needs_persona_reply(run) and not offline_unconfirmed:
         try:
-            persona, _, _ = load_system_prompt()
-            prompt = persona_reply_prompt(persona, run)
+            if not go2.is_connected and any(step.get("effectful") for step in run.steps):
+                raise RuntimeError("robot_disconnected")
+            from cloud.go2.agentcore.personality.profile import get_profile
+            from cloud.go2.agentcore.personality.behavior import reply_persona
+            profile = get_profile()
+            prompt = persona_reply_prompt(reply_persona(profile), run, traits=profile["traits"])
             emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", session_id=session_id,
                              input=prompt, goal=run.goal, template_version="persona-result-v1")
@@ -219,7 +236,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", session_id=session_id,
                              output=getattr(response, "content", ""))
-            if not valid_persona_reply(response.content):
+            if not valid_persona_reply(response.content, run):
                 raise ValueError("invalid_persona_reply")
             run.response = response.content.strip()
             run.reply_source = "persona_model"
@@ -229,7 +246,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                              reply=run.response, reason="persona_result_summary", reply_kind="final")
         except Exception as exc:
             logger.warning("Go2 persona reply unavailable run=%s error=%s", run.run_id, type(exc).__name__)
-            run.response = ""
+            run.response = factual_fallback("go2", run.status, run)
             run.reply_source = "runtime"
             store.save(run)
     # A delegated request without a reply or verified action cannot be
@@ -239,21 +256,19 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                         (step.get("result") or {}).get("result") == "ok"
                         for step in run.steps)):
         run.status = "blocked"
-        run.response = ""
+        run.response = factual_fallback("go2", run.status, run)
         run.reply_source = "runtime"
         store.save(run)
     result = _result(run)
     progress_closed.set()
     progress("finished", None)
-    # A cloud service can be reachable while the physical robot is disconnected.
-    # Pure conversation remains possible; physical failures caused by disconnection
-    # are represented by structured status rather than a fabricated robot line.
-    disconnected_action = not go2.is_connected
+    # The offline fallback is an explicit factual reply from Go2, never a
+    # model-generated claim that an unverified physical action completed.
     publish_allowed = not run.parent_run_id or time.time() < run.deadline
     if context.session_id.startswith("peer_"):
         # The messenger emits the peer reply once; keep this run's response for it.
         pass
-    elif publish_allowed and not disconnected_action and result["response"]:
+    elif publish_allowed and result["response"]:
         published = publish_agent_event("agent_reply", agent_id="go2",
             session_id=event_session, scope="space" if autonomous else "session",
             space_id=context.space_id, status=result["result"], run_id=run.run_id,
@@ -264,7 +279,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
         result["event_id"] = published.get("event_id")
         run.reply_event_id = result["event_id"] or ""
         store.save(run)
-    elif publish_allowed and not disconnected_action:
+    elif publish_allowed:
         publish_agent_event("reply_error", agent_id="go2", session_id=event_session,
             scope="space" if autonomous else "session", space_id=context.space_id,
             status=result["result"], run_id=run.run_id, trace_id=run.trace_id or run.run_id,
@@ -272,7 +287,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             source=event_source)
     else:
         result["response"] = ""
-        if disconnected_action or not publish_allowed:
+        if not publish_allowed:
             run.response = ""
             run.reply_source = "runtime"
             store.save(run)

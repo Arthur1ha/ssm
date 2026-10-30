@@ -611,6 +611,27 @@ body {
 .personality-editor input[type="range"] { display: block; width: 100%; margin-top: 8px; accent-color: #4bd4ff; }
 .personality-editor > div { margin-top: 7px; display: flex; align-items: center; justify-content: space-between; }
 .personality-editor > div small { color: var(--color-text-dim); font: 8px var(--font-mono); }
+.agent-personality__prompt-label { display: grid !important; gap: 4px; margin: 0 0 7px !important; color: var(--color-text) !important; font-size: 12px !important; font-weight: 600; }
+.agent-personality__prompt-label small { color: var(--color-text-dim); font-size: 10px; font-weight: 400; line-height: 1.5; }
+.agent-personality__traits { margin-top: 16px !important; display: grid !important; gap: 8px; }
+.agent-personality__trait { display: grid !important; gap: 5px; margin: 0 !important; padding: 11px 12px; border: 1px solid var(--color-border); border-radius: 9px; background: var(--color-surface-1); }
+.agent-personality__trait-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--color-text); }
+.agent-personality__trait-head strong { font-size: 12px; font-weight: 600; }
+.agent-personality__trait-head output { color: #4bd4ff; font: 12px var(--font-mono); }
+.agent-personality__trait-detail, .agent-personality__trait-effect { color: var(--color-text-dim); font-size: 10px; line-height: 1.5; }
+.agent-personality__trait-effect { color: var(--color-text-muted); }
+.agent-personality__trait input[type="range"] { margin-top: 3px; }
+.agent-personality__trait-scale { display: flex; justify-content: space-between; color: var(--color-text-dim); }
+.agent-personality__actions { margin-top: 16px !important; display: flex !important; align-items: center; justify-content: space-between; gap: 12px; }
+.agent-personality__actions .btn { min-height: 38px; }
+.agent-personality__feedback { white-space: normal; font-size: 11px; line-height: 1.5; }
+.agent-personality textarea:focus-visible, .agent-personality input:focus-visible, .agent-personality button:focus-visible { outline: 2px solid #4bd4ff; outline-offset: 2px; }
+.orchestrator-settings-drawer__intro, .orchestrator-settings-drawer__profile { grid-column: 1 / -1; }
+.orchestrator-settings-drawer__intro { border-color: var(--color-accent-border); background: linear-gradient(120deg, var(--color-accent-dim), transparent 70%), var(--color-surface-0); }
+.orchestrator-settings-drawer__intro p { color: var(--color-text-muted); font-size: 11px; line-height: 1.7; }
+.orchestrator-settings-drawer .space-drawer__header small, .orchestrator-settings-drawer .asset-section__heading small { color: var(--color-accent); }
+.orchestrator-settings-drawer .agent-personality__trait-head output { color: var(--color-accent); }
+.orchestrator-settings-drawer .personality-editor input[type="range"] { accent-color: var(--color-accent); }
 .people-list { display: grid; gap: 6px; }
 .person-row { min-height: 49px; padding: 6px; display: grid; grid-template-columns: 34px 1fr 27px; gap: 8px; align-items: center; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface-1); }
 .person-row__avatar { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid rgba(178,132,255,.3); border-radius: 9px; background: rgba(178,132,255,.08); color: #c3a2ff; font-size: 13px; font-weight: 600; }

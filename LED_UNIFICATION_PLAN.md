@@ -42,7 +42,7 @@ MQTT 上的 manifest、status 和当前 state 使用 retained，便于新订阅�
 ### 2. 明确 Card 的调用描述
 
 1. `cloud/cards/schema.py`、`cloud/cards/builder.py` 中保持设备物理执行 `transport.kind=mqtt` 和任务 topic；将云端 `chat_endpoint`、模式读写端点标为云端服务能力，避免把混合端点解释成整张 Card 的统一传输类型。
-2. 修正 `expand_mode_skills()`：当前它把 HTTP `/api/esp32/autonomy` 写进 `invoke.action`，而 `cloud/orchestrator/graph.py` 按 Card 的 MQTT 类型把该字符串当 MQTT 命令发布。先停止把 `set_autonomy` 作为可编排 MQTT 技能发布；模式仍由 Card 的 `modes` 供 PWA 使用，并通过现有授权 API 修改。如需要语音切换模式，再增加有独立鉴权的云端调用能力和按技能选择传输的 Dispatcher。
+2. 修正 `expand_mode_skills()`：旧编排图曾按 Card 的 MQTT 类型把 HTTP `/api/esp32/autonomy` 路径当作 MQTT 命令发布；现已停止把 `set_autonomy` 作为可编排 MQTT 技能发布，旧图也已删除。模式仍由 Card 的 `modes` 供 PWA 使用，并通过现有授权 API 修改。如需要语音切换模式，再增加有独立鉴权的云端调用能力和按技能选择传输的 Dispatcher。
 3. 对话接口只对真实挂载灯智能体的 unit 暴露；`cloud/esp32/router.py` 校验 `unit_id`，并把同步 LLM 调用移出异步事件循环。`cloud/api/intents.py` 的当前设备页对话入口保持统一会话策略。
 
 验收：Card 中每个公开技能都能实际调用；模式切换不会被当成 ESP32 MQTT 命令；聊天不会误指向其他 ESP32 单元。

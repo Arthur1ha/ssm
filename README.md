@@ -14,8 +14,8 @@
   │  ESP32（边缘端）  │        │       云端服务（cloud/）         │
   │  MicroPython     │        │  ┌──────────────────────────┐  │
   │                  │        │  │ orchestrator 编排器       │  │
-  │  BSM ← TriggerMap│        │  │ Planner→Dispatcher→       │  │
-  │  ISM ← TriggerMap│        │  │ Evaluator→Responder       │  │
+  │  BSM ← TriggerMap│        │  │ 逐轮规划→执行→核对结果    │  │
+  │  ISM ← TriggerMap│        │  │ →生成人格回复             │  │
   │  本地规则（兜底） │        │  ├──────────────────────────┤  │
   └────────┬─────────┘        │  │ api（FastAPI :8082）      │  │
            │           HTTP   │  │  esp32 桌面智能体          │  │
@@ -30,9 +30,9 @@
 **控制优先级**：用户指令 > 智能体 > 本地规则（离线兜底）
 
 云端有三个 LLM 智能体：
-- **编排器**（`cloud/orchestrator/`，独立进程）：订阅用户意图，经 LangGraph 图统筹全局，MQTT 派发到 ESP32、HTTP 委托到 Go2。
+- **编排器**（`cloud/orchestrator/`，独立进程）：订阅用户意图，经逐步任务循环统筹全局，MQTT 派发到 ESP32、HTTP 委托到 Go2。
 - **ESP32 桌面智能体**（`cloud/esp32/agent.py`）：带 persona 的 sense→reason→act，自主响应传感器事件。
-- **Go2 机器狗智能体**（`cloud/go2/`）：独立 LangGraph，含性格演化、记忆、导航、视觉，经 HTTP 暴露 `/api/go2/*`。
+- **Go2 机器狗智能体**（`cloud/go2/`）：独立逐步任务循环，含性格演化、记忆、导航、视觉，经 HTTP 暴露 `/api/go2/*`。
 
 ## esp硬件引脚
 
@@ -101,12 +101,12 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 
 #### 编排器（`cloud/orchestrator/`，独立进程）
 
-Python + LangGraph，订阅 `ssm/intent/+`，驱动编排图。
+Python 逐步任务循环，订阅 `ssm/intent/+`，每次观察结果后继续规划。
 
 | 文件 | 职责 |
 |------|------|
-| `main.py` | MQTT 事件循环：意图 → 编排图 |
-| `graph.py` | LangGraph：Planner→Dispatcher→Evaluator→Responder（含多模型 fallback） |
+| `main.py` | MQTT 事件循环：意图 → 逐步任务循环 |
+| `multitask.py` | 逐轮规划、派发、核对结果并生成管家回复 |
 | `tools.py` | MQTT/HTTP 派发与反馈辅助 |
 | `shared_state.py` | 线程安全设备/任务快照（合并 MQTT manifest + `devices.json`） |
 | `devices.json` | 预留：文件型非 MQTT 设备注册表（当前为空 `{}`，go2 已走 MQTT card） |

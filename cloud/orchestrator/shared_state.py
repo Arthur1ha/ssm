@@ -1,4 +1,4 @@
-# shared_state.py — Thread-safe store for MQTT ↔ LangGraph data exchange
+# shared_state.py — Thread-safe store for MQTT and the coordinator task loop
 
 import threading
 import json

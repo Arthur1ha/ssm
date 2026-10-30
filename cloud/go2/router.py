@@ -1045,12 +1045,10 @@ async def cleanup_go2_session(
 
 def cleanup_session_resources(session_id: str) -> dict:
     """Idempotently release only resources owned by one trusted session."""
-    from cloud.go2.agent import cleanup_session
     from cloud.go2.navigation.navigator import navigator
 
     lease = control_lease.snapshot()
     owns_motion = lease is not None and lease.owner_session_id == session_id
-    history_removed = cleanup_session(session_id)
     tasks_cancelled = session_tasks.cancel(session_id)
     navigation_stopped = navigator.stop(owner_session_id=session_id)
     drive_stopped = drive.stop(owner_session_id=session_id)
@@ -1068,7 +1066,6 @@ def cleanup_session_resources(session_id: str) -> dict:
     return {
         "ok": True,
         "session_id": session_id,
-        "history_removed": history_removed,
         "tasks_cancelled": tasks_cancelled,
         "navigation_stopped": navigation_stopped,
         "drive_stopped": drive_stopped,

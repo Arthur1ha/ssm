@@ -1,84 +1,80 @@
+"""Peer-facing personality facades read the same saved profile as reply loops."""
+
 import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from cloud.space.execution import ExecutionContext
+from cloud.agent_runtime.personality import ProfileStore
 from cloud.esp32.agentcore import soul as lamp_soul
+from cloud.esp32.agentcore.personality import profile as lamp_profile
 from cloud.go2.agentcore import soul as go2_soul
+from cloud.go2.agentcore.personality import profile as go2_profile
+from cloud.space.execution import ExecutionContext
 
 
-def test_lamp_first_start_persists_score_without_replacing_admin_profile(tmp_path, monkeypatch):
-    path = tmp_path / "soul" / "personality.json"
-    monkeypatch.setattr(lamp_soul, "PERSONALITY_FILE", path)
+def _isolate_lamp(tmp_path, monkeypatch, migration=lambda: {}):
+    path = tmp_path / "lamp" / "profile.json"
+    monkeypatch.setattr(lamp_profile, "_store", ProfileStore(
+        agent_id="esp32_desk_led", path=path, prompt=lamp_profile.DEFAULT_PROMPT,
+        trait_specs=lamp_profile.TRAIT_SPECS, migration=migration))
+    monkeypatch.setattr(lamp_soul, "emit_agent_event", lambda *_args, **_kwargs: None)
+    return path
+
+
+def _isolate_go2(tmp_path, monkeypatch):
+    path = tmp_path / "go2" / "profile.json"
+    monkeypatch.setattr(go2_profile, "_store", ProfileStore(
+        agent_id="go2", path=path, prompt=go2_profile.DEFAULT_PROMPT,
+        trait_specs=go2_profile.TRAIT_SPECS, migration=lambda: {}))
+    monkeypatch.setattr(go2_soul, "emit_agent_event", lambda *_args, **_kwargs: None)
+    return path
+
+
+def test_lamp_first_start_keeps_saved_admin_profile(tmp_path, monkeypatch):
+    path = _isolate_lamp(tmp_path, monkeypatch)
     lamp_soul.ensure_personality_profile()
-    assert json.loads(path.read_text(encoding="utf-8"))["social_initiative"] == 70
-    path.write_text(json.dumps({"prompt": "管理员人设", "social_initiative": 92}), encoding="utf-8")
-    lamp_soul.ensure_personality_profile()
-    assert lamp_soul.get_personality_view() == {"prompt": "管理员人设", "social_initiative": 92}
-
-
-def test_lamp_legacy_profile_and_score_preservation(tmp_path, monkeypatch):
-    path = tmp_path / "lamp.json"
-    path.write_text(json.dumps({"prompt": "旧人设"}), encoding="utf-8")
-    monkeypatch.setattr(lamp_soul, "PERSONALITY_FILE", path)
-    monkeypatch.setattr(lamp_soul, "emit_agent_event", lambda *a, **k: None)
+    assert lamp_profile.get_profile()["traits"]["social_initiative"] == 70
     context = ExecutionContext("admin", "admin", True)
-    assert lamp_soul.get_personality_view() == {"prompt": "旧人设", "social_initiative": 70}
-    lamp_soul.set_personality("新表达", context, 12)
-    lamp_soul.set_personality("再修改", context)
-    assert lamp_soul.get_personality_view() == {"prompt": "再修改", "social_initiative": 12}
-    with pytest.raises(ValueError):
-        lamp_soul.set_personality("错误", context, 101)
-    assert lamp_soul.get_personality_view()["prompt"] == "再修改"
+    lamp_soul.set_personality("管理员人设", context, 92)
+    lamp_soul.ensure_personality_profile()
+    assert lamp_soul.get_personality_view() == {
+        "prompt": "管理员人设", "social_initiative": 92}
+    assert json.loads(path.read_text(encoding="utf-8"))["prompt"] == "管理员人设"
 
 
-def test_go2_profile_maps_extraversion_and_rolls_back_on_second_write(tmp_path, monkeypatch):
-    prompt_path, traits_path = tmp_path / "personality.json", tmp_path / "traits.json"
-    prompt_path.write_text(json.dumps({"prompt": "旧人设"}), encoding="utf-8")
-    traits_path.write_text(json.dumps({"extraversion": 40, "curiosity": 70}), encoding="utf-8")
-    monkeypatch.setattr(go2_soul, "_PERSONALITY_FILE", prompt_path)
-    monkeypatch.setattr(go2_soul, "_TRAITS_FILE", traits_path)
-    monkeypatch.setattr(go2_soul, "emit_agent_event", lambda *a, **k: None)
-    assert go2_soul.get_personality_view() == {"prompt": "旧人设", "social_initiative": 40}
+def test_lamp_migrates_old_profile_once_and_preserves_score(tmp_path, monkeypatch):
+    old_path = tmp_path / "old-lamp.json"
+    old_path.write_text(json.dumps({"prompt": "旧人设", "social_initiative": 12}), encoding="utf-8")
+    monkeypatch.setattr(lamp_profile, "PERSONALITY_FILE", old_path)
+    _isolate_lamp(tmp_path, monkeypatch, migration=lamp_profile._migrate)
+    assert lamp_soul.get_personality_view() == {"prompt": "旧人设", "social_initiative": 12}
+    context = ExecutionContext("admin", "admin", True)
+    lamp_soul.set_personality("新表达", context)
+    assert lamp_soul.get_personality_view() == {"prompt": "新表达", "social_initiative": 12}
+
+
+def test_go2_persona_and_extraversion_are_one_atomic_profile(tmp_path, monkeypatch):
+    path = _isolate_go2(tmp_path, monkeypatch)
     go2_soul.set_personality("新表达", 10)
-    go2_soul.set_personality("再修改")
-    assert go2_soul.get_personality_view() == {"prompt": "再修改", "social_initiative": 10}
-    before_prompt, before_traits = prompt_path.read_bytes(), traits_path.read_bytes()
-    original = go2_soul._atomic_json
-
-    def fail_traits(path, value):
-        if path == traits_path:
-            raise OSError("simulated trait write failure")
-        return original(path, value)
-
-    monkeypatch.setattr(go2_soul, "_atomic_json", fail_traits)
-    with pytest.raises(OSError):
-        go2_soul.set_personality("不应保存", 99)
-    assert prompt_path.read_bytes() == before_prompt
-    assert traits_path.read_bytes() == before_traits
+    before = path.read_bytes()
+    assert go2_soul.get_personality_view() == {"prompt": "新表达", "social_initiative": 10}
+    with pytest.raises(ValueError):
+        go2_soul.set_personality("不应保存", 101)
+    assert path.read_bytes() == before
 
 
-def test_go2_daily_description_does_not_replace_new_admin_edit(tmp_path, monkeypatch):
-    prompt_path, traits_path = tmp_path / "personality.json", tmp_path / "traits.json"
-    monkeypatch.setattr(go2_soul, "_PERSONALITY_FILE", prompt_path)
-    monkeypatch.setattr(go2_soul, "_TRAITS_FILE", traits_path)
-    monkeypatch.setattr(go2_soul, "emit_agent_event", lambda *a, **k: None)
+def test_go2_daily_evolution_preserves_concurrent_admin_edit(tmp_path, monkeypatch):
+    _isolate_go2(tmp_path, monkeypatch)
     go2_soul.set_personality("原始表达", 45)
 
     class Model:
-        calls = 0
-
         async def ainvoke(self, _messages):
-            self.calls += 1
-            if self.calls == 1:
-                return SimpleNamespace(content='{"extraversion": 2}')
             go2_soul.set_personality("管理员刚更新", 90)
-            return SimpleNamespace(content="你是一只很活泼的机器狗。")
+            return SimpleNamespace(content='{"extraversion": 2}')
 
-    model = Model()
-    monkeypatch.setattr(go2_soul, "get_text_llm", lambda: model)
-    asyncio.run(go2_soul.evolve_from_summary("2026-10-26", "有趣的一天", traits_path))
+    monkeypatch.setattr(go2_soul, "get_text_llm", lambda: Model())
+    asyncio.run(go2_soul.evolve_from_summary("2026-10-30", "有趣的一天"))
     assert go2_soul.get_personality_view() == {
-        "prompt": "管理员刚更新", "social_initiative": 90}
+        "prompt": "管理员刚更新", "social_initiative": 92}

@@ -1,5 +1,5 @@
 # main.py — 云端编排器入口
-# MQTT 事件循环：用户意图 → 编排图
+# MQTT 事件循环：用户意图 → 逐步任务循环
 
 import os
 import json
@@ -22,8 +22,8 @@ import paho.mqtt.client as mqtt_lib
 from shared_state import SharedState
 from cloud.cards.registry import CardRegistry
 import tools as agent_tools
-from graph import (cancel_peer_coordination, clear_peer_coordination,
-                   clear_session_context)
+from cloud.orchestrator.agentcore.peer.cancellation import (cancel_peer_coordination,
+                                                              clear_peer_coordination)
 from cloud.orchestrator.multitask import build_intent_run_context, run_intent_loop, run_peer_loop
 from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message
 from cloud.peers.messaging import AgentMessenger
@@ -62,18 +62,18 @@ _intent_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssm-inten
 _peer_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssm-peer")
 
 
-def _run_intent(session_id: str, graph_input: dict) -> None:
+def _run_intent(session_id: str, intent_context: dict) -> None:
     current = state.get_session(session_id)
-    expires_at = graph_input.get("expires_at")
+    expires_at = intent_context.get("expires_at")
     if current is None or (expires_at is not None and expires_at <= time.time()):
         logger.info("[Main] discarded stale intent session=%s", session_id)
         return
     try:
-        run_intent_loop(graph_input, resume=bool(graph_input.get("resume_run_id")),
-                        supplemental=graph_input.get("user_msg", "") if graph_input.get("resume_run_id") else "")
+        run_intent_loop(intent_context, resume=bool(intent_context.get("resume_run_id")),
+                        supplemental=intent_context.get("user_msg", "") if intent_context.get("resume_run_id") else "")
         logger.info("[Main] ── 逐步任务完成 session=%s ──", session_id)
     except Exception as exc:
-        logger.exception("[Main] 编排图异常 session=%s: %s", session_id, exc)
+        logger.exception("[Main] 任务循环异常 session=%s: %s", session_id, exc)
 
 
 def _handle_agent_message(message: dict) -> None:
@@ -294,7 +294,7 @@ def on_message(client, userdata, msg):
 
         return
 
-    # ssm/intent/{session_id} → 编排图
+    # ssm/intent/{session_id} → 逐步任务循环
     if len(parts) == 3 and parts[1] == "intent":
         try:
             trusted = parse_trusted_intent(
@@ -404,7 +404,6 @@ def _cleanup_session(session_id: str):
     """Clear local context and ask Go2 to release only this session's work."""
     context = state.get_session(session_id) or {}
     actor = context.get("actor", "visitor")
-    clear_session_context(session_id)
     state.clear_session(session_id)
     constraints = get_constraint_store()
     if constraints.remove_session(session_id):
@@ -438,7 +437,7 @@ while True:
 
         if trigger == "intent":
             session_id = event.get("session_id", "")
-            logger.info("[Main] ── 编排图启动 session=%s ──", session_id)
+            logger.info("[Main] ── 逐步任务启动 session=%s ──", session_id)
             _intent_worker.submit(
                 _run_intent, session_id, build_intent_run_context(event["payload"]),
             )

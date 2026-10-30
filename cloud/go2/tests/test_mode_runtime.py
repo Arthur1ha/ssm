@@ -88,6 +88,38 @@ def test_reactive_prompt_records_version_and_memory_source(monkeypatch):
     assert "固定约束版本" in llm.ainvoke.await_args.args[0][0].content
 
 
+def test_low_boldness_keeps_reactive_turn_as_observation(monkeypatch):
+    profile = {"prompt": "我是 Go2", "traits": {"curiosity": 70, "extraversion": 45,
+                                      "boldness": 10}, "revision": 2}
+    monkeypatch.setattr(reactive, "get_profile", lambda: profile)
+    monkeypatch.setattr(reactive, "get_text_llm", lambda: SimpleNamespace(
+        ainvoke=AsyncMock(return_value=SimpleNamespace(
+            content='{"action":"turn_left","reason":"想看看"}'))))
+    mind = reactive.ReactiveMind()
+    mind.set_active(True)
+    mind._dispatch_action = AsyncMock()
+    frame = {"persons": {"detected": False, "count": 0},
+             "faces": {"detected": False, "count": 0}, "change_type": "none"}
+    asyncio.run(mind._autonomous_reason(frame))
+    mind._dispatch_action.assert_not_awaited()
+
+
+def test_reactive_timeout_reply_rejects_false_completion(monkeypatch):
+    events = []
+    monkeypatch.setattr("cloud.api.intents.publish_agent_event",
+                        lambda kind, **facts: events.append((kind, facts)))
+    monkeypatch.setattr(reactive.go2 if hasattr(reactive, "go2") else go2,
+                        "is_connected", True)
+    monkeypatch.setattr(reactive, "get_text_llm", lambda: SimpleNamespace(
+        ainvoke=AsyncMock(return_value=SimpleNamespace(content="我已经完成动作啦"))))
+    mind = reactive.ReactiveMind()
+    mind.set_active(True)
+    asyncio.run(mind._publish_action_reply("Hello", "打招呼", {"result": "timeout"}))
+    reply = [facts for kind, facts in events if kind == "agent_reply"][-1]
+    assert reply["status"] == "timeout"
+    assert "还没收到" in reply["text"]
+
+
 def test_free_explore_motion_uses_executor_and_interrupt_gate(monkeypatch):
     calls = []
 
@@ -223,3 +255,29 @@ def test_explore_question_pauses_and_keeps_private_image_reference(tmp_path, mon
     assert events[0][0][1] == "question"
     assert events[0][1]["media_ref"].startswith("/api/go2/activity-media/")
     assert activity_media.load_snapshot("act_question", drive._pending_question_id) == b"\xff\xd8test\xff\xd9"
+
+
+def test_personality_traits_change_existing_decision_opportunities():
+    from cloud.esp32.agentcore.personality.behavior import light_change_bucket
+    from cloud.go2.agentcore.personality.behavior import exploration_interval, social_action_candidates
+    from cloud.orchestrator.agentcore.personality.behavior import clarification_guidance
+
+    assert exploration_interval(10) > exploration_interval(70) > exploration_interval(100)
+    assert social_action_candidates(10, {"Hello", "Dance1"}) == {"Hello"}
+    assert social_action_candidates(60, {"Hello", "Dance1"}) == {"Hello", "Dance1"}
+    assert light_change_bucket(45, 0) is None
+    assert light_change_bucket(45, 90) != light_change_bucket(45, 20)
+    assert clarification_guidance(10) != clarification_guidance(90)
+
+
+def test_non_success_persona_reply_cannot_claim_completion():
+    from cloud.agent_runtime.loop import Run
+    from cloud.agent_runtime.replies import factual_fallback, valid_persona_reply
+
+    run = Run("test", "", "去门口", 0, status="timeout")
+    assert not valid_persona_reply("我已经完成啦", run)
+    assert valid_persona_reply("我还没收到动作完成的确认。", run)
+    assert "确认" in factual_fallback("go2", "timeout")
+    assert "完成" not in factual_fallback("esp32_desk_led", "blocked")
+    assert "办好了" not in factual_fallback(
+        "go2", "ok", Run("chat", "", "你好", 0, status="ok"))

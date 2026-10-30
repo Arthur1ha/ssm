@@ -22,6 +22,8 @@ from cloud.go2.agentcore.tools.executor import execute_tool
 from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
 from cloud.go2.agentcore.perception.vision import VisionFrame
 from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.personality.profile import get_profile
+from cloud.go2.agentcore.personality.behavior import exploration_interval, social_action_candidates
 from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 from cloud.go2.space_context import prompt_space_context
@@ -30,7 +32,6 @@ from cloud.peers.social import SocialState, activity_peers
 
 logger = logging.getLogger(__name__)
 
-_CURIOSITY_THRESHOLD   = 10   # 10s 无事件 → EXPLORING
 _SOCIAL_CHECK_INTERVAL = 5    # 空闲期间有人脸信号时每 5 tick 评估互动
 
 
@@ -95,10 +96,10 @@ class Drive:
             return
         from cloud.space.context import get_space_context
         from cloud.api.main import _esp32_state
-        from cloud.go2.agentcore.soul import get_personality_view
         context = get_space_context("go2", state=_esp32_state)
         activity, peers = activity_peers("go2", context["peers"])
-        score = get_personality_view()["social_initiative"]
+        profile = get_profile()
+        score = profile["traits"]["extraversion"]
         opportunity = self._social_state.opportunity(
             activity, peers, context["recent_discoveries"], score, unit_id="go2")
         if local_observation and local_observation.get("event_id") and peers:
@@ -114,7 +115,7 @@ class Drive:
         targets = [{"unit_id": peer["unit_id"], "name": peer.get("name"),
                     "skills": (peer.get("skills") or [])[:5]} for peer in peers]
         prompt = (
-            f"{get_personality_view()['prompt']}\n"
+            f"{profile['prompt']}\n"
             f"你的社交主动性：{score}/100。此值影响主动开口的倾向，"
             "但每条消息仍应与情境和同伴能力相关。\n"
             "你正在活动内评估是否主动向同伴说一句有价值的话。"
@@ -178,9 +179,8 @@ class Drive:
 
     async def _publish_motion_reply(self, name: str, params: dict, result: dict) -> None:
         from cloud.agent_runtime.loop import Run
-        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply, factual_fallback
         from cloud.api.intents import publish_agent_event
-        from cloud.go2.agentcore.soul import load_system_prompt
 
         if not go2.is_connected or self.user_interrupt:
             return
@@ -194,17 +194,14 @@ class Drive:
             space_id=self._context.space_id, source="autonomous", status=status,
             run_id=run_id, step_id=run_id, stage="observed")
         try:
-            persona, _, _ = load_system_prompt()
+            persona = get_profile()["prompt"]
             response = await get_text_llm().ainvoke([
                 HumanMessage(content=persona_reply_prompt(persona, run))])
             answer = response.content
-            if not valid_persona_reply(answer):
+            if not valid_persona_reply(answer, run):
                 raise ValueError("invalid_persona_reply")
         except Exception:
-            publish_agent_event("reply_error", agent_id="go2", scope="space",
-                space_id=self._context.space_id, source="autonomous",
-                status=status, run_id=run_id)
-            return
+            answer = factual_fallback("go2", status, run)
         if self.user_interrupt or not go2.is_connected:
             return
         publish_agent_event("agent_reply", agent_id="go2", scope="space",
@@ -306,7 +303,11 @@ class Drive:
 
             # Exploration is scheduled by curiosity and the live map. Face
             # detection only schedules a separate social check between trips.
-            if self._curiosity >= _CURIOSITY_THRESHOLD:
+            profile = get_profile()
+            threshold = exploration_interval(profile["traits"]["curiosity"])
+            if self._curiosity >= threshold:
+                logger.info("[Drive] explore candidate revision=%s curiosity=%s interval=%s",
+                            profile["revision"], profile["traits"]["curiosity"], threshold)
                 self._curiosity = 0
                 self._state = MotivationalState.EXPLORING
                 try:
@@ -530,16 +531,20 @@ class Drive:
 
         episode_memory.add(EventType.OBSERVATION, f"社交观察：{observation}")
         memory_ctx = episode_memory.format_context()
+        profile = get_profile()
+        boldness = profile["traits"]["boldness"]
+        candidates = social_action_candidates(boldness, _VALID_SPORT_CMDS)
         prompt = (
             f"{self._identity_context()}\n"
             f"最新观察：{observation}\n"
-            f"可用姿态动作：{', '.join(sorted(_VALID_SPORT_CMDS))}\n\n"
+            f"可选姿态动作：{', '.join(sorted(candidates))}；大胆程度 {boldness}/100。"
+            "分数越低越倾向先观察或保持安静；不能改变运动安全条件。\n\n"
             f"决定是否对这个人做出互动（或什么都不做）。\n"
             f"直接输出 JSON，不含代码块：{{\"action\": \"动作名或null\", \"reason\": \"一句话\"}}"
         )
         try:
             bundle = build_prompt(
-                "free_explore", personality=get_system_prompt(), memory=memory_ctx,
+                "free_explore", personality=profile["prompt"], memory=memory_ctx,
                 device_state=prompt + "\n当前空间现状：" + prompt_space_context(),
                 memory_sources=("episode",), tool_version="go2-tools-v1",
             )
@@ -559,7 +564,7 @@ class Drive:
         reason = decision.get("reason", "")
         if action:
             canonical = _normalize_sport_action(str(action))
-            if canonical is None:
+            if canonical is None or canonical not in candidates:
                 logger.info("[Drive] SOCIAL 忽略无效姿态动作：%s", action)
                 return
             try:

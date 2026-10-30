@@ -36,7 +36,7 @@ def _make_llm():
         base_kwargs["max_tokens"] = max_tokens
     llms = [ChatOpenAI(model=m, **base_kwargs) for m in models]
     logger.info(
-        "[Graph] LLM config base_url=%s models=%s key_present=%s timeout=%s max_retries=%s max_tokens=%s",
+        "[Orchestrator] LLM config base_url=%s models=%s key_present=%s timeout=%s max_retries=%s max_tokens=%s",
         base_url or "(empty)",
         " → ".join(models),
         bool(api_key),

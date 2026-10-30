@@ -15,14 +15,18 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from cloud.agent_runtime.loop import Run, parse_decision, run_loop
-from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply
+from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply, factual_fallback
 from cloud.agent_runtime.progress import submit_progress
 from cloud.agent_runtime.store import RunStore
 from cloud.observability import bind_context, current_event_context, emit_agent_event
 from cloud.orchestrator.agentcore.llm import _make_llm
 from cloud.orchestrator.agentcore.skills.coordination import allows_step
 from cloud.orchestrator.agentcore.tools.executor import validate_public_skill
-from graph import AGENT_PERSONA, _http_timeout_for, _skill_requires_persistence, peer_coordination_cancelled
+from cloud.orchestrator.agentcore.peer.cancellation import peer_coordination_cancelled
+from cloud.orchestrator.agentcore.tools.dispatch_policy import (http_timeout_for,
+                                                                  skill_requires_persistence)
+from cloud.orchestrator.agentcore.personality.profile import get_profile
+from cloud.orchestrator.agentcore.personality.behavior import clarification_guidance, current_persona
 from cloud.space.registry import DEFAULT_SPACE_ID, build_adoption_candidates, get_space_registry
 from cloud.space.context import get_space_context
 from cloud.space.constraints import get_constraint_store
@@ -119,7 +123,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
     skill = next((s for s in card.get("skills", []) if s.get("id") == skill_id), None) if card else None
     if not skill:
         return {"result": "blocked", "error": "target_or_skill_unavailable"}
-    if _skill_requires_persistence(skill) and not context.get("persist"):
+    if skill_requires_persistence(skill) and not context.get("persist"):
         return {"result": "rejected", "error": "persistence_permission_denied"}
     task = {"unit_id": unit_id, "skill_id": skill_id, "params": params, "task_id": step_id}
     try:
@@ -174,7 +178,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                 "trace_id": correlation.get("trace_id"),
                 "parent_run_id": correlation.get("run_id")}
         timeout = (max(1, deadline - time.time()) if unit_id == "go2" or skill_id == "adjust_lighting"
-                   else min(_http_timeout_for(card, skill_id), max(1, deadline - time.time())))
+                   else min(http_timeout_for(card, skill_id), max(1, deadline - time.time())))
         try:
             result = transport.do_http_dispatch(selected.get("endpoint", ""), body, timeout)
         except Exception as exc:
@@ -226,10 +230,14 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
     transport.do_publish_feedback(session_id, "planning", "正在理解并执行目标…", run_id=run_id)
 
     async def decide(current: Run) -> dict:
+        profile = get_profile()
+        persona = current_persona(profile)
+        clarification = clarification_guidance(profile["traits"]["clarification_tendency"])
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
                          run_id=current.run_id, agent_id="orchestrator",
-                         source="default", role="orchestrator",
-                         content_hash=hashlib.sha256(AGENT_PERSONA.encode()).hexdigest(),
+                         source="profile", role="orchestrator",
+                         profile_revision=profile["revision"],
+                         content_hash=hashlib.sha256(persona.encode()).hexdigest(),
                          prompt_trimmed=False)
         data = {"goal": current.goal, "supplement": supplemental,
                 "space": get_space_context("cloud_orchestrator", state=transport._state,
@@ -237,7 +245,7 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                 "steps": [{"tool": s["tool"], "params": s["params"], "result": s.get("result")}
                           for s in current.steps[-8:]]}
         prompt = (
-            f"{AGENT_PERSONA}\n每轮只返回一个严格 JSON 对象："
+            f"{persona}\n澄清偏好：{clarification}\n每轮只返回一个严格 JSON 对象："
             '{"tool":"工具名","params":{...}} 或 {"final":"回复"}。'
             "工具：list_agents({}), get_space_context({}), read_state({}), invoke_skill({unit_id,skill_id,params,message?}),"
             " await_result({task_id}), save_rule({rule}), send_message({target,content,reply_to?}),"
@@ -412,7 +420,7 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                         stage="narrated", sequence=run.attempt * 10 + 3,
                         step_number=len(run.steps),
                         **step_progress_facts(step))
-                submit_progress(AGENT_PERSONA, run.goal, step, invoke_text,
+                submit_progress(current_persona(), run.goal, step, invoke_text,
                                 publish_text, progress_closed,
                                 min(run.deadline, time.time() + 4))
 
@@ -425,7 +433,9 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                                                              "set_space_constraint", "clear_space_constraints"}))
     if needs_persona_reply(run):
         try:
-            prompt = persona_reply_prompt(AGENT_PERSONA, run)
+            profile = get_profile()
+            prompt = persona_reply_prompt(current_persona(profile), run,
+                                          traits=profile["traits"])
             emit_agent_event("model.request", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
                              input=prompt, goal=run.goal,
@@ -435,7 +445,7 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
             emit_agent_event("model.response", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="orchestrator", session_id=session_id,
                              output=getattr(response, "content", ""))
-            if not valid_persona_reply(response.content):
+            if not valid_persona_reply(response.content, run):
                 raise ValueError("invalid_persona_reply")
             run.response = response.content.strip()
             run.reply_source = "persona_model"
@@ -447,7 +457,7 @@ def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
         except Exception as exc:
             logger.warning("orchestrator persona reply unavailable run=%s error=%s",
                            run.run_id, type(exc).__name__)
-            run.response = ""
+            run.response = factual_fallback("cloud_orchestrator", run.status, run)
             run.reply_source = "runtime"
             store.save(run)
     stage = ("question" if run.status == "needs_clarification" else

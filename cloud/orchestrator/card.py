@@ -1,4 +1,4 @@
-"""Public coordinator Card; internal tools remain private to the graph."""
+"""Public coordinator Card; internal tools remain private to its task loop."""
 
 
 def build_card(unit_id: str) -> dict:

@@ -12,6 +12,7 @@ from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_promp
 from cloud.agent_runtime.progress import submit_progress
 from cloud.agent_runtime.progress_facts import step_progress_facts
 from cloud.api import intents
+from cloud.go2.agentcore.personality.behavior import reply_persona
 
 
 def _session(session_id, space_id="main"):
@@ -104,6 +105,26 @@ def test_progress_facts_keep_delegated_goal_without_tool_output():
     facts = step_progress_facts(step)
     assert facts["requested_text"] == "坐下"
     assert facts["reason"] == "Go2 未连接"
+
+
+def test_plain_chat_reply_uses_answer_draft_without_execution_report():
+    run = Run("chat", "s", "陪我聊两句", time.time() + 10,
+              status="ok", decision_draft="好呀，我在这儿。")
+    prompt = persona_reply_prompt("你是好奇的 Go2，讲话轻快。", run,
+                                  traits={"curiosity": 80})
+    assert '"answer_draft": "好呀，我在这儿。"' in prompt
+    assert '"user_message": "陪我聊两句"' in prompt
+    assert "好奇的 Go2" in prompt
+    assert "不要提任务完成、执行记录、状态、没有动作步骤" in prompt
+    assert '"runtime_note"' not in prompt
+    assert '"status"' not in prompt
+
+
+def test_go2_extraversion_changes_reply_guidance():
+    profile = {"prompt": "你是 Go2。", "traits": {"extraversion": 20}}
+    assert "不主动延长闲聊" in reply_persona(profile)
+    profile["traits"]["extraversion"] = 85
+    assert "可自然接话" in reply_persona(profile)
 
 
 @pytest.mark.asyncio

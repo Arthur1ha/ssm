@@ -41,6 +41,7 @@ function App({ session, logout, refreshSession }) {
   const [rulesOpen,   setRulesOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
+  const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [peopleOpen,  setPeopleOpen]  = useState(false);
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const [deviceNotice, setDeviceNotice] = useState('');
@@ -113,7 +114,9 @@ function App({ session, logout, refreshSession }) {
       return;
     }
     if (requestId) {
-      appendProcess(requestId, item.agent_id, item.text, item.event_id);
+      setActivityLog(prev => insertBeforeRequestEnd(prev, requestId,
+        { type: 'ai', agent: item.agent_id, requestId, text: item.text,
+          eventId: item.event_id }));
     } else {
       appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
         eventId: item.event_id, traceId: item.trace_id });
@@ -264,7 +267,8 @@ function App({ session, logout, refreshSession }) {
             </button>{deviceNotice && <small className="action-feedback action-feedback--ok" role="status" title={deviceNotice}>{deviceNotice}</small>}</div>}
             {session.actor === 'admin' && <SpaceMenu
               onShareSpace={() => setInviteOpen(true)} onRules={() => setRulesOpen(true)}
-              onSpaceSettings={() => setSpaceOpen(true)} onPeople={() => setPeopleOpen(true)} onExit={logout}/>}
+              onSpaceSettings={() => setSpaceOpen(true)} onOrchestratorSettings={() => setOrchestratorOpen(true)}
+              onPeople={() => setPeopleOpen(true)} onExit={logout}/>}
           </div>
         </div>
 
@@ -367,6 +371,7 @@ function App({ session, logout, refreshSession }) {
         {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
+        {session.actor === 'admin' && <OrchestratorSettingsDrawer open={orchestratorOpen} onClose={() => setOrchestratorOpen(false)}/>}
         {session.actor === 'admin' && <SpacePeopleDrawer open={peopleOpen} onClose={() => setPeopleOpen(false)}/>}
         {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)} onBound={async result => {
           setDeviceScanOpen(false);

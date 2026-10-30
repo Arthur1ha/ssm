@@ -50,6 +50,11 @@ docs/superpowers/plans/*
 !docs/superpowers/plans/2026-10-27-space-activity-lifecycle.md
 !docs/superpowers/plans/2026-10-27-personality-driven-peer-interaction.md
 !docs/superpowers/plans/2026-10-28-go2-navigation-closed-loop.md
+!docs/superpowers/plans/2026-10-30-go2-personality-behavior-and-replies.md
+!docs/research/
+docs/research/*
+!docs/research/2026-10-30-ai-character-personality-systems.md
+!docs/research/2026-10-30-whale-persona-ssm-analysis.md
 paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin

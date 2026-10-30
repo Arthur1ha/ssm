@@ -96,3 +96,74 @@ def test_lamp_command_checks_current_fsm_before_publish(monkeypatch):
         )
     assert exc.value.status_code == 409
     publish.assert_not_called()
+"""Unified personality persistence and administrator routes."""
+
+import pytest
+
+from cloud.agent_runtime.personality import ProfileStore, RevisionConflict
+from cloud.api.personality import router as personality_router
+from cloud.api.tests.conftest import login_admin
+from cloud.go2.agentcore.personality import profile as go2_profile
+
+
+def _store(tmp_path, migration=None):
+    return ProfileStore(agent_id="go2", path=tmp_path / "personality" / "profile.json",
+                        prompt="默认", trait_specs=go2_profile.TRAIT_SPECS,
+                        migration=migration)
+
+
+def test_profile_migration_revision_validation_and_evolution(tmp_path):
+    old = {"prompt": "管理员原有文案", "traits": {"curiosity": 82, "extraversion": 30,
+                                            "boldness": 44},
+           "metadata": {"last_evolved": "2026-10-28"}}
+    store = _store(tmp_path, lambda: old)
+    first = store.get_profile()
+    assert first["prompt"] == "管理员原有文案"
+    assert first["traits"]["curiosity"] == 82
+    assert store.metadata()["last_evolved"] == "2026-10-28"
+    old["prompt"] = "不应覆盖迁移结果"
+    assert store.get_profile() == first
+
+    admin = {"actor": "admin", "persist": True}
+    edited = store.update_profile({"revision": first["revision"],
+                                   "traits": {"curiosity": 40}}, admin)
+    with pytest.raises(RevisionConflict):
+        store.update_profile({"revision": first["revision"], "prompt": "过期"}, admin)
+    with pytest.raises(ValueError):
+        store.update_profile({"revision": edited["revision"], "traits": {"unknown": 20}}, admin)
+    with pytest.raises(ValueError):
+        store.update_profile({"revision": edited["revision"], "traits": {"boldness": 101}}, admin)
+    with pytest.raises(PermissionError):
+        store.update_profile({"revision": edited["revision"], "prompt": "访客"},
+                             {"actor": "visitor", "persist": True})
+
+    current = store.evolve({"curiosity": 2}, "2026-10-29")
+    assert current["traits"]["curiosity"] == 42
+    assert store.metadata()["last_evolved"] == "2026-10-29"
+    assert not store.replace_generated_prompt("旧生成结果", expected_revision=edited["revision"])
+    assert store.get_profile()["prompt"] == "管理员原有文案"
+
+
+@pytest.mark.asyncio
+async def test_personality_api_admin_csrf_and_revisions(app, client, monkeypatch, tmp_path):
+    from cloud.orchestrator.agentcore.personality import profile as coordinator_profile
+    store = ProfileStore(agent_id="cloud_orchestrator",
+                         path=tmp_path / "orchestrator" / "personality" / "profile.json",
+                         prompt="管家", trait_specs=coordinator_profile.TRAIT_SPECS)
+    monkeypatch.setattr(coordinator_profile, "_store", store)
+    app.include_router(personality_router)
+    assert (await client.get("/api/agents/cloud_orchestrator/personality")).status_code == 401
+    headers = await login_admin(client)
+    first = await client.get("/api/agents/cloud_orchestrator/personality")
+    assert first.status_code == 200
+    revision = first.json()["revision"]
+    body = {"revision": revision, "traits": {"warmth": 85}}
+    assert (await client.put("/api/agents/cloud_orchestrator/personality", json=body)).status_code == 403
+    updated = await client.put("/api/agents/cloud_orchestrator/personality",
+                               json=body, headers=headers)
+    assert updated.status_code == 200
+    assert updated.json()["traits"]["warmth"] == 85
+    assert (await client.put("/api/agents/cloud_orchestrator/personality",
+                             json=body, headers=headers)).status_code == 409
+    assert (await client.put("/api/agents/other/personality",
+                             json=body, headers=headers)).status_code == 404

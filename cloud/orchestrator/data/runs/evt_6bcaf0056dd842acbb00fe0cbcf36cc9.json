@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "run_id": "evt_6bcaf0056dd842acbb00fe0cbcf36cc9",
+  "session_id": "ses_J1tnuBAsUdbDcly9yKYyzXKN",
+  "goal": "你现在讲两句话给我听听",
+  "deadline": 1793273087.148955,
+  "steps": [],
+  "status": "ok",
+  "response": "好呀，我在这儿呢。今天也别太累，有什么安排跟我说一声就行。",
+  "question": "",
+  "trace_id": "tr_5fc9d57b178e4749a4b1fbfa804d6545",
+  "parent_run_id": "",
+  "agent_id": "orchestrator",
+  "origin_kind": "user_delegated",
+  "reply_source": "persona_model",
+  "reply_ready": true,
+  "decision_draft": "好呀，我在这儿呢。今天也别太累，有什么安排跟我说一声就行。",
+  "reply_event_id": "",
+  "attempt": 0,
+  "updated_at": 1793273000.465304
+}

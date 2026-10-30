@@ -7,6 +7,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import multitask
+from cloud.orchestrator.agentcore.tools.dispatch_policy import (
+    http_timeout_for, skill_requires_persistence,
+)
+
+
+def test_active_dispatch_policy_preserves_persistence_and_long_task_budget():
+    assert skill_requires_persistence({"id": "save_location", "invoke": {"action": "SAVE"}})
+    assert skill_requires_persistence({"id": "custom", "tags": ["configuration"]})
+    assert not skill_requires_persistence({"id": "go2_sport", "tags": ["motion"]})
+    assert http_timeout_for({"unit_id": "go2"}, "go2_sport") == 95
+    assert http_timeout_for({"unit_id": "esp32_desk_led"}, "adjust_lighting") == 60
 
 
 def test_go2_motion_does_not_receive_unrelated_lamp_goal(monkeypatch):

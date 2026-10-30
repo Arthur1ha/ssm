@@ -429,8 +429,6 @@ window.FsmDevicePage = FsmDevicePage;
 
 function LampAssetsDrawer({ unitId, open, onClose }) {
   const { useEffect, useState } = React;
-  const [personality, setPersonality] = useState('');
-  const [socialInitiative, setSocialInitiative] = useState(70);
   const [memory, setMemory] = useState({ taught: [], episodes: [], daily_summary: '' });
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
@@ -438,11 +436,7 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
   const load = async () => {
     setBusy(true);
     try {
-      const [profile, records] = await Promise.all([
-        apiClient.request(base + '/personality'), apiClient.request(base + '/memory'),
-      ]);
-      setPersonality(profile.prompt || '');
-      setSocialInitiative(profile.social_initiative ?? 70);
+      const records = await apiClient.request(base + '/memory');
       setMemory(records || { taught: [], episodes: [], daily_summary: '' });
       setFeedback('');
     } catch (error) { setFeedback(apiErrorText(error, '灯的记忆暂时无法读取')); }
@@ -455,17 +449,6 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
-  const save = async event => {
-    event.preventDefault();
-    if (!personality.trim() || busy) return;
-    setBusy(true);
-    try {
-      await apiClient.request(base + '/personality', { method: 'POST',
-        body: { prompt: personality.trim(), social_initiative: Number(socialInitiative) } });
-      setFeedback('人设已更新');
-    } catch (error) { setFeedback(apiErrorText(error, '人设更新失败')); }
-    finally { setBusy(false); }
-  };
   return <>
     <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
     <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`}
@@ -481,16 +464,8 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
       <div className="space-drawer__body" aria-busy={busy}>
         {feedback && <p role="status" className="action-feedback">{feedback}</p>}
         <section className="asset-section">
-          <div className="asset-section__heading"><div><small>SOUL PROFILE</small><h3>灯的人设</h3></div><span>长期生效</span></div>
-          <form className="personality-editor" onSubmit={save}>
-            <textarea value={personality} onChange={event => setPersonality(event.target.value)}
-              rows="5" maxLength="2000" placeholder="描述灯的表达方式…"/>
-            <label>社交主动性 {socialInitiative} · {socialInitiative < 35 ? '低' : socialInitiative < 70 ? '中' : '高'}
-              <input type="range" min="0" max="100" value={socialInitiative}
-                onChange={event => setSocialInitiative(Number(event.target.value))}/>
-            </label>
-            <div><small>{personality.length} / 2000</small><button className="btn btn--accent" disabled={busy || !personality.trim()}>更新人设</button></div>
-          </form>
+          <div className="asset-section__heading"><div><small>PERSONALITY</small><h3>灯的人格与特质</h3></div><span>长期生效</span></div>
+          <AgentPersonalitySettings agentId={unitId} active={open}/>
         </section>
         <section className="asset-section asset-section--memory">
           <div className="asset-section__heading"><div><small>LONG MEMORY</small><h3>灯的记忆</h3></div><span>{memory.taught?.length || 0} 条调教</span></div>

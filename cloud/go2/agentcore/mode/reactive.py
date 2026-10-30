@@ -13,7 +13,8 @@ from cloud.go2.agentcore.perception.vision import VisionFrame
 from cloud.go2.agentcore.tools.tools import check_rules, record_rule_completion, get_text_llm, _VALID_SPORT_CMDS
 from cloud.go2.agentcore.tools.executor import execute_tool
 from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
-from cloud.go2.agentcore.soul import get_system_prompt
+from cloud.go2.agentcore.personality.profile import get_profile
+from cloud.go2.agentcore.personality.behavior import decision_persona, reactive_action_candidates
 from cloud.go2.agentcore.prompts import build_prompt
 from cloud.go2.agentcore.memory.episode import episode_memory, EventType
 from cloud.go2.space_context import prompt_space_context
@@ -119,9 +120,8 @@ class ReactiveMind:
 
     async def _publish_action_reply(self, action: str, reason: str, result: dict) -> None:
         from cloud.agent_runtime.loop import Run
-        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply
+        from cloud.agent_runtime.replies import persona_reply_prompt, valid_persona_reply, factual_fallback
         from cloud.api.intents import publish_agent_event
-        from cloud.go2.agentcore.soul import load_system_prompt
         from cloud.go2.connection import go2
 
         if not go2.is_connected:
@@ -136,17 +136,15 @@ class ReactiveMind:
             scope="space", space_id=self._context.space_id, run_id=run_id,
             step_id=run_id, source="autonomous", stage="observed")
         try:
-            persona, _, _ = load_system_prompt()
+            profile = get_profile()
             response = await get_text_llm().ainvoke([
-                HumanMessage(content=persona_reply_prompt(persona, run))])
+                HumanMessage(content=persona_reply_prompt(profile["prompt"], run,
+                                                          traits=profile["traits"]))])
             answer = response.content
-            if not valid_persona_reply(answer):
+            if not valid_persona_reply(answer, run):
                 raise ValueError("invalid_persona_reply")
         except Exception:
-            publish_agent_event("reply_error", agent_id="go2", status=status,
-                scope="space", space_id=self._context.space_id, run_id=run_id,
-                source="autonomous")
-            return
+            answer = factual_fallback("go2", status, run)
         if not self._active or not go2.is_connected:
             return
         publish_agent_event("agent_reply", agent_id="go2", status=status,
@@ -216,22 +214,25 @@ class ReactiveMind:
         )
 
         memory_ctx = episode_memory.format_context()
+        profile = get_profile()
+        boldness = profile["traits"]["boldness"]
+        candidate_actions = reactive_action_candidates(
+            boldness, _VALID_SPORT_CMDS, set(_TURN_ACTIONS))
         prompt = (
             f"{self._identity_context()}\n"
             f"当前画面变化：{frame['change_type']}，场景：{scene}。\n"
             f"规则层没有触发任何动作。\n"
             f"上次自主动作：{last_str}\n"
             f"冷却中的动作：{cooldown_str}\n"
-            f"可用动作：\n"
-            f"  姿态类：{', '.join(sorted(_VALID_SPORT_CMDS))}\n"
-            f"  转向类：{', '.join(sorted(_TURN_ACTIONS))}（用于朝向变化方向）\n\n"
+            f"当前可选动作：{', '.join(sorted(candidate_actions))}。也可以只观察、不行动。\n"
+            f"大胆程度 {boldness}/100 只影响观察、姿态与转向候选，不改变运动许可。\n\n"
             f"决定你想做什么（或什么都不做）。不要走动，只做姿态或转向。\n"
             f"直接输出 JSON，不含代码块：{{\"action\": \"动作名或null\", \"reason\": \"一句话\"}}"
         )
 
         try:
             bundle = build_prompt(
-                "reactive", personality=get_system_prompt(), memory=memory_ctx,
+                "reactive", personality=decision_persona(profile), memory=memory_ctx,
                 device_state=prompt + "\n当前空间现状：" + prompt_space_context(),
                 memory_sources=("episode",), tool_version="go2-tools-v1",
             )
@@ -259,8 +260,10 @@ class ReactiveMind:
         self._last_autonomous_ts = now
 
 
-        if action:
+        if action and action in candidate_actions:
             await self._dispatch_action(action, reason, "自主响应", generation=generation)
+        elif action:
+            logger.info("[ReactiveMind] 个性候选中没有动作 %s，保持观察", action)
         else:
             logger.info("[ReactiveMind] 决定不行动：%s", reason)
 
