@@ -6,6 +6,7 @@ import logging
 import math
 import time
 
+from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.connection import go2
 from cloud.go2.control import LeaseConflict, control_lease
 from cloud.go2.execution import ExecutionContext, current_context, use_context
@@ -139,7 +140,7 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
                 # we reported a terminal result. Motion stays on this task.
                 raw = fn(**params)
             else:
-                raw = await asyncio.wait_for(asyncio.to_thread(fn, **params), timeout=spec.timeout_s)
+                raw = await asyncio.wait_for(invoke_blocking(lambda: fn(**params)), timeout=spec.timeout_s)
         result = normalize_result(name, raw)
     except asyncio.TimeoutError:
         result = {"result": "timeout", "error": "tool_timeout"}

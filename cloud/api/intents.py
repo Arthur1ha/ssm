@@ -301,13 +301,15 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                     get_activity_store().record_event(activity_id, "message", unit_id=agent_id,
                                                       text=event["text"], status=status,
                                                       source_event_id=event["event_id"])
-                elif event_type == "agent_progress" and agent_id == "esp32_desk_led":
+                elif (event_type == "agent_progress" and agent_id == "esp32_desk_led"
+                      and facts.get("stage") == "observed"
+                      and facts.get("tool") in {"set_led_state", "set_led_color", "blink_led"}):
                     kind = ("action_result" if status in {"ok", "error", "blocked", "cancelled",
                                                            "timeout", "rejected", "unknown"}
                             else "action_progress")
                     get_activity_store().record_event(activity_id, kind, unit_id=agent_id,
                                                       text=event["text"], status=status,
-                                                      task_id=step_id or run_id,
+                                                      action=facts["tool"], task_id=step_id or run_id,
                                                       source_event_id=event["event_id"])
     if scope == "space":
         _events.emit_space(space_id, event)
@@ -427,9 +429,22 @@ async def create_intent(
 ):
     event_id = "evt_" + uuid.uuid4().hex
     trace_id = "tr_" + uuid.uuid4().hex
-    if req.resume_run_id:
+    resume_run_id = req.resume_run_id
+    if not resume_run_id:
+        from cloud.agents.common.checkpoint import FileCheckpointSaver
+        from cloud.agents.common.context import thread_id_for
+        latest = FileCheckpointSaver().get_tuple({"configurable": {
+            "thread_id": thread_id_for("cloud_orchestrator", session["session_id"])}})
+        if latest:
+            values = latest.checkpoint.get("channel_values", {})
+            pending = values.get("run") or {}
+            if (isinstance(pending, dict) and pending.get("session_id") == session["session_id"]
+                    and (values.get("decision") or {}).get("kind") == "ask"
+                    and pending.get("status") == "executing"):
+                resume_run_id = pending.get("run_id")
+    if resume_run_id:
         from cloud.agents.common.views import load_run
-        graph_run = load_run(req.resume_run_id, session["session_id"], "cloud_orchestrator")
+        graph_run = load_run(resume_run_id, session["session_id"], "cloud_orchestrator")
         if graph_run is not None and graph_run.trace_id:
             trace_id = graph_run.trace_id
     from cloud.api.activity import user_intervention
@@ -445,8 +460,8 @@ async def create_intent(
         payload["intent_hint"] = req.intent_hint
     if req.device_hint:
         payload["device_hint"] = req.device_hint
-    if req.resume_run_id:
-        payload["resume_run_id"] = req.resume_run_id
+    if resume_run_id:
+        payload["resume_run_id"] = resume_run_id
     emit_agent_event("task.received", trace_id=trace_id,
                      session_id=session["session_id"], agent_id="orchestrator",
                      origin_kind="user_delegated", input=req.text,

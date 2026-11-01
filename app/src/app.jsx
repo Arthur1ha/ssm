@@ -6,7 +6,7 @@ const SUGGESTIONS = [
   '让机器狗挥挥手，再把灯调成暖白色',
   '请灯和机器狗一起迎接客人',
   '我开始工作了',
-  '接下来请空间里的灯和机器狗都不要主动打扰我',
+  '设备自己去玩吧',
 ];
 
 function useHashLocal() {
@@ -87,8 +87,8 @@ function App({ session, logout, refreshSession }) {
   const appendProcess = (requestId, agent, text, eventId) => {
     if (!text) return;
     setActivityLog(prev => {
-      if (eventId && prev.some(entry => entry.type === 'process'
-        && entry.requestId === requestId && entry.eventId === eventId)) return prev;
+      if (prev.some(entry => entry.type === 'process' && entry.requestId === requestId
+        && entry.agent === agent && (eventId && entry.eventId === eventId || entry.text === text))) return prev;
       return insertBeforeRequestEnd(prev, requestId,
         { type: 'process', requestId, agent, text, eventId });
     });
@@ -102,8 +102,6 @@ function App({ session, logout, refreshSession }) {
         if (prev[index].requestId === requestId) { position = index + 1; break; }
       }
       return [...prev.slice(0, position),
-        { type: 'process', agent: 'cloud_orchestrator', requestId,
-          text: '处理结束', terminal: true, eventId: `terminal:${requestId}` },
         { type: 'ai', agent: 'cloud_orchestrator', requestId, text, final: true, eventId },
         ...prev.slice(position)];
     });
@@ -151,7 +149,7 @@ function App({ session, logout, refreshSession }) {
       }
       if (item.type !== 'agent_reply' || !item.text) return;
       if (item.scope === 'space' && item.source === 'autonomous') {
-        if (item.activity_id && item.activity_id === currentActivity?.activity_id) return;
+        if (item.activity_id) return; // Activity replies already appear inside their activity card.
         appendReply(item);
       } else if (item.scope === 'session'
           && ['orchestrator', 'delegated_skill'].includes(item.source)) {
@@ -212,7 +210,9 @@ function App({ session, logout, refreshSession }) {
     setSavingRule(true);
     apiClient.request('/api/teachings', { method: 'POST', body: pendingRule })
       .then(item => { setPendingRule(null); setSavingRule(false);
-        appendActivity({ type: 'ai', agent: 'orchestrator', text: `已记住：${item.name}（${item.teaching_id}）。尚未接入自动执行。` }); })
+        appendActivity({ type: 'teaching_saved', teaching: item,
+          unitName: agents.find(agent => agent.unit_id === item.unit_id)?.name
+            || getAgentDisplayName(item.unit_id) }); })
       .catch(error => {
         appendActivity({ type: 'ai', agent: 'orchestrator', text: apiErrorText(error) });
         setSavingRule(false);
@@ -307,35 +307,30 @@ function App({ session, logout, refreshSession }) {
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}
+            onOpenRules={() => setRulesOpen(true)}
             onAnswerActivity={event => {
               setActivityQuestion(event);
               navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
             }}/>
 
           {pendingRule && session.actor === 'admin' && (
-            <div style={{ padding: '0 16px 10px' }}>
-              <div style={{
-                background: 'var(--color-accent-dim)',
-                border: '1px solid rgba(200,255,62,0.22)', borderRadius: 18, padding: '14px 16px',
-              }}>
-                <div style={{ fontSize: 12, color: '#C8FF3E', fontWeight: 600, marginBottom: 8 }}>
-                  教导预览 · 确认记住？</div>
-                <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{pendingRule.name}</div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 12 }}>
-                  教给 {agents.find(a => a.unit_id === pendingRule.unit_id)?.name || pendingRule.unit_id}：当 {pendingRule.trigger} → {pendingRule.behavior}。确认后先记住，暂不自动执行。
+            <div className="teaching-preview-wrap">
+              <div className="teaching-card teaching-card--preview">
+                <div className="teaching-card__top">
+                  <span className="teaching-card__eyebrow">待确认的教导</span>
+                  <span className="teaching-card__target">{agents.find(a => a.unit_id === pendingRule.unit_id)?.name
+                    || getAgentDisplayName(pendingRule.unit_id)}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={() => setPendingRule(null)} style={{
-                    flex: 1, padding: '9px 0', borderRadius: 999, fontSize: 13,
-                    background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
-                    color: 'var(--color-text-muted)', cursor: 'pointer', fontFamily: 'inherit',
-                  }}>取消</button>
-                  <button onClick={handleConfirmRule} disabled={savingRule} style={{
-                    flex: 2, padding: '9px 0', borderRadius: 999, fontSize: 13, fontWeight: 600,
-                    background: 'var(--color-accent)', border: 'none', color: 'var(--color-bg)',
-                    cursor: 'pointer', fontFamily: 'inherit',
-                  }}>
-                    {savingRule ? '保存中...' : '确认保存'}
+                <h3 className="teaching-card__title">{pendingRule.name}</h3>
+                <div className="teaching-card__sequence">
+                  <div className="teaching-card__line"><span>当</span><p>{pendingRule.trigger}</p></div>
+                  <div className="teaching-card__line"><span>就</span><p>{pendingRule.behavior}</p></div>
+                </div>
+                <p className="teaching-card__note">记住后仍需设置触发条件，启用后才会自动执行。</p>
+                <div className="teaching-card__actions">
+                  <button className="teaching-button teaching-button--quiet" onClick={() => setPendingRule(null)}>取消</button>
+                  <button className="teaching-button teaching-button--primary" onClick={handleConfirmRule} disabled={savingRule}>
+                    {savingRule ? '正在保存…' : '记住教导'}
                   </button>
                 </div>
               </div>

@@ -237,16 +237,11 @@ async def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
     from cloud.peers.gateway import request_peer_skill as dispatch_peer_skill
     context = current_context()
     origin_kind = getattr(context, "origin_kind", "user_delegated")
-    return await asyncio.to_thread(
-        dispatch_peer_skill,
-        initiator_unit_id="go2",
-        target_unit_id=target_unit_id,
-        skill_id=skill_id,
-        params=params,
-        context=context,
-        origin_kind=origin_kind,
-        request_id=request_id,
-    )
+    from cloud.agents.common.runner import invoke_blocking
+    return await invoke_blocking(lambda: dispatch_peer_skill(
+        initiator_unit_id="go2", target_unit_id=target_unit_id,
+        skill_id=skill_id, params=params, context=context,
+        origin_kind=origin_kind, request_id=request_id))
 
 
 def _identity_result(snapshot) -> dict:

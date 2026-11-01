@@ -69,11 +69,28 @@ def _run_intent(session_id: str, intent_context: dict) -> None:
         logger.info("[Main] discarded stale intent session=%s", session_id)
         return
     try:
-        run_intent_loop(intent_context, resume=bool(intent_context.get("resume_run_id")),
-                        supplemental=intent_context.get("user_msg", "") if intent_context.get("resume_run_id") else "")
+        outcome = run_intent_loop(intent_context, resume=bool(intent_context.get("resume_run_id")),
+                                  supplemental=intent_context.get("user_msg", "") if intent_context.get("resume_run_id") else "")
+        if outcome.get("result") == "rejected":
+            reason = outcome.get("error", "request_rejected")
+            message = ("上一轮还在等待你的回答，本次未能接续，请重新发送回答。" if reason == "session_busy"
+                       else "请求未能进入任务流程，请重试。")
+            run_id = outcome.get("run_id") or intent_context.get("event_id") or ""
+            trace_id = intent_context.get("trace_id") or run_id
+            logger.warning("[Main] intent rejected session=%s reason=%s", session_id, reason)
+            agent_tools.do_publish_feedback(session_id, "failed", message, status="rejected",
+                                            run_id=run_id, trace_id=trace_id)
+            agent_tools.do_publish_ui_event(session_id, "agent_reply", run_id=run_id,
+                                            trace_id=trace_id, status="rejected", text=message)
         logger.info("[Main] ── 逐步任务完成 session=%s ──", session_id)
     except Exception as exc:
         logger.exception("[Main] 任务循环异常 session=%s: %s", session_id, exc)
+        run_id = intent_context.get("resume_run_id") or intent_context.get("event_id") or ""
+        trace_id = intent_context.get("trace_id") or run_id
+        agent_tools.do_publish_feedback(session_id, "failed", "任务处理异常，请查看任务状态。",
+                                        status="error", run_id=run_id, trace_id=trace_id)
+        agent_tools.do_publish_ui_event(session_id, "reply_error", run_id=run_id,
+                                        trace_id=trace_id, status="error")
 
 
 def _handle_agent_message(message: dict) -> None:

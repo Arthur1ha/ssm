@@ -68,7 +68,7 @@ class ApiClient extends EventTarget {
     };
     source.onmessage = forward;
     [
-      'planning', 'executing', 'ack', 'step', 'pending_rule', 'discovery_candidates',
+      'planning', 'executing', 'ack', 'step', 'question', 'pending_rule', 'discovery_candidates',
       'done', 'partial', 'failed', 'denied', 'device', 'lease', 'session_ended',
       'run_stage', 'agent_progress', 'agent_reply', 'reply_error',
       'activity', 'peer_message',

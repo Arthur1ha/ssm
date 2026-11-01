@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -10,6 +9,7 @@ import time
 from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
+from cloud.agents.common.runner import invoke_blocking
 from cloud.observability import current_event_context, emit_agent_event
 from cloud.agents.steward.tools.coordination import allows_step
 from cloud.agents.steward.tools.card import validate_public_skill
@@ -221,7 +221,7 @@ def make_executor(run, context: dict, resume: bool = False):
                    for step in run.steps):
                 return {"result": "rejected", "error": "activity_already_started_for_intent"}
             try:
-                started = await asyncio.to_thread(
+                started = await invoke_blocking(
                     transport.do_start_activity, context, run.goal,
                     context["event_id"], context["user_revision"],
                     min(12.0, max(1.0, run.deadline - time.time())))
@@ -276,7 +276,7 @@ def make_executor(run, context: dict, resume: bool = False):
             return {"result": "ok", "sensors": transport._state.sensor_snapshot() if transport._state else {},
                     "actuators": transport._state.actuator_snapshot() if transport._state else {}}
         if name == "invoke_skill":
-            return _invoke_skill(context, args, step_id, run.deadline)
+            return await invoke_blocking(_invoke_skill, context, args, step_id, run.deadline)
         if name == "await_result":
             task_id = args.get("task_id")
             original = next((s.get("result") for s in run.steps
@@ -286,9 +286,11 @@ def make_executor(run, context: dict, resume: bool = False):
                 return {"result": "rejected", "error": "unknown_task_id"}
             endpoint = original.get("query_endpoint")
             if endpoint:
-                return transport.do_http_task_status(endpoint, task_id, context,
-                                                     timeout=min(5, max(0.1, run.deadline - time.time())))
-            return _wait_mqtt_result(task_id, session_id, min(run.deadline, time.time() + 20))
+                return await invoke_blocking(
+                    transport.do_http_task_status, endpoint, task_id, context,
+                    min(5, max(0.1, run.deadline - time.time())))
+            return await invoke_blocking(
+                _wait_mqtt_result, task_id, session_id, min(run.deadline, time.time() + 20))
         if name == "save_rule":
             if context.get("actor") != "admin" or not context.get("persist"):
                 return {"result": "rejected", "error": "persistence_permission_denied"}

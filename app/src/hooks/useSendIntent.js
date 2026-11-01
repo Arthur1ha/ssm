@@ -43,6 +43,10 @@ function useSendIntent() {
       if (payload.event_id && seenRef.current.has(payload.event_id)) return;
       if (payload.event_id) seenRef.current.add(payload.event_id);
       if (payload.type === 'agent_reply') {
+        if (payload.agent_id === 'cloud_orchestrator'
+            && payload.status === 'needs_clarification') {
+          pendingRunRef.current = payload.run_id || null;
+        }
         if (payload.text) active.callbacks.onMessage?.(payload.text, payload.agent_id, payload);
         if (payload.agent_id === 'cloud_orchestrator') finish();
         return;
@@ -57,6 +61,9 @@ function useSendIntent() {
         return;
       }
       if (payload.type === 'agent_progress') {
+        if (payload.stage === 'finished' && payload.status === 'needs_clarification') {
+          pendingRunRef.current = payload.run_id || null;
+        }
         resetTimeout();
         setThinkingText(describeRunProgress(payload));
         active.callbacks.onProgress?.(payload);

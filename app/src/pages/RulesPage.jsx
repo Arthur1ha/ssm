@@ -50,52 +50,69 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
   };
   const groups = Object.groupBy ? Object.groupBy(teachings, item => item.unit_id) :
     teachings.reduce((all, item) => { (all[item.unit_id] ||= []).push(item); return all; }, {});
+  const deviceName = unitId => cards.find(card => card.unit_id === unitId)?.name
+    || getAgentDisplayName(unitId);
+  const statusText = item => ({ unbound: '等待设置', ready: '等待启用',
+    enabled: '运行中', capability_unavailable: '能力已变化' })[item.execution_status || 'unbound'] || '等待设置';
   return (
-    <div style={{ height: '100%', overflowY: 'auto', padding: '18px 16px 80px', color: 'var(--color-text)' }}>
-      {!embedded && <h2>教导记忆</h2>}
-      <p style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>教导保存后需绑定已声明的观察与技能，启用后才参与智能体自主判断。</p>
-      {error && <p role="alert" style={{ color: 'var(--color-danger)' }}>{error}</p>}
-      {!teachings.length && <p style={{ color: 'var(--color-text-dim)', padding: '32px 0' }}>还没有教导。可以在对话中告诉管家想教哪个智能体、何时做什么。</p>}
+    <div className="rules-screen">
+      {!embedded && <h2 className="rules-screen__title">自动规则</h2>}
+      <p className="rules-screen__intro">教导会先记住。设置触发条件并启用后，设备才能自行行动。</p>
+      {error && <p className="rules-screen__error" role="alert">{error}</p>}
+      {!teachings.length && <div className="rules-empty"><span aria-hidden="true">当 → 就</span>
+        <strong>还没有教导</strong><p>在对话里告诉管家：哪个设备，在什么时候，做什么。</p></div>}
       {Object.entries(groups).map(([unitId, items]) => (
-        <section key={unitId} style={{ marginTop: 24 }}>
-          <h3 style={{ fontSize: 14 }}>{unitId}</h3>
-          {items.map(item => <article key={item.teaching_id} style={{ padding: 14, margin: '10px 0',
-            border: '1px solid var(--color-border)', borderRadius: 'var(--radius-card)',
-            background: 'var(--color-surface-2)' }}>
+        <section key={unitId} className="rules-group">
+          <div className="rules-group__heading"><h3>{deviceName(unitId)}</h3><span>{items.length} 条教导</span></div>
+          {items.map(item => <article key={item.teaching_id} className={`rule-card${item.execution_status === 'enabled' ? ' rule-card--enabled' : ''}`}>
             {editing?.teaching_id === item.teaching_id ? <>
+              <div className="rule-card__top"><span className="rule-card__eyebrow">修改教导</span></div>
               {['name', 'trigger', 'behavior'].map(key =>
-                <label key={key} style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>{({name:'名称',trigger:'何时',behavior:'做什么',})[key]}
+                <label key={key} className="rule-field">{({name:'名称',trigger:'当 · 触发情形',behavior:'就 · 期望行为',})[key]}
                   <input value={editing[key]} maxLength={key === 'name' ? 120 : 500}
-                    onChange={e => setEditing({ ...editing, [key]: e.target.value })}
-                    style={{ display:'block', width:'100%', boxSizing:'border-box', padding:8,
-                      color:'var(--color-text)', background:'var(--color-surface-1)', border:'1px solid var(--color-border)' }}/>
+                    onChange={e => setEditing({ ...editing, [key]: e.target.value })}/>
                 </label>)}
-              <button onClick={save}>保存修改</button> <button onClick={() => setEditing(null)}>取消</button>
+              <div className="rule-card__actions"><button className="teaching-button teaching-button--primary" onClick={save}>保存修改</button>
+                <button className="teaching-button teaching-button--quiet" onClick={() => setEditing(null)}>取消</button></div>
             </> : <>
-              <strong>{item.name}</strong>
-              <div style={{ marginTop: 6, fontSize: 13 }}>当 {item.trigger} → {item.behavior}</div>
-              <div style={{ marginTop: 6, fontSize: 11, color:'var(--color-text-dim)' }}>{item.status === 'needs_review' ? '待检查' : '已记住'} · {({unbound:'尚未绑定',ready:'已绑定，未启用',enabled:'已启用',capability_unavailable:'能力不足，已暂停'})[item.execution_status || 'unbound']} · 修订 {item.revision}</div>
+              <div className="rule-card__top"><span className="rule-card__eyebrow">{item.status === 'needs_review' ? '待检查的教导' : '已记住的教导'}</span>
+                <span className={`rule-card__status rule-card__status--${item.execution_status || 'unbound'}`}>{statusText(item)}</span></div>
+              <h3 className="rule-card__title">{item.name}</h3>
+              <div className="teaching-card__sequence">
+                <div className="teaching-card__line"><span>当</span><p>{item.trigger}</p></div>
+                <div className="teaching-card__line"><span>就</span><p>{item.behavior}</p></div>
+              </div>
+              {item.execution_status !== 'enabled' && <p className="rule-card__hint">{item.execution_status === 'capability_unavailable'
+                ? '设备能力发生变化，请重新设置触发条件。' : item.execution_status === 'ready'
+                  ? '触发条件已设置，启用后才会自动执行。' : '这条教导已保存，还不会自动执行。'}</p>}
               {bindingEditor?.teaching_id === item.teaching_id && (() => {
                 const card = cards.find(entry => entry.unit_id === item.unit_id) || {};
-                return <div style={{ marginTop: 10 }}>
-                  <label>观察能力 <select value={bindingEditor.observation_id} onChange={e => setBindingEditor({...bindingEditor, observation_id:e.target.value})}>
-                    <option value="">请选择</option>{(card.observations || []).map(obs => <option key={obs.id} value={obs.id}>{obs.id}</option>)}
-                  </select></label>{' '}
-                  <label>自主技能 <select value={bindingEditor.skill_id} onChange={e => setBindingEditor({...bindingEditor, skill_id:e.target.value})}>
-                    <option value="">请选择</option>{(card.autonomous_skills || []).map(id => <option key={id} value={id}>{id}</option>)}
+                return <div className="rule-binding">
+                  <strong className="rule-binding__heading">设置自动执行</strong>
+                  <label className="rule-field">观察能力 <select value={bindingEditor.observation_id} onChange={e => setBindingEditor({...bindingEditor, observation_id:e.target.value})}>
+                    <option value="">请选择</option>{(card.observations || []).map(obs => <option key={obs.id} value={obs.id}>
+                      {({ 'vision.person_presence': '看到人', 'vision.face_presence': '看到人脸' })[obs.id] || obs.name || obs.id}
+                    </option>)}
                   </select></label>
-                  <label style={{display:'block'}}>观察条件（JSON）<input value={bindingEditor.where} onChange={e => setBindingEditor({...bindingEditor, where:e.target.value})} /></label>
-                  <label style={{display:'block'}}>技能参数（JSON）<input value={bindingEditor.params} onChange={e => setBindingEditor({...bindingEditor, params:e.target.value})} /></label>
-                  <label><input type="checkbox" checked={bindingEditor.enabled} onChange={e => setBindingEditor({...bindingEditor, enabled:e.target.checked})} />启用</label>{' '}
-                  <button onClick={saveBinding}>保存绑定</button>{' '}<button onClick={() => setBindingEditor(null)}>取消</button>
+                  <label className="rule-field">自主技能 <select value={bindingEditor.skill_id} onChange={e => setBindingEditor({...bindingEditor, skill_id:e.target.value})}>
+                    <option value="">请选择</option>{(card.autonomous_skills || []).map(id => <option key={id} value={id}>
+                      {card.skills?.find(skill => skill.id === id)?.name || id}
+                    </option>)}
+                  </select></label>
+                  <label className="rule-field">观察条件（JSON）<input value={bindingEditor.where} onChange={e => setBindingEditor({...bindingEditor, where:e.target.value})} /></label>
+                  <label className="rule-field">技能参数（JSON）<input value={bindingEditor.params} onChange={e => setBindingEditor({...bindingEditor, params:e.target.value})} /></label>
+                  <label className="rule-binding__toggle"><input type="checkbox" checked={bindingEditor.enabled} onChange={e => setBindingEditor({...bindingEditor, enabled:e.target.checked})} />启用自动执行</label>
+                  <div className="rule-card__actions"><button className="teaching-button teaching-button--primary" onClick={saveBinding}>保存设置</button>
+                    <button className="teaching-button teaching-button--quiet" onClick={() => setBindingEditor(null)}>取消</button></div>
                 </div>;
               })()}
-              <div style={{ marginTop: 10 }}><button onClick={() => setEditing({ ...item })}>修改</button>{' '}
-                <button onClick={() => setBindingEditor({teaching_id:item.teaching_id,
+              <div className="rule-card__actions"><button className="rule-action" onClick={() => setEditing({ ...item })}>修改</button>
+                <button className="rule-action" onClick={() => setBindingEditor({teaching_id:item.teaching_id,
                   observation_id:item.binding?.observation_id || '', where:JSON.stringify(item.binding?.where || {}),
                   skill_id:item.binding?.skill_id || '', params:JSON.stringify(item.binding?.params || {}),
-                  enabled:item.execution_status === 'enabled'})}>执行绑定</button>{' '}
-                <button onClick={() => remove(item)}>{pendingDelete === item.teaching_id ? '确认撤销？' : '撤销'}</button></div>
+                  enabled:item.execution_status === 'enabled'})}>设置自动执行</button>
+                <button className={`rule-action rule-action--danger${pendingDelete === item.teaching_id ? ' is-confirming' : ''}`}
+                  onClick={() => remove(item)}>{pendingDelete === item.teaching_id ? '确认撤销' : '撤销'}</button></div>
             </>}
           </article>)}
         </section>

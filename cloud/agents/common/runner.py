@@ -7,15 +7,18 @@ tool calls executes none, so physical tools cannot run concurrently.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
+import threading
 import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, TypedDict
 
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ValidationError
@@ -66,6 +69,29 @@ def _schema(name: str, declaration: Any) -> dict:
 
 async def _await(value):
     return await value if inspect.isawaitable(value) else value
+
+
+async def invoke_blocking(callback, *args):
+    """Run a synchronous adapter without blocking the graph or losing trace context."""
+    outcome: Future = Future()
+    context = contextvars.copy_context()
+
+    def run():
+        try:
+            outcome.set_result(context.run(callback, *args))
+        except BaseException as exc:
+            outcome.set_exception(exc)
+
+    threading.Thread(target=run, daemon=True).start()
+    while not outcome.done():
+        await asyncio.sleep(0.05)
+    return outcome.result()
+
+
+async def _invoke(callback, *args):
+    if inspect.iscoroutinefunction(callback):
+        return await callback(*args)
+    return await _await(await invoke_blocking(callback, *args))
 
 
 async def run_role_graph(
@@ -153,6 +179,20 @@ async def run_role_graph(
         content = getattr(response, "content", "")
         emit("model.response", turn=turns, output={"content": content, "tool_calls": calls},
              duration_ms=round((time.monotonic() - started) * 1000))
+        if not calls and (not isinstance(content, str) or not content.strip()) and time.time() < current.deadline - 1:
+            emit("model.empty_retry", turn=turns)
+            try:
+                response = await asyncio.wait_for(bound_model.ainvoke(messages + [HumanMessage(
+                    content="上一轮没有返回内容或工具调用。请根据原请求调用一个合适的工具，或明确回答。"
+                )]), timeout=max(0.1, current.deadline - time.time()))
+            except Exception as exc:
+                emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc))
+            else:
+                calls = getattr(response, "tool_calls", None) or []
+                content = getattr(response, "content", "")
+                emit("model.response", turn=turns, retry=True,
+                     output={"content": content, "tool_calls": calls},
+                     duration_ms=round((time.monotonic() - started) * 1000))
         if len(calls) > 1:
             current.status, current.response = "blocked", "模型一次请求了多个动作，未执行新动作。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
@@ -224,11 +264,11 @@ async def run_role_graph(
                 if reservation["reservation"] == "existing":
                     result = reservation.get("result")
                     if result is None and reconcile_effect is not None:
-                        result = await _await(reconcile_effect(name, params, step_id))
+                        result = await _invoke(reconcile_effect, name, params, step_id)
                     if result is None:
                         result = {"result": "unknown", "error": "prior_dispatch_unconfirmed"}
                 else:
-                    result = await asyncio.wait_for(_await(execute(name, params, step_id)),
+                    result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
                                                     timeout=max(0.1, current.deadline - time.time()))
                 if isinstance(result, dict) and result.get("result") not in {
                     "unknown", "timeout", "executing", "accepted"
@@ -236,7 +276,7 @@ async def run_role_graph(
                     ledger.mark_result(current.agent_id, thread_id,
                                        current.run_id, step_id, result)
             else:
-                result = await asyncio.wait_for(_await(execute(name, params, step_id)),
+                result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
                                                 timeout=max(0.1, current.deadline - time.time()))
         except asyncio.TimeoutError:
             result = {"result": "timeout", "error": "run_deadline_exceeded"}

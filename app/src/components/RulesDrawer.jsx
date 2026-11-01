@@ -37,7 +37,7 @@ function RulesDrawer({ open, onClose }) {
           borderBottom: '1px solid var(--color-border)',
         }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-            <span style={{ fontSize: 16, fontWeight: 400, color: 'var(--color-text)' }}>教导记忆</span>
+            <span style={{ fontSize: 16, fontWeight: 400, color: 'var(--color-text)' }}>自动规则</span>
             {rules.length > 0 && (
               <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
                 {rules.length} 条已记住
