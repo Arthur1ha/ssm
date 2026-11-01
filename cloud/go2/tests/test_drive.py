@@ -24,7 +24,7 @@ def _make_frame(person_detected: bool, count: int = 0,
 
 
 def test_initial_state_is_idle():
-    from cloud.go2.agentcore.mode.free_explore import Drive
+    from cloud.go2.mode.free_explore import Drive
     d = Drive()
     assert d.state_snapshot["state"] == "IDLE"
     assert d.state_snapshot["curiosity"] == 0
@@ -32,8 +32,8 @@ def test_initial_state_is_idle():
 
 def test_on_vision_frame_face_updates_social_context_without_stopping_exploration(monkeypatch, tmp_path):
     """人脸信号可用于互动，但不控制地图探索状态。"""
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
@@ -47,8 +47,8 @@ def test_on_vision_frame_face_updates_social_context_without_stopping_exploratio
 
 def test_on_vision_frame_background_person_stays_idle(monkeypatch, tmp_path):
     """远处背景人（无人脸）不切换 SOCIAL，探索不被打断。"""
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
@@ -60,8 +60,8 @@ def test_on_vision_frame_background_person_stays_idle(monkeypatch, tmp_path):
 
 
 def test_on_vision_frame_person_enter_records_vision_change(monkeypatch, tmp_path):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     fresh = EpisodeMemory(episodes_dir=tmp_path)
     monkeypatch.setattr(drive_mod, "episode_memory", fresh)
 
@@ -74,8 +74,8 @@ def test_on_vision_frame_person_enter_records_vision_change(monkeypatch, tmp_pat
 
 
 def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch, tmp_path):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     fresh = EpisodeMemory(episodes_dir=tmp_path)
     monkeypatch.setattr(drive_mod, "episode_memory", fresh)
 
@@ -88,8 +88,8 @@ def test_on_vision_frame_person_leaves_records_vision_change(monkeypatch, tmp_pa
 
 
 def test_repeated_face_frames_do_not_take_over_drive_state(monkeypatch, tmp_path):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
@@ -101,15 +101,15 @@ def test_repeated_face_frames_do_not_take_over_drive_state(monkeypatch, tmp_path
 
 
 def test_state_snapshot_contains_required_fields():
-    from cloud.go2.agentcore.mode.free_explore import Drive
+    from cloud.go2.mode.free_explore import Drive
     snap = Drive().state_snapshot
     for key in ("state", "curiosity", "person_present", "last_action_ts"):
         assert key in snap
 
 
 def test_start_creates_task_and_resets_state(monkeypatch, tmp_path):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
@@ -128,8 +128,8 @@ def test_start_creates_task_and_resets_state(monkeypatch, tmp_path):
 
 
 def test_stop_cancels_task(monkeypatch, tmp_path):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     d = drive_mod.Drive()
@@ -188,8 +188,8 @@ async def test_memory_endpoint_returns_taught_and_today(client):
 
 
 def _isolate_personality_profile(tmp_path, monkeypatch):
-    from cloud.agent_runtime.personality import ProfileStore
-    from cloud.go2.agentcore.personality import profile
+    from cloud.personality.store import ProfileStore
+    from cloud.agents.go2.personality import profile
 
     monkeypatch.setattr(profile, "_store", ProfileStore(
         agent_id="go2", path=tmp_path / "personality" / "profile.json",
@@ -207,7 +207,7 @@ async def test_personality_get_returns_prompt(client, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_personality_post_updates_system_prompt(client, tmp_path, monkeypatch):
-    import cloud.go2.agentcore.soul as pers_mod
+    import cloud.agents.go2.personality.legacy as pers_mod
     _isolate_personality_profile(tmp_path, monkeypatch)
     r = await client.post("/api/go2/personality", json={"prompt": "严肃、话少的机器狗"})
     assert r.status_code == 200
@@ -217,11 +217,12 @@ async def test_personality_post_updates_system_prompt(client, tmp_path, monkeypa
 # ── 视觉与地图探索独立 ──────────────────────────────────────────────
 
 
-def test_face_signal_does_not_prevent_curiosity_exploration():
-    from cloud.go2.agentcore.mode import free_explore
-    from cloud.go2.agentcore.personality.behavior import exploration_interval
+def test_face_signal_does_not_prevent_curiosity_exploration(monkeypatch):
+    from cloud.go2.mode import free_explore
+    from cloud.agents.go2.personality.behavior import exploration_interval
 
     drive = free_explore.Drive()
+    monkeypatch.setattr(free_explore.go2, "is_connected", True)
     drive._person_engaging = True
     drive._curiosity = exploration_interval(70) - 1
 
@@ -236,7 +237,7 @@ def test_face_signal_does_not_prevent_curiosity_exploration():
                 if count > 1:
                     raise asyncio.CancelledError()
             with patch.object(free_explore, "get_profile", return_value={"traits": {"curiosity": 70}, "revision": 1}), \
-                 patch("cloud.go2.agentcore.mode.free_explore.asyncio.sleep", side_effect=one_sleep):
+                 patch("cloud.go2.mode.free_explore.asyncio.sleep", side_effect=one_sleep):
                 with pytest.raises(asyncio.CancelledError):
                     await drive._run_loop()
             explore.assert_awaited_once()
@@ -247,7 +248,7 @@ def test_face_signal_does_not_prevent_curiosity_exploration():
 
 
 def test_face_signal_does_not_skip_frontier_navigation(monkeypatch):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
+    import cloud.go2.mode.free_explore as drive_mod
     from cloud.go2.navigation.navigator import navigator
 
     drive = drive_mod.Drive()
@@ -264,7 +265,7 @@ def test_face_signal_does_not_skip_frontier_navigation(monkeypatch):
 
 
 def test_invalid_social_action_never_reaches_motion_executor(monkeypatch):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
+    import cloud.go2.mode.free_explore as drive_mod
     from types import SimpleNamespace
 
     drive = drive_mod.Drive()
@@ -278,7 +279,7 @@ def test_invalid_social_action_never_reaches_motion_executor(monkeypatch):
 
 
 def test_user_interrupt_prevents_map_exploration(monkeypatch):
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
+    import cloud.go2.mode.free_explore as drive_mod
     from cloud.go2.navigation.navigator import navigator
 
     drive = drive_mod.Drive()
@@ -293,8 +294,8 @@ def test_user_interrupt_prevents_map_exploration(monkeypatch):
 
 def test_exec_explore_direction_blocked_message_guides_observe(monkeypatch, tmp_path):
     """Bug A 修复：explore_direction A*预检查失败时，返回消息应提示 go2_observe + go2_tag_location + 换开阔方向。"""
-    import cloud.go2.agentcore.mode.free_explore as drive_mod
-    from cloud.go2.agentcore.memory.episode import EpisodeMemory
+    import cloud.go2.mode.free_explore as drive_mod
+    from cloud.agents.go2.memory.episode import EpisodeMemory
     monkeypatch.setattr(drive_mod, "episode_memory", EpisodeMemory(episodes_dir=tmp_path))
 
     fake_odom = {"x": 0.0, "y": 0.0, "heading": 0.0}

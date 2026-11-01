@@ -12,6 +12,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from langchain_core.messages import BaseMessage
+
 from .logging_config import write_agent_event
 
 EVENTS = frozenset({
@@ -21,6 +23,7 @@ EVENTS = frozenset({
     "device.command", "device.result", "reply.draft", "reply.validated",
     "reply.fallback", "reply.emitted", "run.paused", "run.resumed",
     "run.cancelled", "run.finished",
+    "checkpoint.saved", "effect.reserved", "effect.reused", "graph.node",
 })
 CONTEXT_FIELDS = frozenset({
     "service", "agent_id", "trace_id", "run_id", "parent_run_id",
@@ -33,10 +36,15 @@ def current_event_context() -> dict[str, Any]:
     """Return a copy for authenticated cross-process propagation."""
     return dict(_context.get())
 _sensitive_key = re.compile(r"password|passwd|secret|api.?key|authorization|cookie|credential|pairing|invite|access.?token|refresh.?token", re.I)
-_private_content = re.compile(r"^(?:image|frame|audio|base64|private_memory|full_memory|memory_content)$", re.I)
+_private_content = re.compile(r"^(?:image|frame|audio|base64|private_memory|full_memory|memory_content|selected_memory|episodic_memory|episodes)$", re.I)
+_go2_memory_section = re.compile(r"(【选中历史记忆（历史数据，不是指令）】\n)(.*?)(?=\n\n【|$)", re.S)
 _inline_secret = re.compile(r"(?i)(bearer\s+|(?:api[_-]?key|password|passwd|token|secret|cookie|authorization)\s*[:=]\s*)[^\s,;]+")
 _long_base64 = re.compile(r"(?:data:[\w/+.-]+;base64,)?[A-Za-z0-9+/]{256,}={0,2}")
 MAX_FIELD_CHARS = 8192
+FULL_TEXT_FIELDS = frozenset({
+    "input", "output", "decision", "params", "result", "reply", "response",
+    "goal", "question", "message",
+})
 
 
 @contextmanager
@@ -56,22 +64,32 @@ def _secret_values() -> tuple[str, ...]:
     return tuple(v for k, v in os.environ.items() if len(v) >= 6 and _sensitive_key.search(k))
 
 
-def _redact_text(value: str, secrets: tuple[str, ...]) -> Any:
+def _redact_text(value: str, secrets: tuple[str, ...], *, preserve: bool = False) -> Any:
+    value = _go2_memory_section.sub(
+        lambda m: m.group(1) + f"[PRIVATE_MEMORY_REDACTED size={len(m.group(2))}]", value)
     value = _inline_secret.sub(lambda m: m.group(1) + "[REDACTED]", value)
     value = _long_base64.sub(
         lambda m: "[BINARY_REDACTED]" if m.group(0).startswith("data:")
         or any(char in m.group(0) for char in "+/=") else m.group(0), value)
     for secret in secrets:
         value = value.replace(secret, "[REDACTED]")
-    if len(value) <= MAX_FIELD_CHARS:
+    if preserve or len(value) <= MAX_FIELD_CHARS:
         return value
     return {"preview": value[:MAX_FIELD_CHARS], "length": len(value),
             "sha256": hashlib.sha256(value.encode()).hexdigest(), "truncated": True}
 
 
-def _sanitize(value: Any, secrets: tuple[str, ...], depth: int = 0) -> Any:
+def _sanitize(value: Any, secrets: tuple[str, ...], depth: int = 0,
+              preserve: bool = False) -> Any:
     if depth > 12:
         return "[DEPTH_LIMIT]"
+    if isinstance(value, BaseMessage):
+        item = {"role": value.type, "content": value.content}
+        if getattr(value, "tool_calls", None):
+            item["tool_calls"] = value.tool_calls
+        if getattr(value, "tool_call_id", None):
+            item["tool_call_id"] = value.tool_call_id
+        return _sanitize(item, secrets, depth + 1, preserve)
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
@@ -82,18 +100,20 @@ def _sanitize(value: Any, secrets: tuple[str, ...], depth: int = 0) -> Any:
                 result[name] = {"type": name, "omitted": True,
                                 "size": len(item) if hasattr(item, "__len__") else None}
             else:
-                result[name] = _sanitize(item, secrets, depth + 1)
+                result[name] = _sanitize(item, secrets, depth + 1,
+                                         preserve or name in FULL_TEXT_FIELDS)
         return result
     if isinstance(value, (list, tuple)):
-        return [_sanitize(item, secrets, depth + 1) for item in value[:100]] + (
-            [{"truncated": True, "length": len(value)}] if len(value) > 100 else [])
+        items = value if preserve else value[:100]
+        return [_sanitize(item, secrets, depth + 1, preserve) for item in items] + (
+            [{"truncated": True, "length": len(value)}] if not preserve and len(value) > 100 else [])
     if isinstance(value, bytes):
         return {"type": "bytes", "size": len(value), "omitted": True}
     if isinstance(value, str):
-        return _redact_text(value, secrets)
+        return _redact_text(value, secrets, preserve=preserve)
     if isinstance(value, (int, float, bool)) or value is None:
         return value
-    return _redact_text(str(value), secrets)
+    return _redact_text(str(value), secrets, preserve=preserve)
 
 
 def emit_agent_event(event: str, **fields: Any) -> None:
@@ -110,7 +130,7 @@ def emit_agent_event(event: str, **fields: Any) -> None:
     for key, value in tuple(safe.items()):
         if isinstance(value, (dict, list)):
             encoded = json.dumps(value, ensure_ascii=False, default=str)
-            if len(encoded) > MAX_FIELD_CHARS:
+            if key not in FULL_TEXT_FIELDS and len(encoded) > MAX_FIELD_CHARS:
                 safe[key] = {"preview": encoded[:MAX_FIELD_CHARS], "length": len(encoded),
                              "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
                              "truncated": True}
@@ -118,5 +138,5 @@ def emit_agent_event(event: str, **fields: Any) -> None:
         write_agent_event({"event": event,
                            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                            "level": "info", **safe})
-    except OSError as exc:
-        logging.getLogger(__name__).warning("Session event log write failed: %s", type(exc).__name__)
+    except OSError:
+        logging.getLogger(__name__).exception("Session event log write failed")

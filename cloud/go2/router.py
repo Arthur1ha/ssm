@@ -19,11 +19,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.mode.free_explore import drive
-from cloud.go2.agentcore.mode.reactive import reactive_mind
-from cloud.go2.agentcore.perception.vision import vision_loop
-from cloud.go2.agentcore.perception.identity import IdentityEvent, identity_skill
-from cloud.go2.agentcore.memory.episode import EventType, episode_memory
+from cloud.go2.mode.free_explore import drive
+from cloud.go2.mode.reactive import reactive_mind
+from cloud.go2.perception.vision import vision_loop
+from cloud.go2.perception.identity import IdentityEvent, identity_skill
+from cloud.agents.go2.memory.episode import EventType, episode_memory
 from cloud.go2.control import LeaseConflict, control_lease, session_tasks
 from cloud.go2.execution import (
     ExecutionContext, SYSTEM_CONTEXT, current_context, require_admin_read,
@@ -191,7 +191,7 @@ def _acquire_motion(context: ExecutionContext) -> None:
 
 def _check_direct_motion(command: str, params: dict, context: ExecutionContext) -> None:
     """Apply the tool motion preflight to FSM buttons and joystick input."""
-    from cloud.go2.agentcore.tools.executor import check_direct_motion
+    from cloud.go2.tools.executor import check_direct_motion
     previous = control_lease.snapshot()
     if (command == "StopMove" and previous is not None
             and previous.owner_session_id != context.session_id):
@@ -534,7 +534,7 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 
 @router.post("/chat")
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
-    from cloud.go2.multitask import run_go2_loop
+    from cloud.agents.go2.graph import run_go2_loop
     context = _normalize_context(context)
     if req.trace_id is not None and not re.fullmatch(r"tr_[A-Fa-f0-9]{32}", req.trace_id):
         raise HTTPException(status_code=400, detail="invalid trace_id")
@@ -597,7 +597,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
 @router.get("/tasks/{task_id}")
 async def go2_task_status(task_id: str, context: ExecutionContext = Depends(require_intervening_service_context)):
     from cloud.go2.tasks import chat_tasks
-    from cloud.go2.multitask import get_store, _result
+    from cloud.agents.go2.graph import get_store, _result
     context = _normalize_context(context)
     record = chat_tasks.get(task_id, context.session_id)
     if record is None:
@@ -612,7 +612,7 @@ async def go2_task_status(task_id: str, context: ExecutionContext = Depends(requ
 @router.post("/tasks/{task_id}/resume")
 async def go2_task_resume(task_id: str, req: ChatRequest,
                           context: ExecutionContext = Depends(require_intervening_service_context)):
-    from cloud.go2.multitask import run_go2_loop
+    from cloud.agents.go2.graph import run_go2_loop
     context = _normalize_context(context)
     return await run_go2_loop(context.session_id, req.message, context=context,
                               run_id=task_id, resume=True)
@@ -632,7 +632,7 @@ async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(requ
 @router.post("/chat/stream")
 async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(require_intervening_service_context)):
     """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
-    from cloud.go2.multitask import run_go2_loop
+    from cloud.agents.go2.graph import run_go2_loop
 
     context = _normalize_context(context)
     _cancel_pending_peer_requests(context)
@@ -760,7 +760,7 @@ async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = 
             time.monotonic() - go2.odom_received_at > 1.0 or
             go2.odom_frame_id != "odom"):
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
-    from cloud.go2.agentcore.memory import spatial as spatial_memory
+    from cloud.agents.go2.memory import spatial as spatial_memory
     with use_context(context):
         result = spatial_memory.tag_location(req.name, odom)
     return {"ok": True, "message": result}
@@ -768,7 +768,7 @@ async def nav_tag_location(req: TagLocationRequest, context: ExecutionContext = 
 
 @router.get("/navigation/locations")
 async def nav_list_locations(context=Depends(require_authenticated_read)):
-    from cloud.go2.agentcore.memory import spatial as spatial_memory
+    from cloud.agents.go2.memory import spatial as spatial_memory
     return spatial_memory.list_locations()
 
 
@@ -776,7 +776,7 @@ async def nav_list_locations(context=Depends(require_authenticated_read)):
 async def nav_delete_location(name: str, context: ExecutionContext = Depends(require_intervening_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.agentcore.memory import spatial as spatial_memory
+    from cloud.agents.go2.memory import spatial as spatial_memory
     with use_context(context):
         deleted = spatial_memory.delete_location(name)
     if not deleted:
@@ -893,8 +893,8 @@ async def go2_memory(context=Depends(require_admin_read)):
     """返回 Go2 的成长资产：调教记录 + 今天的事件流。"""
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.agentcore.tools.tools import load_rules
-    from cloud.go2.agentcore.memory.episode import episode_memory
+    from cloud.go2.tools.tools import load_rules
+    from cloud.agents.go2.memory.episode import episode_memory
     return {"taught": load_rules(), "today": episode_memory.format_today()}
 
 
@@ -952,7 +952,7 @@ async def go2_identity_recognize(context: ExecutionContext = Depends(require_int
 async def go2_personality_get(context=Depends(require_admin_read)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.agentcore.soul import get_personality_view
+    from cloud.agents.go2.personality.legacy import get_personality_view
     return get_personality_view()
 
 
@@ -960,7 +960,7 @@ async def go2_personality_get(context=Depends(require_admin_read)):
 async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.agentcore.soul import set_personality, get_personality_view
+    from cloud.agents.go2.personality.legacy import set_personality, get_personality_view
     with use_context(context):
         try:
             set_personality(req.prompt, req.social_initiative)
@@ -1012,7 +1012,7 @@ async def nav_set_home(context: ExecutionContext = Depends(require_intervening_s
     odom = go2.odom
     if not odom:
         raise HTTPException(status_code=503, detail="暂无 Odom 数据")
-    from cloud.go2.agentcore.memory import spatial as spatial_memory
+    from cloud.agents.go2.memory import spatial as spatial_memory
     with use_context(context):
         result = spatial_memory.tag_location("home", odom)
     return {"ok": True, "message": result}
@@ -1132,7 +1132,7 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
     import io, math as _math
     import numpy as np
     from PIL import Image, ImageDraw
-    from cloud.go2.agentcore.memory import spatial as spatial_memory
+    from cloud.agents.go2.memory import spatial as spatial_memory
     from cloud.go2.navigation.navigator import navigator
 
     if (not go2.is_connected or go2.voxel_received_at is None

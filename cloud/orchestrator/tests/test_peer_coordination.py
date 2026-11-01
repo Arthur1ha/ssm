@@ -12,7 +12,7 @@ import tools
 from trusted_context import (TrustedContextError, parse_trusted_peer_cancel,
                              parse_trusted_peer_request)
 from cloud.mqtt_signing import NonceReplayGuard, sign_message
-from cloud.orchestrator.agentcore.peer.cancellation import (
+from cloud.peers.cancellation import (
     cancel_peer_coordination, clear_peer_coordination, peer_coordination_cancelled,
 )
 
@@ -22,7 +22,7 @@ TOKEN = "service-secret-123456"
 
 @pytest.fixture(autouse=True)
 def configured_space(monkeypatch):
-    monkeypatch.setattr("cloud.orchestrator.agentcore.tools.executor.get_space_registry",
+    monkeypatch.setattr("cloud.agents.steward.tools.card.get_space_registry",
                         lambda: MagicMock(get_space=lambda: {"device_ids": ["esp32_desk", "go2"]}))
 
 
@@ -124,7 +124,7 @@ def _card(unit_id, kind, skill_id, tags, action=""):
 
 
 def test_dispatch_rejects_card_outside_configured_space(monkeypatch):
-    from cloud.orchestrator.agentcore.tools import executor
+    from cloud.agents.steward.tools import card as executor
     card = _card("esp32_desk_led", "mqtt", "set_light_state", ["light"], "SET_STATE")
     card["device_id"] = "neighbor_space_device"
     monkeypatch.setattr(executor, "get_space_registry", lambda: MagicMock(

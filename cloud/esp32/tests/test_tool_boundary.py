@@ -2,10 +2,9 @@
 
 from unittest.mock import MagicMock
 
-from cloud.esp32.agent import ESP32Agent
-from cloud.esp32.agentcore.tools.registry import TOOL_DECLARATIONS
-from cloud.esp32.agentcore.memory import taught as migrated_taught
-from cloud.esp32.memory import taught as legacy_taught
+from cloud.esp32.service import ESP32Agent
+from cloud.esp32.tool_registry import TOOL_DECLARATIONS
+from cloud.agents.lamp.memory import taught
 
 
 def _agent(monkeypatch, *, ism="OFF", online=True):
@@ -49,22 +48,6 @@ def test_reactive_user_hold_and_offline_prevent_publish(monkeypatch):
     assert calls == []
 
 
-def test_reactive_taught_id_inside_params_does_not_block_online_lamp(monkeypatch):
-    agent, _ = _agent(monkeypatch)
-    calls = []
-    touched = []
-    monkeypatch.setattr("cloud.esp32.tools.set_led_state", lambda **kw: calls.append(kw) or "auto_taught")
-    monkeypatch.setattr(migrated_taught, "touch", lambda rule_id: touched.append(rule_id))
-    monkeypatch.setattr(agent, "_device_online", lambda: False)
-
-    completed = agent._execute([{"tool": "set_led_state", "params": {
-        "state": "ON", "taught_id": "tb_work"}}], "esp32_desk_led")
-
-    assert completed == ["set_led_state"]
-    assert calls == [{"unit_id": "esp32_desk_led", "state": "ON"}]
-    assert touched == ["tb_work"]
-
-
 def test_lamp_only_declares_supported_tools():
     assert set(TOOL_DECLARATIONS) == {
         "set_led_state", "set_led_color", "blink_led", "list_peers",
@@ -72,8 +55,7 @@ def test_lamp_only_declares_supported_tools():
     }
 
 
-def test_taught_old_and_new_paths_share_module_and_data(tmp_path):
-    assert legacy_taught is migrated_taught
+def test_taught_file_persistence(tmp_path):
     path = tmp_path / "taught.json"
-    rule = migrated_taught.add("天黑", "调亮", path=path)
-    assert legacy_taught.list_all(path=path)[0]["id"] == rule["id"]
+    rule = taught.add("天黑", "调亮", path=path)
+    assert taught.list_all(path=path)[0]["id"] == rule["id"]

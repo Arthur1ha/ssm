@@ -1,10 +1,9 @@
 import asyncio
-import json
 import time
 from types import SimpleNamespace
 
-from cloud.go2.agentcore.mode import free_explore
-from cloud.go2.agentcore.perception.identity import IdentityEvent, IdentitySnapshot
+from cloud.go2.mode import free_explore
+from cloud.go2.perception.identity import IdentityEvent, IdentitySnapshot
 
 
 def test_drive_social_join_sends_once_and_skip_consumes_opportunity(monkeypatch):
@@ -21,15 +20,18 @@ def test_drive_social_join_sends_once_and_skip_consumes_opportunity(monkeypatch)
                         lambda: {"prompt": "简短说话", "traits": {"extraversion": 80}})
     monkeypatch.setattr(free_explore, "prompt_space_context", lambda: "{}")
     sent = []
-    monkeypatch.setattr("cloud.go2.agentcore.tools.tools.send_message",
+    monkeypatch.setattr("cloud.go2.tools.tools.send_message",
                         lambda target, content: sent.append((target, content)) or
                         {"result": "accepted", "message_id": "msg_1", "conversation_id": "conv_1"})
 
     class Model:
         decision = {"decision": "send_message", "target": "lamp", "content": "主人在工作，保持稳定照明好吗？", "reason": "工作照明"}
 
+        def with_structured_output(self, *_args, **_kwargs):
+            return self
+
         async def ainvoke(self, _messages):
-            return SimpleNamespace(content=json.dumps(self.decision))
+            return self.decision
 
     model = Model()
     monkeypatch.setattr(free_explore, "get_text_llm", lambda: model)

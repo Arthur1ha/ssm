@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Optional
 
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.memory import spatial as spatial_memory
+from cloud.agents.go2.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
 
 logger = logging.getLogger(__name__)

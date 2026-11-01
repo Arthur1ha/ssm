@@ -51,7 +51,8 @@ def _error(event: dict) -> bool:
 def _brief(event: dict) -> str:
     parts = [str(event.get("ts", "?")), str(event.get("agent_id") or event.get("service") or "?"), str(event.get("event", "?"))]
     kind = event.get("event")
-    for key in ("turn", "tool", "target_unit_id", "initiator_unit_id", "skill_id",
+    for key in ("turn", "node", "thread_id", "checkpoint_id", "tool",
+                "target_unit_id", "initiator_unit_id", "skill_id",
                 "request_id", "task_id", "transport", "status", "duration_ms",
                 "goal", "input", "output", "decision", "params", "result",
                 "reply", "response", "question", "error", "cause", "message"):
@@ -82,7 +83,7 @@ def _brief(event: dict) -> str:
 
 def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
     if args.errors:
-        return [event for event in events if _error(event)]
+        events = [event for event in events if _error(event)]
     identifier = args.identifier
     if args.latest and not identifier:
         for event in reversed(events):
@@ -94,6 +95,13 @@ def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
     if identifier:
         events = [event for event in events if (event.get("session_id") or "system") == identifier
                   or event.get("trace_id") == identifier]
+    if args.agent_id:
+        events = [event for event in events if event.get("agent_id") == args.agent_id]
+    if args.run_id:
+        events = [event for event in events if event.get("run_id") == args.run_id]
+    if args.task_id:
+        events = [event for event in events if event.get("task_id") == args.task_id
+                  or event.get("request_id") == args.task_id]
     if not args.json:
         events = [event for event in events if event.get("event") != "persona.loaded"]
     return events
@@ -106,13 +114,16 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="show full redacted JSON events")
     parser.add_argument("--latest", action="store_true", help="show the latest user session")
     parser.add_argument("--errors", action="store_true", help="show failures across traces")
+    parser.add_argument("--agent-id", help="filter by exact agent ID")
+    parser.add_argument("--run-id", help="filter by exact run ID")
+    parser.add_argument("--task-id", help="filter by exact task or request ID")
     parser.add_argument("--follow", action="store_true", help="update the view every second")
     parser.add_argument("--limit", type=int, default=0, help="show at most this many recent events")
     args = parser.parse_args()
-    if args.errors and args.identifier:
-        parser.error("--errors cannot be combined with an ID")
-    if args.identifier and not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", args.identifier):
-        parser.error("ID contains unsupported characters")
+    for name in ("identifier", "agent_id", "run_id", "task_id"):
+        value = getattr(args, name)
+        if value and not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", value):
+            parser.error(f"{name} contains unsupported characters")
     if args.limit < 0:
         parser.error("--limit must be nonnegative")
 

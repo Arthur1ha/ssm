@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from cloud.agent_runtime.personality import RevisionConflict
+from cloud.personality.store import RevisionConflict
 from cloud.api.auth import require_admin, require_admin_csrf
 
 router = APIRouter(prefix="/api/agents", tags=["personality"])
@@ -18,11 +18,11 @@ class PersonalityUpdate(BaseModel):
 
 def _module(agent_id: str):
     if agent_id == "cloud_orchestrator":
-        from cloud.orchestrator.agentcore.personality import profile
+        from cloud.agents.steward.personality import profile
     elif agent_id == "esp32_desk_led":
-        from cloud.esp32.agentcore.personality import profile
+        from cloud.agents.lamp.personality import profile
     elif agent_id == "go2":
-        from cloud.go2.agentcore.personality import profile
+        from cloud.agents.go2.personality import profile
     else:
         raise HTTPException(status_code=404, detail="unknown agent")
     return profile

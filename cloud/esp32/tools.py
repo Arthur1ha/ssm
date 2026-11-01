@@ -21,7 +21,7 @@ def publish_task(unit_id: str, task_id: str, action: str, params: dict, session_
     )
 
 
-from cloud.esp32.agentcore.tools.registry import TOOL_DESCRIPTIONS
+from cloud.esp32.tool_registry import TOOL_DESCRIPTIONS
 
 
 def list_peers(unit_id: str = "esp32_desk_led") -> list[dict]:

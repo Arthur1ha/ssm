@@ -8,22 +8,20 @@ import pytest
 from fastapi import HTTPException
 
 from cloud.api import intents
-from cloud.esp32 import agent as esp32_agent
+from cloud.agents.common.models import get_text_model
 
 
 @pytest.mark.asyncio
 async def test_lamp_run_waits_for_final_persona_reply(monkeypatch, tmp_path):
-    from cloud.agent_runtime.loop import Run
-    from cloud.agent_runtime.store import RunStore
-    from cloud.esp32 import paths
+    from cloud.agents.common.runner import GraphRun
+    from cloud.agents.common import views
 
-    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
-    store = RunStore(tmp_path / "runs")
-    run = Run("lamp_reply_race", "test-session", "亮紫灯，然后让狗坐下", time.time() + 90)
+    run = GraphRun("lamp_reply_race", "test-session", "亮紫灯，然后让狗坐下", time.time() + 90)
     run.status = "error"
     run.response = "暂时无法可靠理解下一步；已执行的动作不会重发。"
     run.reply_ready = False
-    assert store.create(run)
+    run.agent_id = "esp32_desk_led"
+    monkeypatch.setattr(views, "load_run", lambda *_args, **_kwargs: run)
     session = {"session_id": "test-session"}
 
     pending = await intents.get_lamp_chat_run("esp32_desk_led", run.run_id, session)
@@ -33,7 +31,6 @@ async def test_lamp_run_waits_for_final_persona_reply(monkeypatch, tmp_path):
     run.response = "紫灯已经亮了；狗坐下的请求被拒了。"
     run.reply_source = "persona_model"
     run.reply_ready = True
-    store.save(run)
     final = await intents.get_lamp_chat_run("esp32_desk_led", run.run_id, session)
     assert final["result"] == "error"
     assert final["reply"] == run.response
@@ -63,8 +60,7 @@ def test_lamp_llm_does_not_retry_past_chat_deadline(monkeypatch):
         return object()
 
     monkeypatch.setenv("MODEL_LIST", "test-model")
-    monkeypatch.setattr(esp32_agent, "ChatOpenAI", make_model)
-    esp32_agent.ESP32Agent.__new__(esp32_agent.ESP32Agent)._make_llm()
+    get_text_model("lamp", model_class=make_model)
 
     assert captured["timeout"] == 35
     assert captured["max_retries"] == 0
@@ -100,10 +96,10 @@ def test_lamp_command_checks_current_fsm_before_publish(monkeypatch):
 
 import pytest
 
-from cloud.agent_runtime.personality import ProfileStore, RevisionConflict
+from cloud.personality.store import ProfileStore, RevisionConflict
 from cloud.api.personality import router as personality_router
 from cloud.api.tests.conftest import login_admin
-from cloud.go2.agentcore.personality import profile as go2_profile
+from cloud.agents.go2.personality import profile as go2_profile
 
 
 def _store(tmp_path, migration=None):
@@ -146,7 +142,7 @@ def test_profile_migration_revision_validation_and_evolution(tmp_path):
 
 @pytest.mark.asyncio
 async def test_personality_api_admin_csrf_and_revisions(app, client, monkeypatch, tmp_path):
-    from cloud.orchestrator.agentcore.personality import profile as coordinator_profile
+    from cloud.agents.steward.personality import profile as coordinator_profile
     store = ProfileStore(agent_id="cloud_orchestrator",
                          path=tmp_path / "orchestrator" / "personality" / "profile.json",
                          prompt="管家", trait_specs=coordinator_profile.TRAIT_SPECS)

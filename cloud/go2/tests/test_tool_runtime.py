@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cloud.go2.agentcore.tools.executor import execute_tool
-from cloud.go2.agentcore.tools.registry import TOOL_REGISTRY
+from cloud.go2.tools.executor import execute_tool
+from cloud.go2.tools.registry import TOOL_REGISTRY
 from cloud.go2.connection import go2
 from cloud.go2.control import control_lease
 from cloud.go2.execution import ExecutionContext
@@ -33,7 +33,7 @@ def robot(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_registry_covers_all_implementations():
-    from cloud.go2.agentcore.tools.tools import TOOL_FN_MAP
+    from cloud.go2.tools.tools import TOOL_FN_MAP
     assert set(TOOL_REGISTRY) == set(TOOL_FN_MAP)
 
 
@@ -82,7 +82,7 @@ async def test_peer_tool_rejects_non_object_params_before_dispatch(robot):
 @pytest.mark.asyncio
 async def test_peer_tool_uses_trusted_go2_context(monkeypatch, robot):
     from cloud.peers import gateway
-    from cloud.go2.agentcore.tools import tools as tool_impl
+    from cloud.go2.tools import tools as tool_impl
 
     calls = []
 
@@ -151,7 +151,7 @@ async def test_unknown_tool_is_structured_error(robot):
 
 @pytest.mark.asyncio
 async def test_stop_failure_is_traceable(monkeypatch, robot):
-    from cloud.go2.agentcore.tools.tools import go2_move
+    from cloud.go2.tools.tools import go2_move
     from cloud.go2.execution import use_context
 
     robot.side_effect = [{"result": "accepted"}, {"result": "timeout"}]
@@ -165,7 +165,7 @@ async def test_stop_failure_is_traceable(monkeypatch, robot):
 
 @pytest.mark.asyncio
 async def test_old_session_does_not_stop_new_lease_owner(monkeypatch, robot):
-    from cloud.go2.agentcore.tools.tools import go2_move
+    from cloud.go2.tools.tools import go2_move
     from cloud.go2.execution import use_context
 
     async def preempt_during_move(_duration):

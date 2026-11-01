@@ -110,8 +110,8 @@ rotate-logs:
 	@logrotate -s $(LOG_DIR)/.logrotate.state $(LOG_DIR)/logrotate.conf
 
 trace-task:
-	@if [ -z "$$ID" ]; then echo "Usage: make trace-task ID=<session_id> [JSON=1]" >&2; exit 2; fi
-	@uv run python scripts/trace_task.py "$$ID" $(if $(filter 1 true yes,$(JSON)),--json,) $(if $(filter 1 true yes,$(FOLLOW)),--follow,)
+	@if [ -z "$$ID$$AGENT_ID$$RUN_ID$$TASK_ID" ]; then echo "Usage: make trace-task ID=<session_id> [AGENT_ID=<agent>] [RUN_ID=<run>] [TASK_ID=<task>] [JSON=1]" >&2; exit 2; fi
+	@uv run python scripts/trace_task.py $(if $(ID),"$(ID)",) $(if $(AGENT_ID),--agent-id "$(AGENT_ID)",) $(if $(RUN_ID),--run-id "$(RUN_ID)",) $(if $(TASK_ID),--task-id "$(TASK_ID)",) $(if $(filter 1 true yes,$(JSON)),--json,) $(if $(filter 1 true yes,$(FOLLOW)),--follow,)
 
 task-trace:
 	@if [ -n "$$ID" ]; then uv run python scripts/trace_task.py "$$ID" --follow; else uv run python scripts/trace_task.py --latest --follow; fi

@@ -3,24 +3,36 @@
 import asyncio
 import inspect
 import time
-from types import SimpleNamespace
+from langchain_core.messages import AIMessage
 
-from cloud.esp32 import agent as agent_mod
+from cloud.esp32 import service as agent_mod
 from cloud.esp32 import router as lamp_router
-from cloud.esp32.agentcore.tools import registry as tools_registry
+from cloud.esp32 import tool_registry as tools_registry
 from cloud.esp32.state import ESP32State
 from cloud.space.execution import ExecutionContext
 
 
 def test_semantic_task_waits_for_physical_result_and_reuses_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("SSM_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
+    monkeypatch.setenv("SSM_RUN_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
     from cloud.esp32 import tasks
+    from cloud.esp32 import physical_tasks
     monkeypatch.setattr(tasks, "TASKS_DIR", tmp_path / "semantic_tasks")
+    monkeypatch.setattr(physical_tasks, "PHYSICAL_TASKS_DIR", tmp_path / "physical_tasks")
     tasks._tasks.clear()
     state = ESP32State()
     from cloud.esp32 import paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
-    model = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(
-        content='{"tool":"set_led_state","params":{"state":"ON"}}', tool_calls=[]))
+    class Model:
+        def bind_tools(self, _tools, **_kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(content="", tool_calls=[{
+                "name": "set_led_state", "args": {"state": "ON"}, "id": "semantic-step"}])
+
+    model = Model()
     agent = agent_mod.ESP32Agent(state, llm=model)
     monkeypatch.setattr(agent_mod, "get_agent", lambda: agent)
     monkeypatch.setattr(lamp_router._esp32_agent, "get_agent", lambda: agent)
@@ -34,6 +46,9 @@ def test_semantic_task_waits_for_physical_result_and_reuses_id(monkeypatch, tmp_
     from cloud.api import intents
     def dispatch(unit_id, action, params, session, source=None, task_id=None):
         published.append((unit_id, action, params, session, source, task_id))
+        physical_tasks.reserve(task_id, unit_id=unit_id,
+                               session_id=session["session_id"], action=action,
+                               params=params)
         return task_id
     monkeypatch.setattr(intents, "_dispatch_mqtt_task", dispatch)
     monkeypatch.setitem(tools_registry.PHYSICAL_ACTIONS["SET_STATE"], "timeout", 0.02)
@@ -68,14 +83,21 @@ def test_semantic_task_wait_uses_fastapi_worker_pool():
 
 
 def test_lamp_failed_step_gets_persona_reply(monkeypatch, tmp_path):
-    from cloud.esp32 import paths
-    monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
-    decisions = iter([
-        '{"tool":"missing_tool","params":{}}',
-        '{"final":"全完成了"}',
-        '行吧，这一步没办成，别急着给我记功。',
+    monkeypatch.setenv("SSM_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
+    monkeypatch.setenv("SSM_RUN_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
+    replies = iter([
+        AIMessage(content="", tool_calls=[{"name": "missing_tool", "args": {}, "id": "bad-step"}]),
+        AIMessage(content="行吧，这一步没办成，别急着给我记功。"),
     ])
-    model = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(content=next(decisions)))
+    class Model:
+        def bind_tools(self, _tools, **_kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            return next(replies)
+
+    model = Model()
     agent = agent_mod.ESP32Agent(ESP32State(), llm=model)
     monkeypatch.setattr(agent, "_device_online", lambda: True)
     context = ExecutionContext("lamp-persona-failure", "admin", True,

@@ -10,7 +10,7 @@ from dataclasses import replace
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from cloud.esp32 import agent as _esp32_agent
+from cloud.esp32 import service as _esp32_agent
 from cloud.api.auth import require_admin, require_admin_csrf, require_session
 from cloud.space.execution import ExecutionContext, require_service_context
 
@@ -126,9 +126,9 @@ async def esp32_chat(unit_id: str, req: ChatRequest, _session: dict = Depends(re
 async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
     """返回灯智能体的成长资产：调教记录 + 历史规律摘要。"""
     _require_led_unit(unit_id)
-    from cloud.esp32.agentcore.memory import taught
-    from cloud.esp32.agentcore.memory.episode import recent
-    from cloud.esp32.agentcore.memory.daily_summary import summarize_day
+    from cloud.agents.lamp.memory import taught
+    from cloud.agents.lamp.memory.episode import recent
+    from cloud.agents.lamp.memory.daily_summary import summarize_day
     agent = _esp32_agent.get_agent()
     belief = getattr(agent, "_belief_summary", "") if agent else ""
     context = ExecutionContext(_session["session_id"], "admin", True, "main",
@@ -140,7 +140,7 @@ async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
 @router.get("/{unit_id}/personality")
 async def esp32_personality_get(unit_id: str, _session: dict = Depends(require_admin)):
     _require_led_unit(unit_id)
-    from cloud.esp32.agentcore.soul import get_personality_view
+    from cloud.agents.lamp.personality.soul import get_personality_view
     return get_personality_view()
 
 
@@ -148,7 +148,7 @@ async def esp32_personality_get(unit_id: str, _session: dict = Depends(require_a
 async def esp32_personality_set(unit_id: str, req: PersonalityRequest,
                                  session: dict = Depends(require_admin_csrf)):
     _require_led_unit(unit_id)
-    from cloud.esp32.agentcore.soul import set_personality, get_personality_view
+    from cloud.agents.lamp.personality.soul import set_personality, get_personality_view
     context = ExecutionContext(session["session_id"], "admin", True, "main",
                                "user_delegated", int(session["expires_at"]))
     try:
@@ -189,10 +189,9 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
         from cloud.api.intents import _dispatch_mqtt_task
         session = {"session_id": context.session_id, "actor": context.actor,
                    "expires_at": context.expires_at, "persist": False}
-        def dispatch(uid, act, arguments, _context, source):
-            import uuid
+        def dispatch(uid, act, arguments, _context, source, *, task_id=None):
             from cloud.esp32.tasks import update_progress
-            physical_id = "task_" + uuid.uuid4().hex
+            physical_id = task_id or "task_" + uuid.uuid4().hex
             update_progress(req.task_id, physical_id)
             _dispatch_mqtt_task(uid, act, arguments, session,
                                 source=source, task_id=physical_id)
@@ -235,58 +234,15 @@ def reply_to_physical_task(unit_id: str, req: PhysicalReplyRequest,
         raise HTTPException(status_code=403, detail="a live delegated session is required")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", req.task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
+    import asyncio
     from cloud.api.main import _esp32_state
     from cloud.api.intents import publish_agent_event
-    from cloud.agent_runtime.loop import Run
-    from cloud.agent_runtime.replies import (
-        factual_fallback, persona_reply_prompt, valid_persona_reply,
-    )
-    from cloud.esp32.agentcore.personality.profile import get_profile
-    from langchain_core.messages import HumanMessage
-    agent = _esp32_agent.get_agent()
-    def publish_reply(status: str, answer: str) -> dict:
-        event = publish_agent_event("agent_reply", agent_id=unit_id,
-            session_id=context.session_id, status=status, run_id=req.task_id,
-            trace_id=req.trace_id, parent_run_id=req.parent_run_id,
-            step_id=req.task_id, source="delegated_skill", text=answer)
-        return {"result": status, "response": answer, "event_id": event["event_id"]}
-
-    if agent is None:
-        return {**publish_reply("unknown", factual_fallback(unit_id, "unknown")),
-                "error": "lamp_brain_unavailable"}
-
     from cloud.cards.registry import get_registry
-    card = get_registry().get_card(unit_id)
-    if not card or not card.get("online"):
-        return {**publish_reply("rejected", factual_fallback(unit_id, "rejected")),
-                "error": "lamp_offline"}
-    physical = None
-    until = time.monotonic() + 2
-    while physical is None and time.monotonic() < until:
-        physical = _esp32_state.get_task_result(req.task_id)
-        if physical is None:
-            time.sleep(0.05)
-    if physical is None:
-        return {**publish_reply("unknown", factual_fallback(unit_id, "unknown")),
-                "error": "physical_result_unavailable"}
-    status = str(physical.get("result") or "unknown")
-    if status not in {"ok", "accepted", "executing", "timeout", "unknown", "blocked",
-                      "rejected", "cancelled", "error"}:
-        status = "unknown"
-    run = Run(req.task_id, context.session_id, req.goal, time.time() + 15,
-              steps=[{"step_id": req.task_id, "tool": req.action,
-                      "params": req.params, "result": physical}], status=status,
-              trace_id=req.trace_id, parent_run_id=req.parent_run_id,
-              agent_id=unit_id, origin_kind=context.origin_kind)
-    try:
-        current = get_profile()
-        answer = agent._llm.invoke([HumanMessage(content=persona_reply_prompt(
-            current["prompt"], run, traits=current["traits"]))]).content
-        if not valid_persona_reply(answer, run):
-            raise ValueError("invalid_persona_reply")
-    except Exception:
-        publish_agent_event("reply_error", agent_id=unit_id, session_id=context.session_id,
-            status=status, run_id=req.task_id, trace_id=req.trace_id,
-            parent_run_id=req.parent_run_id, step_id=req.task_id, source="delegated_skill")
-        answer = factual_fallback(unit_id, status)
-    return publish_reply(status, answer)
+    from cloud.agents.lamp.workflows.physical_reply import run_physical_reply
+    return asyncio.run(run_physical_reply(
+        task_id=req.task_id, goal=req.goal, action=req.action, params=req.params,
+        trace_id=req.trace_id, parent_run_id=req.parent_run_id,
+        unit_id=unit_id, session_id=context.session_id,
+        agent=_esp32_agent.get_agent(), device_state=_esp32_state,
+        registry=get_registry(), publish=publish_agent_event,
+    ))

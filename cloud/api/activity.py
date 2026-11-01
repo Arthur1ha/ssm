@@ -59,7 +59,7 @@ async def _switch_mode(unit_id: str, mode: str, activity_id: str) -> dict[str, A
         readback = await go2_autonomy_get()
     elif unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
         from cloud.esp32.router import set_activity_mode
-        from cloud.esp32.agent import get_agent
+        from cloud.esp32.service import get_agent
 
         result = set_activity_mode(mode, activity_id)
         agent = get_agent()
@@ -120,7 +120,7 @@ async def reconcile_current_activity() -> None:
                 mode = (await go2_autonomy_get()).get("mode")
             elif unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
                 from cloud.esp32.router import get_activity_mode_owner
-                from cloud.esp32.agent import get_agent
+                from cloud.esp32.service import get_agent
                 owner = get_activity_mode_owner()
                 agent = get_agent()
                 mode = agent.get_autonomy_mode() if agent else "unknown"

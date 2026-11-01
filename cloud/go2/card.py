@@ -69,7 +69,7 @@ def get_card_skill(skill_id: str) -> dict | None:
             "properties": {"message": {"type": "string"}},
         }
     else:
-        from cloud.go2.agentcore.tools.registry import get_tool_spec
+        from cloud.go2.tools.registry import get_tool_spec
         spec = get_tool_spec(tool_name)
         if spec is None:
             raise RuntimeError(f"Card skill {skill_id} references missing tool {tool_name}")

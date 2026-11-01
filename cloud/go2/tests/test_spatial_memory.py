@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pytest
 from unittest.mock import AsyncMock, patch
-import cloud.go2.agentcore.memory.spatial as sm
+import cloud.agents.go2.memory.spatial as sm
 
 
 @pytest.fixture(autouse=True)

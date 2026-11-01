@@ -23,8 +23,36 @@ __pycache__/
 tests/
 test_*.py
 *_test.py
+!cloud/agents/common/tests/
+!cloud/agents/common/tests/test_checkpoint.py
+!cloud/agents/common/tests/test_effects.py
+!cloud/agents/common/tests/test_runner.py
+!cloud/agents/common/tests/test_run_index.py
+!cloud/agents/common/tests/test_views.py
+!cloud/agents/lamp/tests/
+!cloud/agents/lamp/tests/test_graph.py
+!cloud/agents/lamp/tests/test_tool_execution.py
+!cloud/agents/lamp/tests/test_reactive_graph.py
+!cloud/agents/lamp/tests/test_graph_entry.py
+!cloud/agents/go2/tests/
+!cloud/agents/go2/tests/test_graph.py
+!cloud/agents/go2/tests/test_graph_entry.py
+!cloud/agents/go2/tests/test_run_view.py
+!cloud/agents/go2/tests/test_tool_declarations.py
+!cloud/agents/go2/tests/test_workflows.py
+!cloud/agents/go2/tests/test_social_workflow.py
+!cloud/agents/go2/tests/test_daily_summary_graph.py
+!cloud/agents/go2/tests/test_evolution_graph.py
+!cloud/agents/steward/tests/
+!cloud/agents/steward/tests/test_graph.py
+!cloud/agents/steward/tests/test_personality.py
+!cloud/agents/steward/tests/test_tools.py
 !cloud/api/tests/
+!cloud/api/tests/test_lamp_durable_dispatch.py
 !cloud/api/tests/test_persona_sse.py
+!cloud/esp32/tests/
+!cloud/esp32/tests/test_physical_tasks.py
+!cloud/space/tests/test_activity_event_dedupe.py
 
 # 运行时数据，不纳入版本控制
 *.db
@@ -51,10 +79,14 @@ docs/superpowers/plans/*
 !docs/superpowers/plans/2026-10-27-personality-driven-peer-interaction.md
 !docs/superpowers/plans/2026-10-28-go2-navigation-closed-loop.md
 !docs/superpowers/plans/2026-10-30-go2-personality-behavior-and-replies.md
+!docs/superpowers/plans/2026-10-31-langchain-langgraph-agent-migration.md
 !docs/research/
 docs/research/*
 !docs/research/2026-10-30-ai-character-personality-systems.md
 !docs/research/2026-10-30-whale-persona-ssm-analysis.md
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/agent-langgraph-migration-comparison.md
 paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin
@@ -62,6 +94,7 @@ cloudflared
 
 # Go2 运行期状态（记忆/性格/规则）
 cloud/go2/data/
+cloud/data/
 cloud/space/data/
 cloud/esp32/data/
 cloud/space/audit.jsonl

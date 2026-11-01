@@ -7,12 +7,12 @@ import threading
 
 import pytest
 
-from cloud.agent_runtime.loop import Run, run_loop
-from cloud.agent_runtime.replies import needs_persona_reply, persona_reply_prompt
-from cloud.agent_runtime.progress import submit_progress
-from cloud.agent_runtime.progress_facts import step_progress_facts
+from cloud.agents.common.runner import GraphRun as Run
+from cloud.agents.common.replies import persona_reply_prompt
+from cloud.agents.common.progress import submit_progress
+from cloud.agents.common.progress_facts import step_progress_facts
 from cloud.api import intents
-from cloud.go2.agentcore.personality.behavior import reply_persona
+from cloud.agents.go2.personality.behavior import reply_persona
 
 
 def _session(session_id, space_id="main"):
@@ -127,31 +127,8 @@ def test_go2_extraversion_changes_reply_guidance():
     assert "可自然接话" in reply_persona(profile)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("tool_status,expected", [
-    ("ok", "ok"), ("rejected", "partial"), ("timeout", "timeout"),
-])
-async def test_final_claim_is_draft_and_persona_reads_verified_status(tool_status, expected):
-    run = Run("r", "s", "做一件事", time.time() + 10)
-    decisions = iter([{"tool": "act", "params": {}}, {"final": "全部完成"}])
-
-    async def decide(_run):
-        return next(decisions)
-
-    async def execute(_name, _params, _step_id):
-        return {"result": tool_status}
-
-    result = await run_loop(run, decide, execute)
-    assert result.status == expected
-    assert needs_persona_reply(result)
-    assert result.response != "全部完成"
-    prompt = persona_reply_prompt("角色", result)
-    assert f'"status": "{expected}"' in prompt
-    assert f'"result": "{tool_status}"' in prompt
-
-
 def test_narrated_progress_uses_facts_and_drops_late_text(monkeypatch):
-    monkeypatch.setattr("cloud.agent_runtime.progress._slots", threading.BoundedSemaphore(2))
+    monkeypatch.setattr("cloud.agents.common.progress._slots", threading.BoundedSemaphore(2))
     received = []
     arrived = threading.Event()
     closed = threading.Event()

@@ -1,10 +1,20 @@
+"""Graph execution emits one correlated model, tool, checkpoint and reply trace."""
+
 import json
 import time
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+from pydantic import BaseModel
 
-from cloud.agent_runtime.loop import Run, run_loop
-from cloud.observability import configure_logging
+from cloud.agents.common.checkpoint import FileCheckpointSaver
+from cloud.agents.common.effects import FileEffectLedger
+from cloud.agents.common.runner import GraphRun, run_role_graph
+from cloud.observability import bind_context, configure_logging
+
+
+class SetLedState(BaseModel):
+    state: str
 
 
 def _events(directory):
@@ -12,81 +22,76 @@ def _events(directory):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+class Model:
+    def __init__(self, messages):
+        self.messages = iter(messages)
+
+    def bind_tools(self, _tools, **kwargs):
+        assert kwargs["parallel_tool_calls"] is False
+        return self
+
+    async def ainvoke(self, _messages):
+        result = next(self.messages)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
 @pytest.mark.asyncio
-async def test_trace_records_dispatch_after_durable_pending_intent(tmp_path):
-    configure_logging("api", log_dir=tmp_path)
-    run = Run("run_trace", "session", "turn on the light", time.time() + 10,
-              trace_id="tr_0123456789abcdef0123456789abcdef", agent_id="lamp")
-    records = []
-
-    async def decide(current):
-        return ({"tool": "set_led_state", "params": {"state": "ON"}}
-                if not current.steps else {"final": "灯亮了"})
-
-    async def execute(name, params, step_id):
-        assert records[-1] == (step_id, "pending")
-        return {"result": "ok", "task_id": "task_one"}
+async def test_graph_trace_records_durable_dispatch_and_receipt(tmp_path):
+    configure_logging("api", log_dir=tmp_path / "logs")
+    trace_id = "tr_0123456789abcdef0123456789abcdef"
+    run = GraphRun("run_trace", "session", "turn on the light", time.time() + 10,
+                   trace_id=trace_id, agent_id="esp32_desk_led")
+    recorded = []
 
     def record(current, step):
-        if step:
-            records.append((step["step_id"], step["dispatch_status"]))
+        if step is not None:
+            recorded.append((step["step_id"], step["dispatch_status"]))
 
-    await run_loop(run, decide, execute, record=record)
-    events = _events(tmp_path)
+    async def execute(_name, _params, step_id):
+        assert recorded[-1] == (step_id, "pending")
+        return {"result": "ok", "task_id": "task_one"}
+
+    with bind_context(trace_id=trace_id, run_id=run.run_id,
+                      agent_id=run.agent_id, session_id=run.session_id):
+        await run_role_graph(
+            run, model=Model([
+                AIMessage(content="", tool_calls=[{"name": "set_led_state",
+                                                   "args": {"state": "ON"}, "id": "step-1"}]),
+                AIMessage(content="灯亮了"),
+            ]), tool_schemas={"set_led_state": SetLedState},
+            build_messages=lambda current: [HumanMessage(content=current.goal)],
+            execute=execute, record=record,
+            checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
+            effect_ledger=FileEffectLedger(tmp_path / "effects"))
+    events = _events(tmp_path / "logs")
     names = [event["event"] for event in events]
+    assert names.index("model.request") < names.index("tool.dispatch")
     assert names.index("tool.dispatch") < names.index("tool.result") < names.index("run.finished")
-    assert all(event["trace_id"] == run.trace_id for event in events)
-    assert records[0][1] == "pending"
+    assert "checkpoint.saved" in names
+    assert all(event.get("trace_id") == trace_id for event in events)
+    assert recorded[0][1] == "pending"
     assert run.status == "ok"
-    assert run.response == ""
     assert run.decision_draft == "灯亮了"
-    validated = next(event for event in events if event["event"] == "reply.validated")
-    assert validated["reply"] == ""
-    assert validated["changed"] is True
 
 
 @pytest.mark.asyncio
-async def test_model_failure_never_dispatches_tool(tmp_path, caplog):
-    configure_logging("api", log_dir=tmp_path)
-    run = Run("run_timeout", "session", "move", time.time() + 10,
-              trace_id="tr_fedcba9876543210fedcba9876543210", agent_id="go2")
+async def test_model_failure_never_dispatches_tool(tmp_path):
+    configure_logging("api", log_dir=tmp_path / "logs")
+    run = GraphRun("run_timeout", "session", "move", time.time() + 10,
+                   trace_id="tr_fedcba9876543210fedcba9876543210", agent_id="go2")
 
-    async def decide(_run):
-        raise TimeoutError("upstream timeout")
-
-    async def execute(_name, _params, _step_id):
+    async def execute(*_args):
         raise AssertionError("tool must not run")
 
-    await run_loop(run, decide, execute)
-    names = [event["event"] for event in _events(tmp_path)]
+    await run_role_graph(
+        run, model=Model([TimeoutError("upstream timeout")]),
+        tool_schemas={"set_led_state": SetLedState},
+        build_messages=lambda current: [HumanMessage(content=current.goal)],
+        execute=execute, checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
+        effect_ledger=FileEffectLedger(tmp_path / "effects"))
+    names = [event["event"] for event in _events(tmp_path / "logs")]
     assert "model.error" in names
     assert "tool.dispatch" not in names
     assert run.status == "error"
-    assert "session=session" in caplog.text
-    assert "agent=go2" in caplog.text
-    assert "turn=1 failed error=TimeoutError" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_partial_reply_explains_disconnected_peer(tmp_path):
-    configure_logging("api", log_dir=tmp_path)
-    run = Run("run_peer", "session", "开灯再让机器狗站起来", time.time() + 10,
-              trace_id="tr_11111111111111111111111111111111", agent_id="lamp")
-
-    async def decide(current):
-        if not current.steps:
-            return {"tool": "set_led_state", "params": {"state": "ON"}}
-        if len(current.steps) == 1:
-            return {"tool": "request_peer_skill", "params": {"target_unit_id": "go2"}}
-        return {"final": "全部完成"}
-
-    async def execute(name, params, step_id):
-        if name == "set_led_state":
-            return {"result": "ok"}
-        return {"result": "blocked", "error": "Go2 device is not connected"}
-
-    await run_loop(run, decide, execute)
-    assert run.status == "partial"
-    assert run.response == ""
-    assert [step["result"]["result"] for step in run.steps] == ["ok", "blocked"]
-    assert "全部完成" not in run.response

@@ -17,10 +17,13 @@ dependencies = [
     "opencv-python-headless>=4.10.0",
     "tencentcloud-sdk-python>=3.1.188",
     "structlog>=25.0.0",
+    "langchain>=1,<2",
+    "langgraph>=1,<2",
 ]
 
 [dependency-groups]
 dev = [
+    "langgraph-checkpoint-conformance>=0.0.2",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
 ]

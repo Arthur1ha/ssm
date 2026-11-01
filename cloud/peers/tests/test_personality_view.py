@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud.agent_runtime.personality import ProfileStore
-from cloud.esp32.agentcore import soul as lamp_soul
-from cloud.esp32.agentcore.personality import profile as lamp_profile
-from cloud.go2.agentcore import soul as go2_soul
-from cloud.go2.agentcore.personality import profile as go2_profile
+from cloud.personality.store import ProfileStore
+from cloud.agents.lamp.personality import soul as lamp_soul
+from cloud.agents.lamp.personality import profile as lamp_profile
+from cloud.agents.go2.personality import legacy as go2_soul
+from cloud.agents.go2.personality import profile as go2_profile
 from cloud.space.execution import ExecutionContext
 
 
@@ -70,9 +70,13 @@ def test_go2_daily_evolution_preserves_concurrent_admin_edit(tmp_path, monkeypat
     go2_soul.set_personality("原始表达", 45)
 
     class Model:
+        def with_structured_output(self, _schema, *, method):
+            assert method == "function_calling"
+            return self
+
         async def ainvoke(self, _messages):
             go2_soul.set_personality("管理员刚更新", 90)
-            return SimpleNamespace(content='{"extraversion": 2}')
+            return {"extraversion": 2}
 
     monkeypatch.setattr(go2_soul, "get_text_llm", lambda: Model())
     asyncio.run(go2_soul.evolve_from_summary("2026-10-30", "有趣的一天"))

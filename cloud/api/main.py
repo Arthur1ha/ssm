@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
-from cloud.esp32 import agent as esp32_agent_mod
+from cloud.esp32 import service as esp32_agent_mod
 from cloud.esp32 import tools as esp32_tools
 from cloud.esp32.router import router as esp32_router, internal_router as esp32_internal_router
 from cloud.esp32.state import ESP32State

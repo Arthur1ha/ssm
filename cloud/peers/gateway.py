@@ -120,7 +120,7 @@ def _authorize_autonomous(initiator: str) -> None:
         if router._autonomy_mode == "manual":
             raise PermissionError("Go2 autonomy is manual")
     else:
-        from cloud.esp32.agent import get_agent
+        from cloud.esp32.service import get_agent
         agent = get_agent()
         if agent is None or agent.get_autonomy_mode() != "reactive" or agent._in_user_hold():
             raise PermissionError("lamp autonomy is unavailable")

@@ -1,4 +1,4 @@
-from cloud.go2.agentcore.prompts import PROMPT_VERSION, build_prompt
+from cloud.agents.go2.prompt_contract import PROMPT_VERSION, build_prompt
 import pytest
 
 

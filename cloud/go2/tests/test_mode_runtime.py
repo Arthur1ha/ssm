@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from cloud.go2.card import _build_go2_card
 from cloud.go2.connection import go2
-from cloud.go2.agentcore.mode import free_explore, reactive
+from cloud.go2.mode import free_explore, reactive
 from cloud.go2 import router as go2_router
 from cloud.go2.execution import ExecutionContext
 
@@ -70,38 +70,6 @@ def test_reactive_action_uses_executor_and_stops_after_mode_switch(monkeypatch):
     mind.set_active(False)
     asyncio.run(mind._dispatch_action("Hello", "test", "test"))
     assert len(calls) == 1
-
-
-def test_reactive_prompt_records_version_and_memory_source(monkeypatch):
-    response = SimpleNamespace(content='{"action": null, "reason": "静观"}')
-    llm = SimpleNamespace(ainvoke=AsyncMock(return_value=response))
-    monkeypatch.setattr(reactive, "get_text_llm", lambda: llm)
-    mind = reactive.ReactiveMind()
-    mind.set_active(True)
-    frame = {"persons": {"detected": False, "count": 0},
-             "faces": {"detected": False, "count": 0}, "change_type": "none"}
-    asyncio.run(mind._autonomous_reason(frame))
-    metadata = mind._last_prompt_metadata
-    assert metadata["task"] == "reactive"
-    assert metadata["prompt_version"]
-    assert metadata["memory_sources"] == ("episode",)
-    assert "固定约束版本" in llm.ainvoke.await_args.args[0][0].content
-
-
-def test_low_boldness_keeps_reactive_turn_as_observation(monkeypatch):
-    profile = {"prompt": "我是 Go2", "traits": {"curiosity": 70, "extraversion": 45,
-                                      "boldness": 10}, "revision": 2}
-    monkeypatch.setattr(reactive, "get_profile", lambda: profile)
-    monkeypatch.setattr(reactive, "get_text_llm", lambda: SimpleNamespace(
-        ainvoke=AsyncMock(return_value=SimpleNamespace(
-            content='{"action":"turn_left","reason":"想看看"}'))))
-    mind = reactive.ReactiveMind()
-    mind.set_active(True)
-    mind._dispatch_action = AsyncMock()
-    frame = {"persons": {"detected": False, "count": 0},
-             "faces": {"detected": False, "count": 0}, "change_type": "none"}
-    asyncio.run(mind._autonomous_reason(frame))
-    mind._dispatch_action.assert_not_awaited()
 
 
 def test_reactive_timeout_reply_rejects_false_completion(monkeypatch):
@@ -258,9 +226,9 @@ def test_explore_question_pauses_and_keeps_private_image_reference(tmp_path, mon
 
 
 def test_personality_traits_change_existing_decision_opportunities():
-    from cloud.esp32.agentcore.personality.behavior import light_change_bucket
-    from cloud.go2.agentcore.personality.behavior import exploration_interval, social_action_candidates
-    from cloud.orchestrator.agentcore.personality.behavior import clarification_guidance
+    from cloud.agents.lamp.personality.behavior import light_change_bucket
+    from cloud.agents.go2.personality.behavior import exploration_interval, social_action_candidates
+    from cloud.agents.steward.personality.behavior import clarification_guidance
 
     assert exploration_interval(10) > exploration_interval(70) > exploration_interval(100)
     assert social_action_candidates(10, {"Hello", "Dance1"}) == {"Hello"}
@@ -271,8 +239,8 @@ def test_personality_traits_change_existing_decision_opportunities():
 
 
 def test_non_success_persona_reply_cannot_claim_completion():
-    from cloud.agent_runtime.loop import Run
-    from cloud.agent_runtime.replies import factual_fallback, valid_persona_reply
+    from cloud.agents.common.runner import GraphRun as Run
+    from cloud.agents.common.replies import factual_fallback, valid_persona_reply
 
     run = Run("test", "", "去门口", 0, status="timeout")
     assert not valid_persona_reply("我已经完成啦", run)

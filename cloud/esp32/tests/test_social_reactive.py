@@ -1,6 +1,6 @@
 import time
 
-from cloud.esp32.agent import ESP32Agent
+from cloud.esp32.service import ESP32Agent
 
 
 class _State:
@@ -25,7 +25,7 @@ def test_lamp_send_message_obeys_activity_mode_and_budget(monkeypatch):
         return ({"result": "accepted", "message_id": "msg_1"}
                 if kwargs["mode_available"] else {"result": "blocked"})
 
-    monkeypatch.setattr("cloud.esp32.agentcore.tools.executor.execute_auxiliary", auxiliary)
+    monkeypatch.setattr("cloud.esp32.tool_executor.execute_auxiliary", auxiliary)
     agent._social_state.reset("act_test", joined_at=time.time())
     params = {"target": "go2", "content": "工作中保持稳定照明好吗？"}
     assert not agent._dispatch_tool("send_message", params, "esp32_desk_led")
@@ -53,7 +53,7 @@ def test_lamp_normalizes_model_message_aliases_before_validated_dispatch(monkeyp
     monkeypatch.setattr("cloud.peers.social.activity_peers",
                         lambda _unit, _peers: (activity, [peer]))
     calls = []
-    monkeypatch.setattr("cloud.esp32.agentcore.tools.executor.execute_auxiliary",
+    monkeypatch.setattr("cloud.esp32.tool_executor.execute_auxiliary",
                         lambda **kwargs: calls.append(kwargs) or
                         {"result": "accepted", "message_id": "msg_1"})
     agent._social_state.reset("act_test", joined_at=time.time())

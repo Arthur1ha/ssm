@@ -8,7 +8,7 @@ import time
 import threading
 from dataclasses import dataclass, field
 
-from cloud.agent_runtime.json_files import locked_directory, read_record, record_path, write_record
+from cloud.storage.json_files import locked_directory, read_record, record_path, write_record
 from cloud.esp32.paths import TASKS_DIR
 
 

@@ -29,10 +29,10 @@
 
 **控制优先级**：用户指令 > 智能体 > 本地规则（离线兜底）
 
-云端有三个 LLM 智能体：
-- **编排器**（`cloud/orchestrator/`，独立进程）：订阅用户意图，经逐步任务循环统筹全局，MQTT 派发到 ESP32、HTTP 委托到 Go2。
-- **ESP32 桌面智能体**（`cloud/esp32/agent.py`）：带 persona 的 sense→reason→act，自主响应传感器事件。
-- **Go2 机器狗智能体**（`cloud/go2/`）：独立逐步任务循环，含性格演化、记忆、导航、视觉，经 HTTP 暴露 `/api/go2/*`。
+云端有三个 LLM 智能体，模型决策分别位于 `cloud/agents/{steward,lamp,go2}/graph.py`：
+- **编排器**（`cloud/orchestrator/`，独立进程）：订阅用户意图，经管家 Graph 统筹全局，MQTT 派发到 ESP32、HTTP 委托到 Go2。
+- **ESP32 桌面智能体**（`cloud/esp32/service.py`）：灯 Graph 处理对话与传感器触发的自主决策。
+- **Go2 机器狗智能体**（`cloud/go2/`）：Go2 Graph 处理对话与自主决策；设备层负责导航、视觉与 WebRTC。
 
 ## esp硬件引脚
 
@@ -101,12 +101,12 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 
 #### 编排器（`cloud/orchestrator/`，独立进程）
 
-Python 逐步任务循环，订阅 `ssm/intent/+`，每次观察结果后继续规划。
+订阅 `ssm/intent/+`，调用 `cloud/agents/steward/graph.py` 的 LangGraph 逐步任务图，每次观察真实结果后继续规划。三角色共用 `cloud/agents/common/` 的文件检查点、动作账本和事件投影。
 
 | 文件 | 职责 |
 |------|------|
 | `main.py` | MQTT 事件循环：意图 → 逐步任务循环 |
-| `multitask.py` | 逐轮规划、派发、核对结果并生成管家回复 |
+| `../agents/steward/graph.py` | 逐轮规划、派发、核对结果并生成管家回复 |
 | `tools.py` | MQTT/HTTP 派发与反馈辅助 |
 | `shared_state.py` | 线程安全设备/任务快照（合并 MQTT manifest + `devices.json`） |
 | `devices.json` | 预留：文件型非 MQTT 设备注册表（当前为空 `{}`，go2 已走 MQTT card） |
@@ -171,11 +171,11 @@ make ps / logs     # 查看进程 / 日志
 
 ### 按会话查看日志
 
-使用 `make trace-task ID=<session_id>` 查看一个会话内灯、机器狗和编排器的步骤；加 `JSON=1` 可看脱敏后的完整字段，加 `FOLLOW=1` 可持续跟踪。也可用 `trace_id` 定位某一次任务。默认输出包含模型输入输出、决策、工具参数、接收方与结果摘要。`make logs` 显示最近会话及错误摘要。在现有 tmux 会话内运行 `make tmux-windows` 会按名称增补 `session_trace`、`errors`、`mqtt-trace` 窗口；`make tmux-windows ID=<session_id>` 将任务窗口切到指定会话。也可从会话外设置 `SSM_TMUX_SESSION=<会话名>`；设置 `SERIAL_PORT=<设备端口>` 时增补 ESP32 串口窗口。重复执行不会重启 `api`、`orchestrator` 或 `broker` 服务窗口。
+使用 `make trace-task ID=<session_id>` 查看一个会话内灯、机器狗和编排器的步骤；也可按 `AGENT_ID=<agent>`、`RUN_ID=<run>` 或 `TASK_ID=<task>` 检索。加 `JSON=1` 可看脱敏后的完整字段，加 `FOLLOW=1` 可持续跟踪。默认输出包含模型输入输出、决策、工具参数、接收方与结果摘要。`make logs` 显示最近会话及错误摘要。在现有 tmux 会话内运行 `make tmux-windows` 会按名称增补 `session_trace`、`errors`、`mqtt-trace` 窗口；`make tmux-windows ID=<session_id>` 将任务窗口切到指定会话。也可从会话外设置 `SSM_TMUX_SESSION=<会话名>`；设置 `SERIAL_PORT=<设备端口>` 时增补 ESP32 串口窗口。重复执行不会重启 `api`、`orchestrator` 或 `broker` 服务窗口。
 
-任务事件在首次发生时追加到 `logs/session-<session_id>.jsonl`，API 与编排器共享同一个会话文件；没有会话 ID 的自主任务写入 `logs/session-system.jsonl`。每条事件写完立即关闭文件，不会因进程启动产生空文件，文件删除后下一个事件会重新创建。启动时清理 14 天未更新的会话日志。运行状态 JSON 位于各智能体的 `data/runs/`，不随日志清理删除。`make rotate-logs` 对 API、编排器等 stdout 和 Broker 日志执行独立轮转；真实设备验收后可将其纳入每日定时任务。API 普通日志写入 `api.log`（包含云端灯和机器狗），编排器普通日志写入 `orchestrator.log`；Broker/串口原始日志各自保留。
+任务事件在首次发生时追加到 `logs/session-<session_id>.jsonl`，API 与编排器共享同一个会话文件；没有会话 ID 的自主任务写入 `logs/session-system.jsonl`。每条事件写完立即关闭文件，不会因进程启动产生空文件，文件删除后下一个事件会重新创建。启动时清理 14 天未更新的会话日志。Graph 检查点、运行索引与物理动作账本使用本地文件持久化；旧 `data/runs/` 记录已另行归档，不由新入口恢复。`make rotate-logs` 对 API、编排器等 stdout 和 Broker 日志执行独立轮转。API 普通日志写入 `api.log`（包含云端灯和机器狗），编排器普通日志写入 `orchestrator.log`；Broker/串口原始日志各自保留。
 
-旧 SQLite 任务账本迁移时，先停止 API/编排器写入并备份数据库及 `-wal`、`-shm` 文件，再执行 `uv run python -m scripts.migrate_task_sqlite_to_json --source <旧库> --dest <数据目录>/runs --kind runs --apply`；灯语义账本使用 `--kind semantic_tasks` 和 `semantic_tasks` 目标目录。省略 `--apply` 可先盘点。脚本不会删除旧库，目标 JSON 内容不同则停止。运行服务现使用 `SSM_GO2_RUN_DIR`、`SSM_ORCHESTRATOR_RUN_DIR` 覆盖目录；旧 `*_RUN_DB` 仅供定位迁移源。
+历史 SQLite 任务账本可用 `scripts/migrate_task_sqlite_to_json.py` 离线读取并核对，旧 JSON 运行记录保留在迁移归档中。新运行状态以 LangGraph 文件检查点与运行索引为准；旧记录不会自动重新派发物理动作。
 
 ### 2. 配置并上传 ESP32
 

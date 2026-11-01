@@ -23,7 +23,7 @@
 | 边缘端 | MicroPython on ESP32 | MicroPython ≥1.23，ESP32 DevKit |
 | 边缘库 | `umqtt.robust`、`neopixel`、`machine`、`ujson` | 内置于 MicroPython |
 | 消息代理 | Mosquitto | 运行于云服务器 `47.116.137.202`，TCP 1883 / WS 9001 |
-| 云端 AI | 共享逐步任务循环 + LangChain + ChatOpenAI（兼容接口） | langchain≥0.3 |
+| 云端 AI | LangChain 工具调用 + LangGraph 逐步任务图、文件检查点 | langchain≥1、langgraph≥1 |
 | LLM（编排/Go2/ESP32 智能体） | 火山方舟 Ark `deepseek-v4-flash` / `deepseek-v4-pro`（OpenAI 兼容） | 见 `cloud/.env: MODEL_LIST` |
 | Go2 机器狗 | `unitree-webrtc-connect`（WebRTC）+ YOLO（ultralytics）视觉 | HTTP REST，非 MQTT |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
@@ -54,24 +54,26 @@ ssm/
 │   │   ├── rules.py     ← `/api/rules` 自动化规则 CRUD
 │   │   └── devices.py   ← `/api/devices` + `/api/devices/{unit_id}/agent`（★ A2A Agent Card，数据取自 cards/）
 │   ├── cards/           ← ★ A2A 设备卡注册表：registry.py（订阅 card/manifest/status，全局单一真相）、builder.py（manifest→AgentCard）、schema.py
+│   ├── agents/          ← 三角色 Agent Graph 与共享文件检查点、动作账本、回复投影
+│   │   ├── common/      ← 运行图、持久化、模型、事件与回复契约
+│   │   ├── steward/     ← 管家 Graph、人格、工具声明与公开 skill
+│   │   ├── lamp/        ← 灯 Graph、人格、记忆与自主工作流
+│   │   └── go2/         ← Go2 Graph、人格、记忆与自主工作流
 │   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + 逐步任务循环）
-│   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → multitask
-│   │   ├── multitask.py ← 逐轮规划、派发、核对结果、生成管家回复
+│   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 管家 Graph
 │   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助
 │   │   ├── shared_state.py ← 线程安全传感器/执行器/任务快照（按 manifest agent_type 分桶）
 │   │   ├── devices.json ← 预留：文件型非 MQTT 设备注册表（当前为空，go2 已走 MQTT card）
 │   │   └── rules.json   ← 自动化规则存储
 │   ├── esp32/           ← ESP32 桌面空间智能体（云端侧，原 orchestrator/desk_agent）
-│   │   ├── agent.py     ← 灯实例与自主模式状态
-│   │   ├── multitask.py ← 灯的逐步问答和委派任务循环
+│   │   ├── service.py   ← 灯实例与自主模式状态、Graph 入口
 │   │   ├── router.py    ← `/api/esp32/autonomy`（灯自主模式 manual/reactive）
 │   │   ├── state.py     ← ESP32 设备/任务状态
 │   │   ├── tools.py     ← MQTT 发布辅助
 │   │   └── tts.py       ← TTS 合成封装
 │   └── go2/             ← Go2 机器狗智能体（数据面 HTTP；控制面 card/status 仍走 MQTT）
-│       ├── multitask.py ← Go2 的逐步问答和委派任务循环
 │       ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
-│       ├── agentcore/   ← Go2 内核：personality、soul（特质演化）、memory、tools、mode（vision/reactive）
+│       ├── mode/、perception/、tools/ ← 设备侧模式、视觉与执行适配
 │       ├── navigation/  ← astar / frontier / occupancy_grid / navigator / drive
 │       └── connection/  ← webrtc / video / sensors / fsm
 ├── app/                 ← 用户端 PWA（跑在手机/浏览器）
@@ -94,7 +96,7 @@ ssm/
 └── docs/                ← superpowers/（plans + specs）、research/、*.html 状态机图（无 ARCHITECTURE.md）
 ```
 
-**云端有三个 LLM 智能体**：编排器（`orchestrator/multitask.py`，统筹全局）、ESP32 桌面智能体（`esp32/agent.py` 管自主模式，`esp32/multitask.py` 管对话）、Go2 机器狗（`go2/multitask.py`）。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。
+**云端有三个 LLM 智能体**：管家、灯与 Go2 的模型决策分别位于 `cloud/agents/{steward,lamp,go2}/`；`orchestrator/main.py`、`esp32/service.py` 与 `go2/router.py` 接入各自 Graph。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。
 
 **当前接线**（以 `config.py` 为准）：
 
@@ -166,7 +168,7 @@ ssm/
 
 ### 4. 逐步任务循环（意图编排）
 
-**决策**：三个云端智能体共用 `cloud/agent_runtime/loop.py`；每轮由模型选择一个工具或最终回答，观察工具真实结果后再决定下一轮。管家、灯、Go2 各自在 `multitask.py` 组装提示词和执行设备专属工具。
+**决策**：三个云端智能体共用 `cloud/agents/common/` 的 LangGraph 运行、文件检查点、动作账本和回复契约；每轮由模型选择一个工具或最终回答，观察工具真实结果后再决定下一轮。各角色在 `cloud/agents/{steward,lamp,go2}/graph.py` 组装提示词和设备专属工具。
 
 **原因**：灯完成后再让 Go2 行动等依赖关系必须由实际回执决定。统一循环记录每步结果，并在末尾用共享回复模板与各自的人设组织答复。
 
@@ -186,7 +188,7 @@ ssm/
 
 **原因**：灯的价值是"自动选合适的色温/亮度"而非开关，但自主调光与用户/编排器命令并发会互相打架。模式开关 + 让位窗口让"全自动可介入 / 完全用户控制"成为可切换实验条件，且 LLM 始终是调色唯一大脑，不降级为规则表。仿机器狗 `_autonomy_mode` + `user_interrupt`，但灯是 tick 循环故用带 TTL 的窗口而非瞬时标志。
 
-**避免**：在灯智能体里写"什么情况配什么颜色"的硬编码规则表；manual 模式误解为只能开关灯（富命令仍可控）；让位窗口逻辑依赖 go2 agentcore（各智能体自主逻辑独立）。
+**避免**：在灯智能体里写"什么情况配什么颜色"的硬编码规则表；manual 模式误解为只能开关灯（富命令仍可控）；让位窗口逻辑依赖 Go2 的自主层（各智能体自主逻辑独立）。
 
 ---
 
@@ -216,7 +218,7 @@ make tunnel-url
 **可以做：**
 - 在 `UNIT_CONFIGS` 新增设备条目
 - 在 `TriggerMap` 新增事件→动作路由
-- 在三个智能体的 `multitask.py` 调整逐步任务逻辑
+- 在三个智能体的 `cloud/agents/*/graph.py` 调整逐步任务逻辑
 - 修改 PWA UI 样式和交互（app.jsx）
 
 **不能做：**

@@ -15,7 +15,6 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict, deque
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -42,6 +41,8 @@ _lamp_task_owners_lock = threading.Lock()
 
 def record_lamp_task_result(task_id: str, result: dict[str, Any]) -> None:
     """Keep owned browser results available even if the state ring is trimmed."""
+    from cloud.esp32.physical_tasks import record_result
+    record_result(task_id, os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"), result)
     with _lamp_task_owners_lock:
         if task_id in _lamp_task_owners:
             _lamp_task_results[task_id] = dict(result)
@@ -298,14 +299,16 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                 event["activity_id"] = activity_id
                 if event_type == "agent_reply":
                     get_activity_store().record_event(activity_id, "message", unit_id=agent_id,
-                                                      text=event["text"], status=status)
+                                                      text=event["text"], status=status,
+                                                      source_event_id=event["event_id"])
                 elif event_type == "agent_progress" and agent_id == "esp32_desk_led":
                     kind = ("action_result" if status in {"ok", "error", "blocked", "cancelled",
                                                            "timeout", "rejected", "unknown"}
                             else "action_progress")
                     get_activity_store().record_event(activity_id, kind, unit_id=agent_id,
                                                       text=event["text"], status=status,
-                                                      task_id=step_id or run_id)
+                                                      task_id=step_id or run_id,
+                                                      source_event_id=event["event_id"])
     if scope == "space":
         _events.emit_space(space_id, event)
     else:
@@ -425,17 +428,10 @@ async def create_intent(
     event_id = "evt_" + uuid.uuid4().hex
     trace_id = "tr_" + uuid.uuid4().hex
     if req.resume_run_id:
-        from cloud.agent_runtime.store import RunStore
-        runs_dir = Path(os.getenv("SSM_ORCHESTRATOR_RUN_DIR",
-                                  str(Path(__file__).resolve().parents[1] / "orchestrator" / "data" / "runs")))
-        store = RunStore(runs_dir)
-        previous = store.get(req.resume_run_id, session["session_id"])
-        if previous is not None:
-            if previous.trace_id:
-                trace_id = previous.trace_id
-            else:
-                previous.trace_id = trace_id
-                store.save(previous)
+        from cloud.agents.common.views import load_run
+        graph_run = load_run(req.resume_run_id, session["session_id"], "cloud_orchestrator")
+        if graph_run is not None and graph_run.trace_id:
+            trace_id = graph_run.trace_id
     from cloud.api.activity import user_intervention
     user_revision = await user_intervention(event_id)
     payload: dict[str, Any] = {
@@ -479,7 +475,7 @@ def _dispatch_mqtt_task(
     if not card.get("online", False):
         raise HTTPException(status_code=503, detail="unit is offline")
     if unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
-        from cloud.esp32.agentcore.tools.registry import (
+        from cloud.esp32.tool_registry import (
             valid_lamp_params, normalize_brightness, fsm_allows,
         )
         from cloud.api.main import _esp32_state
@@ -520,6 +516,16 @@ def _dispatch_mqtt_task(
     task_id = task_id or "task_" + uuid.uuid4().hex
     if not re.fullmatch(r"task_[A-Fa-f0-9]{32}", task_id):
         raise ValueError("invalid_physical_task_id")
+    owned_lamp_task = unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+    if owned_lamp_task:
+        from cloud.esp32.physical_tasks import reserve
+        # Reserve before publishing. A retry with the same ID must only query
+        # the original result, including after an API process restart.
+        first_dispatch = reserve(task_id, unit_id=unit_id,
+                                 session_id=session["session_id"],
+                                 action=action, params=params)
+        if not first_dispatch:
+            return task_id
     payload = {
         "task_id": task_id,
         "session_id": session["session_id"],
@@ -534,7 +540,6 @@ def _dispatch_mqtt_task(
     payload.update({key: correlation[key] for key in ("trace_id", "run_id") if key in correlation})
     if source:
         payload["source"] = source
-    owned_lamp_task = unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
     if owned_lamp_task:
         with _lamp_task_owners_lock:
             _lamp_task_owners[task_id] = (unit_id, session["session_id"])
@@ -544,6 +549,8 @@ def _dispatch_mqtt_task(
     try:
         _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
     except Exception:
+        # Keep the reservation: MQTT may have accepted the command before
+        # reporting failure, so another publish would risk a duplicate action.
         if owned_lamp_task:
             with _lamp_task_owners_lock:
                 _lamp_task_owners.pop(task_id, None)
@@ -553,7 +560,7 @@ def _dispatch_mqtt_task(
 
 
 def _valid_lamp_params(action: str, params: Any) -> bool:
-    from cloud.esp32.agentcore.tools.registry import valid_lamp_params
+    from cloud.esp32.tool_registry import valid_lamp_params
     return valid_lamp_params(action, params)
 
 
@@ -566,8 +573,9 @@ def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any],
         session["session_id"], session["actor"], session["actor"] == "admin",
         DEFAULT_SPACE_ID, "user_delegated", int(session["expires_at"]),
     )
-    def dispatch(uid, action, params, _context, source):
-        return _dispatch_mqtt_task(uid, action, params, session, source=source)
+    def dispatch(uid, action, params, _context, source, *, task_id=None):
+        return _dispatch_mqtt_task(uid, action, params, session, source=source,
+                                   task_id=task_id)
 
     return agent.run_user_loop(message, unit_id, context, dispatch,
                                run_id=run_id, resume=resume)
@@ -585,7 +593,7 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
         raise HTTPException(status_code=404, detail="unit is not available in the current space")
     if not card.get("online"):
         raise HTTPException(status_code=503, detail="unit is offline")
-    from cloud.esp32.agent import get_agent
+    from cloud.esp32.service import get_agent
 
     agent = get_agent()
     if agent is None:
@@ -716,7 +724,7 @@ async def create_command(
             raise HTTPException(status_code=403, detail="only an administrator may change autonomy mode")
         if req.params.get("axis") != "autonomy" or not req.params.get("value"):
             raise HTTPException(status_code=400, detail="set_mode requires axis=autonomy and value")
-        from cloud.esp32.agent import get_agent
+        from cloud.esp32.service import get_agent
 
         agent = get_agent()
         if agent is None:
@@ -746,18 +754,21 @@ async def get_lamp_chat_run(unit_id: str, run_id: str,
         raise HTTPException(status_code=404, detail="lamp run not found")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
         raise HTTPException(status_code=400, detail="invalid run_id")
-    from cloud.agent_runtime.store import RunStore
-    from cloud.esp32.paths import DATA_DIR
-    run = RunStore(DATA_DIR / "runs").get(run_id, session["session_id"])
+    from cloud.agents.common.views import load_run
+    run = load_run(run_id, session["session_id"], "esp32_desk_led")
     if run is None:
         raise HTTPException(status_code=404, detail="lamp run not found")
     if not run.reply_ready:
         return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
                 "result": "executing", "reply": "", "question": None,
                 "steps": run.steps}
+    event_id = run.reply_event_id or None
+    if event_id is None:
+        from cloud.agents.lamp.graph import stable_reply_event_id
+        event_id = stable_reply_event_id(run, run.status)
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": run.status, "reply": run.response,
-            "event_id": run.reply_event_id or None,
+            "event_id": event_id,
             "question": run.question or None, "steps": run.steps}
 
 @router.get("/api/commands/go2/tasks/{task_id}")
@@ -789,6 +800,15 @@ async def get_lamp_command_task(unit_id: str, task_id: str,
         raise HTTPException(status_code=404, detail="lamp task not found")
     if not re.fullmatch(r"task_[A-Fa-f0-9]{32}", task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
+    from cloud.esp32.physical_tasks import get as get_physical_task
+    durable = get_physical_task(task_id, unit_id=unit_id,
+                                session_id=session["session_id"])
+    if durable is not None:
+        if durable["result"] == "unknown":
+            with _lamp_task_owners_lock:
+                if _lamp_task_owners.get(task_id) == (unit_id, session["session_id"]):
+                    return {"result": "executing", "task_id": task_id}
+        return durable
     with _lamp_task_owners_lock:
         owner = _lamp_task_owners.get(task_id)
         cached = _lamp_task_results.get(task_id)

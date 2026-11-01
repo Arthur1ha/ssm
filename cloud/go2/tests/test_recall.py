@@ -1,8 +1,8 @@
 import json
 from datetime import date, datetime, timedelta
 
-from cloud.go2.agentcore.memory.episode import EpisodeMemory
-from cloud.go2.agentcore.memory.recall import recall_memory
+from cloud.agents.go2.memory.episode import EpisodeMemory
+from cloud.agents.go2.memory.recall import recall_memory
 
 
 def _write_event(directory, day, hour, event_type, content):

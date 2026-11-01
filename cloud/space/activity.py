@@ -265,11 +265,18 @@ class ActivityStore:
             return ended
 
     def record_event(self, activity_id: str, event_type: str, *, unit_id: str = "",
-                     text: str = "", **facts: Any) -> dict[str, Any] | None:
+                     text: str = "", source_event_id: str = "",
+                     **facts: Any) -> dict[str, Any] | None:
         with self._lock:
             if not self._current or self._current["activity_id"] != activity_id or self._current["status"] == "ending":
                 return None
-            return self._record_event_locked(activity_id, event_type, unit_id=unit_id, text=text, **facts)
+            if source_event_id:
+                for old in self._events.get(activity_id, []):
+                    if old.get("source_event_id") == source_event_id:
+                        return deepcopy(old)
+            return self._record_event_locked(activity_id, event_type, unit_id=unit_id,
+                                             text=text, source_event_id=source_event_id,
+                                             **facts)
 
     def _record_event_locked(self, activity_id: str, event_type: str, *, unit_id: str = "",
                              text: str = "", **facts: Any) -> dict[str, Any]:
@@ -286,7 +293,7 @@ class ActivityStore:
                       if key in {"target_unit_id", "message_id", "conversation_id", "task_id",
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
                                  "question_id", "action", "physical_stop", "reason",
-                                 "source", "confidence"}})
+                                 "source", "confidence", "source_event_id"}})
         if "source" in event:
             event["source"] = str(event["source"])[:64]
         if "confidence" in event and (isinstance(event["confidence"], bool)

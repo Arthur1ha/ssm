@@ -66,12 +66,12 @@ def test_go2_peer_reply_creates_one_local_bubble_without_sending_again(tmp_path,
     store.set_device(activity["activity_id"], "esp32_desk_led", mode="reactive", status="joined")
     store.activate(activity["activity_id"])
     monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: store)
-    monkeypatch.setattr("cloud.go2.agentcore.soul.load_system_prompt",
+    monkeypatch.setattr("cloud.agents.go2.personality.legacy.load_system_prompt",
                         lambda: ("我是机器狗", "test", None))
     class Model:
         async def ainvoke(self, _messages):
             return SimpleNamespace(content="灯的回复收到了，我继续找能走的路。")
-    monkeypatch.setattr("cloud.go2.agentcore.llm.get_text_llm", lambda: Model())
+    monkeypatch.setattr("cloud.agents.common.models.get_text_model", lambda _role: Model())
     messenger = Messenger()
     reply = {**MESSAGE, "sender": "esp32_desk_led", "target": "go2",
              "content": "灯光已调好", "reply_to": "msg_original",

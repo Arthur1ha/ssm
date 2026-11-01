@@ -67,8 +67,8 @@ def _publish_go2_reply_ack(messenger, message: dict) -> None:
         return
     status = messenger.get_status(message["reply_to"]) or {}
     confirmed = status.get("state") == "ok"
-    from cloud.go2.agentcore.soul import load_system_prompt
-    from cloud.go2.agentcore.llm import get_text_llm
+    from cloud.agents.go2.personality.legacy import load_system_prompt
+    from cloud.agents.common.models import get_text_model
     from langchain_core.messages import HumanMessage
 
     persona, _, _ = load_system_prompt()
@@ -83,7 +83,7 @@ def _publish_go2_reply_ack(messenger, message: dict) -> None:
     )
     try:
         response = asyncio.run(asyncio.wait_for(
-            get_text_llm().ainvoke([HumanMessage(content=prompt)]), timeout=8))
+            get_text_model("go2").ainvoke([HumanMessage(content=prompt)]), timeout=8))
         reply = str(response.content).strip()
         if not reply or len(reply) > 120 or "\n" in reply:
             raise ValueError("invalid_peer_ack")
@@ -130,7 +130,7 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
     text = _peer_input(message, messenger)
     try:
         if target == "go2":
-            from cloud.go2.multitask import run_go2_loop
+            from cloud.agents.go2.graph import run_go2_loop
             started_task = None
 
             def on_step(step):
@@ -151,7 +151,7 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
                 result["task_id"] = started_task
             _finish(messenger, message, result, reply_key="response")
             return
-        from cloud.esp32.agent import get_agent
+        from cloud.esp32.service import get_agent
         from cloud.api.intents import _dispatch_mqtt_task
         agent = get_agent()
         if agent is None:

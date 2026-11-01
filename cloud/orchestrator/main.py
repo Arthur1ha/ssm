@@ -22,9 +22,9 @@ import paho.mqtt.client as mqtt_lib
 from shared_state import SharedState
 from cloud.cards.registry import CardRegistry
 import tools as agent_tools
-from cloud.orchestrator.agentcore.peer.cancellation import (cancel_peer_coordination,
-                                                              clear_peer_coordination)
-from cloud.orchestrator.multitask import build_intent_run_context, run_intent_loop, run_peer_loop
+from cloud.peers.cancellation import cancel_peer_coordination, clear_peer_coordination
+from cloud.agents.steward.graph import build_intent_run_context, run_intent_loop
+from cloud.agents.steward.skills.coordination import run_peer_loop
 from cloud.mqtt_signing import MqttSignatureError, NonceReplayGuard, sign_message
 from cloud.peers.messaging import AgentMessenger
 from cloud.space.constraints import CURRENT_CONSTRAINTS_TOPIC, get_constraint_store

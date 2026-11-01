@@ -14,7 +14,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from cloud.agent_runtime.json_files import locked_directory, read_record, record_path, write_record
+from cloud.storage.json_files import locked_directory, read_record, record_path, write_record
 
 
 def digest(value: object) -> str:
