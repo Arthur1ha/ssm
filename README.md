@@ -93,7 +93,7 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 | `POST /api/intents`、`POST /api/commands/{unit_id}` | 认证后的统一手机命令入口 |
 | `GET /api/events` | 按会话过滤的反馈与设备状态 SSE |
 | `POST /api/emergency-stop` | 管理员和体验者均可用的全局安全停止 |
-| `GET/POST/DELETE /api/rules` | 管理员自动化规则 CRUD（`rules.py`） |
+| `GET/POST/PATCH/DELETE /api/teachings` | 管理员教导记忆 CRUD；确认后仅保存，暂不自动执行 |
 | `/api/admin/*` | 固定空间和访客邀请管理 |
 | `/api/go2/*` | 内部 Go2 数据面；写接口要求内部服务身份与可信执行上下文 |
 

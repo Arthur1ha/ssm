@@ -14,13 +14,12 @@ _LED_STATE_TRIG = {
 
 
 class TriggerMap:
-    def __init__(self, bsm, ism_led, ism_light, ism_ir, mqtt, local_rules):
+    def __init__(self, bsm, ism_led, ism_light, ism_ir, mqtt):
         self._bsm        = bsm
         self._ism_led    = ism_led
         self._ism_light  = ism_light
         self._ism_ir     = ism_ir
         self._mqtt       = mqtt
-        self._local      = local_rules
         self._pending_blink = None
         self._last_on = (255, 255, 255, 200)
         self._blink_restore = None
@@ -31,7 +30,6 @@ class TriggerMap:
         self._task_correlation = {}  # only active task IDs; terminal payload caches IDs
 
         self._led_task_pfx = "ssm/task/{}/".format(UNIT_LED)
-        self._rules_topic  = "ssm/rules/{}".format(DEVICE_ID)
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
@@ -40,26 +38,6 @@ class TriggerMap:
         if topic.startswith(self._led_task_pfx):
             task_id = topic[len(self._led_task_pfx):]
             self._handle_led_task(payload, task_id)
-
-        elif topic == "ssm/decision/active":
-            active = (payload == "true" or payload is True)
-            self._local.set_decision_active(active)
-
-        elif topic == self._rules_topic:
-            if isinstance(payload, list):
-                self._local.load_rules(payload)
-
-    # ─────────────────────────────────────────────────────────
-    #  本地兜底规则直接调用（不经 MQTT 自环）：执行 LED 命令
-    # ─────────────────────────────────────────────────────────
-    def exec_command(self, payload):
-        """供 LocalRules 在云端离线时直接调用，执行一条 LED 命令。"""
-        if isinstance(payload, dict):
-            try:
-                return self._exec_led(payload.get("cmd"), payload)
-            except Exception as exc:
-                print("[LocalRules] command failed:", exc)
-                return False
 
     # ─────────────────────────────────────────────────────────
     #  LED execution — ISM validates first, then BSM acts
@@ -136,7 +114,6 @@ class TriggerMap:
                                payload, retain=True)
             if event == "LIGHT_CHANGED":
                 self._mqtt.publish("ssm/agents/{}/event".format(UNIT_LIGHT), payload)
-                self._local.on_light_event(data["level"])
             if self._ism_light.state == "ERROR":
                 self._ism_light.transition(Trigger.SENSOR_RECOVERED)
 
@@ -147,12 +124,10 @@ class TriggerMap:
                                payload, retain=True)
             if event == "IR_CHANGED":
                 self._mqtt.publish("ssm/agents/{}/event".format(UNIT_IR), payload)
-                self._local.on_ir_event(data["presence"])
 
         elif event == "SOUND_DETECTED":
             payload = {"unit_id": UNIT_SOUND, "detected": True, "ts": ts}
             self._mqtt.publish("ssm/agents/{}/event".format(UNIT_SOUND), payload)
-            self._local.on_sound_event()
 
         elif event == "BLINK_DONE":
             if (self._ism_led.state != State.BLINKING or

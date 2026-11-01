@@ -1,1 +1,0 @@
-"""Lamp Agent tests."""

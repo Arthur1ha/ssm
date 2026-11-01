@@ -1,131 +1,106 @@
 const { useState: useStateR, useEffect: useEffectR } = React;
 
 function RulesScreen({ embedded = false, onRulesChange, open }) {
-  const [rules, setRules] = useStateR([]);
-  const [pendingDelete, setPendingDelete] = useStateR(null); // rule_id | null
-
-  // 自动取消确认（1.5 秒超时）
-  const deleteTimerRef = React.useRef(null);
-  const requestDelete = (rule_id) => {
-    if (pendingDelete === rule_id) {
-      // 二次点击：执行删除
-      clearTimeout(deleteTimerRef.current);
-      setPendingDelete(null);
-      handleDelete(rule_id);
-    } else {
-      // 第一次点击：进入确认状态
-      clearTimeout(deleteTimerRef.current);
-      setPendingDelete(rule_id);
-      deleteTimerRef.current = setTimeout(() => setPendingDelete(null), 1500);
-    }
-  };
-
+  const [teachings, setTeachings] = useStateR([]);
+  const [editing, setEditing] = useStateR(null);
+  const [error, setError] = useStateR('');
+  const [pendingDelete, setPendingDelete] = useStateR(null);
+  const [cards, setCards] = useStateR([]);
+  const [bindingEditor, setBindingEditor] = useStateR(null);
   const load = async () => {
     try {
-      const data = await apiClient.request('/api/rules');
-      setRules(data);
-      onRulesChange?.(data);
-    } catch {}
+      const [items, devices] = await Promise.all([
+        apiClient.request('/api/teachings'), apiClient.request('/api/devices')]);
+      setTeachings(items);
+      setCards(devices);
+      onRulesChange?.(items);
+      setError('');
+    } catch (err) { setError(err.message || '读取教导失败'); }
   };
-
   useEffectR(() => { load(); }, []);
   useEffectR(() => { if (open) load(); }, [open]);
-
-  const handleDelete = async (rule_id) => {
-    await apiClient.request(`/api/rules/${rule_id}`, { method: 'DELETE' });
-    load();
+  const remove = async (item) => {
+    if (pendingDelete !== item.teaching_id) { setPendingDelete(item.teaching_id); return; }
+    try {
+      await apiClient.request(`/api/teachings/${encodeURIComponent(item.teaching_id)}`, { method: 'DELETE' });
+      setPendingDelete(null);
+      await load();
+    } catch (err) { setError(err.message || '撤销失败'); }
   };
-
-  const handleToggle = async (rule_id, enabled) => {
-    await apiClient.request(`/api/rules/${rule_id}`, {
-      method: 'PATCH',
-      body: { enabled: !enabled },
-    });
-    load();
+  const save = async () => {
+    try {
+      await apiClient.request(`/api/teachings/${encodeURIComponent(editing.teaching_id)}`, {
+        method: 'PATCH', body: { name: editing.name, trigger: editing.trigger,
+          behavior: editing.behavior },
+      });
+      setEditing(null);
+      await load();
+    } catch (err) { setError(err.message || '修改失败'); }
   };
-
+  const saveBinding = async () => {
+    try {
+      await apiClient.request(`/api/teachings/${encodeURIComponent(bindingEditor.teaching_id)}/binding`, {
+        method: 'PUT', body: { observation_id: bindingEditor.observation_id,
+          where: JSON.parse(bindingEditor.where), skill_id: bindingEditor.skill_id,
+          params: JSON.parse(bindingEditor.params), enabled: bindingEditor.enabled },
+      });
+      setBindingEditor(null);
+      await load();
+    } catch (err) { setError(err.message || '绑定失败'); }
+  };
+  const groups = Object.groupBy ? Object.groupBy(teachings, item => item.unit_id) :
+    teachings.reduce((all, item) => { (all[item.unit_id] ||= []).push(item); return all; }, {});
   return (
-    <div style={{ position: embedded ? 'relative' : 'absolute', inset: embedded ? 'unset' : 0,
-      display: 'flex', flexDirection: 'column' }}>
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
-        background: 'radial-gradient(50% 30% at 50% 5%, var(--color-accent-dim), transparent 70%)' }}/>
-      {!embedded && (
-        <div style={{ padding: '14px 20px 10px', display: 'flex', alignItems: 'center',
-          justifyContent: 'space-between', flexShrink: 0, position: 'relative' }}>
-          <span style={{ fontSize: 22, fontWeight: 300, letterSpacing: '-0.01em',
-            color: 'var(--color-text)' }}>规则</span>
-          <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
-            {rules.filter(r => r.enabled).length} 启用 · {rules.length} 总计
-          </span>
-        </div>
-      )}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px',
-        paddingBottom: embedded ? '16px' : 'calc(158px + env(safe-area-inset-bottom, 0px))',
-        position: 'relative' }}>
-        {rules.length === 0 ? (
-          <div style={{ padding: '60px 20px', textAlign: 'center',
-            color: 'var(--color-text-dim)', fontSize: 13, lineHeight: 2 }}>
-            还没有规则<br/>
-            <span style={{ fontSize: 12 }}>在对话框里说"检测到人就开灯"来创建</span><br/>
-            <span style={{ fontSize: 11, color: 'var(--color-text-dim)',
-              opacity: 0.6 }}>规则创建后会在这里显示，可随时启用或关闭</span>
-          </div>
-        ) : rules.map(rule => (
-          <div key={rule.rule_id} style={{
-            display: 'flex', alignItems: 'center', gap: 12,
-            padding: '13px 14px', marginBottom: 8,
-            borderRadius: 'var(--radius-card)',
-            background: rule.enabled ? 'var(--color-accent-dim)' : 'var(--color-surface-1)',
-            border: `1px solid ${rule.enabled ? 'rgba(200,255,62,0.16)' : 'var(--color-border)'}`,
-          }}>
-            {/* Toggle */}
-            <div onClick={() => handleToggle(rule.rule_id, rule.enabled)}
-              className="interactive"
-              style={{ width: 38, height: 22, borderRadius: 11, flexShrink: 0,
-                background: rule.enabled ? 'var(--color-accent)' : 'var(--color-surface-3)',
-                position: 'relative', transition: 'background 0.2s' }}>
-              <div style={{ position: 'absolute', top: 3,
-                left: rule.enabled ? 18 : 3,
-                width: 16, height: 16, borderRadius: '50%',
-                background: 'var(--color-bg)', transition: 'left 0.2s' }}/>
-            </div>
-            {/* 规则信息 */}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 500,
-                color: rule.enabled ? 'var(--color-text)' : 'var(--color-text-muted)',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {rule.name}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--color-text-dim)',
-                fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-                {rule.trigger?.tag}.{rule.trigger?.event} → {rule.action?.tag}
-              </div>
-            </div>
-            {/* 删除按钮（扩大触摸目标 B6 + 二次确认 B3） */}
-            <button
-              onClick={() => requestDelete(rule.rule_id)}
-              style={{
-                flexShrink: 0, padding: 8, margin: -8,  /* 视觉28px，点击44px */
-                borderRadius: '50%',
-                background: pendingDelete === rule.rule_id
-                  ? 'var(--color-danger-dim)' : 'transparent',
-                border: pendingDelete === rule.rule_id
-                  ? '1px solid var(--color-danger-border)' : '1px solid transparent',
-                color: pendingDelete === rule.rule_id
-                  ? 'var(--color-danger)' : 'var(--color-text-dim)',
-                cursor: 'pointer', transition: 'all 0.15s',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: pendingDelete === rule.rule_id ? 10 : 12,
-                fontFamily: 'var(--font-sans)',
-                WebkitTapHighlightColor: 'transparent',
-              }}>
-              {pendingDelete === rule.rule_id ? '确认?' : <Icon name="x" size={12}/>}
-            </button>
-          </div>
-        ))}
-      </div>
+    <div style={{ height: '100%', overflowY: 'auto', padding: '18px 16px 80px', color: 'var(--color-text)' }}>
+      {!embedded && <h2>教导记忆</h2>}
+      <p style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>教导保存后需绑定已声明的观察与技能，启用后才参与智能体自主判断。</p>
+      {error && <p role="alert" style={{ color: 'var(--color-danger)' }}>{error}</p>}
+      {!teachings.length && <p style={{ color: 'var(--color-text-dim)', padding: '32px 0' }}>还没有教导。可以在对话中告诉管家想教哪个智能体、何时做什么。</p>}
+      {Object.entries(groups).map(([unitId, items]) => (
+        <section key={unitId} style={{ marginTop: 24 }}>
+          <h3 style={{ fontSize: 14 }}>{unitId}</h3>
+          {items.map(item => <article key={item.teaching_id} style={{ padding: 14, margin: '10px 0',
+            border: '1px solid var(--color-border)', borderRadius: 'var(--radius-card)',
+            background: 'var(--color-surface-2)' }}>
+            {editing?.teaching_id === item.teaching_id ? <>
+              {['name', 'trigger', 'behavior'].map(key =>
+                <label key={key} style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>{({name:'名称',trigger:'何时',behavior:'做什么',})[key]}
+                  <input value={editing[key]} maxLength={key === 'name' ? 120 : 500}
+                    onChange={e => setEditing({ ...editing, [key]: e.target.value })}
+                    style={{ display:'block', width:'100%', boxSizing:'border-box', padding:8,
+                      color:'var(--color-text)', background:'var(--color-surface-1)', border:'1px solid var(--color-border)' }}/>
+                </label>)}
+              <button onClick={save}>保存修改</button> <button onClick={() => setEditing(null)}>取消</button>
+            </> : <>
+              <strong>{item.name}</strong>
+              <div style={{ marginTop: 6, fontSize: 13 }}>当 {item.trigger} → {item.behavior}</div>
+              <div style={{ marginTop: 6, fontSize: 11, color:'var(--color-text-dim)' }}>{item.status === 'needs_review' ? '待检查' : '已记住'} · {({unbound:'尚未绑定',ready:'已绑定，未启用',enabled:'已启用',capability_unavailable:'能力不足，已暂停'})[item.execution_status || 'unbound']} · 修订 {item.revision}</div>
+              {bindingEditor?.teaching_id === item.teaching_id && (() => {
+                const card = cards.find(entry => entry.unit_id === item.unit_id) || {};
+                return <div style={{ marginTop: 10 }}>
+                  <label>观察能力 <select value={bindingEditor.observation_id} onChange={e => setBindingEditor({...bindingEditor, observation_id:e.target.value})}>
+                    <option value="">请选择</option>{(card.observations || []).map(obs => <option key={obs.id} value={obs.id}>{obs.id}</option>)}
+                  </select></label>{' '}
+                  <label>自主技能 <select value={bindingEditor.skill_id} onChange={e => setBindingEditor({...bindingEditor, skill_id:e.target.value})}>
+                    <option value="">请选择</option>{(card.autonomous_skills || []).map(id => <option key={id} value={id}>{id}</option>)}
+                  </select></label>
+                  <label style={{display:'block'}}>观察条件（JSON）<input value={bindingEditor.where} onChange={e => setBindingEditor({...bindingEditor, where:e.target.value})} /></label>
+                  <label style={{display:'block'}}>技能参数（JSON）<input value={bindingEditor.params} onChange={e => setBindingEditor({...bindingEditor, params:e.target.value})} /></label>
+                  <label><input type="checkbox" checked={bindingEditor.enabled} onChange={e => setBindingEditor({...bindingEditor, enabled:e.target.checked})} />启用</label>{' '}
+                  <button onClick={saveBinding}>保存绑定</button>{' '}<button onClick={() => setBindingEditor(null)}>取消</button>
+                </div>;
+              })()}
+              <div style={{ marginTop: 10 }}><button onClick={() => setEditing({ ...item })}>修改</button>{' '}
+                <button onClick={() => setBindingEditor({teaching_id:item.teaching_id,
+                  observation_id:item.binding?.observation_id || '', where:JSON.stringify(item.binding?.where || {}),
+                  skill_id:item.binding?.skill_id || '', params:JSON.stringify(item.binding?.params || {}),
+                  enabled:item.execution_status === 'enabled'})}>执行绑定</button>{' '}
+                <button onClick={() => remove(item)}>{pendingDelete === item.teaching_id ? '确认撤销？' : '撤销'}</button></div>
+            </>}
+          </article>)}
+        </section>
+      ))}
     </div>
   );
 }
-
 window.RulesScreen = RulesScreen;

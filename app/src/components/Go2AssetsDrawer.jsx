@@ -74,7 +74,7 @@ function Go2AssetsDrawer({ open, onClose }) {
 
   const formatCoordinate = value => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
   const taughtLabel = rule => {
-    const value = rule.behavior || rule.name || rule.action || rule.trigger;
+    const value = `${rule.trigger} → ${rule.behavior}`;
     if (typeof value === 'string') return value;
     if (value && typeof value === 'object') return JSON.stringify(value);
     return '未命名习惯';
@@ -156,8 +156,8 @@ function Go2AssetsDrawer({ open, onClose }) {
             <div className="memory-block">
               <h4>已教习惯</h4>
               {memory.taught.length ? <ul>{memory.taught.map((rule, index) => (
-                <li key={rule.id || index}><span>{taughtLabel(rule)}</span>
-                  <code>{rule.hit_count || 0} 次触发</code></li>
+                <li key={rule.teaching_id || index}><span>{taughtLabel(rule)}</span>
+                  <code>已记住，尚未接入自动执行</code></li>
               ))}</ul> : <p className="asset-empty">还没有保存的调教习惯。</p>}
             </div>
           </section>

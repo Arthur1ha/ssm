@@ -8,28 +8,10 @@ from dataclasses import asdict, is_dataclass
 from langchain_core.messages import HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.paths import RULES_FILE
 from cloud.go2.control import control_lease
 from cloud.go2.execution import current_context, require_admin, require_persist
 
-# Compatibility wrappers for existing callers; implementation lives in agentcore.rules.
-from cloud.go2 import rules as _rules
 from cloud.go2.models import get_text_llm, get_vision_llm
-
-def load_rules():
-    return _rules.load_rules(rules_file=RULES_FILE)
-
-def save_rules(rules):
-    return _rules.save_rules(rules, rules_file=RULES_FILE)
-
-def _migrate_rule(rule):
-    return _rules._migrate_rule(rule)
-
-def check_rules(observation, *, include_rules=False):
-    return _rules.check_rules(observation, include_rules=include_rules, rules_file=RULES_FILE)
-
-def record_rule_completion(rule_id):
-    return _rules.record_rule_completion(rule_id, rules_file=RULES_FILE)
 
 # ── 工具函数 ──────────────────────────────────────────────────────
 
@@ -141,41 +123,16 @@ def go2_status() -> str:
     return f"已连接 | mode={s.get('mode')} body_height={s.get('body_height')} velocity={s.get('velocity')}"
 
 
-def go2_add_rule(trigger: str, action: str, cooldown_s: int = 30,
-                 behavior: str = "") -> str:
-    """添加视觉触发调教：检测到 trigger 时执行 action（go2_sport 的 cmd 取值）。"""
-    require_persist("add a trained rule")
-    canonical = _normalize_sport_action(action)
-    if canonical is None:
-        return f"不支持的动作 {action}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
-    action = canonical
-    rules = [_migrate_rule(r) for r in load_rules()]
-    rules = [r for r in rules if not (r["trigger"] == trigger and r["action"] == action)]
-    rules.append({
-        "id":            f"tb_{int(time.time() * 1000)}",
-        "trigger":       trigger,
-        "action":        action,
-        "behavior":      behavior or action,
-        "action_hint":   {"skill": action},
-        "cooldown_s":    cooldown_s,
-        "last_triggered": 0,
-        "enabled":       True,
-        "created_ts":    time.time(),
-        "hit_count":     0,
-        "last_fired_ts": None,
-    })
-    save_rules(rules)
-    return f"已添加规则：检测到「{trigger}」时执行 {action}，冷却 {cooldown_s}s"
+def go2_add_rule(*args, **kwargs):
+    raise RuntimeError("legacy Go2 rule creation is retired; use /api/teachings")
 
 
 def go2_list_rules() -> str:
-    rules = load_rules()
+    from cloud.agents.common import teachings
+    rules = teachings.list_for("go2")
     if not rules:
-        return "当前没有规则"
-    return "\n".join(
-        f"- 检测到「{r['trigger']}」→ {r['action']}（冷却 {r['cooldown_s']}s）"
-        for r in rules
-    )
+        return "当前没有教导"
+    return "\n".join(f"- 当「{r['trigger']}」→ {r['behavior']}（已记住，尚未接入自动执行）" for r in rules)
 
 
 # ── 导航工具 ─────────────────────────────────────────────────────
@@ -313,7 +270,6 @@ TOOL_FN_MAP = {
     "go2_move":                   go2_move,
     "go2_observe":                go2_observe,
     "go2_status":                 go2_status,
-    "go2_add_rule":               go2_add_rule,
     "go2_list_rules":             go2_list_rules,
     "go2_tag_location":           go2_tag_location,
     "go2_navigate_to":            go2_navigate_to,

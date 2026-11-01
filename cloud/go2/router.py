@@ -893,9 +893,9 @@ async def go2_memory(context=Depends(require_admin_read)):
     """返回 Go2 的成长资产：调教记录 + 今天的事件流。"""
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.go2.tools.tools import load_rules
+    from cloud.agents.common import teachings
     from cloud.agents.go2.memory.episode import episode_memory
-    return {"taught": load_rules(), "today": episode_memory.format_today()}
+    return {"taught": teachings.list_for("go2", space_id=context.space_id), "today": episode_memory.format_today()}
 
 
 @router.get("/autonomy")

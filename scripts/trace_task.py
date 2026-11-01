@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -107,6 +106,76 @@ def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
     return events
 
 
+def _follow(log_dir: Path, args: argparse.Namespace) -> None:
+    """Tail new complete lines without retaining old events or rereading files."""
+    positions: dict[Path, tuple[int, int]] = {}
+    for path in _files(log_dir):
+        try:
+            stat = path.stat()
+            positions[path] = (stat.st_ino, stat.st_size)
+        except OSError:
+            pass
+    target = args.identifier or ("errors" if args.errors else "latest session")
+    print(f"Watching new events for {target}...", flush=True)
+    while True:
+        paths = _files(log_dir)
+        latest = None
+        if args.latest and not args.identifier:
+            candidates = [path for path in paths if path.name != "session-system.jsonl"]
+            if candidates:
+                latest = max(candidates, key=lambda path: path.stat().st_mtime_ns).stem[8:]
+            elif paths:
+                latest = "system"
+        for path in paths:
+            try:
+                with path.open("rb") as source:
+                    stat = path.stat()
+                    previous = positions.get(path)
+                    if previous is None:
+                        offset = 0
+                    elif previous[0] != stat.st_ino or previous[1] > stat.st_size:
+                        offset = 0
+                    else:
+                        offset = previous[1]
+                    source.seek(offset)
+                    while True:
+                        line = source.readline()
+                        if not line:
+                            break
+                        if not line.endswith(b"\n"):
+                            source.seek(-len(line), 1)
+                            break
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        if args.errors and not _error(event):
+                            continue
+                        if args.identifier and not (
+                            (event.get("session_id") or "system") == args.identifier
+                            or event.get("trace_id") == args.identifier
+                        ):
+                            continue
+                        if latest and (event.get("session_id") or "system") != latest:
+                            continue
+                        if args.agent_id and event.get("agent_id") != args.agent_id:
+                            continue
+                        if args.run_id and event.get("run_id") != args.run_id:
+                            continue
+                        if args.task_id and event.get("task_id") != args.task_id and event.get("request_id") != args.task_id:
+                            continue
+                        if not args.json and event.get("event") == "persona.loaded":
+                            continue
+                        print(json.dumps(event, ensure_ascii=False, sort_keys=True) if args.json else _brief(event), flush=True)
+                    positions[path] = (stat.st_ino, source.tell())
+            except OSError as exc:
+                print(f"Cannot read {path}: {exc}", file=sys.stderr)
+        positions = {path: state for path, state in positions.items() if path in paths}
+        time.sleep(1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("identifier", nargs="?", help="session ID (or trace ID for one task)")
@@ -127,36 +196,23 @@ def main() -> int:
     if args.limit < 0:
         parser.error("--limit must be nonnegative")
 
-    seen: set[str] = set()
-    had_match = False
-    reported_damage = 0
     if args.follow:
-        target = args.identifier or ("errors" if args.errors else "latest session")
-        print(f"Watching {target}; waiting for new task events...", flush=True)
-    while True:
-        events, damaged = _read(args.log_dir)
-        matches = _select(events, args)
-        if args.limit:
-            matches = matches[-args.limit :]
-        new = []
-        for event in matches:
-            key = hashlib.sha256(json.dumps(event, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-            if key not in seen:
-                seen.add(key)
-                new.append(event)
-        for event in new:
-            print(json.dumps(event, ensure_ascii=False, sort_keys=True) if args.json else _brief(event), flush=True)
-        had_match = had_match or bool(matches)
-        if damaged and damaged != reported_damage:
-            print(f"Warning: skipped {damaged} malformed JSONL line(s)", file=sys.stderr)
-            reported_damage = damaged
-        if not args.follow:
-            if not _files(args.log_dir):
-                print(f"No session log files in {args.log_dir}", file=sys.stderr)
-            elif not had_match:
-                print(f"No matching events for {args.identifier or ('errors' if args.errors else 'latest session')}", file=sys.stderr)
-            return 0 if had_match else 1
-        time.sleep(1)
+        _follow(args.log_dir, args)
+        return 0
+
+    events, damaged = _read(args.log_dir)
+    matches = _select(events, args)
+    if args.limit:
+        matches = matches[-args.limit :]
+    for event in matches:
+        print(json.dumps(event, ensure_ascii=False, sort_keys=True) if args.json else _brief(event), flush=True)
+    if damaged:
+        print(f"Warning: skipped {damaged} malformed JSONL line(s)", file=sys.stderr)
+    if not _files(args.log_dir):
+        print(f"No session log files in {args.log_dir}", file=sys.stderr)
+    elif not matches:
+        print(f"No matching events for {args.identifier or ('errors' if args.errors else 'latest session')}", file=sys.stderr)
+    return 0 if matches else 1
 
 
 if __name__ == "__main__":

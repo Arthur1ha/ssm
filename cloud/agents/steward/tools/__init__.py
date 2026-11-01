@@ -15,7 +15,7 @@ from cloud.agents.steward.tools.coordination import allows_step
 from cloud.agents.steward.tools.card import validate_public_skill
 from cloud.peers.cancellation import peer_coordination_cancelled
 from cloud.agents.steward.tools.policy import http_timeout_for, skill_requires_persistence
-from cloud.space.registry import DEFAULT_SPACE_ID
+from cloud.space.registry import DEFAULT_SPACE_ID, get_space_cards, get_space_registry
 from cloud.space.context import get_space_context
 from cloud.space.constraints import get_constraint_store
 from cloud.orchestrator import tools as transport
@@ -34,6 +34,7 @@ def _cards(context: dict) -> dict:
 
 def _public_view(cards: dict) -> list:
     return [{"unit_id": uid, "online": card.get("online", False),
+             "name": card.get("name"), "services": card.get("services", {}),
              "skills": [{"id": skill.get("id"), "params_schema": skill.get("params_schema", {})}
                         for skill in card.get("skills", [])[:16]]}
             for uid, card in list(cards.items())[:24]]
@@ -147,9 +148,16 @@ class AwaitResult(_Args):
     """查询既有设备任务结果。"""
     task_id: str
 
+class TeachingDraft(_Args):
+    """一条要交给主人确认的教导草案。"""
+    unit_id: str = Field(min_length=1, description="目标智能体的 Agent Card unit_id")
+    name: str = Field(min_length=1, max_length=120, description="教导名称")
+    trigger: str = Field(min_length=1, max_length=500, description="何时适用，用自然语言描述")
+    behavior: str = Field(min_length=1, max_length=500, description="希望智能体如何行动，用自然语言描述")
+
 class SaveRule(_Args):
-    """提交待用户确认的自动化规则。"""
-    rule: dict[str, Any]
+    """提交待主人确认的教导草案，只记住，不自动执行。"""
+    rule: TeachingDraft
 
 class SendMessage(_Args):
     """向同空间智能体发送受限消息。"""
@@ -285,10 +293,27 @@ def make_executor(run, context: dict, resume: bool = False):
             if context.get("actor") != "admin" or not context.get("persist"):
                 return {"result": "rejected", "error": "persistence_permission_denied"}
             rule = args.get("rule")
-            if not isinstance(rule, dict) or not isinstance(rule.get("name"), str):
-                return {"result": "rejected", "error": "invalid_rule"}
-            transport.do_publish_feedback(session_id, "pending_rule", "请确认这条规则后再生效。",
-                                          rule=rule, run_id=run_id)
+            if not isinstance(rule, dict) or any(
+                    not isinstance(rule.get(key), str) or not rule[key].strip()
+                    for key in ("unit_id", "name", "trigger", "behavior")):
+                return {"result": "rejected", "error": "invalid_teaching"}
+            if (len(rule["name"].strip()) > 120 or
+                    len(rule["trigger"].strip()) > 500 or
+                    len(rule["behavior"].strip()) > 500 or
+                    not isinstance(run.goal, str) or not run.goal.strip() or len(run.goal) > 1000):
+                return {"result": "rejected", "error": "teaching_text_too_long"}
+            available = _cards(context)
+            members = get_space_cards(available, get_space_registry())
+            members.update({uid: card for uid, card in available.items()
+                            if card.get("space_id") == DEFAULT_SPACE_ID})
+            target = members.get(rule["unit_id"])
+            if not target or (target.get("services") or {}).get("teachings_endpoint") != "/api/teachings":
+                return {"result": "rejected", "error": "target_not_teachable"}
+            draft = {key: rule[key].strip() for key in ("unit_id", "name", "trigger", "behavior")}
+            draft["source_text"] = run.goal
+            draft["confirmation_id"] = f"{run_id}:{step_id}"[:120]
+            transport.do_publish_feedback(session_id, "pending_rule", "请确认是否记住这条教导；暂不自动执行。",
+                                          rule=draft, run_id=run_id)
             return {"result": "accepted", "reason": "awaiting_user_confirmation"}
         return {"result": "rejected", "error": "unknown_tool"}
     return execute

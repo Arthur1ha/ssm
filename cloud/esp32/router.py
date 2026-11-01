@@ -126,14 +126,14 @@ async def esp32_chat(unit_id: str, req: ChatRequest, _session: dict = Depends(re
 async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
     """返回灯智能体的成长资产：调教记录 + 历史规律摘要。"""
     _require_led_unit(unit_id)
-    from cloud.agents.lamp.memory import taught
+    from cloud.agents.common import teachings
     from cloud.agents.lamp.memory.episode import recent
     from cloud.agents.lamp.memory.daily_summary import summarize_day
     agent = _esp32_agent.get_agent()
     belief = getattr(agent, "_belief_summary", "") if agent else ""
     context = ExecutionContext(_session["session_id"], "admin", True, "main",
                                "user_delegated", int(_session["expires_at"]))
-    return {"taught": taught.list_all(), "belief_summary": belief,
+    return {"taught": teachings.list_for(unit_id, space_id=_session["space_id"]), "belief_summary": belief,
             "episodes": recent(context), "daily_summary": summarize_day()}
 
 

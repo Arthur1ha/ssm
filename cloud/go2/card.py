@@ -184,6 +184,12 @@ def _build_go2_card() -> dict:
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",
+        "services": {"teachings_endpoint": "/api/teachings"},
+        "observations": [
+            {"id": "vision.person_presence", "fields": {"detected": "boolean"}},
+            {"id": "vision.face_presence", "fields": {"detected": "boolean"}},
+        ],
+        "autonomous_skills": ["go2_sport"],
         "online": False,
         "transport": {
             "kind": "http",
@@ -192,6 +198,12 @@ def _build_go2_card() -> dict:
             "state_stream": "/api/go2/connection/stream",
         },
         "skills": card_skills(),
+        "suggestions": [
+            "向我挥挥手",
+            "看看你面前有什么",
+            "识别一下你面前的人",
+            "有哪些已保存的地点？",
+        ],
         # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
         "state": {},
         "state_machine": _go2_state_machine(),

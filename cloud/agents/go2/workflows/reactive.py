@@ -51,6 +51,7 @@ class ActionState(TypedDict, total=False):
     action_cooldowns: dict[str, float]
     last_decision: dict[str, Any] | None
     candidate_actions: list[str]
+    teaching_candidates: list[dict]
     decision: dict[str, Any]
     result: dict[str, Any]
     status: str
@@ -90,6 +91,12 @@ def build_action_graph(
             boldness, set(_VALID_SPORT_CMDS), set(TURN_ACTIONS))
             if kind == "reactive" else
             social_action_candidates(boldness, set(_VALID_SPORT_CMDS)))
+        if kind == "reactive":
+            taught = {item["binding"]["params"]["cmd"]
+                      for item in state.get("teaching_candidates", [])
+                      if item["binding"]["skill_id"] == "go2_sport" and
+                      item["binding"]["params"].get("cmd") in _VALID_SPORT_CMDS}
+            candidates = set(candidates) | taught
         available = [action for action in candidates
                      if now - state.get("action_cooldowns", {}).get(action, 0) >= ACTION_COOLDOWN_S]
         return {"status": "deciding", "candidate_actions": sorted(available)}
@@ -99,7 +106,10 @@ def build_action_graph(
         prompt = (
             f"当前观察：{state.get('scene', '')}\n人物：{state.get('identity', '')}\n"
             f"空间：{state.get('space_summary', '')}\n记忆摘要：{state.get('memory_summary', '')}\n"
+            f"已启用教导的观察命中：{state.get('teaching_candidates', [])}\n"
             f"可选动作：{', '.join(state['candidate_actions']) or '无'}。也可以只观察。"
+            "若教导命中且其动作可选，应按教导行动；安全、用户中断和设备状态优先，"
+            "不行动时在 reason 中说明原因。"
             "只做当前模式允许的姿态或转向，不走动；用户中断和设备安全优先。"
         )
         try:

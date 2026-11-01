@@ -2,7 +2,12 @@
  * 主屏始终挂载；设备页以 position:fixed 包裹层叠在上方，
  * 进入时右滑入，返回时右滑出，避免整棵树切换导致的闪烁。
  */
-const SUGGESTIONS = ['我要工作了', '帮我营造睡眠氛围', '有人来了', '我要离开了'];
+const SUGGESTIONS = [
+  '让机器狗挥挥手，再把灯调成暖白色',
+  '请灯和机器狗一起迎接客人',
+  '我开始工作了',
+  '接下来请空间里的灯和机器狗都不要主动打扰我',
+];
 
 function useHashLocal() {
   const { useState, useEffect } = React;
@@ -192,10 +197,10 @@ function App({ session, logout, refreshSession }) {
       },
       onPendingRule: rule => {
         if (session.actor === 'admin') {
-          finishRequest(requestId, '规则已经准备好，请确认是否保存。');
+          finishRequest(requestId, '教导已整理好，请确认是否记住。');
           setPendingRule(rule);
         } else {
-          finishRequest(requestId, '临时体验不会保存长期规则，你仍可以直接控制现有设备。');
+          finishRequest(requestId, '临时体验不能保存长期教导。');
         }
       },
       intentHint: options.intentHint,
@@ -203,10 +208,11 @@ function App({ session, logout, refreshSession }) {
   };
 
   const handleConfirmRule = () => {
-    if (!pendingRule) return;
+    if (!pendingRule || savingRule) return;
     setSavingRule(true);
-    apiClient.request('/api/rules', { method: 'POST', body: pendingRule })
-      .then(() => { setPendingRule(null); setSavingRule(false); })
+    apiClient.request('/api/teachings', { method: 'POST', body: pendingRule })
+      .then(item => { setPendingRule(null); setSavingRule(false);
+        appendActivity({ type: 'ai', agent: 'orchestrator', text: `已记住：${item.name}（${item.teaching_id}）。尚未接入自动执行。` }); })
       .catch(error => {
         appendActivity({ type: 'ai', agent: 'orchestrator', text: apiErrorText(error) });
         setSavingRule(false);
@@ -313,11 +319,10 @@ function App({ session, logout, refreshSession }) {
                 border: '1px solid rgba(200,255,62,0.22)', borderRadius: 18, padding: '14px 16px',
               }}>
                 <div style={{ fontSize: 12, color: '#C8FF3E', fontWeight: 600, marginBottom: 8 }}>
-                  规则预览 · 确认保存？</div>
+                  教导预览 · 确认记住？</div>
                 <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{pendingRule.name}</div>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', marginBottom: 12 }}>
-                  当 {pendingRule.trigger?.tag}.{pendingRule.trigger?.event}
-                  {' → '}{pendingRule.action?.tag} / {pendingRule.action?.cmd}
+                  教给 {agents.find(a => a.unit_id === pendingRule.unit_id)?.name || pendingRule.unit_id}：当 {pendingRule.trigger} → {pendingRule.behavior}。确认后先记住，暂不自动执行。
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={() => setPendingRule(null)} style={{

@@ -11,11 +11,6 @@ def sense(state, last_sound_ts: float = 0.0) -> dict:
         if unit_id.endswith("_light"):
             light_data = data.get("state") or data.get("event")
             break
-    if not light_data:
-        return {"light_available": False, "sound_available": any(
-            unit_id.endswith("_sound") for unit_id in sensors
-        )}
-
     now = time.time()
     sound_available = False
     sound_detected = now - last_sound_ts < 5
@@ -41,10 +36,11 @@ def sense(state, last_sound_ts: float = 0.0) -> dict:
     hour = now_dt.hour
     period = ("深夜" if hour < 6 else "清晨" if hour < 9 else "上午" if hour < 12
               else "下午" if hour < 18 else "傍晚" if hour < 21 else "夜间")
+    light_data = light_data or {}
     value = light_data.get("value", 0)
     return {
-        "light_available": True, "sound_available": sound_available,
-        "light_level": light_data.get("level", "NORMAL"),
+        "light_available": bool(light_data), "sound_available": sound_available,
+        "light_level": light_data.get("level", "UNKNOWN"),
         "light_value": value, "light_lux": light_data.get("lux", value),
         "sound_detected": sound_detected, "sound_recent": sound_detected,
         "led_state": led_state, "led_device_id": led_device_id,

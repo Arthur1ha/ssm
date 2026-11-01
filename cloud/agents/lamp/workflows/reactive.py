@@ -35,12 +35,10 @@ class ReactiveState(TypedDict, total=False):
 
 def _prompt(agent, state: ReactiveState) -> str:
     from cloud.agents.lamp.personality.profile import get_profile
-    from cloud.agents.lamp.memory import taught
     from cloud.space.context import get_space_context
 
     profile = get_profile()
     space = get_space_context(agent._find_led_unit(), state=agent._state)
-    rules = [r for r in taught.list_all() if r.get("enabled", True)]
     if agent._belief_summary:
         history = f"历史规律摘要：{agent._belief_summary}"
     else:
@@ -54,13 +52,14 @@ def _prompt(agent, state: ReactiveState) -> str:
         "你负责桌面灯的自主判断。一次最多调用一个工具；看到真实结果后才决定下一步。"
         "无需动作时直接回答。accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
+        "观测中的 teaching_candidates 是已校验且启用的主人教导。命中且当前可执行时，"
+        "按其中的 agent_tool 和参数调用工具；若因安全或更高优先级要求不执行，应说明原因。"
+        "仍须遵守用户让位和真实执行回执。"
         f"社交主动性：{profile['traits']['social_initiative']}/100；"
         f"调光敏感度：{profile['traits']['adjustment_sensitivity']}/100，"
         "它只影响重新评估机会，不直接映射颜色。\n"
         f"观测：{json.dumps(state['sense'], ensure_ascii=False, default=str)}\n"
         f"空间：{json.dumps(space, ensure_ascii=False, default=str)}\n"
-        f"主人教过的规矩：{json.dumps(rules, ensure_ascii=False, default=str)}\n"
-        "如果工具动作确实依据某条规矩，在工具参数里给 taught_id；它不是设备参数。\n"
         f"{history}\n"
         f"已观察结果：{json.dumps(state.get('steps', []), ensure_ascii=False, default=str)}"
     )
@@ -129,7 +128,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if not agent._should_act() or not agent._device_online():
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
-        taught_id = args.pop("taught_id", None)
+        args.pop("taught_id", None)
         if name == "request_peer_skill":
             args["request_id"] = call["id"]
         event(state, "tool.dispatch", tool=name, params=args, tool_call_id=call["id"])
@@ -141,9 +140,6 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         else:
             ok = agent._dispatch_tool(name, args, agent._find_led_unit())
         result = getattr(agent, "_last_reactive_tool_result", {"result": "unknown"})
-        if ok and result.get("result") == "ok" and taught_id:
-            from cloud.agents.lamp.memory import taught
-            taught.touch(taught_id)
         step = {"step_id": call["id"], "tool": name, "params": args, "result": result}
         event(state, "tool.result", tool=name, step_id=call["id"], result=result,
               status=result.get("result", "unknown"),
@@ -247,7 +243,6 @@ def run_reactive_event(agent, sense: dict, *, model=None, publish=None,
 
 def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tuple[dict, tuple] | None:
     """Apply the listener's debounce, opportunity and material-change gates."""
-    from cloud.agents.lamp.memory import taught
     from cloud.agents.lamp.personality.behavior import light_change_bucket
     from cloud.agents.lamp.personality.profile import get_profile
     from cloud.esp32 import tools as lamp_tools
@@ -269,6 +264,31 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     if sense is None:
         return None
     sense = dict(sense)
+    observation = None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if unit.endswith("_sound") and payload.get("detected") is True:
+        observation = {"id": "sensor.sound_detected", "values": {"detected": True},
+                       "source": unit, "ts": payload.get("ts", 0)}
+    elif unit.endswith("_light") and "level" in payload:
+        observation = {"id": "sensor.light_changed", "values": {"level": payload["level"]},
+                       "source": unit, "ts": payload.get("ts", 0)}
+    if observation:
+        from cloud.agents.common import teachings
+        from cloud.agents.common.teaching_bindings import candidates
+        from cloud.cards.registry import get_registry
+        card = get_registry().get_card(agent._find_led_unit())
+        if card:
+            sense["teaching_candidates"] = candidates(
+                teachings.list_for(agent._find_led_unit()), observation, card, now=now)
+            from cloud.esp32.tool_registry import TOOL_DECLARATIONS
+            for candidate in sense["teaching_candidates"]:
+                skill = next((item for item in card.get("skills", [])
+                              if item.get("id") == candidate["binding"]["skill_id"]), None)
+                action = (skill or {}).get("invoke", {}).get("action")
+                candidate["agent_tool"] = next((name for name, declaration in TOOL_DECLARATIONS.items()
+                                                if declaration.get("action") == action), None)
+            sense["teaching_candidates"] = [candidate for candidate in sense["teaching_candidates"]
+                                            if candidate["agent_tool"] in VISIBLE]
     sense["proactive_hints"] = agent._check_proactive(sense)
     profile = get_profile()
     space = get_space_context(agent._find_led_unit(), state=agent._state)
@@ -278,8 +298,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         profile["traits"]["social_initiative"], unit_id=agent._find_led_unit())
     if opportunity:
         sense["social_opportunity"] = opportunity
-    rule_sig = tuple((r.get("id"), r.get("trigger"), r.get("behavior"), r.get("enabled"))
-                     for r in taught.list_all())
+    rule_sig = tuple(item["teaching_id"] for item in sense.get("teaching_candidates", ()))
     try:
         peers = lamp_tools.list_peers(agent._find_led_unit())
     except Exception:

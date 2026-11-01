@@ -41,7 +41,7 @@ class ReactiveMind:
 
     def _sense(self) -> dict | None:
         observed = sense_sensors(self._state, self._last_sound_ts)
-        return observed if observed["light_available"] else None
+        return observed if observed["light_available"] or observed["sound_available"] else None
 
     def _find_led_unit(self) -> str:
         """从 actuator 快照中查找 LED 单元 ID，找不到返回默认值。"""

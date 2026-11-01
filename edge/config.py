@@ -51,7 +51,6 @@ LIGHT_SAMPLE_MS      = 2000   # light polling interval
 IR_DEBOUNCE_MS       = 200    # IR presence debounce
 IR_HEARTBEAT_MS      = 30000  # IR heartbeat even when no change
 SOUND_COOLDOWN_MS    = 2000   # minimum gap between sound events
-LOCAL_RULES_DELAY_MS = 500    # delay after MQTT connect before local rules fire
 HEARTBEAT_MS         = 60000  # agent keepalive interval
 
 # ── Unit registry — 新增设备只需在这里添加一条 ──────────────

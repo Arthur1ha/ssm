@@ -31,7 +31,7 @@ from cloud.esp32.router import router as esp32_router, internal_router as esp32_
 from cloud.esp32.state import ESP32State
 from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
-from cloud.api.rules import router as rules_router
+from cloud.api.teachings import router as teachings_router
 from cloud.api.people import router as people_router
 from cloud.api.devices import router as devices_router
 from cloud.api.sessions import router as sessions_router
@@ -172,6 +172,8 @@ def _on_esp32_message(client, userdata, msg):
 @asynccontextmanager
 async def lifespan(app):
     configure_logging("api")
+    from cloud.agents.common.teaching_migration import migrate_legacy
+    migrate_legacy()
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(item, _DropSnapshotLogs) for item in access.filters):
         access.addFilter(_DropSnapshotLogs())
@@ -271,7 +273,7 @@ app.include_router(go2_router)
 app.include_router(people_router)
 app.include_router(esp32_router)
 app.include_router(esp32_internal_router)
-app.include_router(rules_router)
+app.include_router(teachings_router)
 app.include_router(devices_router)
 app.include_router(sessions_router)
 app.include_router(intents_router)

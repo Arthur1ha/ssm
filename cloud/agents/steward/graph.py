@@ -50,6 +50,28 @@ def _checkpoint_run(saver: FileCheckpointSaver, thread_id: str, run_id: str) -> 
     return None
 
 
+def _recent_session_history(saver: FileCheckpointSaver, thread_id: str,
+                            current_run_id: str, limit: int = 4) -> list[dict]:
+    """Return completed user turns from this session, newest last."""
+    history = []
+    seen = {current_run_id}
+    for item in saver.list({"configurable": {"thread_id": thread_id}}, limit=120):
+        data = item.checkpoint.get("channel_values", {}).get("run")
+        if not isinstance(data, dict):
+            continue
+        run_id = data.get("run_id")
+        if not run_id or run_id in seen or data.get("status") in {"executing", "needs_clarification"}:
+            continue
+        seen.add(run_id)
+        goal = data.get("goal")
+        response = data.get("response") or data.get("decision_draft")
+        if isinstance(goal, str) and goal.strip() and isinstance(response, str) and response.strip():
+            history.append({"user": goal[:1000], "assistant": response[:1000]})
+            if len(history) >= limit:
+                break
+    return list(reversed(history))
+
+
 
 
 
@@ -117,6 +139,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
             return {"run_id": run_id, "result": "rejected", "error": "run_id_conflict"}
     if resume:
         context = {**context, "user_msg": run.goal}
+    history = _recent_session_history(saver, thread_id, run_id)
     model = llm or get_text_model("steward")
     execute = make_executor(run, context, resume)
     transport.do_publish_feedback(session_id, "planning", "正在理解并执行目标…", run_id=run_id)
@@ -200,7 +223,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                       session_id=session_id, origin_kind=run.origin_kind):
         asyncio.run(run_role_graph(
             run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
-            build_messages=lambda current: build_messages(current, supplemental), execute=execute,
+            build_messages=lambda current: build_messages(current, supplemental, history), execute=execute,
             on_step=on_step, on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
             effectful=lambda name: name in {"invoke_skill", "save_rule", "send_message", "start_activity",

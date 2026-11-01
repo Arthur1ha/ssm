@@ -212,11 +212,11 @@ MODE_DEFS: dict[str, list[dict]] = {"led": _LED_MODES}
 
 # ── 声明式快捷指令表 ──────────────────────────────────────────────
 # 设备页对话的快捷词，由 card.suggestions 驱动（前端无设备特判）。
-# 灯走直达调教入口，故给的是"调教/对话"风格示例而非即时控制命令。
+# 灯页展示调光、色温与闪烁，均由灯智能体独立处理。
 _LED_SUGGESTIONS: list[str] = [
-    "以后天黑了就调亮一点",
-    "我睡觉时开助眠灯",
-    "我工作时开护眼光",
+    "把灯调成适合阅读的亮度和色温",
+    "把灯调成暖白色，亮度降低一些",
+    "闪烁三次提醒我",
 ]
 
 SUGGESTION_DEFS: dict[str, list[str]] = {"led": _LED_SUGGESTIONS}
@@ -310,7 +310,13 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     fsm_key = _fsm_key(manifest)
     if fsm_key:
         if fsm_key == "led" and agent_type == "actuator":
-            card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat"}
+            card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat",
+                                "teachings_endpoint": "/api/teachings"}
+            card["observations"] = [
+                {"id": "sensor.sound_detected", "fields": {"detected": "boolean"}},
+                {"id": "sensor.light_changed", "fields": {"level": "string"}},
+            ]
+            card["autonomous_skills"] = ["set_light_color", "set_light_state", "blink_light"]
         card["state_machine"] = (NEW_LED_FSM if fsm_key == "led" and
                                  manifest.get("fsm_version") == 2 else FSM_DEFS[fsm_key])
         modes = MODE_DEFS.get(fsm_key)

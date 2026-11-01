@@ -73,6 +73,16 @@ def normalize_card(payload: dict) -> dict:
     skills = card.get("skills")
     if not isinstance(skills, list):
         raise ValueError("skills must be an array")
+    observations = card.get("observations", [])
+    if not isinstance(observations, list):
+        raise ValueError("observations must be an array")
+    for observation in observations:
+        if (not isinstance(observation, dict) or
+                not isinstance(observation.get("id"), str) or
+                not isinstance(observation.get("fields"), dict) or
+                any(value not in {"string", "boolean", "integer", "number"}
+                    for value in observation["fields"].values())):
+            raise ValueError("invalid observation declaration")
     for skill in skills:
         if not isinstance(skill, dict):
             raise ValueError("skill must be an object")

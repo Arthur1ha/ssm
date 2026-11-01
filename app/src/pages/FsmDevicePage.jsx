@@ -477,7 +477,7 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
           </div>
           <div className="memory-block"><h4>已教习惯</h4>
             {memory.taught?.length ? <ul>{memory.taught.map((rule, index) =>
-              <li key={rule.id || index}><span>{rule.trigger} → {rule.behavior}</span><code>{rule.hit_count || 0} 次触发</code></li>)}</ul>
+              <li key={rule.teaching_id || index}><span>{rule.trigger} → {rule.behavior}</span><code>{({unbound:'尚未绑定',ready:'已绑定，未启用',enabled:'已启用',capability_unavailable:'能力不足，已暂停'})[rule.execution_status || 'unbound']}</code></li>)}</ul>
               : <p className="asset-empty">还没有保存的调教习惯。</p>}
           </div>
         </section>

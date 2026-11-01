@@ -91,6 +91,7 @@ def persona_reply_prompt(persona: str, run: Run, *, traits: dict | None = None) 
         + "根据真实执行结果回答用户：ok 才表示完成；accepted、executing、timeout、unknown "
         "均不能说成完成。失败或被拒绝的动作不能说成已执行。若只有部分成功，说明哪些已完成、哪些未完成。"
         "若记录中有错误或超时原因，用日常语言说明；edge_result_unconfirmed 表示未收到设备执行回执，"
+        "invalid_rule 和 invalid_teaching 表示提交格式错误，不代表传感器缺失或设备不支持。"
         "不能断言设备动作失败。后续步骤因结果未确认而暂停时也要说明。没有实际发起后续操作，就不要承诺会继续查看或重试。"
         "运行时说明和草稿只供理解，不要照抄；不要假装其他智能体已回复。\n"
         + json.dumps(facts, ensure_ascii=False, default=str)

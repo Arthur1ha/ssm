@@ -75,7 +75,7 @@ function describeRunProgress(event, compact = false) {
     go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
     get_space_context: '查看空间信息', read_state: '查看传感器状态',
     await_result: '核对执行结果', request_peer_skill: '协同处理请求',
-    save_rule: '保存自动化规则', go2_chat: '回应当前问题' })[actionId] || '处理当前请求';
+    save_rule: '整理待确认教导', go2_chat: '回应当前问题' })[actionId] || '处理当前请求';
   const argumentLabels = { brightness: '亮度', duration: '时长', duration_s: '时长', speed: '速度' };
   const args = Object.entries(event.arguments || {}).filter(([key, value]) =>
     argumentLabels[key] && typeof value === 'number' && Number.isFinite(value))
