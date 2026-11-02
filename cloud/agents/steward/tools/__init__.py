@@ -10,6 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
 from cloud.agents.common.runner import invoke_blocking
+from cloud.agents.common.teaching_bindings import validate_for_teaching
 from cloud.observability import current_event_context, emit_agent_event
 from cloud.agents.steward.tools.coordination import allows_step
 from cloud.agents.steward.tools.card import validate_public_skill
@@ -35,9 +36,13 @@ def _cards(context: dict) -> dict:
 def _public_view(cards: dict) -> list:
     return [{"unit_id": uid, "online": card.get("online", False),
              "name": card.get("name"), "services": card.get("services", {}),
-             "skills": [{"id": skill.get("id"), "params_schema": skill.get("params_schema", {})}
-                        for skill in card.get("skills", [])[:16]]}
-            for uid, card in list(cards.items())[:24]]
+             "observations": card.get("observations", []),
+             "autonomous_skills": card.get("autonomous_skills", []),
+             "skills": [{"id": skill.get("id"), "name": skill.get("name"),
+                         "description": skill.get("description"),
+                         "params_schema": skill.get("params_schema", {})}
+                        for skill in card.get("skills", [])]}
+            for uid, card in cards.items()]
 
 def _wait_mqtt_result(task_id: str, session_id: str, deadline: float) -> dict:
     while time.time() < deadline:
@@ -154,9 +159,12 @@ class TeachingDraft(_Args):
     name: str = Field(min_length=1, max_length=120, description="教导名称")
     trigger: str = Field(min_length=1, max_length=500, description="何时适用，用自然语言描述")
     behavior: str = Field(min_length=1, max_length=500, description="希望智能体如何行动，用自然语言描述")
+    binding: dict[str, Any] | None = Field(description=(
+        "设备当前可验证的自动执行映射；只有观察和自主技能都能精确表达用户条件时填写。"
+        "格式为 observation_id、where、skill_id、params；不能把看到任意人等同于识别主人。"))
 
 class SaveRule(_Args):
-    """提交待主人确认的教导草案，只记住，不自动执行。"""
+    """提交教导和可验证的自动执行映射，由主人一起确认。"""
     rule: TeachingDraft
 
 class SendMessage(_Args):
@@ -311,10 +319,20 @@ def make_executor(run, context: dict, resume: bool = False):
             target = members.get(rule["unit_id"])
             if not target or (target.get("services") or {}).get("teachings_endpoint") != "/api/teachings":
                 return {"result": "rejected", "error": "target_not_teachable"}
+            binding = rule.get("binding")
+            if binding is not None:
+                try:
+                    binding = validate_for_teaching(binding, target, rule["trigger"])
+                except (ValueError, KeyError, TypeError):
+                    return {"result": "rejected", "error": "unsupported_teaching_binding"}
             draft = {key: rule[key].strip() for key in ("unit_id", "name", "trigger", "behavior")}
             draft["source_text"] = run.goal
             draft["confirmation_id"] = f"{run_id}:{step_id}"[:120]
-            transport.do_publish_feedback(session_id, "pending_rule", "请确认是否记住这条教导；暂不自动执行。",
+            if binding is not None:
+                draft["binding"] = binding
+            feedback = ("请确认教导和自动触发设置。" if binding is not None
+                        else "请确认教导；当前没有可验证的自动触发设置。")
+            transport.do_publish_feedback(session_id, "pending_rule", feedback,
                                           rule=draft, run_id=run_id)
             return {"result": "accepted", "reason": "awaiting_user_confirmation"}
         return {"result": "rejected", "error": "unknown_tool"}

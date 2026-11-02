@@ -30,7 +30,7 @@ def tool_schemas(context: ExecutionContext | None = None) -> dict[str, dict]:
 
 
 READ_ONLY_TOOLS = frozenset({
-    "go2_status", "go2_observe", "go2_list_rules", "go2_list_locations",
+    "go2_status", "go2_observe", "go2_list_teachings", "go2_list_locations",
     "go2_recognize_person", "go2_list_people", "list_peers", "get_space_context",
 })
 

@@ -413,6 +413,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       </ChatPanel>
       </div>
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
+        card={card}
         modes={modes} modeVals={modeVals} onSwitchMode={switchMode}
         offline={offline} connected={connected} safetyAction={safetyAction}
         onSafety={() => { setSettingsOpen(false); dispatchTransition(safetyAction); }}
@@ -589,7 +590,7 @@ function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, 
   </div>;
 }
 
-function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, isLamp, actor, unitId, onGo2Settings, onLampSettings }) {
+function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, isLamp, actor, unitId, onGo2Settings, onLampSettings }) {
   const panelRef = React.useRef(null);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
@@ -599,7 +600,7 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
     const onKey = event => {
       if (event.key === 'Escape') closeRef.current();
       if (event.key !== 'Tab') return;
-      const focusables = panelRef.current?.querySelectorAll('button:not([disabled]), a[href]');
+      const focusables = panelRef.current?.querySelectorAll('button:not([disabled]), a[href], summary');
       if (!focusables?.length) return;
       if (event.shiftKey && document.activeElement === focusables[0]) {
         event.preventDefault();
@@ -635,6 +636,21 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
       {actor === 'admin' && isLamp && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onLampSettings(); }}>
         <span><strong>灯智能体设置</strong><small>人设与记忆</small></span><Icon name="arrow" size={15}/>
       </button>}
+      <details className="device-settings-capabilities">
+        <summary>设备能力与技能</summary>
+        <section><h3>可用于自动触发的观察</h3>
+          {card?.observations?.length ? card.observations.map(obs =>
+            <p key={obs.id}><strong>{obs.name || obs.id}</strong><small>{obs.available === false ? '当前不可用 · ' : ''}{obs.description || '设备声明的观察条件'}</small></p>)
+            : <p><small>该设备暂未声明自动触发条件。</small></p>}
+        </section>
+        <section><h3>公开技能</h3>
+          {card?.skills?.length ? card.skills.map(skill =>
+            <p key={skill.id}><strong>{skill.name}</strong>
+              <small>{(card.autonomous_skills || []).includes(skill.id) ? '可用于自主规则' :
+                skill.tags?.includes('persistent') ? '需管理员操作' : '可手动或通过对话调用'} · {skill.description}</small></p>)
+            : <p><small>该设备暂未声明公开技能。</small></p>}
+        </section>
+      </details>
       <a className="device-settings-card" href={'/api/devices/' + encodeURIComponent(unitId) + '/agent'}
         target="_blank" rel="noopener noreferrer">
         <span><strong>Agent Card</strong><small>查看设备能力、状态机和控件声明</small></span><Icon name="arrow" size={15}/>

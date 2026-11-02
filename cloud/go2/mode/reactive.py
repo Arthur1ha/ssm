@@ -52,6 +52,7 @@ class ReactiveMind:
         self._generation = 0
         self._context: ExecutionContext = SYSTEM_CONTEXT
         self._last_prompt_metadata: dict | None = None
+        self._reason_lock = asyncio.Lock()
 
     def set_active(self, active: bool, context: ExecutionContext | None = None) -> None:
         self._generation += 1
@@ -67,8 +68,24 @@ class ReactiveMind:
         return time.time() - self._action_cooldowns.get(action, 0) < _ACTION_COOLDOWN_S
 
     def on_identity_event(self, event) -> None:
-        """只更新推理上下文；身份本身不直接触发动作。"""
+        """身份变化可作为已声明的观察；动作仍由自主 Graph 决策。"""
         self._identity = event.current
+        current, previous = event.current, event.previous
+        if (not self._active or current.status != "recognized" or current.role != "owner"
+                or previous.status == "recognized" and previous.person_id == current.person_id):
+            return
+        from cloud.go2.perception.vision import vision_loop
+        frame, _ = vision_loop.latest_frame_pair()
+        if frame is None or abs(time.time() - frame["ts"]) > 5:
+            return
+        observation = {"id": "vision.owner_recognized", "values": {"recognized": True},
+                       "source": "go2.identity", "ts": current.ts,
+                       "person_id": current.person_id}
+        try:
+            asyncio.get_running_loop().create_task(
+                self._autonomous_reason(frame, self._generation, identity_observation=observation))
+        except RuntimeError:
+            return
 
     def _identity_context(self) -> str:
         current = self._identity
@@ -158,7 +175,13 @@ class ReactiveMind:
 
     # ── 异步自主推理 ──────────────────────────────────────────────
 
-    async def _autonomous_reason(self, frame: VisionFrame, generation: int | None = None) -> None:
+    async def _autonomous_reason(self, frame: VisionFrame, generation: int | None = None,
+                                 identity_observation: dict | None = None) -> None:
+        async with self._reason_lock:
+            await self._reason_once(frame, generation, identity_observation)
+
+    async def _reason_once(self, frame: VisionFrame, generation: int | None,
+                           identity_observation: dict | None) -> None:
         """Project a vision change into Go2's checkpointed autonomous Graph."""
         if not self._active or (generation is not None and generation != self._generation):
             return
@@ -170,6 +193,15 @@ class ReactiveMind:
         now = time.time()
         scene = (f"{frame['change_type']}；"
                  f"{frame['persons']['count']} 人，{frame['faces']['count']} 张脸")
+        if identity_observation:
+            current = self._identity
+            if (current.status == "recognized" and current.role == "owner"
+                    and current.person_id == identity_observation.get("person_id")):
+                identity_observation = {**identity_observation, "ts": now}
+            else:
+                identity_observation = None
+        if identity_observation:
+            scene += "；已识别主人"
         from cloud.agents.common import teachings
         from cloud.agents.common.teaching_bindings import candidates
         from cloud.cards.registry import get_registry
@@ -182,6 +214,8 @@ class ReactiveMind:
                 observation = {"id": f"vision.{kind}_presence", "values": {"detected": detected},
                                "source": "go2.camera", "ts": frame["ts"], "frame_id": frame["frame_id"]}
                 teaching_candidates.extend(candidates(records, observation, card, now=now))
+            if identity_observation:
+                teaching_candidates.extend(candidates(records, identity_observation, card, now=now))
         run_id = "auto_" + uuid.uuid4().hex
         def live() -> bool:
             return (self._active and go2.is_connected and

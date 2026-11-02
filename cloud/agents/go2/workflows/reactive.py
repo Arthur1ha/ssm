@@ -83,7 +83,8 @@ def build_action_graph(
         now = state.get("now", time.time())
         if not state.get("active") or not state.get("connected") or state.get("interrupted"):
             return {"status": "cancelled", "candidate_actions": []}
-        if kind == "reactive" and now - state.get("last_autonomous_ts", 0) < AUTONOMY_COOLDOWN_S:
+        if (kind == "reactive" and not state.get("teaching_candidates")
+                and now - state.get("last_autonomous_ts", 0) < AUTONOMY_COOLDOWN_S):
             return {"status": "cooldown", "candidate_actions": []}
         profile = profile_loader()
         boldness = profile["traits"]["boldness"]

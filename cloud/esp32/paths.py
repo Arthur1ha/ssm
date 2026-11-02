@@ -9,7 +9,6 @@ DATA_DIR = Path(
     os.getenv("ESP32_DATA_DIR", str(Path(__file__).resolve().parent / "data"))
 )
 MEMORY_DIR = DATA_DIR / "memory"
-TAUGHT_FILE = MEMORY_DIR / "taught.json"
 EPISODES_FILE = MEMORY_DIR / "episodes.jsonl"
 SUMMARY_DIR = MEMORY_DIR / "daily_summary"
 PERSONALITY_FILE = DATA_DIR / "soul" / "personality.json"

@@ -172,8 +172,6 @@ def _on_esp32_message(client, userdata, msg):
 @asynccontextmanager
 async def lifespan(app):
     configure_logging("api")
-    from cloud.agents.common.teaching_migration import migrate_legacy
-    migrate_legacy()
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(item, _DropSnapshotLogs) for item in access.filters):
         access.addFilter(_DropSnapshotLogs())

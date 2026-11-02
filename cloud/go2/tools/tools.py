@@ -123,16 +123,17 @@ def go2_status() -> str:
     return f"已连接 | mode={s.get('mode')} body_height={s.get('body_height')} velocity={s.get('velocity')}"
 
 
-def go2_add_rule(*args, **kwargs):
-    raise RuntimeError("legacy Go2 rule creation is retired; use /api/teachings")
-
-
-def go2_list_rules() -> str:
+def go2_list_teachings() -> str:
     from cloud.agents.common import teachings
-    rules = teachings.list_for("go2")
-    if not rules:
+    records = teachings.list_for("go2")
+    if not records:
         return "当前没有教导"
-    return "\n".join(f"- 当「{r['trigger']}」→ {r['behavior']}（已记住，尚未接入自动执行）" for r in rules)
+    statuses = {"unbound": "未设置自动执行", "ready": "未启用自动执行",
+                "enabled": "已启用自动执行"}
+    return "\n".join(
+        f"- 当「{item['trigger']}」→ {item['behavior']}"
+        f"（{statuses.get(item.get('execution_status'), '需要重新设置自动执行')}）"
+        for item in records)
 
 
 # ── 导航工具 ─────────────────────────────────────────────────────
@@ -265,7 +266,7 @@ TOOL_FN_MAP = {
     "go2_move":                   go2_move,
     "go2_observe":                go2_observe,
     "go2_status":                 go2_status,
-    "go2_list_rules":             go2_list_rules,
+    "go2_list_teachings":         go2_list_teachings,
     "go2_tag_location":           go2_tag_location,
     "go2_navigate_to":            go2_navigate_to,
     "go2_navigate_to_coordinate": go2_navigate_to_coordinate,

@@ -270,6 +270,7 @@ identity_skill.add_callback(_on_identity_event)
 async def _initialize_identity_vision() -> None:
     """连接后先验证人员库，再决定是否启动身份视觉消费者。"""
     await identity_skill.check_provider()
+    _publish_go2_card()
     _configure_vision_consumers(_autonomy_mode)
 
 

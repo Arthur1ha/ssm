@@ -69,9 +69,7 @@ def _save(space_id: str, unit_id: str, items: list[dict]) -> None:
 
 def remember(unit_id: str, name: str, trigger: str, behavior: str, source_text: str,
              *, space_id: str = "main", source: str = "owner_confirmation",
-             legacy_id: str | None = None, legacy_file: str | None = None,
-             legacy_index: int | None = None, legacy_backup: str | None = None,
-             status: str = "remembered", confirmation_id: str | None = None) -> dict:
+             confirmation_id: str | None = None, binding: dict | None = None) -> dict:
     name, trigger, behavior = (_text(name, "name", 120), _text(trigger, "trigger"),
                                _text(behavior, "behavior"))
     source_text = _text(source_text, "source_text", 1000)
@@ -87,20 +85,14 @@ def remember(unit_id: str, name: str, trigger: str, behavior: str, source_text: 
         now = time.time()
         item = {"schema_version": 1, "teaching_id": f"tb_{uuid.uuid4().hex}",
                 "unit_id": unit_id, "space_id": space_id, "name": name,
-                "trigger": trigger, "behavior": behavior, "status": status,
-                "execution_status": "unbound",
+                "trigger": trigger, "behavior": behavior, "status": "remembered",
+                "execution_status": "enabled" if binding is not None else "unbound",
                 "source": source, "source_text": source_text,
                 "created_at": now, "updated_at": now, "revision": 1}
+        if binding is not None:
+            item["binding"] = dict(binding)
         if confirmation_id is not None:
             item["confirmation_id"] = confirmation_id
-        if legacy_id is not None:
-            item["legacy_id"] = str(legacy_id)[:120]
-        if legacy_file is not None:
-            item["legacy_file"] = str(legacy_file)[:300]
-        if legacy_index is not None:
-            item["legacy_index"] = legacy_index
-        if legacy_backup is not None:
-            item["legacy_backup"] = str(legacy_backup)[:300]
         items.append(item)
         _save(space_id, unit_id, items)
         return item

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud.agents.common import teachings
-from cloud.agents.common.teaching_bindings import validate as validate_binding
+from cloud.agents.common.teaching_bindings import validate_for_teaching
 from cloud.api.auth import require_admin, require_admin_csrf
 from cloud.api.policy import audit_event
 from cloud.cards.registry import get_registry
@@ -22,6 +22,7 @@ class Draft(BaseModel):
     behavior: str = Field(min_length=1, max_length=500)
     source_text: str = Field(min_length=1, max_length=1000)
     confirmation_id: str | None = Field(default=None, min_length=1, max_length=120)
+    binding: dict | None = None
 
 
 class Revision(BaseModel):
@@ -71,7 +72,7 @@ def _project(item: dict, card: dict) -> dict:
     result = dict(item)
     if result.get("execution_status") in {"ready", "enabled"}:
         try:
-            validate_binding(result.get("binding"), card)
+            validate_for_teaching(result.get("binding"), card, result.get("trigger") or "")
         except (ValueError, KeyError, TypeError):
             result["execution_status"] = "capability_unavailable"
     return result
@@ -91,16 +92,20 @@ async def list_teachings(unit_id: str | None = None, session: dict = Depends(req
 
 @router.post("", status_code=201)
 async def create_teaching(req: Draft, session: dict = Depends(require_admin_csrf)):
-    _target(req.unit_id, session)
+    card = _targets(session["space_id"]).get(req.unit_id)
+    if card is None:
+        raise HTTPException(404, "teachable agent is not in this space")
     if len(_all(session)) >= 2000:
         raise HTTPException(422, "space teaching limit reached")
     try:
+        binding = validate_for_teaching(req.binding, card, req.trigger) if req.binding is not None else None
         item = teachings.remember(req.unit_id, req.name, req.trigger, req.behavior,
                                   req.source_text, space_id=session["space_id"],
-                                  confirmation_id=req.confirmation_id)
-    except ValueError as exc:
+                                  confirmation_id=req.confirmation_id, binding=binding)
+    except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
-    audit_event("teaching_created", session, teaching_id=item["teaching_id"], unit_id=req.unit_id)
+    audit_event("teaching_created", session, teaching_id=item["teaching_id"],
+                unit_id=req.unit_id, enabled=item["execution_status"] == "enabled")
     return item
 
 
@@ -130,7 +135,8 @@ async def bind_teaching(teaching_id: str, req: BindingRequest,
         raise HTTPException(404, "teaching not found")
     card = _targets(session["space_id"])[existing["unit_id"]]
     try:
-        binding = validate_binding(req.model_dump(exclude={"enabled"}), card)
+        binding = validate_for_teaching(req.model_dump(exclude={"enabled"}), card,
+                                        existing["trigger"])
     except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     item = teachings.set_binding(existing["unit_id"], teaching_id, binding,

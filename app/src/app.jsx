@@ -195,7 +195,9 @@ function App({ session, logout, refreshSession }) {
       },
       onPendingRule: rule => {
         if (session.actor === 'admin') {
-          finishRequest(requestId, '教导已整理好，请确认是否记住。');
+          finishRequest(requestId, rule.binding
+            ? '教导和触发条件已整理好，请确认。'
+            : '教导已整理好；设备暂时无法准确识别这个触发条件。');
           setPendingRule(rule);
         } else {
           finishRequest(requestId, '临时体验不能保存长期教导。');
@@ -326,11 +328,18 @@ function App({ session, logout, refreshSession }) {
                   <div className="teaching-card__line"><span>当</span><p>{pendingRule.trigger}</p></div>
                   <div className="teaching-card__line"><span>就</span><p>{pendingRule.behavior}</p></div>
                 </div>
-                <p className="teaching-card__note">记住后仍需设置触发条件，启用后才会自动执行。</p>
+                {pendingRule.binding ? <div className="rule-card__mapping">
+                  <span className="rule-card__mapping-label">确认后启用的触发设置</span>
+                  <strong>{window.ruleObservationCopy(pendingRule.binding.observation_id, pendingRule.binding.where)}
+                    <span aria-hidden="true">→</span>
+                    {window.ruleActionCopy(pendingRule.binding.skill_id, pendingRule.binding.params,
+                      agents.find(a => a.unit_id === pendingRule.unit_id))}</strong>
+                </div> : <p className="teaching-card__note">设备目前没有能准确匹配这句话的触发条件或自主动作；确认后只保存教导，不会自动执行。</p>}
+                {pendingRule.binding && <p className="teaching-card__note">设备还需处于“自主反应”模式；命中后仍会检查状态与安全限制。</p>}
                 <div className="teaching-card__actions">
                   <button className="teaching-button teaching-button--quiet" onClick={() => setPendingRule(null)}>取消</button>
                   <button className="teaching-button teaching-button--primary" onClick={handleConfirmRule} disabled={savingRule}>
-                    {savingRule ? '正在保存…' : '记住教导'}
+                    {savingRule ? '正在保存…' : pendingRule.binding ? '确认并启用' : '仅记住教导'}
                   </button>
                 </div>
               </div>

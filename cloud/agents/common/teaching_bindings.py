@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 
@@ -12,14 +13,16 @@ def validate(binding: dict, card: dict) -> dict:
     observations = {item.get("id"): item for item in card.get("observations", [])
                     if isinstance(item, dict)}
     observation = observations.get(binding["observation_id"])
-    if observation is None:
+    if observation is None or observation.get("available") is False:
         raise ValueError("observation capability unavailable")
     where = binding["where"]
     fields = observation.get("fields") or {}
     types = {"string": str, "boolean": bool, "integer": int, "number": float}
-    if not isinstance(where, dict) or not all(
+    if not isinstance(where, dict) or not where or not all(
             key in fields and type(value) is types.get(fields[key]) for key, value in where.items()):
         raise ValueError("observation condition is not supported")
+    if binding["observation_id"] == "vision.owner_recognized" and where != {"recognized": True}:
+        raise ValueError("owner recognition requires a confirmed owner event")
     skill = next((item for item in card.get("skills", [])
                   if item.get("id") == binding["skill_id"]), None)
     if skill is None:
@@ -47,6 +50,16 @@ def validate(binding: dict, card: dict) -> dict:
             "skill_id": binding["skill_id"], "params": dict(params)}
 
 
+def validate_for_teaching(binding: dict, card: dict, trigger: str) -> dict:
+    """Keep identity-specific teachings from silently matching every person."""
+    checked = validate(binding, card)
+    if (card.get("unit_id") == "go2" and
+            checked["observation_id"] in {"vision.person_presence", "vision.face_presence"} and
+            re.search(r"主人|看到我|看见我|见到我|认出我|识别我", trigger)):
+        raise ValueError("identity trigger requires owner recognition observation")
+    return checked
+
+
 def candidates(records: list[dict], observation: dict, card: dict, *, now: float | None = None) -> list[dict]:
     now = time.time() if now is None else now
     if not isinstance(observation, dict):
@@ -60,7 +73,7 @@ def candidates(records: list[dict], observation: dict, card: dict, *, now: float
             continue
         binding = record.get("binding")
         try:
-            checked = validate(binding, card)
+            checked = validate_for_teaching(binding, card, str(record.get("trigger") or ""))
         except (ValueError, KeyError, TypeError):
             continue
         if (checked["observation_id"] == observation.get("id") and

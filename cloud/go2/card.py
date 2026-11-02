@@ -52,6 +52,48 @@ CARD_SKILLS = {
         "tags": ["motion", "robot"],
         "invoke": {"action": "MOVE"},
     },
+    "go2_observe": {
+        "tool_name": "go2_observe",
+        "name": "观察当前画面",
+        "description": "通过摄像头描述当前看到的场景",
+        "tags": ["vision", "robot"],
+        "invoke": {"action": "OBSERVE"},
+    },
+    "go2_status": {
+        "tool_name": "go2_status",
+        "name": "查看机器狗状态",
+        "description": "读取连接、姿态与运动状态",
+        "tags": ["status", "robot"],
+        "invoke": {"action": "STATUS"},
+    },
+    "go2_set_led": {
+        "tool_name": "go2_set_led",
+        "name": "设置机身灯",
+        "description": "设置机器狗机身灯的颜色和时长",
+        "tags": ["light", "robot"],
+        "invoke": {"action": "SET_LED"},
+    },
+    "go2_list_locations": {
+        "tool_name": "go2_list_locations",
+        "name": "查看已保存地点",
+        "description": "列出机器狗可导航的命名地点",
+        "tags": ["navigation", "robot"],
+        "invoke": {"action": "LIST_LOCATIONS"},
+    },
+    "go2_tag_location": {
+        "tool_name": "go2_tag_location",
+        "name": "保存当前地点",
+        "description": "管理员将当前定位保存为可导航的命名地点",
+        "tags": ["navigation", "persistent", "robot"],
+        "invoke": {"action": "TAG_LOCATION"},
+    },
+    "go2_list_teachings": {
+        "tool_name": "go2_list_teachings",
+        "name": "查看已保存教导",
+        "description": "查看机器狗的教导和自动执行状态",
+        "tags": ["memory", "robot"],
+        "invoke": {"action": "LIST_TEACHINGS"},
+    },
 }
 
 
@@ -176,6 +218,8 @@ def _build_go2_card() -> dict:
     card 只含能力，不含 volatile state；online/status 表示真实 WebRTC 连接状态，
     FSM/动作等动态状态经 HTTP /api/go2/* 实时获取。
     """
+    from cloud.go2.perception.identity import identity_skill
+
     card = {
         "card_schema_version": 1,
         "version": "1",
@@ -186,8 +230,14 @@ def _build_go2_card() -> dict:
         "agent_type": "robot",
         "services": {"teachings_endpoint": "/api/teachings"},
         "observations": [
-            {"id": "vision.person_presence", "fields": {"detected": "boolean"}},
-            {"id": "vision.face_presence", "fields": {"detected": "boolean"}},
+            {"id": "vision.person_presence", "name": "看到人",
+             "description": "只判断画面中是否有人，不识别身份", "fields": {"detected": "boolean"}},
+            {"id": "vision.face_presence", "name": "看到人脸",
+             "description": "只判断画面中是否有人脸，不识别身份", "fields": {"detected": "boolean"}},
+            {"id": "vision.owner_recognized", "name": "识别到主人",
+             "description": "人脸识别确认已登记的主人；需要人脸识别服务可用",
+             "available": identity_skill.enabled,
+             "fields": {"recognized": "boolean"}},
         ],
         "autonomous_skills": ["go2_sport"],
         "online": False,
