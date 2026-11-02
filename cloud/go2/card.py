@@ -262,7 +262,6 @@ def _build_go2_card() -> dict:
             "label": "自主性",
             "options": [
                 {"value": "manual",       "label": "完全遥控", "description": "由用户/编排器遥控决定行动"},
-                {"value": "reactive",     "label": "自主反应", "description": "机器狗根据视觉输入自主做即时反应"},
                 {"value": "free_explore", "label": "自由探索", "description": "需要可信定位和已知可通行地图；当前地图不足时拒绝移动"},
             ],
             "get": "/api/go2/autonomy",

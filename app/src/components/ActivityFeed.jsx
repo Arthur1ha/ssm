@@ -110,7 +110,7 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
                 {window.ruleActionCopy(teaching.binding.skill_id, teaching.binding.params, card)}</strong>
             </div>}
             <div className="teaching-saved__footer">
-              <span>{teaching.execution_status === 'enabled' ? '已启用 · 自主反应模式下生效' : '已记住 · 暂不自动触发'}</span>
+              <span>{teaching.execution_status === 'enabled' ? '已启用 · 设备自主模式下生效' : '已记住 · 暂不自动触发'}</span>
               {onOpenRules && <button className="teaching-link" onClick={onOpenRules}>查看教导与规则 <span aria-hidden="true">↗</span></button>}
             </div>
           </div>;

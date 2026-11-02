@@ -335,7 +335,7 @@ function App({ session, logout, refreshSession }) {
                     {window.ruleActionCopy(pendingRule.binding.skill_id, pendingRule.binding.params,
                       agents.find(a => a.unit_id === pendingRule.unit_id))}</strong>
                 </div> : <p className="teaching-card__note">设备目前没有能准确匹配这句话的触发条件或自主动作；确认后只保存教导，不会自动执行。</p>}
-                {pendingRule.binding && <p className="teaching-card__note">设备还需处于“自主反应”模式；命中后仍会检查状态与安全限制。</p>}
+                {pendingRule.binding && <p className="teaching-card__note">设备还需开启自主模式；命中后仍会检查状态与安全限制。</p>}
                 <div className="teaching-card__actions">
                   <button className="teaching-button teaching-button--quiet" onClick={() => setPendingRule(null)}>取消</button>
                   <button className="teaching-button teaching-button--primary" onClick={handleConfirmRule} disabled={savingRule}>

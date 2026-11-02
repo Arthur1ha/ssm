@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import replace
 from enum import Enum
 from typing import Optional
@@ -55,6 +56,65 @@ class Drive:
         self._social_retry_after = 0.0
         self._social_action_cooldowns: dict[str, float] = {}
         self._last_social_decision: dict | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._generation = 0
+        self._events: deque[dict] = deque(maxlen=32)
+        self._seen_events: set[str] = set()
+        self._wake: asyncio.Event | None = None
+        self._active_goal: dict | None = None
+        self._last_decision: dict | None = None
+        self._last_tool_result: dict | None = None
+        self._explore_visited: list[tuple[float, float]] = []
+        self._explore_rejected: list[tuple[float, float]] = []
+        self._last_observation: str | None = None
+        self._action_cooldowns: dict[str, float] = {}
+
+    @property
+    def last_decision(self) -> dict | None:
+        return self._last_decision
+
+    def submit_event(self, event: dict) -> bool:
+        """Thread-safe bounded fact delivery to the active autonomous loop."""
+        if self._loop is None or self._task is None or self._task.done():
+            return False
+        event_id = str(event.get("event_id") or event.get("message_id") or "")
+        ts = event.get("ts")
+        deadline = event.get("deadline", (ts or 0) + 5)
+        if not event_id or not isinstance(ts, (int, float)) or not isinstance(deadline, (int, float)):
+            return False
+        if ts > time.time() + 5 or deadline <= time.time():
+            return False
+        generation = self._generation
+        def deliver() -> None:
+            if generation != self._generation or event_id in self._seen_events:
+                return
+            if event.get("activity_id") and event["activity_id"] != self._activity_id():
+                if event.get("kind") == "peer_message":
+                    event["messenger"].send_result(event_id, "cancelled", reason="activity_ended")
+                return
+            self._seen_events.add(event_id)
+            if len(self._seen_events) > 256:
+                self._seen_events = {item.get("event_id") for item in self._events}
+            if len(self._events) == self._events.maxlen:
+                dropped = self._events.popleft()
+                if dropped.get("kind") == "peer_message":
+                    dropped["messenger"].send_result(dropped["message_id"], "cancelled",
+                                                      reason="autonomy_queue_full")
+            self._events.append(dict(event))
+            if self._wake is not None:
+                self._wake.set()
+        self._loop.call_soon_threadsafe(deliver)
+        return True
+
+    def submit_peer_message(self, message: dict, messenger) -> bool:
+        if message.get("target") != "go2" or message.get("reply_to"):
+            return False
+        return self.submit_event({"event_id": message["message_id"],
+            "message_id": message["message_id"], "kind": "peer_message",
+            "source": message.get("sender"), "content": message.get("content", ""),
+            "ts": time.time(), "deadline": message["deadline"],
+            "activity_id": message.get("activity_id"),
+            "message": message, "messenger": messenger})
 
     @staticmethod
     def _result_text(result: dict) -> str:
@@ -199,6 +259,20 @@ class Drive:
                     if owner_session_id is not None:
                         navigator.stop(owner_session_id=owner_session_id)
                     return {"result": "cancelled", "message": "导航被打断"}
+                if self._events and await self._interrupt_for_event():
+                    stopped = owner_session_id is not None and navigator.stop(owner_session_id=owner_session_id)
+                    nav_task.cancel()
+                    await asyncio.gather(nav_task, return_exceptions=True)
+                    if stopped and go2.is_connected:
+                        try:
+                            receipt = await go2.send_command("StopMove", completion_timeout=5.0)
+                            stopped = receipt.get("result") == "ok"
+                        except Exception:
+                            stopped = False
+                    if not stopped:
+                        self.user_interrupt = True
+                    return {"result": "cancelled" if stopped else "unknown",
+                            "reason": "autonomous_task_handoff" if stopped else "stop_unconfirmed"}
                 await asyncio.sleep(0.5)
             return nav_task.result()
         except asyncio.CancelledError:
@@ -229,6 +303,7 @@ class Drive:
         """
         currently_present  = frame["persons"]["detected"]
         currently_engaging = frame["faces"]["detected"]
+        face_changed = currently_engaging != self._person_engaging
 
         # 追踪人体 presence，供对话上下文使用。
         if currently_present and not self._person_present:
@@ -251,10 +326,42 @@ class Drive:
 
         if frame["changed"] and frame["change_type"] != "none" and not currently_present and not self._person_present:
             episode_memory.add(EventType.VISION_CHANGE, f"视觉变化：{frame['change_type']}")
+        if (frame["changed"] or face_changed) and frame.get("frame_id"):
+            self.submit_event({"event_id": "frame:" + str(frame["frame_id"]),
+                "kind": "observation", "source": "go2.camera", "ts": frame["ts"],
+                "deadline": frame["ts"] + 5,
+                "content": f"persons={frame['persons']['count']}; faces={frame['faces']['count']}",
+                "activity_id": self._activity_id()})
 
     def on_identity_event(self, event) -> None:
-        """身份仅作为语言/社交上下文，不直接切换状态或触发运动。"""
+        """Only confirmed fresh identity can trigger an enabled teaching."""
         self._identity = event.current
+        current, previous = event.current, event.previous
+        if (current.status != "recognized" or current.role != "owner" or
+                previous.status == "recognized" and previous.person_id == current.person_id):
+            return
+        from cloud.go2.perception.vision import vision_loop
+        frame, _ = vision_loop.latest_frame_pair()
+        if frame is None or abs(time.time() - frame["ts"]) > 5:
+            return
+        from cloud.agents.common import teachings
+        from cloud.agents.common.teaching_bindings import candidates
+        from cloud.cards.registry import get_registry
+        card = get_registry().get_card("go2")
+        if not card:
+            return
+        observation = {"id": "vision.owner_recognized", "values": {"recognized": True},
+                       "source": "go2.identity", "ts": current.ts,
+                       "person_id": current.person_id}
+        matches = candidates(teachings.list_for("go2", space_id=self._context.space_id),
+                             observation, card)
+        for match in matches:
+            binding = match["binding"]
+            if binding["skill_id"] == "go2_sport" and binding["params"].get("cmd") == "Hello":
+                self.submit_event({"event_id": f"owner:{current.person_id}:{current.ts}:{match['teaching_id']}",
+                    "kind": "teaching", "source": "go2.identity", "ts": time.time(),
+                    "deadline": time.time() + 5, "person_id": current.person_id,
+                    "teaching_id": match["teaching_id"], "action": "Hello"})
 
     def _identity_context(self) -> str:
         current = self._identity
@@ -273,18 +380,26 @@ class Drive:
         saver = FileCheckpointSaver()
         graph = build_motivation_graph(profile_loader=get_profile, checkpointer=saver)
         thread_id = "go2:motivation:" + uuid.uuid4().hex
+        self._wake = asyncio.Event()
         while True:
-            await asyncio.sleep(1)
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+            self._wake.clear()
             if self.user_interrupt or self._pending_question_id:
                 continue
-
-            await self._evaluate_social()
+            if self._events:
+                event = self._events.popleft()
+                await self._handle_event(event, graph, saver, thread_id)
+                continue
 
             async with saver.async_run_lock(thread_id):
                 tick = await graph.ainvoke(
                     {"state": self._state.value, "curiosity": self._curiosity,
                      "social_tick": self._social_tick,
                      "person_engaging": self._person_engaging,
+                     "pending_event": {},
                      "interrupted": self.user_interrupt,
                      "pending_question": bool(self._pending_question_id),
                      "connected": go2.is_connected},
@@ -300,9 +415,238 @@ class Drive:
                 finally:
                     self._state = MotivationalState.IDLE
             elif tick.get("should_social"):
-                await self._do_social()
+                self.submit_event({"event_id": "social:" + uuid.uuid4().hex,
+                    "kind": "social", "source": "go2.camera", "ts": time.time(),
+                    "deadline": time.time() + 5})
 
-    async def _do_explore(self) -> None:
+    async def _decide_event(self, event: dict, graph=None, saver=None, thread_id=None) -> dict:
+        from cloud.agents.common.checkpoint import FileCheckpointSaver
+        from cloud.agents.go2.workflows.free_explore import build_motivation_graph
+        saver = saver or FileCheckpointSaver()
+        try:
+            model = get_text_llm() if event.get("kind") == "peer_message" else None
+        except Exception:
+            model = None
+        graph = build_motivation_graph(profile_loader=get_profile,
+            checkpointer=saver, model=model)
+        thread_id = thread_id or "go2:event:" + uuid.uuid4().hex
+        public_event = {key: event.get(key) for key in
+                        ("event_id", "kind", "source", "content", "deadline", "activity_id")}
+        async with saver.async_run_lock(thread_id):
+            result = await graph.ainvoke({"pending_event": public_event,
+                "space_summary": prompt_space_context(),
+                "current_goal": self._active_goal,
+                "last_tool_result": self._last_tool_result,
+                "connected": go2.is_connected, "interrupted": self.user_interrupt,
+                "pending_question": bool(self._pending_question_id)},
+                {"configurable": {"thread_id": thread_id}}, durability="sync")
+        self._last_decision = {"event_id": event["event_id"],
+                               "choice": result.get("event_decision", "defer"),
+                               "reason": result.get("decision_reason", "")}
+        return self._last_decision
+
+    async def _interrupt_for_event(self) -> bool:
+        event = self._events[0]
+        if event.get("kind") not in {"peer_message", "teaching"}:
+            return False
+        decision = await self._decide_event(event)
+        event["decision"] = decision
+        return decision["choice"] == "accept"
+
+    async def _advance_task(self, goal: dict, *, stage: str = "", result: dict | None = None,
+                            step_done: bool = False) -> dict:
+        """Persist one task transition; Drive only adapts the selected device step."""
+        from cloud.agents.common.checkpoint import FileCheckpointSaver
+        from cloud.agents.go2.workflows.free_explore import build_motivation_graph
+        saver = FileCheckpointSaver()
+        graph = build_motivation_graph(profile_loader=get_profile, checkpointer=saver)
+        thread_id = "go2:task:" + goal["event_id"]
+        update = {"event_id": goal["event_id"], "stage": stage,
+                  "result": result or {}, "step_done": step_done, "now": time.time()}
+        async with saver.async_run_lock(thread_id):
+            state = await graph.ainvoke({"current_goal": goal, "task_update": update,
+                "pending_event": {}, "connected": go2.is_connected,
+                "interrupted": self.user_interrupt,
+                "pending_question": bool(self._pending_question_id)},
+                {"configurable": {"thread_id": thread_id}}, durability="sync")
+        self._active_goal = state.get("current_goal") or None
+        self._last_tool_result = state.get("last_tool_result")
+        return state
+
+    async def _handle_event(self, event: dict, graph, saver, thread_id) -> None:
+        if event.get("deadline", 0) <= time.time():
+            if event.get("kind") == "peer_message":
+                event["messenger"].send_result(event["message_id"], "cancelled", reason="message_expired")
+            return
+        decision = event.get("decision") or await self._decide_event(event, graph, saver, thread_id)
+        if event["kind"] == "teaching":
+            if decision["choice"] != "accept" or self.user_interrupt:
+                return
+            current = self._identity
+            from cloud.go2.perception.vision import vision_loop
+            frame, _ = vision_loop.latest_frame_pair()
+            if (not current or current.status != "recognized" or current.role != "owner"
+                    or current.person_id != event["person_id"] or time.time() > event["deadline"]
+                    or frame is None or abs(time.time() - frame.get("ts", 0)) > 5
+                    or not (frame.get("faces") or {}).get("detected")):
+                self._last_decision = {**decision, "reason": "identity_expired"}
+                return
+            if time.time() - self._action_cooldowns.get(event["action"], 0) < 30:
+                self._last_decision = {**decision, "reason": "action_cooldown"}
+                return
+            self._active_goal = {"kind": "teaching", "event_id": event["event_id"]}
+            await self._advance_task(self._active_goal, stage="start")
+            result = await self._execute_motion("go2_sport", {"cmd": event["action"]})
+            self._action_cooldowns[event["action"]] = time.time()
+            await self._advance_task(self._active_goal, stage="finish", result=result)
+            self._active_goal = None
+            return
+        if event["kind"] == "social":
+            await self._do_social()
+            return
+        if event["kind"] != "peer_message":
+            return
+        messenger, message = event["messenger"], event["message"]
+        choice = decision["choice"]
+        if choice != "accept":
+            if choice == "decline":
+                messenger.send_result(event["message_id"], "rejected", reason="autonomous_declined")
+            else:
+                messenger.send_result(event["message_id"], "unknown", reason="autonomous_deferred")
+            return
+        task_id = "peer_" + event["message_id"]
+        self._active_goal = {"kind": "peer_message", "event_id": event["event_id"],
+                             "task_id": task_id, "deadline": event["deadline"]}
+        messenger.send_progress(event["message_id"], task_id)
+        if self._is_color_object_game(str(message.get("content") or "")):
+            try:
+                await self._run_color_object_game(event, task_id)
+            except asyncio.CancelledError:
+                messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
+                                      reason="autonomy_stopped")
+                raise
+            finally:
+                self._active_goal = None
+            return
+        from cloud.agents.go2.graph import run_go2_loop
+        from cloud.peers.inbound import _peer_input
+        context = replace(self._context, expires_at=int(min(event["deadline"], time.time() + 90)))
+        task = asyncio.create_task(run_go2_loop(context.session_id, _peer_input(message, messenger),
+                context=context, run_id=event["message_id"], deadline=event["deadline"]))
+        try:
+            while not task.done():
+                if self.user_interrupt or not go2.is_connected or time.time() >= event["deadline"]:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    from cloud.go2.navigation.navigator import navigator
+                    navigator.stop(owner_session_id=self.owner_session_id)
+                    if go2.is_connected:
+                        try:
+                            await go2.send_command("StopMove", completion_timeout=5.0)
+                        except Exception:
+                            pass
+                    result = {"result": "cancelled" if self.user_interrupt else "unknown",
+                              "error": "autonomy_interrupted" if self.user_interrupt else "task_expired_or_offline"}
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                result = await task
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
+                                  reason="autonomy_stopped")
+            raise
+        except Exception as exc:
+            logger.exception("[Drive] peer task failed")
+            result = {"result": "unknown", "error": type(exc).__name__}
+        await self._advance_task(self._active_goal, stage="finish", result=result)
+        self._active_goal = None
+        status = result.get("result", "unknown")
+        if status not in {"ok", "blocked", "rejected", "error", "cancelled"}:
+            status = "unknown"
+        messenger.send_result(event["message_id"], status, task_id=task_id,
+                              reason=result.get("error"))
+        if result.get("response"):
+            messenger.send_message(message["target"], message["sender"],
+                str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply")
+
+    @staticmethod
+    def _is_color_object_game(content: str) -> bool:
+        return "物品" in content and ("同色" in content or "颜色" in content)
+
+    def _live_lamp_color(self, source: str) -> dict | None:
+        from cloud.space.context import get_space_context
+        from cloud.api.main import _esp32_state
+        context = get_space_context("go2", state=_esp32_state)
+        for entry in context["environment"]:
+            if entry.get("source") != source or entry.get("status") != "current":
+                continue
+            values = entry.get("values") or {}
+            rgb = tuple(values.get(key) for key in ("r", "g", "b"))
+            if (all(type(value) is int and 0 <= value <= 255 for value in rgb)
+                    and type(values.get("brightness")) is int
+                    and values["brightness"] > 0):
+                return {"rgb": rgb, "as_of": entry["as_of"], "source": source}
+        return None
+
+    async def _run_color_object_game(self, event: dict, task_id: str) -> None:
+        """Bounded search; descriptions remain candidates without object evidence."""
+        message, messenger = event["message"], event["messenger"]
+        color = self._live_lamp_color(str(event.get("source") or ""))
+        if color is None:
+            await self._advance_task(self._active_goal, stage="finish",
+                result={"result": "rejected", "reason": "lamp_color_unknown_or_stale"})
+            messenger.send_result(event["message_id"], "rejected", task_id=task_id,
+                                  reason="lamp_color_unknown_or_stale")
+            messenger.send_message("go2", message["sender"],
+                "我没读到这盏灯的新鲜 RGB 和亮度，先不按邀请文字猜颜色。",
+                reply_to=event["message_id"], reply_kind="reply")
+            return
+        self._active_goal = {**self._active_goal, "kind": "color_object_game",
+                             "target_color": color, "deadline": event["deadline"]}
+        task_state = await self._advance_task(self._active_goal, stage="start")
+        observations = []
+        reason = "structured_multiframe_evidence_unavailable"
+        while task_state.get("next_action") == "explore_frontier":
+            if self.user_interrupt or not go2.is_connected:
+                reason = "autonomy_interrupted_or_offline"
+                break
+            if time.time() >= event["deadline"]:
+                reason = "game_expired"
+                break
+            latest = self._live_lamp_color(color["source"])
+            if latest is None:
+                reason = "lamp_color_stale"
+                break
+            if latest["rgb"] != color["rgb"]:
+                reason = "lamp_color_changed"
+                break
+            self._last_observation = None
+            self._last_tool_result = None
+            await self._do_explore(observe_question=(
+                f"只描述当前画面中疑似与 RGB {color['rgb']} 同色的物品；"
+                "不能把颜色描述当作已定位或已确认。"))
+            if self._last_observation:
+                observations.append(self._last_observation[:240])
+            step_result = self._last_tool_result or {"result": "unknown"}
+            task_state = await self._advance_task(self._active_goal, result=step_result,
+                                                  step_done=True)
+            if step_result.get("result") != "ok":
+                reason = "frontier_unavailable_or_failed"
+                break
+        await self._advance_task(self._active_goal, stage="finish", result={"result": "unknown",
+            "target_color": color, "candidate_descriptions": observations, "reason": reason})
+        messenger.send_result(event["message_id"], "unknown", task_id=task_id,
+                              reason=reason)
+        detail = ("灯色已变化，需要重新约定目标颜色。" if reason == "lamp_color_changed" else
+                  "灯色状态已过期，需要重新确认。" if reason == "lamp_color_stale" else
+                  "目前只有画面文字候选，缺少跨帧物体证据，不能确认找到。")
+        messenger.send_message("go2", message["sender"],
+            "我按灯的实时颜色查看了安全探索点。" + detail,
+            reply_to=event["message_id"], reply_kind="reply")
+
+    async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:
         """Explore measured map frontiers; vision describes arrivals separately."""
         from cloud.go2.navigation.navigator import navigator
 
@@ -310,10 +654,10 @@ class Drive:
             logger.info("[Drive] 探索进入即被打断")
             return
 
-        visited: list[tuple[float, float]] = []
-        rejected: list[tuple[float, float]] = []
+        visited = self._explore_visited
+        rejected = self._explore_rejected
         logger.info("[Drive] 开始地图驱动的自主探索")
-        for step in range(15):
+        for step in range(1):
             if self.user_interrupt or not go2.is_connected:
                 break
             snapshot, reason = navigator._snapshot()
@@ -331,6 +675,7 @@ class Drive:
                 break
             logger.info("[Drive] 地图边界目标 step=%d x=%.2f y=%.2f", step, *target)
             result = await self._navigate(coordinate=target)
+            self._last_tool_result = result
             status = result.get("result")
             episode_memory.add(
                 EventType.ACTION_TAKEN,
@@ -348,20 +693,26 @@ class Drive:
                     break
                 if status == "blocked" and len(rejected) < 3:
                     rejected.append(target)
-                    continue
+                    break
                 break
             visited.append(target)
+            if len(visited) > 32:
+                del visited[:-32]
             self._activity_event("action_result", self._result_text(result),
                                  action="explore_frontier", status="ok")
             # The camera reports what was reached; its availability never
             # changes the map target or authorizes movement.
             if time.time() >= self._vision_retry_after:
                 try:
-                    observation = await go2_observe("描述当前位置看到的场景，有什么值得记录的")
+                    observation = await go2_observe(observe_question)
                     if observation and not observation.startswith("无可用视频帧"):
+                        self._last_observation = observation
                         episode_memory.add(EventType.OBSERVATION, observation)
                         event = self._activity_event("observation", observation)
-                        await self._evaluate_social(event)
+                        if event:
+                            self.submit_event({"event_id": event.get("event_id", uuid.uuid4().hex),
+                                "kind": "observation", "source": "go2.camera", "ts": time.time(),
+                                "deadline": time.time() + 5, "activity_id": self._activity_id()})
                     else:
                         self._vision_retry_after = time.time() + 60
                 except Exception as exc:
@@ -506,58 +857,8 @@ class Drive:
         return f"{nav_summary} | 到达后观察：{observation}"
 
     async def _do_social(self) -> None:
-        """Evaluate one nearby social action through the autonomous Go2 Graph."""
-        from cloud.agents.common.checkpoint import FileCheckpointSaver
-        from cloud.agents.go2.workflows.reactive import build_action_graph
-        from cloud.api.intents import publish_agent_event
-
-        if self.user_interrupt or not go2.is_connected:
-            return
-        try:
-            observation = await go2_observe("描述画面中的人在做什么")
-        except Exception as exc:
-            logger.warning("[Drive] observe 失败: %s", exc)
-            return
-        episode_memory.add(EventType.OBSERVATION, f"社交观察：{observation}")
-        run_id = "social_action_" + uuid.uuid4().hex
-        def live() -> bool:
-            return not self.user_interrupt and not self._pending_question_id and go2.is_connected
-        async def execute(action: str, reason: str) -> dict:
-            if not live():
-                return {"result": "cancelled", "error": "autonomy_gate_changed"}
-            result = await self._execute_motion("go2_sport", {"cmd": action}, publish_reply=False)
-            if result.get("result") == "ok":
-                episode_memory.add(EventType.ACTION_TAKEN,
-                                   f"社交互动：执行了 {action}（{reason}）")
-            return result
-        saver = FileCheckpointSaver()
-        graph = build_action_graph(
-            get_text_llm(), kind="social", profile_loader=get_profile,
-            execute=execute, can_dispatch=live, checkpointer=saver)
-        thread_id = "go2:social_action:" + run_id
-        state = {"run_id": run_id, "kind": "social", "scene": observation,
-                 "identity": self._identity_context(),
-                 "memory_summary": episode_memory.format_context(),
-                 "space_summary": prompt_space_context(),
-                 "active": True, "connected": go2.is_connected,
-                 "interrupted": self.user_interrupt, "now": time.time(),
-                 "action_cooldowns": dict(self._social_action_cooldowns),
-                 "last_decision": self._last_social_decision}
-        async with saver.async_run_lock(thread_id):
-            result = await graph.ainvoke(state,
-                {"configurable": {"thread_id": thread_id}}, durability="sync")
-        self._last_social_decision = result.get("last_decision", self._last_social_decision)
-        self._social_action_cooldowns.update(result.get("action_cooldowns") or {})
-        decision = result.get("decision") or {}
-        if result.get("result") and decision.get("action") and live():
-            status = result["result"].get("result", "unknown")
-            publish_agent_event("agent_progress", agent_id="go2", status=status,
-                scope="space", space_id=self._context.space_id, run_id=run_id,
-                step_id=run_id, source="autonomous", stage="observed")
-            if result.get("response"):
-                publish_agent_event("agent_reply", agent_id="go2", status=status,
-                    scope="space", space_id=self._context.space_id, run_id=run_id,
-                    source="autonomous", text=result["response"])
+        """Social opportunity uses the same bounded event handling checkpoint."""
+        await self._evaluate_social()
 
     # ── 生命周期 ───────────────────────────────────────────────────
 
@@ -570,6 +871,12 @@ class Drive:
         self._person_present   = False
         self._person_engaging  = False
         self._task             = asyncio.create_task(self._run_loop())
+        self._loop = asyncio.get_running_loop()
+        self._generation += 1
+        self._events.clear()
+        self._seen_events.clear()
+        self._explore_visited.clear()
+        self._explore_rejected.clear()
         self.owner_session_id  = owner_session_id
         self._context = replace(context or SYSTEM_CONTEXT, origin_kind="agent_autonomous")
         self.user_interrupt = False
@@ -583,6 +890,13 @@ class Drive:
         owned_session = self.owner_session_id
         active = self._task is not None
         self.user_interrupt = True
+        self._generation += 1
+        for event in self._events:
+            if event.get("kind") == "peer_message":
+                event["messenger"].send_result(event["message_id"], "cancelled",
+                                               reason="autonomy_stopped")
+        self._events.clear()
+        self._loop = None
         self._pending_question_id = None
         if active:
             self._task.cancel()

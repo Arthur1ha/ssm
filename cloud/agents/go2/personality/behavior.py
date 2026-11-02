@@ -13,15 +13,6 @@ def social_action_candidates(boldness: int, available: set[str]) -> set[str]:
     return set(available)
 
 
-def reactive_action_candidates(boldness: int, postures: set[str], turns: set[str]) -> set[str]:
-    """Offer existing reactive gestures and turns by preference only."""
-    if boldness < 30:
-        return postures.intersection({"Hello"})
-    if boldness < 60:
-        return set(postures)
-    return set(postures) | set(turns)
-
-
 def decision_persona(profile: dict) -> str:
     traits = profile["traits"]
     return (

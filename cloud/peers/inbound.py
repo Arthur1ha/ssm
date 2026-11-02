@@ -130,26 +130,10 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
     text = _peer_input(message, messenger)
     try:
         if target == "go2":
-            from cloud.agents.go2.graph import run_go2_loop
-            started_task = None
-
-            def on_step(step):
-                nonlocal started_task
-                outcome = step.get("result") or {}
-                if (step.get("effectful") and started_task is None
-                        and outcome.get("result") in {"ok", "accepted", "executing"}
-                        and (outcome.get("result") == "ok" or outcome.get("task_id"))):
-                    started_task = outcome.get("task_id") or step["step_id"]
-                    messenger.send_progress(message["message_id"], started_task)
-
-            result = asyncio.run(run_go2_loop(
-                context.session_id, text, context=context,
-                run_id=message["message_id"], deadline=message["deadline"],
-                on_step=on_step,
-            ))
-            if started_task:
-                result["task_id"] = started_task
-            _finish(messenger, message, result, reply_key="response")
+            from cloud.go2.mode.free_explore import drive
+            if not drive.submit_peer_message(message, messenger):
+                messenger.send_result(message["message_id"], "rejected",
+                                      reason="go2_autonomy_inactive")
             return
         from cloud.esp32.service import get_agent
         from cloud.api.intents import _dispatch_mqtt_task

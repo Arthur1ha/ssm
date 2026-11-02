@@ -20,7 +20,6 @@ from pydantic import BaseModel
 
 from cloud.go2.connection import go2
 from cloud.go2.mode.free_explore import drive
-from cloud.go2.mode.reactive import reactive_mind
 from cloud.go2.perception.vision import vision_loop
 from cloud.go2.perception.identity import IdentityEvent, identity_skill
 from cloud.agents.go2.memory.episode import EventType, episode_memory
@@ -52,7 +51,7 @@ router = APIRouter(prefix="/api/go2", tags=["go2"])
 _active_rule_cb  = None
 _active_drive_cb = None
 _active_identity_cb = None
-_autonomy_mode   = "manual"  # "manual" | "reactive" | "free_explore"
+_autonomy_mode   = "manual"  # "manual" | "free_explore"
 _activity_mode_owner: str | None = None
 _connect_task: asyncio.Task | None = None
 
@@ -250,7 +249,6 @@ def _on_identity_event(event: IdentityEvent) -> None:
                 text=f"已确认看到主人{current.name}", source="identity_recognition",
                 confidence=current.score)
 
-    reactive_mind.on_identity_event(event)
     drive.on_identity_event(event)
 
 
@@ -275,9 +273,8 @@ async def _initialize_identity_vision() -> None:
 
 
 def _configure_vision_consumers(mode: str, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
-    """统一重配视觉消费者；身份在三种 autonomy 模式下都可保持运行。"""
+    """统一重配视觉消费者；身份在两种 autonomy 模式下都可保持运行。"""
     global _active_rule_cb, _active_drive_cb, _active_identity_cb
-    reactive_mind.set_active(False)
     drive.stop()
     for callback in (_active_rule_cb, _active_drive_cb, _active_identity_cb):
         if callback is not None:
@@ -291,11 +288,7 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
     if identity_skill.enabled:
         _active_identity_cb = _on_identity_vision_frame
         vision_loop.add_callback(_active_identity_cb)
-    if mode == "reactive":
-        reactive_mind.set_active(True, context)
-        _active_rule_cb = reactive_mind.on_vision_frame
-        vision_loop.add_callback(_active_rule_cb)
-    elif mode == "free_explore":
+    if mode == "free_explore":
         _active_drive_cb = drive.on_vision_frame
         vision_loop.add_callback(_active_drive_cb)
         drive.start(owner_session_id=owner_session_id, context=context)
@@ -680,8 +673,8 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
 
 @router.get("/mind/last_decision")
 async def go2_mind_last_decision(context=Depends(require_authenticated_read)):
-    """返回 ReactiveMind 上次 LLM 推理的决策结果。"""
-    d = reactive_mind.last_decision
+    """返回统一自主流程最近一次任务决策。"""
+    d = drive.last_decision
     if d is None:
         return {"decision": None}
     return {"decision": d}
@@ -742,7 +735,7 @@ class LedRequest(BaseModel):
 
 
 class AutonomyRequest(BaseModel):
-    mode: str  # "manual" | "reactive" | "free_explore"
+    mode: str  # "manual" | "free_explore"
 
 
 class PersonalityRequest(BaseModel):
@@ -909,7 +902,7 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
     global _autonomy_mode, _activity_mode_owner
     context = _normalize_context(context)
     _require_admin_persist(context)
-    if req.mode not in ("manual", "reactive", "free_explore"):
+    if req.mode not in ("manual", "free_explore"):
         raise HTTPException(status_code=400, detail=f"未知自主模式: {req.mode}")
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
@@ -923,8 +916,6 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
 
     if req.mode == "manual":
         logging.info("[Go2] 自主模式 → 完全遥控")
-    elif req.mode == "reactive":
-        logging.info("[Go2] 自主模式 → 自主反应")
     else:  # free_explore
         logging.info("[Go2] 自主模式 → 自由探索")
 

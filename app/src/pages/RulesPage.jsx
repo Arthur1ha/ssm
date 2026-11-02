@@ -116,7 +116,7 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
   return (
     <div className="rules-screen">
       {!embedded && <h2 className="rules-screen__title">教导与自动规则</h2>}
-      <p className="rules-screen__intro">这里保存的是你教给设备的期望。设置可识别的条件和动作并启用后，设备在“自主反应”模式下才会把它作为行动候选，仍会检查当前状态和安全条件。</p>
+      <p className="rules-screen__intro">这里保存的是你教给设备的期望。设置可识别的条件和动作并启用后，设备在自主模式下按条件执行，仍会检查当前状态和安全条件。</p>
       {error && <p className="rules-screen__error" role="alert">{error}</p>}
       {!teachings.length && <div className="rules-empty"><span aria-hidden="true">当 → 就</span>
         <strong>还没有教导</strong><p>在对话里告诉管家：哪个设备，在什么时候，做什么。</p></div>}
@@ -151,7 +151,7 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
               {item.execution_status !== 'enabled' && <p className="rule-card__hint">{item.execution_status === 'capability_unavailable'
                 ? '设备能力发生变化，请重新设置触发条件。' : item.execution_status === 'ready'
                   ? '映射已保存，启用后才会参与设备的自主决策。' : '这条教导已保存，还不会触发设备动作。'}</p>}
-              {item.execution_status === 'enabled' && <p className="rule-card__hint">需开启设备的“自主反应”模式。条件命中后由设备判断；安全限制或用户操作可能使它不执行。</p>}
+              {item.execution_status === 'enabled' && <p className="rule-card__hint">需开启设备的自主模式。条件命中后会检查安全限制和用户操作。</p>}
               {bindingEditor?.teaching_id === item.teaching_id && (() => {
                 const observation = card.observations?.find(entry => entry.id === bindingEditor.observation_id);
                 const skill = card.skills?.find(entry => entry.id === bindingEditor.skill_id);
