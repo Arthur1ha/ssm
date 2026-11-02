@@ -114,6 +114,7 @@ async def run_role_graph(
     resume: bool = False,
     resume_value: str | None = None,
     initial_tool: tuple[str, dict] | None = None,
+    terminal_tools: frozenset[str] = frozenset(),
 ) -> GraphRun:
     """Run a role's model and domain executor through a durable StateGraph.
 
@@ -304,11 +305,15 @@ async def run_role_graph(
             current.status, current.response = result["result"], "请求已发送，但实际完成情况尚未确认；后续步骤已暂停。"
         elif result["result"] == "cancelled":
             current.status, current.response = "cancelled", "任务已取消；后续步骤未执行。"
+        elif name in terminal_tools:
+            current.status = result["result"]
+            current.response = result.get("message") or result.get("reason") or result.get("error") or result["result"]
         return {"run": asdict(current), "effects": state["effects"] + int(is_effect)}
 
     async def tool_route(state: _State) -> str:
         result = (state["run"]["steps"][-1].get("result") or {}).get("result")
-        return "finish" if result in UNCERTAIN | {"cancelled"} else "model"
+        tool_name = state["run"]["steps"][-1].get("tool")
+        return "finish" if tool_name in terminal_tools or result in UNCERTAIN | {"cancelled"} else "model"
 
     async def start_route(state: _State) -> str:
         return "tool" if state.get("decision", {}).get("kind") == "tool" else "model"

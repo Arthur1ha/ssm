@@ -132,6 +132,10 @@ def _skill_policy(initiator: str, target: str, skill_id: str, params: dict, orig
             raise PermissionError("unsupported coordination skill")
         return
     if target == "go2":
+        if skill_id == "go2_visual_navigate":
+            if origin == "user_delegated" and isinstance(params.get("target"), str) and params["target"].strip():
+                return
+            raise PermissionError("visual navigation requires a delegated user target")
         if skill_id == "go2_move" and origin == "user_delegated":
             duration = params.get("duration")
             speed = params.get("speed", 0.3)
@@ -361,6 +365,10 @@ def request_peer_skill(
         if target_unit_id == initiator_unit_id:
             raise PermissionError("self request is not a peer request")
         skill = validate_skill_params(target, skill_id, params)
+        if target_unit_id == "go2" and skill_id == "go2_visual_navigate":
+            # This one task includes visual localization, navigation and
+            # arrival verification. Never outwait the verified user session.
+            timeout = min(150.0, context.expires_at - time.time())
         action = str((skill.get("invoke") or {}).get("action") or "")
         if target_unit_id not in {"go2", "cloud_orchestrator"} and skill_id not in {
             "set_light_state", "blink_light", "adjust_lighting",

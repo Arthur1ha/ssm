@@ -442,7 +442,8 @@ class Drive:
                 {"configurable": {"thread_id": thread_id}}, durability="sync")
         self._last_decision = {"event_id": event["event_id"],
                                "choice": result.get("event_decision", "defer"),
-                               "reason": result.get("decision_reason", "")}
+                               "reason": result.get("decision_reason", ""),
+                               "task_kind": result.get("task_kind", "peer_task")}
         return self._last_decision
 
     async def _interrupt_for_event(self) -> bool:
@@ -518,7 +519,7 @@ class Drive:
         self._active_goal = {"kind": "peer_message", "event_id": event["event_id"],
                              "task_id": task_id, "deadline": event["deadline"]}
         messenger.send_progress(event["message_id"], task_id)
-        if self._is_color_object_game(str(message.get("content") or "")):
+        if decision.get("task_kind") == "follow_peer_color":
             try:
                 await self._run_color_object_game(event, task_id)
             except asyncio.CancelledError:
@@ -571,10 +572,6 @@ class Drive:
             messenger.send_message(message["target"], message["sender"],
                 str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply")
 
-    @staticmethod
-    def _is_color_object_game(content: str) -> bool:
-        return "物品" in content and ("同色" in content or "颜色" in content)
-
     def _live_lamp_color(self, source: str) -> dict | None:
         from cloud.space.context import get_space_context
         from cloud.api.main import _esp32_state
@@ -608,6 +605,7 @@ class Drive:
         task_state = await self._advance_task(self._active_goal, stage="start")
         observations = []
         reason = "structured_multiframe_evidence_unavailable"
+        color_round = 1
         while task_state.get("next_action") == "explore_frontier":
             if self.user_interrupt or not go2.is_connected:
                 reason = "autonomy_interrupted_or_offline"
@@ -620,15 +618,22 @@ class Drive:
                 reason = "lamp_color_stale"
                 break
             if latest["rgb"] != color["rgb"]:
-                reason = "lamp_color_changed"
-                break
+                color = latest
+                color_round += 1
+                self._active_goal = {**self._active_goal, "target_color": color,
+                                     "color_round": color_round}
+                task_state = await self._advance_task(self._active_goal,
+                    result={"result": "ok", "reason": "lamp_color_changed",
+                            "target_color": color})
+                continue
             self._last_observation = None
             self._last_tool_result = None
             await self._do_explore(observe_question=(
                 f"只描述当前画面中疑似与 RGB {color['rgb']} 同色的物品；"
                 "不能把颜色描述当作已定位或已确认。"))
             if self._last_observation:
-                observations.append(self._last_observation[:240])
+                observations.append({"rgb": color["rgb"],
+                                     "description": self._last_observation[:240]})
             step_result = self._last_tool_result or {"result": "unknown"}
             task_state = await self._advance_task(self._active_goal, result=step_result,
                                                   step_done=True)
@@ -636,14 +641,14 @@ class Drive:
                 reason = "frontier_unavailable_or_failed"
                 break
         await self._advance_task(self._active_goal, stage="finish", result={"result": "unknown",
-            "target_color": color, "candidate_descriptions": observations, "reason": reason})
+            "target_color": color, "color_rounds": color_round,
+            "candidate_descriptions": observations, "reason": reason})
         messenger.send_result(event["message_id"], "unknown", task_id=task_id,
                               reason=reason)
-        detail = ("灯色已变化，需要重新约定目标颜色。" if reason == "lamp_color_changed" else
-                  "灯色状态已过期，需要重新确认。" if reason == "lamp_color_stale" else
+        detail = ("灯色状态已过期，需要重新确认。" if reason == "lamp_color_stale" else
                   "目前只有画面文字候选，缺少跨帧物体证据，不能确认找到。")
         messenger.send_message("go2", message["sender"],
-            "我按灯的实时颜色查看了安全探索点。" + detail,
+            f"我跟随灯的实时颜色检查了 {color_round} 轮安全探索点。" + detail,
             reply_to=event["message_id"], reply_kind="reply")
 
     async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:

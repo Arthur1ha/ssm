@@ -112,7 +112,9 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         return {"run_id": run_id, "result": "rejected", "error": "run_not_resumable"}
     if route and not resume:
         return {"run_id": run_id, "result": "unknown", "response": "", "steps": []}
-    deadline = min(float(context.get("expires_at") or time.time() + 90), time.time() + 90)
+    # A visual target task includes detection, closed-loop travel and a fresh
+    # arrival check. Keep the user session as the hard upper bound.
+    deadline = min(float(context.get("expires_at") or time.time() + 180), time.time() + 180)
     if resume:
         run = previous
         run.attempt += 1
@@ -124,9 +126,10 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         if latest:
             values = latest.checkpoint.get("channel_values", {})
             other_run = values.get("run") or {}
-            if other_run.get("run_id") != run_id and (
-                    other_run.get("status") == "executing" or
-                    (values.get("decision") or {}).get("kind") == "ask"):
+            awaiting_answer = (values.get("decision") or {}).get("kind") == "ask"
+            still_running = (other_run.get("status") == "executing" and
+                             (awaiting_answer or float(other_run.get("deadline") or 0) > time.time()))
+            if other_run.get("run_id") != run_id and still_running:
                 return {"run_id": run_id, "result": "rejected", "error": "session_busy"}
         run = Run(run_id, session_id, context["user_msg"], deadline)
         run.trace_id = context.get("trace_id") or "tr_" + uuid.uuid4().hex

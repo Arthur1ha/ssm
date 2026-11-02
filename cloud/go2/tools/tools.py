@@ -52,10 +52,15 @@ async def go2_sport(cmd: str) -> str:
         return {"result": "error", "error": "invalid_device_result", "action": canonical}
     status = result.get("result", "error")
     if status == "ok":
-        return {"result": "ok", "action": canonical, "message": f"已执行 {canonical}"}
+        return {"result": "ok", "action": canonical,
+                "message": f"设备已确认 {canonical} 指令" if result.get("confirmation") == "sport_rpc" else f"已执行 {canonical}",
+                "confirmation": result.get("confirmation"),
+                "request_status_code": result.get("request_status_code")}
     if status == "accepted":
         return {"result": "accepted", "action": canonical, "message": f"指令已发送 {canonical}，尚未确认完成"}
-    return {"result": status, "action": canonical, "error": result.get("error") or f"{canonical} 执行未完成"}
+    return {"result": status, "action": canonical,
+            "error": result.get("error") or f"{canonical} 执行未完成",
+            "request_status_code": result.get("request_status_code")}
 
 
 async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) -> str:
@@ -173,6 +178,110 @@ async def go2_navigate_to_coordinate(x: float, y: float) -> dict:
             "error" if result["status"] == "failed" else result["status"], **result}
 
 
+async def _locate_visible_target(target: str, calibration: dict,
+                                 min_received_at: float | None = None) -> tuple[dict, dict, dict]:
+    from cloud.go2.perception.visual_target import (
+        TargetUnlocalized, detect_ground_target, project_ground_contact, validate_samples,
+    )
+    from cloud.go2.navigation.navigator import navigator
+    state_at = getattr(go2, "_sport_state_observed_at", None)
+    if (getattr(go2, "fsm_state", None) != "standing" or state_at is None
+            or time.monotonic() - state_at > 1.0):
+        raise TargetUnlocalized("posture_not_confirmed")
+    captured = go2.latest_frame_snapshot()
+    if min_received_at is not None:
+        deadline = time.monotonic() + 3.0
+        while (captured is None or captured[1]["received_at"] <= min_received_at) and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            captured = go2.latest_frame_snapshot()
+    if captured is None:
+        raise TargetUnlocalized("frame_unavailable")
+    jpeg, frame = captured
+    pose = go2.odom
+    session_id = getattr(go2, "_odom_session_id", None)
+    validate_samples(frame, pose, go2.odom_received_at, go2.voxel_received_at,
+                     go2.odom_frame_id, go2.voxel_frame_id, session_id)
+    snapshot, reason = navigator._snapshot()
+    if reason:
+        raise TargetUnlocalized(reason)
+    _, grid = snapshot
+    if grid.measured_floor_z is None:
+        raise TargetUnlocalized("measured_floor_unavailable")
+    observation = await detect_ground_target(jpeg, target)
+    if (not go2.is_connected or getattr(go2, "_odom_session_id", None) != session_id
+            or math.hypot(go2.odom.get("x", 1e9) - pose["x"],
+                          go2.odom.get("y", 1e9) - pose["y"]) > 0.05):
+        raise TargetUnlocalized("pose_changed_during_detection")
+    location = project_ground_contact(observation, frame, pose, grid.measured_floor_z, calibration)
+    return location, pose, grid
+
+
+async def go2_navigate_to_visible_target(target: str) -> dict:
+    """One task: locate, plan a safe stop, navigate, then verify target again."""
+    from cloud.go2.perception.visual_target import (
+        TargetUnlocalized, load_calibration, require_avoidance_evidence,
+        select_standoff, STANDOFF_M, STANDOFF_TOLERANCE_M, TARGET_KEEPOUT_M,
+    )
+    from cloud.go2.navigation.navigator import navigator
+    if not isinstance(target, str) or not target.strip() or len(target) > 100:
+        return {"result": "blocked", "reason": "invalid_target"}
+    if not go2.is_connected:
+        return {"result": "blocked", "reason": "disconnected"}
+    task_pose = None
+    try:
+        if getattr(go2, "fsm_state", None) != "standing":
+            raise TargetUnlocalized("posture_not_calibrated")
+        serial = getattr(go2, "_connected_serial", None)
+        calibration = load_calibration(serial=serial)
+        require_avoidance_evidence(serial)
+        try:
+            switch = await go2.read_avoidance_switch()
+        except (RuntimeError, asyncio.TimeoutError) as exc:
+            raise TargetUnlocalized("avoidance_switch_unconfirmed") from exc
+        if switch.get("result") != "ok" or switch.get("enabled") is not True:
+            raise TargetUnlocalized("avoidance_switch_unconfirmed")
+        location, pose, _ = await _locate_visible_target(target, calibration)
+        task_pose = pose.copy()
+        # A stale map or pose cannot authorize the movement that follows vision inference.
+        live, reason = navigator._snapshot()
+        if reason or getattr(go2, "_odom_session_id", None) != location["odom_session_id"]:
+            raise TargetUnlocalized(reason or "odom_session_mismatch")
+        if math.hypot(live[0]["x"] - pose["x"], live[0]["y"] - pose["y"]) > 0.05:
+            raise TargetUnlocalized("pose_changed_during_planning")
+        stop = select_standoff(live[1], live[0], location)
+        context = current_context()
+        control_lease.acquire(context)
+        navigation = await navigator.go_to_coordinate(
+            stop["x"], stop["y"], owner_session_id=context.session_id,
+            heading=stop["heading"],
+            keepout=(location["x"], location["y"], TARGET_KEEPOUT_M + location["uncertainty_m"]))
+        task_pose = navigation.get("last_trusted_pose") or task_pose
+        status = navigation.get("status")
+        if status != "succeeded":
+            return {"result": "error" if status == "failed" else status,
+                    "reason": navigation.get("reason"), "navigation": navigation,
+                    "target": target, "last_trusted_pose": navigation.get("last_trusted_pose")}
+        stop_confirmed_at = time.monotonic()
+        verified, _, _ = await _locate_visible_target(target, calibration, stop_confirmed_at)
+        if (verified["source_frame_id"] <= location["source_frame_id"]
+                or verified["odom_session_id"] != location["odom_session_id"]
+                or math.hypot(verified["x"] - location["x"], verified["y"] - location["y"]) > 0.35):
+            raise TargetUnlocalized("arrival_target_mismatch")
+        final_pose = go2.odom
+        final_distance = math.hypot(final_pose["x"] - verified["x"], final_pose["y"] - verified["y"])
+        if not max(TARGET_KEEPOUT_M + verified["uncertainty_m"], STANDOFF_M - STANDOFF_TOLERANCE_M - 0.3) <= final_distance <= STANDOFF_M + STANDOFF_TOLERANCE_M + 0.3:
+            raise TargetUnlocalized("arrival_standoff_mismatch")
+        bearing = math.atan2(verified["y"] - final_pose["y"], verified["x"] - final_pose["x"])
+        if abs(math.atan2(math.sin(bearing - final_pose["heading"]), math.cos(bearing - final_pose["heading"]))) > 0.45:
+            raise TargetUnlocalized("arrival_heading_mismatch")
+        return {"result": "ok", "confirmation": "odom_stopped_and_visual_recheck",
+                "message": f"已到「{target}」旁的安全停靠点", "target": target,
+                "target_location": verified, "stop": stop, "navigation": navigation}
+    except TargetUnlocalized as exc:
+        return {"result": "blocked", "reason": exc.reason, "target": target,
+                "last_trusted_pose": task_pose}
+
+
 def go2_list_locations() -> str:
     from cloud.agents.go2.memory import spatial as spatial_memory
     locs = spatial_memory.list_locations()
@@ -270,6 +379,7 @@ TOOL_FN_MAP = {
     "go2_tag_location":           go2_tag_location,
     "go2_navigate_to":            go2_navigate_to,
     "go2_navigate_to_coordinate": go2_navigate_to_coordinate,
+    "go2_navigate_to_visible_target": go2_navigate_to_visible_target,
     "go2_list_locations":         go2_list_locations,
     "go2_set_led":                go2_set_led,
     "go2_recognize_person":       go2_recognize_person,

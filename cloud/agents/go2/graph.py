@@ -84,7 +84,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                          supplement=message)
     else:
         run = GraphRun(run_id or uuid.uuid4().hex, session_id, message,
-                  min(deadline or time.time() + 90, context.expires_at if context.expires_at else time.time() + 90))
+                  min(deadline or time.time() + 180, context.expires_at if context.expires_at else time.time() + 180))
         if view.session_busy(run.run_id, session_id):
             return {"result": "rejected", "error": "session_busy", "run_id": run.run_id}
         run.trace_id = trace_id or "tr_" + uuid.uuid4().hex
@@ -136,13 +136,16 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                              status="pending_execution")
         result = await execute_tool(name, arguments, context=context)
         if name in {"go2_sport", "go2_move", "go2_set_led", "go2_observe"}:
+            result = {**result, "device_connected": bool(go2.is_connected),
+                      "device_fsm": str(getattr(go2, "fsm_state", "unknown"))}
             emit_agent_event("device.result", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", task_id=step_id,
                              status=result.get("result"), result=result,
                              device_connected=bool(go2.is_connected),
                              device_fsm=str(getattr(go2, "fsm_state", "unknown")),
                              device_snapshot_at=time.time(),
-                             completion_basis="webrtc_result" if result.get("result") == "ok" else "tool_boundary")
+                             completion_basis=(result.get("confirmation") or "webrtc_result")
+                             if result.get("result") == "ok" else "tool_boundary")
         return result
 
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
@@ -266,6 +269,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             on_step=on_step, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS,
             initial_tool=initial_tool, resume=resume,
+            terminal_tools=frozenset({"go2_navigate_to_visible_target"}),
             resume_value=message if resume else None, checkpointer=view.checkpointer)
     progress_closed.set()
     progress("finished", None)

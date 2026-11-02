@@ -375,6 +375,15 @@ async def go2_status(context=Depends(require_authenticated_read)):
     }
 
 
+@router.get("/diagnostics/avoidance")
+async def go2_avoidance_switch(context=Depends(require_admin_read)):
+    """Inspect SWITCH_GET on the current connection without enabling movement."""
+    try:
+        return await go2.read_avoidance_switch()
+    except (RuntimeError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail="avoidance switch status unavailable") from exc
+
+
 @router.get("/video")
 async def go2_video(context=Depends(require_authenticated_read)):
     if not go2.is_connected:
@@ -540,7 +549,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         from cloud.go2.tasks import chat_tasks
         if not req.task_id or len(req.task_id) > 128:
             raise HTTPException(status_code=400, detail="invalid task_id")
-        deadline = req.deadline if req.deadline is not None else time.time() + 45
+        deadline = req.deadline if req.deadline is not None else time.time() + (180 if req.skill_id == "go2_visual_navigate" else 45)
         if not isinstance(deadline, (int, float)) or not time.time() < deadline <= time.time() + 300:
             raise HTTPException(status_code=400, detail="invalid deadline")
         if not 0 <= req.sync_window_s <= 30:

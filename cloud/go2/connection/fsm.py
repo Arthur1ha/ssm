@@ -64,8 +64,12 @@ class Go2FSM:
     def _fsm_on_progress(self, progress: float) -> None:
         """进度从'在动'(>0.05)落到'停了'(<0.05) → 瞬时动作态做完，自动回 standing。"""
         if (self._fsm_state in _TRANSIENT_STATES
+                and self._last_progress <= 0.05 and progress > 0.05):
+            logger.info("[Go2/FSM] 动作进度开始 state=%s progress=%.3f", self._fsm_state, progress)
+        if (self._fsm_state in _TRANSIENT_STATES
                 and self._last_progress > 0.05
                 and progress < 0.05):
+            logger.info("[Go2/FSM] 动作进度结束 state=%s progress=%.3f", self._fsm_state, progress)
             self.fsm_state = "standing"
             waiter = getattr(self, "_completion", None)
             if waiter is not None and not waiter.done():

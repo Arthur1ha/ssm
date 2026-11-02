@@ -73,7 +73,7 @@ def _run_intent(session_id: str, intent_context: dict) -> None:
                                   supplemental=intent_context.get("user_msg", "") if intent_context.get("resume_run_id") else "")
         if outcome.get("result") == "rejected":
             reason = outcome.get("error", "request_rejected")
-            message = ("上一轮还在等待你的回答，本次未能接续，请重新发送回答。" if reason == "session_busy"
+            message = ("上一轮请求仍在处理中，请稍后重试。" if reason == "session_busy"
                        else "请求未能进入任务流程，请重试。")
             run_id = outcome.get("run_id") or intent_context.get("event_id") or ""
             trace_id = intent_context.get("trace_id") or run_id

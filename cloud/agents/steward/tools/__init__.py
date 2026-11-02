@@ -114,7 +114,8 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                 "message": arguments.get("message") or params.get("message") or params.get("goal")
                            or f"请执行 {skill_id}：{json.dumps(params, ensure_ascii=False)}",
                 "goal": params.get("goal"), "skill_id": skill_id, "params": params,
-                "task_id": step_id, "deadline": min(deadline, time.time() + 90),
+                "task_id": step_id,
+                "deadline": min(deadline, time.time() + (160 if skill_id == "go2_visual_navigate" else 90)),
                 "trace_id": correlation.get("trace_id"),
                 "parent_run_id": correlation.get("run_id")}
         timeout = (max(1, deadline - time.time()) if unit_id == "go2" or skill_id == "adjust_lighting"
@@ -284,6 +285,14 @@ def make_executor(run, context: dict, resume: bool = False):
             return {"result": "ok", "sensors": transport._state.sensor_snapshot() if transport._state else {},
                     "actuators": transport._state.actuator_snapshot() if transport._state else {}}
         if name == "invoke_skill":
+            if args.get("unit_id") == "go2" and args.get("skill_id") == "go2_move" and any(
+                step.get("tool") == "invoke_skill"
+                and (step.get("params") or {}).get("unit_id") == "go2"
+                and (step.get("params") or {}).get("skill_id") == "go2_visual_navigate"
+                and (step.get("result") or {}).get("result") != "ok"
+                for step in run.steps[:-1]
+            ):
+                return {"result": "blocked", "error": "visual_navigation_fallback_denied"}
             return await invoke_blocking(_invoke_skill, context, args, step_id, run.deadline)
         if name == "await_result":
             task_id = args.get("task_id")

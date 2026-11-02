@@ -38,6 +38,13 @@ CARD_SKILLS = {
         "tags": ["navigation", "robot"],
         "invoke": {"action": "NAVIGATE"},
     },
+    "go2_visual_navigate": {
+        "tool_name": "go2_navigate_to_visible_target",
+        "name": "视觉目标导航",
+        "description": "走到当前画面中唯一静态地面目标旁的已知安全停靠点；标定或避障未验证时拒绝移动",
+        "tags": ["navigation", "vision", "motion", "robot"],
+        "invoke": {"action": "VISUAL_NAVIGATE"},
+    },
     "go2_recognize_person": {
         "tool_name": "go2_recognize_person",
         "name": "识别面前的人",

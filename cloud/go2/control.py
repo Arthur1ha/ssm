@@ -69,6 +69,16 @@ class ControlLease:
             self._expires_at = now + self.ttl_s
             return self._snapshot_unlocked()
 
+    def heartbeat_session(self, session_id: str, now: float | None = None) -> LeaseSnapshot:
+        """Renew only an already-held lease for a running session-owned task."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._expire_unlocked(now)
+            if not session_id or self._owner_session_id != session_id:
+                raise LeaseConflict(self._owner_session_id, self._expires_at)
+            self._expires_at = now + self.ttl_s
+            return self._snapshot_unlocked()
+
     def release(self, session_id: str) -> bool:
         with self._lock:
             self._expire_unlocked(time.time())

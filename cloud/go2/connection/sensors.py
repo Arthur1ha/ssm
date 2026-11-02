@@ -1,6 +1,9 @@
 import asyncio
+import logging
 import math
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class Go2Sensors:
@@ -53,7 +56,15 @@ class Go2Sensors:
     def _on_state(self, msg: dict) -> None:
         data = msg.get("data", {})
         inner = data.get("data", data) if isinstance(data, dict) else {}
+        if getattr(self, "_completion", None) is not None and getattr(self, "_state_probe_count", 0) < 3:
+            self._state_probe_count = getattr(self, "_state_probe_count", 0) + 1
+            logger.info("[Go2/Sensor] 动作状态样本 outer_keys=%s inner_keys=%s raw_progress=%r raw_mode=%r",
+                        sorted(data) if isinstance(data, dict) else type(data).__name__,
+                        sorted(inner) if isinstance(inner, dict) else type(inner).__name__,
+                        inner.get("progress") if isinstance(inner, dict) else None,
+                        inner.get("mode") if isinstance(inner, dict) else None)
         self._last_state_received_at = time.monotonic()
+        self._sport_state_observed_at = self._last_state_received_at
         progress = float(inner.get("progress") or 0.0)
         self._fsm_on_progress(progress)
         self._fsm_on_posture(inner.get("body_height"))

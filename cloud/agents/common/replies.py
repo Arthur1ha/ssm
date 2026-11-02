@@ -93,6 +93,9 @@ def persona_reply_prompt(persona: str, run: Run, *, traits: dict | None = None) 
         "若记录中有错误或超时原因，用日常语言说明；edge_result_unconfirmed 表示未收到设备执行回执，"
         "invalid_rule 和 invalid_teaching 表示提交格式错误，不代表传感器缺失或设备不支持。"
         "不能断言设备动作失败。后续步骤因结果未确认而暂停时也要说明。没有实际发起后续操作，就不要承诺会继续查看或重试。"
+        "request_status_code=0 表示设备动作接口成功响应；confirmation=sport_rpc 表示招手以此为设备结果，"
+        "可说设备确认了动作指令，不要声称独立视觉验证。其他需要进度确认的动作若未观察到完成进度，应明确说明。"
+        "不要建议与已知状态矛盾的排查，例如设备已连接时建议先检查是否在线。"
         "运行时说明和草稿只供理解，不要照抄；不要假装其他智能体已回复。\n"
         + json.dumps(facts, ensure_ascii=False, default=str)
     )

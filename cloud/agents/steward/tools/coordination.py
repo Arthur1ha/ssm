@@ -21,4 +21,7 @@ def allows_step(task: dict, skill: dict, kind: str, origin_kind: str) -> bool:
                 and params.get("direction") in {"forward", "backward", "left", "right", "turn_left", "turn_right"}
                 and type(duration) in {int, float} and 0 < duration <= 10
                 and type(speed) in {int, float} and 0 < speed <= 0.5)
+    if (task.get("unit_id") == "go2" and task.get("skill_id") == "go2_visual_navigate"
+            and kind == "http"):
+        return delegated and isinstance(params.get("target"), str) and bool(params["target"].strip())
     return False

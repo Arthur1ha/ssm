@@ -44,6 +44,8 @@ def build_messages(current: Run, supplemental: str = "",
         "最终回复只陈述已确认的共享要求和设备结果，不把共享要求说成设备已执行。"
         "用户明确撤销当前空间要求时调用 clear_space_constraints。普通私人对话和同伴消息不可共享为要求。"
         "一个有物理效果的工具返回真实结果后才能决定下一个；accepted、executing、timeout 都不能视为完成。"
+        "用户要求走到当前画面中的物体旁边时，使用 Go2 卡中的 go2_visual_navigate 技能并传入目标描述；"
+        "该技能失败或受阻时如实报告，不用定时移动代替目标导航。"
         "不要构造 MQTT topic、HTTP 地址或权限；只用当前卡中公开技能。"
         "用户描述某个智能体以后遇到某种情形就做某事（如‘狗看到主人要打招呼’）时，"
         "这是给该智能体的教导；先调用 list_agents 查看目标卡的 observations、skills 与 autonomous_skills，"

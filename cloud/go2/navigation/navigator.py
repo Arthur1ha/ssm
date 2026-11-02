@@ -12,6 +12,7 @@ from typing import Optional
 from cloud.go2.connection import go2
 from cloud.agents.go2.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
+from cloud.go2.control import control_lease, LeaseConflict
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +103,14 @@ class Navigator:
         self._begin(name, owner_session_id, asyncio.current_task())
         return await self._run_to(name)
 
-    async def go_to_coordinate(self, x: float, y: float, owner_session_id: str = "system") -> dict:
+    async def go_to_coordinate(self, x: float, y: float, owner_session_id: str = "system",
+                               heading: float | None = None,
+                               keepout: tuple[float, float, float] | None = None) -> dict:
         task = asyncio.current_task()
         self._begin("exploration target", owner_session_id, task)
         return await self._run_to("exploration target", {"name": "exploration target", "x": x, "y": y,
-                                                          "heading": None, "frame_id": "odom",
+                                                          "heading": heading, "frame_id": "odom",
+                                                          "keepout": keepout,
                                                           "session_id": getattr(go2, "_odom_session_id", None)})
 
     async def _run_to(self, name: str, loc: dict | None = None) -> dict:
@@ -137,10 +141,18 @@ class Navigator:
             grid_obj = None
             goal = None
             while time.monotonic() < deadline:
+                if self.owner_session_id != "system":
+                    try:
+                        control_lease.heartbeat_session(self.owner_session_id)
+                    except LeaseConflict:
+                        return self._finish("cancelled", "control_lease_lost", "运动租约已失效", task_id)
                 snapshot, reason = self._snapshot()
                 if reason:
                     return self._finish("failed", reason, "定位或地图不可用，已停止导航", task_id)
                 odom, fresh_grid = snapshot
+                keepout = loc.get("keepout")
+                if keepout and math.hypot(odom["x"] - keepout[0], odom["y"] - keepout[1]) < keepout[2]:
+                    return self._finish("blocked", "target_keepout_breached", "目标安全距离不足", task_id)
                 self.last_trusted_pose = odom.copy()
                 now = time.monotonic()
                 if last_pos is None:
@@ -199,6 +211,8 @@ class Navigator:
                                                 "原地转身空间不足，已停止", task_id)
                     predicted_x = odom["x"] + vx * 0.3 * math.cos(odom["heading"])
                     predicted_y = odom["y"] + vx * 0.3 * math.sin(odom["heading"])
+                    if keepout and math.hypot(predicted_x - keepout[0], predicted_y - keepout[1]) < keepout[2]:
+                        return self._finish("blocked", "target_keepout_breached", "下一步会进入目标安全区", task_id)
                     if not body_clear(predicted_x, predicted_y, odom["heading"] + yaw * 0.3):
                         return self._finish("blocked", "body_clearance_unavailable",
                                             "下一步机身空间不足，已停止", task_id)
@@ -255,6 +269,17 @@ class Navigator:
             return None
         if not grid_obj.is_free(*start):
             return None
+        keepout = loc.get("keepout")
+        path_grid = grid_obj.grid
+        if keepout:
+            path_grid = grid_obj.grid.copy()
+            for gy in range(path_grid.shape[0]):
+                for gx in range(path_grid.shape[1]):
+                    wx, wy = grid_obj.grid_to_odom(gx, gy)
+                    if math.hypot(wx - keepout[0], wy - keepout[1]) < keepout[2]:
+                        path_grid[gy, gx] = True
+            if path_grid[start[1], start[0]] or path_grid[raw_goal[1], raw_goal[0]]:
+                return None
         goal = raw_goal
         if not grid_obj.is_free(*goal):
             # Only known free cells reachable from the robot may be stop points.
@@ -269,13 +294,13 @@ class Navigator:
                     if math.hypot(wx - loc["x"], wy - loc["y"]) <= ARRIVAL_THRESHOLD:
                         candidates.append((math.hypot(wx - loc["x"], wy - loc["y"]), candidate))
             for _, candidate in sorted(candidates):
-                path = astar(grid_obj.grid, start, candidate)
+                path = astar(path_grid, start, candidate)
                 if path:
                     goal = candidate
                     break
             else:
                 return None
-        path = astar(grid_obj.grid, start, goal)
+        path = astar(path_grid, start, goal)
         if path is None:
             return None
         wx, wy = grid_obj.grid_to_odom(*goal)

@@ -684,15 +684,27 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail="invalid task_id")
         return await _internal_request("/api/go2/chat", "POST", session, {
             "message": message, "task_id": task_id,
-            "deadline": time.time() + 90,
+            "deadline": min(float(session["expires_at"]), time.time() + 180),
         })
 
-    canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "RECOGNIZE_PERSON", "STOP"} else action
+    canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "RECOGNIZE_PERSON", "STOP"} else action
     ensure_go2_action(canonical)
     if canonical == "SPORT":
         return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {})})
     if canonical == "NAVIGATE":
         return await _internal_request("/api/go2/navigation/go", "POST", session, {"name": params.get("name", "")})
+    if canonical == "VISUAL_NAVIGATE":
+        target = params.get("target")
+        if not isinstance(target, str) or not target.strip() or len(target.strip()) > 100:
+            raise HTTPException(status_code=400, detail="visual navigation requires a target")
+        task_id = "go2_" + uuid.uuid4().hex
+        return await _internal_request("/api/go2/chat", "POST", session, {
+            "message": f"走到画面中的{target.strip()}旁边",
+            "skill_id": "go2_visual_navigate",
+            "params": {"target": target.strip()},
+            "task_id": task_id,
+            "deadline": min(float(session["expires_at"]), time.time() + 180),
+        })
     if canonical == "RECOGNIZE_PERSON":
         return await _internal_request("/api/go2/identity/recognize", "POST", session, {})
     if canonical == "STOP":

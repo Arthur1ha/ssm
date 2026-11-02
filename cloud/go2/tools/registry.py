@@ -33,7 +33,7 @@ _DIRECTIONS = ["forward", "backward", "left", "right", "turn_left", "turn_right"
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     s.name: s for s in (
-        ToolSpec("go2_sport", "执行站立、停止、招呼、伸展或跳舞动作", _schema({"cmd": _string(enum=_SPORT)}, ("cmd",)), motion=True, timeout_s=22, result_rule="device"),
+        ToolSpec("go2_sport", "执行站立、停止、招呼、伸展或跳舞动作", _schema({"cmd": _string(enum=_SPORT)}, ("cmd",)), motion=True, timeout_s=35, result_rule="device"),
         ToolSpec("go2_move", "按方向、速度和时长定时移动；实际位移未确认", _schema({"direction": _string(enum=_DIRECTIONS), "speed": _number(exclusiveMinimum=0, maximum=0.5, default=0.3), "duration": _number(exclusiveMinimum=0, maximum=10, default=1)}, ("direction",)), motion=True, timeout_s=35, result_rule="device"),
         ToolSpec("go2_observe", "用摄像头回答当前画面问题", _schema({"question": _string(default="描述你看到的场景")}), timeout_s=32),
         ToolSpec("go2_status", "查询设备连接和姿态", _schema({}), timeout_s=3),
@@ -41,6 +41,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
+        ToolSpec("go2_navigate_to_visible_target", "定位当前画面中唯一、静止且接触地面的目标，沿已知自由区域到安全停靠点并复核；缺少实测标定或避障验证时拒绝移动", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", _schema({"color": _string(enum=["white", "red", "yellow", "blue", "green", "cyan", "purple"], default="white"), "duration": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 60}}), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
@@ -57,7 +58,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "skill_id": _string(minLength=1),
             "params": {"type": "object"},
             "request_id": _string(minLength=1, maxLength=100),
-        }, ("target_unit_id", "skill_id", "params")), timeout_s=35),
+        }, ("target_unit_id", "skill_id", "params")), timeout_s=155),
     )
 }
 
