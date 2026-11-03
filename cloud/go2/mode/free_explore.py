@@ -112,6 +112,8 @@ class Drive:
         return self.submit_event({"event_id": message["message_id"],
             "message_id": message["message_id"], "kind": "peer_message",
             "source": message.get("sender"), "content": message.get("content", ""),
+            "interaction_kind": message.get("interaction_kind", "message"),
+            "game_id": message.get("game_id"),
             "ts": time.time(), "deadline": message["deadline"],
             "activity_id": message.get("activity_id"),
             "message": message, "messenger": messenger})
@@ -165,6 +167,7 @@ class Drive:
             return
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.go2.workflows.social import build_social_graph
+        from cloud.peers.games import playable_games
         from cloud.go2.tools.tools import send_message
 
         def can_send(activity_id_to_check: str, target: str, topic: str) -> bool:
@@ -177,8 +180,11 @@ class Drive:
                         and not self.user_interrupt and not self._pending_question_id
                         and go2.is_connected)
 
-        async def deliver(target: str, content: str) -> dict:
-            outcome = send_message(target, content)
+        async def deliver(target: str, content: str, *, interaction_kind: str = "message",
+                          game_id: str | None = None) -> dict:
+            outcome = (send_message(target, content, interaction_kind=interaction_kind,
+                                    game_id=game_id) if interaction_kind == "game_invite"
+                       else send_message(target, content))
             return outcome if isinstance(outcome, dict) else {"result": "error"}
 
         run_id = "social_" + uuid.uuid4().hex
@@ -190,6 +196,9 @@ class Drive:
         state = {"run_id": run_id, "activity_id": activity_id,
                  "activity": context["activity"], "opportunity": opportunity,
                  "peers": peers, "space_summary": prompt_space_context(),
+                 "playable_games": [{"target": peer["unit_id"], **game}
+                                    for peer in peers for game in playable_games(
+                                        activity_id, "go2", peer["unit_id"])],
                  "active": bool(activity), "connected": go2.is_connected,
                  "interrupted": self.user_interrupt,
                  "pending_question": bool(self._pending_question_id),
@@ -248,17 +257,30 @@ class Drive:
     async def _navigate(self, name: str | None = None, coordinate: tuple[float, float] | None = None) -> dict:
         from cloud.go2.navigation.navigator import navigator
         owner_session_id = self.owner_session_id
+        if (owner_session_id and owner_session_id.startswith("act_")
+                and self._activity_id() != owner_session_id):
+            return {"result": "cancelled", "reason": "activity_ended"}
         tool, params = (("go2_navigate_to_coordinate", {"x": coordinate[0], "y": coordinate[1]})
                         if coordinate is not None else ("go2_navigate_to", {"name": name}))
         nav_task = asyncio.create_task(self._execute_motion(tool, params))
         try:
             while not nav_task.done():
-                if self.user_interrupt or not go2.is_connected:
+                if (self.user_interrupt or not go2.is_connected
+                        or (owner_session_id and owner_session_id.startswith("act_")
+                            and self._activity_id() != owner_session_id)):
                     nav_task.cancel()
                     await asyncio.gather(nav_task, return_exceptions=True)
                     if owner_session_id is not None:
                         navigator.stop(owner_session_id=owner_session_id)
-                    return {"result": "cancelled", "message": "导航被打断"}
+                    stopped = False
+                    if go2.is_connected:
+                        try:
+                            receipt = await go2.send_command("StopMove", completion_timeout=5.0)
+                            stopped = receipt.get("result") == "ok"
+                        except Exception:
+                            pass
+                    return {"result": "cancelled" if stopped else "unknown",
+                            "message": "导航被打断" if stopped else "停步未确认"}
                 if self._events and await self._interrupt_for_event():
                     stopped = owner_session_id is not None and navigator.stop(owner_session_id=owner_session_id)
                     nav_task.cancel()
@@ -431,7 +453,13 @@ class Drive:
             checkpointer=saver, model=model)
         thread_id = thread_id or "go2:event:" + uuid.uuid4().hex
         public_event = {key: event.get(key) for key in
-                        ("event_id", "kind", "source", "content", "deadline", "activity_id")}
+                        ("event_id", "kind", "source", "content", "deadline", "activity_id",
+                         "interaction_kind", "game_id")}
+        if event.get("interaction_kind") == "game_invite":
+            from cloud.peers.games import get_game
+            game = get_game(event.get("game_id"))
+            public_event["game"] = ({"game_id": game.game_id, "name": game.name,
+                                     "description": game.description} if game else None)
         async with saver.async_run_lock(thread_id):
             result = await graph.ainvoke({"pending_event": public_event,
                 "space_summary": prompt_space_context(),
@@ -442,8 +470,7 @@ class Drive:
                 {"configurable": {"thread_id": thread_id}}, durability="sync")
         self._last_decision = {"event_id": event["event_id"],
                                "choice": result.get("event_decision", "defer"),
-                               "reason": result.get("decision_reason", ""),
-                               "task_kind": result.get("task_kind", "peer_task")}
+                               "reason": result.get("decision_reason", "")}
         return self._last_decision
 
     async def _interrupt_for_event(self) -> bool:
@@ -508,6 +535,14 @@ class Drive:
         if event["kind"] != "peer_message":
             return
         messenger, message = event["messenger"], event["message"]
+        from cloud.peers.games import activity_allows, game_is_playable, get_game
+        activity_id = event.get("activity_id")
+        is_game_invite = event.get("interaction_kind") == "game_invite"
+        if ((activity_id or is_game_invite)
+                and (not activity_allows(activity_id, message["sender"], "go2")
+                     or (is_game_invite and self._activity_id() != activity_id))):
+            messenger.send_result(event["message_id"], "cancelled", reason="activity_ended")
+            return
         choice = decision["choice"]
         if choice != "accept":
             if choice == "decline":
@@ -516,16 +551,62 @@ class Drive:
                 messenger.send_result(event["message_id"], "unknown", reason="autonomous_deferred")
             return
         task_id = "peer_" + event["message_id"]
+        game = None
+        if event.get("interaction_kind") == "game_invite":
+            game = get_game(event.get("game_id"))
+            if not game or not game_is_playable(event.get("activity_id"),
+                    message["sender"], "go2", game.game_id):
+                messenger.send_result(event["message_id"], "rejected",
+                                      reason="game_unavailable")
+                return
+            # MQTT QoS 1 can redeliver after a process restart. Reserve before
+            # any game step so an unconfirmed prior run never repeats motion.
+            from cloud.agents.common.effects import FileEffectLedger
+            try:
+                reservation = FileEffectLedger().reserve(
+                    "go2", "go2:game:" + event["message_id"],
+                    event["message_id"], "execute", game.game_id,
+                    {"activity_id": activity_id, "sender": message["sender"]})
+            except (OSError, ValueError) as exc:
+                logger.warning("[Drive] game reservation unavailable: %s", type(exc).__name__)
+                messenger.send_result(event["message_id"], "unknown",
+                                      reason="game_reservation_unavailable")
+                return
+            if reservation["reservation"] == "existing":
+                messenger.send_result(event["message_id"], "unknown",
+                                      reason="prior_game_execution_unconfirmed")
+                return
         self._active_goal = {"kind": "peer_message", "event_id": event["event_id"],
                              "task_id": task_id, "deadline": event["deadline"]}
         messenger.send_progress(event["message_id"], task_id)
-        if decision.get("task_kind") == "follow_peer_color":
+        if game is not None:
             try:
-                await self._run_color_object_game(event, task_id)
+                await game.execute(self, event, task_id)
             except asyncio.CancelledError:
-                messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
-                                      reason="autonomy_stopped")
+                from cloud.go2.navigation.navigator import navigator
+                navigator.stop(owner_session_id=self.owner_session_id)
+                stopped = False
+                if go2.is_connected:
+                    try:
+                        receipt = await go2.send_command("StopMove", completion_timeout=5.0)
+                        stopped = receipt.get("result") == "ok"
+                    except Exception:
+                        pass
+                messenger.send_result(event["message_id"],
+                                      "cancelled" if stopped else "unknown", task_id=task_id,
+                                      reason="autonomy_stopped" if stopped else "stop_unconfirmed")
                 raise
+            except Exception as exc:
+                logger.exception("[Drive] game failed game_id=%s", game.game_id)
+                from cloud.go2.navigation.navigator import navigator
+                navigator.stop(owner_session_id=self.owner_session_id)
+                if go2.is_connected:
+                    try:
+                        await go2.send_command("StopMove", completion_timeout=5.0)
+                    except Exception:
+                        pass
+                messenger.send_result(event["message_id"], "unknown", task_id=task_id,
+                                      reason="game_error:" + type(exc).__name__)
             finally:
                 self._active_goal = None
             return
@@ -536,7 +617,10 @@ class Drive:
                 context=context, run_id=event["message_id"], deadline=event["deadline"]))
         try:
             while not task.done():
-                if self.user_interrupt or not go2.is_connected or time.time() >= event["deadline"]:
+                if (self.user_interrupt or not go2.is_connected
+                        or time.time() >= event["deadline"]
+                        or (activity_id and not activity_allows(
+                            activity_id, message["sender"], "go2"))):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     from cloud.go2.navigation.navigator import navigator
@@ -571,85 +655,6 @@ class Drive:
         if result.get("response"):
             messenger.send_message(message["target"], message["sender"],
                 str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply")
-
-    def _live_lamp_color(self, source: str) -> dict | None:
-        from cloud.space.context import get_space_context
-        from cloud.api.main import _esp32_state
-        context = get_space_context("go2", state=_esp32_state)
-        for entry in context["environment"]:
-            if entry.get("source") != source or entry.get("status") != "current":
-                continue
-            values = entry.get("values") or {}
-            rgb = tuple(values.get(key) for key in ("r", "g", "b"))
-            if (all(type(value) is int and 0 <= value <= 255 for value in rgb)
-                    and type(values.get("brightness")) is int
-                    and values["brightness"] > 0):
-                return {"rgb": rgb, "as_of": entry["as_of"], "source": source}
-        return None
-
-    async def _run_color_object_game(self, event: dict, task_id: str) -> None:
-        """Bounded search; descriptions remain candidates without object evidence."""
-        message, messenger = event["message"], event["messenger"]
-        color = self._live_lamp_color(str(event.get("source") or ""))
-        if color is None:
-            await self._advance_task(self._active_goal, stage="finish",
-                result={"result": "rejected", "reason": "lamp_color_unknown_or_stale"})
-            messenger.send_result(event["message_id"], "rejected", task_id=task_id,
-                                  reason="lamp_color_unknown_or_stale")
-            messenger.send_message("go2", message["sender"],
-                "我没读到这盏灯的新鲜 RGB 和亮度，先不按邀请文字猜颜色。",
-                reply_to=event["message_id"], reply_kind="reply")
-            return
-        self._active_goal = {**self._active_goal, "kind": "color_object_game",
-                             "target_color": color, "deadline": event["deadline"]}
-        task_state = await self._advance_task(self._active_goal, stage="start")
-        observations = []
-        reason = "structured_multiframe_evidence_unavailable"
-        color_round = 1
-        while task_state.get("next_action") == "explore_frontier":
-            if self.user_interrupt or not go2.is_connected:
-                reason = "autonomy_interrupted_or_offline"
-                break
-            if time.time() >= event["deadline"]:
-                reason = "game_expired"
-                break
-            latest = self._live_lamp_color(color["source"])
-            if latest is None:
-                reason = "lamp_color_stale"
-                break
-            if latest["rgb"] != color["rgb"]:
-                color = latest
-                color_round += 1
-                self._active_goal = {**self._active_goal, "target_color": color,
-                                     "color_round": color_round}
-                task_state = await self._advance_task(self._active_goal,
-                    result={"result": "ok", "reason": "lamp_color_changed",
-                            "target_color": color})
-                continue
-            self._last_observation = None
-            self._last_tool_result = None
-            await self._do_explore(observe_question=(
-                f"只描述当前画面中疑似与 RGB {color['rgb']} 同色的物品；"
-                "不能把颜色描述当作已定位或已确认。"))
-            if self._last_observation:
-                observations.append({"rgb": color["rgb"],
-                                     "description": self._last_observation[:240]})
-            step_result = self._last_tool_result or {"result": "unknown"}
-            task_state = await self._advance_task(self._active_goal, result=step_result,
-                                                  step_done=True)
-            if step_result.get("result") != "ok":
-                reason = "frontier_unavailable_or_failed"
-                break
-        await self._advance_task(self._active_goal, stage="finish", result={"result": "unknown",
-            "target_color": color, "color_rounds": color_round,
-            "candidate_descriptions": observations, "reason": reason})
-        messenger.send_result(event["message_id"], "unknown", task_id=task_id,
-                              reason=reason)
-        detail = ("灯色状态已过期，需要重新确认。" if reason == "lamp_color_stale" else
-                  "目前只有画面文字候选，缺少跨帧物体证据，不能确认找到。")
-        messenger.send_message("go2", message["sender"],
-            f"我跟随灯的实时颜色检查了 {color_round} 轮安全探索点。" + detail,
-            reply_to=event["message_id"], reply_kind="reply")
 
     async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:
         """Explore measured map frontiers; vision describes arrivals separately."""
@@ -761,7 +766,9 @@ class Drive:
                     self._last_execution_result = "blocked"
                     return "当前活动或社交预算不允许发信"
                 from cloud.go2.tools.tools import send_message
-                outcome = send_message(target, content)
+                outcome = send_message(target, content,
+                    interaction_kind=params.get("interaction_kind", "message"),
+                    game_id=params.get("game_id"))
                 status = outcome.get("result", "error")
                 if status == "accepted":
                     self._social_state.sent(target, content)

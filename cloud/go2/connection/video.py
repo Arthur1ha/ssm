@@ -29,6 +29,8 @@ class Go2Video:
                 frame = await track.recv()  # 必须持续 drain，否则 aiortc 缓冲区积压
                 captured_at = time.time()
                 received_at = time.monotonic()
+                pose_at_capture = getattr(self, "_odom", {}).copy()
+                pose_received_at = getattr(self, "_odom_received_at", None)
             except Exception as e:
                 logger.warning("[Go2/Video] track 结束: %s", e)
                 break
@@ -49,6 +51,8 @@ class Go2Video:
                                            "captured_at": captured_at,
                                            "received_at": received_at,
                                            "odom_session_id": getattr(self, "_odom_session_id", None),
+                                           "pose_at_capture": pose_at_capture,
+                                           "pose_received_at": pose_received_at,
                                            "width": img.width, "height": img.height}
                 last_encode = now
                 self._get_frame_event().set()

@@ -1106,11 +1106,17 @@ async def go2_map_debug(context=Depends(require_admin_read)):
 
     try:
         grid_obj = getattr(go2, "occupancy_grid", None)
+        from cloud.go2.navigation.occupancy_grid import PATH_CLEARANCE_M, TURN_CLEARANCE_M
         grid_summary = ({"floor_z": grid_obj.measured_floor_z,
                          "has_free_space_evidence": grid_obj.has_free_space_evidence,
                          "free_cells": int(np.count_nonzero(grid_obj.cells == 1)),
                          "unknown_cells": int(np.count_nonzero(grid_obj.cells == 0)),
-                         "occupied_cells": int(np.count_nonzero(grid_obj.cells == 2))}
+                         "occupied_cells": int(np.count_nonzero(grid_obj.cells == 2)),
+                         "raw_obstacle_cells": int(np.count_nonzero(grid_obj.obstacles)),
+                         "inflated_only_cells": int(np.count_nonzero(
+                             (grid_obj.cells == 2) & ~grid_obj.obstacles)),
+                         "path_clearance_m": PATH_CLEARANCE_M,
+                         "turn_clearance_m": TURN_CLEARANCE_M}
                         if grid_obj is not None else None)
         odom = getattr(go2, "odom", None)
         if grid_summary is not None and odom and grid_obj.has_free_space_evidence:
@@ -1126,6 +1132,40 @@ async def go2_map_debug(context=Depends(require_admin_read)):
         grid_summary = None
     return {"diagnostics": _summarize(go2.sensor_diagnostics),
             "voxel": _summarize(raw), "grid": grid_summary}
+
+
+@router.get("/diagnostics/rgb-lidar/capture")
+async def capture_rgb_lidar_target(target: str, context=Depends(require_admin_read)):
+    """Capture a named target and its paired 3D voxel sample without moving Go2."""
+    from cloud.observability import bind_context
+    from cloud.go2.perception.rgb_lidar import save_paired_sample
+    from cloud.go2.perception.visual_approach import _save_diagnostic_frame
+    from cloud.go2.perception.visual_target import detect_visible_target
+
+    if not target.strip() or len(target) > 100:
+        raise HTTPException(status_code=400, detail="请提供画面中的目标描述")
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 未连接")
+    captured = go2.latest_frame_snapshot()
+    voxel = go2.voxel_raw
+    voxel_received_at = go2.voxel_received_at
+    if captured is None or voxel is None:
+        raise HTTPException(status_code=503, detail="视频或雷达数据尚未就绪")
+    jpeg, frame = captured
+    session_id = (context.session_id if isinstance(context, ExecutionContext)
+                  else context.get("session_id") if isinstance(context, dict) else None)
+    with bind_context(session_id=session_id):
+        image_path = _save_diagnostic_frame(jpeg, frame)
+        observation = await detect_visible_target(jpeg, target, frame)
+        sample_path = save_paired_sample(image_path, frame, voxel, voxel_received_at,
+                                         observation.get("bbox_1000"))
+    return {"target": target, "frame_id": frame.get("frame_id"),
+            "observation": observation, "image_artifact": str(image_path) if image_path else None,
+            "lidar_artifact": str(sample_path) if sample_path else None,
+            "lidar_status": "paired" if sample_path else "unpaired",
+            "voxel_skew_s": round(voxel_received_at - frame["received_at"], 3)
+            if isinstance(voxel_received_at, (int, float)) else None,
+            "motion_command_sent": False}
 
 
 @router.get("/map.png")
@@ -1159,7 +1199,8 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
     arr = np.empty((ny, nx, 3), dtype=np.uint8)
     arr[:] = (14, 18, 28)  # unknown
     arr[grid_obj.cells == FREE] = (34, 65, 70)
-    arr[grid_obj.cells == OCCUPIED] = (100, 100, 100)
+    arr[grid_obj.cells == OCCUPIED] = (100, 100, 100)  # inflated clearance
+    arr[grid_obj.obstacles] = (210, 85, 75)  # raw obstacle returns
     arr = arr[::-1]
     img = Image.fromarray(arr, "RGB").resize((W, H), Image.NEAREST)
     d   = ImageDraw.Draw(img)
@@ -1210,26 +1251,9 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
             ax = px + int(_math.cos(heading) * L)
             ay = py - int(_math.sin(heading) * L)
             d.line([px, py, ax, ay], fill=(0, 255, 80), width=3)
-
-    # 调试信息叠加
-    free_total = int(np.count_nonzero(grid_obj.cells == FREE))
-    known_total = int(np.count_nonzero(grid_obj.cells != 0))
-    if odom:
-        d.text((4, H - 14),
-               f"x={odom['x']:.2f} y={odom['y']:.2f} h={_math.degrees(odom['heading']):.0f}°",
-               fill=(0, 180, 80))
-    d.text((4, 4),
-           f"orig=({grid_obj.origin[2]:.2f}z) res={grid_obj.resolution} "
-           f"Z={grid_obj.origin[2]:.2f}~{grid_obj.origin[2]+grid_obj.width[2]*grid_obj.resolution:.2f}m",
-           fill=(80, 80, 100))
-    d.text((4, 18),
-           f"known={known_total}/{nx*ny} free={free_total} floor={grid_obj.measured_floor_z}",
-           fill=(180, 80, 80))
-    _, nav_reason = navigator._snapshot()
-    map_age = time.monotonic() - go2.voxel_received_at
-    d.text((4, 32),
-           f"nav={nav_reason or 'ready'} map_age={map_age:.1f}s",
-           fill=(0, 200, 100) if nav_reason is None else (255, 140, 80))
+            d.rectangle([4, 4, 126, 21], fill=(14, 18, 28))
+            d.text((7, 7), f"x={odom['x']:.2f} y={odom['y']:.2f}",
+                   fill=(190, 245, 205))
 
     buf = io.BytesIO()
     img.save(buf, "PNG")

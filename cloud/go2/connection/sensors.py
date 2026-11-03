@@ -17,6 +17,8 @@ class Go2Sensors:
         self._odom_frame_id: str | None = None
         self._odom_interval_s: float | None = None
         self._odom_count = 0
+        self._odom_invalid_count = 0
+        self._odom_last_invalid_reason: str | None = None
         self._low_state: dict = {}
         self._low_state_received_at: float | None = None
         self._low_state_interval_s: float | None = None
@@ -39,6 +41,8 @@ class Go2Sensors:
         self._odom_frame_id = None
         self._odom_interval_s = None
         self._odom_count = 0
+        self._odom_invalid_count = 0
+        self._odom_last_invalid_reason = None
         self._voxel_raw = None
         self._voxel_received_at = None
         self._voxel_source_ts = None
@@ -88,34 +92,34 @@ class Go2Sensors:
         header = data.get("header") or {}
         pose = data.get("pose") or {}
         if not isinstance(header, dict) or not isinstance(pose, dict):
-            self._odom = {}
-            self._odom_received_at = None
-            self._odom_frame_id = None
+            self._odom_invalid_count += 1
+            self._odom_last_invalid_reason = "invalid_structure"
             return
         pos = pose.get("position") or {}
         ori = pose.get("orientation") or {}
         if not isinstance(pos, dict) or not isinstance(ori, dict):
-            self._odom = {}
-            self._odom_received_at = None
-            self._odom_frame_id = None
+            self._odom_invalid_count += 1
+            self._odom_last_invalid_reason = "invalid_pose_structure"
             return
         try:
             x, y = float(pos["x"]), float(pos["y"])
+            z = float(pos["z"]) if "z" in pos else None
             qx, qy, qz, qw = (float(ori[k]) for k in ("x", "y", "z", "w"))
-            values = (x, y, qx, qy, qz, qw)
+            values = (x, y, qx, qy, qz, qw) if z is None else (x, y, z, qx, qy, qz, qw)
             if not all(math.isfinite(v) for v in values) or sum(q*q for q in (qx, qy, qz, qw)) < 0.5:
                 raise ValueError("invalid pose")
         except (KeyError, TypeError, ValueError):
-            self._odom = {}
-            self._odom_received_at = None
-            self._odom_frame_id = None
+            self._odom_invalid_count += 1
+            self._odom_last_invalid_reason = "invalid_pose_values"
             return
         heading = math.atan2(2.0 * (qw * qz + qx * qy),
                              1.0 - 2.0 * (qy * qy + qz * qz))
         self._odom = {
             "x": x,
             "y": y,
+            "z": z,
             "heading": heading,
+            "orientation": [qx, qy, qz, qw],
             "session_id": getattr(self, "_odom_session_id", None),
         }
         now = time.monotonic()
@@ -214,7 +218,9 @@ class Go2Sensors:
         return {
             "pose": {"frame_id": self._odom_frame_id, "source_ts": self._odom_source_ts,
                      "age_s": None if self._odom_received_at is None else now - self._odom_received_at,
-                     "samples": self._odom_count, "latest_rate_hz": rate(self._odom_interval_s)},
+                     "samples": self._odom_count, "latest_rate_hz": rate(self._odom_interval_s),
+                     "invalid_samples": self._odom_invalid_count,
+                     "last_invalid_reason": self._odom_last_invalid_reason},
             "voxel": {"frame_id": self._voxel_frame_id, "source_ts": self._voxel_source_ts,
                       "age_s": None if self._voxel_received_at is None else now - self._voxel_received_at,
                       "samples": self._voxel_count, "latest_rate_hz": rate(self._voxel_interval_s),

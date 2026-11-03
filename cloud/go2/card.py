@@ -41,7 +41,7 @@ CARD_SKILLS = {
     "go2_visual_navigate": {
         "tool_name": "go2_navigate_to_visible_target",
         "name": "视觉目标导航",
-        "description": "走到当前画面中唯一静态地面目标旁的已知安全停靠点；标定或避障未验证时拒绝移动",
+        "description": "用相机与雷达定位可见物体，沿实时地图导航到附近停靠点并重新观察确认",
         "tags": ["navigation", "vision", "motion", "robot"],
         "invoke": {"action": "VISUAL_NAVIGATE"},
     },

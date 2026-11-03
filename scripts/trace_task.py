@@ -41,6 +41,10 @@ def _error(event: dict) -> bool:
         return True
     if event.get("event") in {"model.error", "reply.fallback"}:
         return True
+    if event.get("event") == "vision.gate" and event.get("passed") is False:
+        return True
+    if event.get("event") == "vision.model" and event.get("phase") == "error":
+        return True
     if event.get("event") in {"tool.result", "peer.result", "device.result"}:
         status = event.get("status", event.get("result"))
         return isinstance(status, str) and status in {"error", "failed", "blocked", "unknown", "timeout", "rejected"}
@@ -51,9 +55,14 @@ def _brief(event: dict) -> str:
     parts = [str(event.get("ts", "?")), str(event.get("agent_id") or event.get("service") or "?"), str(event.get("event", "?"))]
     kind = event.get("event")
     for key in ("turn", "node", "thread_id", "checkpoint_id", "tool",
+                "phase", "gate", "passed", "checks", "frame_id",
+                "frame_age_s", "frame_age_at_response_s", "pose_age_s", "map_age_s",
+                "count", "static", "confidence", "minimum_confidence", "bbox",
+                "bbox_1000", "bbox_pixels",
+                "observation", "kind", "goal", "artifact", "reason",
                 "target_unit_id", "initiator_unit_id", "skill_id",
                 "request_id", "task_id", "transport", "status", "duration_ms",
-                "goal", "input", "output", "decision", "params", "result",
+                "input", "output", "decision", "params", "result",
                 "reply", "response", "question", "error", "cause", "message"):
         if key in event and event[key] is not None:
             if kind == "model.request" and key == "input" and event.get("goal"):
@@ -61,7 +70,7 @@ def _brief(event: dict) -> str:
             raw = event[key]
             if key == "result" and isinstance(raw, dict) and kind == "tool.result":
                 raw = {name: raw[name] for name in
-                       ("result", "error", "message", "response", "task_id", "actions_taken")
+                       ("result", "reason", "error", "message", "response", "task_id", "actions_taken")
                        if name in raw}
                 nested = event[key].get("tool_results")
                 if isinstance(nested, list):
@@ -81,9 +90,15 @@ def _brief(event: dict) -> str:
 
 
 def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
-    if args.errors:
-        events = [event for event in events if _error(event)]
     identifier = args.identifier
+    if args.latest and not identifier:
+        # Authenticated browser conversations use ses_ IDs; offline checks use
+        # named fixture sessions and must not become the apparent latest chat.
+        for event in reversed(events):
+            if (event.get("event") == "task.received"
+                    and str(event.get("session_id", "")).startswith("ses_")):
+                identifier = event["session_id"]
+                break
     if args.latest and not identifier:
         for event in reversed(events):
             if event.get("session_id") and event["session_id"] != "system":
@@ -91,6 +106,8 @@ def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
                 break
         if not identifier and events:
             identifier = "system"
+    if args.errors:
+        events = [event for event in events if _error(event)]
     if identifier:
         events = [event for event in events if (event.get("session_id") or "system") == identifier
                   or event.get("trace_id") == identifier]
@@ -121,7 +138,9 @@ def _follow(log_dir: Path, args: argparse.Namespace) -> None:
         paths = _files(log_dir)
         latest = None
         if args.latest and not args.identifier:
-            candidates = [path for path in paths if path.name != "session-system.jsonl"]
+            candidates = [path for path in paths if path.name.startswith("session-ses_")]
+            if not candidates:
+                candidates = [path for path in paths if path.name != "session-system.jsonl"]
             if candidates:
                 latest = max(candidates, key=lambda path: path.stat().st_mtime_ns).stem[8:]
             elif paths:

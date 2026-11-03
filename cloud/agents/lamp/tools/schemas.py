@@ -50,6 +50,8 @@ class SendMessage(BaseModel):
     """给同空间智能体发送短消息；投递成功不代表接受任务。"""
     target: str
     content: str = Field(min_length=1, max_length=1000)
+    interaction_kind: Literal["message", "game_invite"] = "message"
+    game_id: str | None = None
 
 
 class AskUser(BaseModel):

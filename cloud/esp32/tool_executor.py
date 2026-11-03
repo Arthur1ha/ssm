@@ -117,7 +117,9 @@ def execute_auxiliary(*, unit_id: str, tool: str, params: dict,
         if messenger is None:
             return {"result": "error", "error": "messaging_unavailable"}
         return messenger.send_message(unit_id, params["target"], params["content"],
-                                      reply_to=params.get("reply_to"))
+                                      reply_to=params.get("reply_to"),
+                                      interaction_kind=params.get("interaction_kind", "message"),
+                                      game_id=params.get("game_id"))
     try:
         if tool == "list_peers":
             from cloud.esp32 import tools

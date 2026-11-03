@@ -12,9 +12,10 @@ import time
 from pathlib import Path
 
 from cloud.go2.navigation.astar import astar
+from cloud.observability import emit_agent_event
+
 
 CALIBRATION_PATH = Path(__file__).with_name('camera_calibration.json')
-AVOIDANCE_EVIDENCE_PATH = Path(__file__).with_name('avoidance_evidence.json')
 MAX_SAMPLE_SKEW = 0.25
 MAX_FRAME_AGE = 0.8
 MAX_POSITION_ERROR_M = 0.20
@@ -32,21 +33,6 @@ class TargetUnlocalized(ValueError):
 def _require(condition: bool) -> None:
     if not condition:
         raise ValueError('site evidence failed validation')
-
-
-def require_avoidance_evidence(serial: str | None, path: Path = AVOIDANCE_EVIDENCE_PATH) -> dict:
-    """Require an on-site record for the exact robot and Navigator motion channel."""
-    try:
-        data = json.loads(path.read_text())
-        _require(bool(serial and data['robot_serial'] == serial))
-        _require(data['connection_method'] == 'Remote')
-        _require(data['motion_channel'] == 'WIRELESS_CONTROLLER')
-        _require(data['switch_get_enabled'] is True)
-        _require(data['motion_channel_obstacle_test_passed'] is True)
-        _require(bool(data['firmware_version'] and data['tested_at']))
-        return data
-    except (OSError, ValueError, TypeError, KeyError) as exc:
-        raise TargetUnlocalized('avoidance_unverified') from exc
 
 
 def load_calibration(path: Path = CALIBRATION_PATH, *, serial: str | None = None) -> dict:
@@ -193,31 +179,91 @@ def select_standoff(grid, pose: dict, target: dict) -> dict:
     return {'x': x, 'y': y, 'heading': heading, 'distance_to_target_m': distance}
 
 
-async def detect_ground_target(jpeg: bytes, target: str) -> dict:
-    """Ask vision for pixels only; never use model-supplied distance or coordinates."""
+async def _ask_vision(jpeg: bytes, target: str, frame: dict,
+                      instruction: str, mode: str) -> dict:
+    """Keep both visual tools on the same JSON request and diagnostic path."""
     from langchain_core.messages import HumanMessage, SystemMessage
     from cloud.go2.models import get_vision_llm
-    instruction = (
-        '只分析给定图像中指定目标。输出纯 JSON：'
-        '{"count":整数,"confidence":0到1,"static":布尔值,'
-        '"ground_contact_visible":布尔值,"contact_pixel":[像素x,像素y],'
-        '"bbox":[左,上,右,下]}。'
-        'count 是与描述匹配的目标数量。若目标不唯一、地面接触点不可见或目标在桌面上，'
-        'ground_contact_visible 必须为 false。禁止估计距离或世界坐标。'
-    )
-    response = await get_vision_llm().ainvoke([
-        SystemMessage(content=instruction),
-        HumanMessage(content=[{'type': 'text', 'text': '目标：' + target},
-                              {'type': 'image_url', 'image_url': {'url':
-                               'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode()}}]),
-    ])
+    width, height = frame.get('width'), frame.get('height')
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+        emit_agent_event('vision.gate', gate='frame_dimensions', passed=False,
+                         frame_id=frame.get('frame_id'), width=width, height=height,
+                         reason='vision_result_invalid')
+        raise TargetUnlocalized('vision_result_invalid')
+    emit_agent_event('vision.model', phase='request', frame_id=frame.get('frame_id'),
+                     width=width, height=height, mode=mode)
+    started = time.monotonic()
     try:
-        raw = response.content
+        response = await get_vision_llm().bind(response_format={'type': 'json_object'}).ainvoke([
+            SystemMessage(content=instruction),
+            HumanMessage(content=[{'type': 'text', 'text': '目标：' + target},
+                                  {'type': 'image_url', 'image_url': {'url':
+                                   'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode()}}]),
+        ])
+    except Exception as exc:
+        emit_agent_event('vision.model', phase='error', frame_id=frame.get('frame_id'),
+                         mode=mode, error_type=type(exc).__name__, detail=str(exc)[:300],
+                         duration_ms=round((time.monotonic() - started) * 1000))
+        raise
+    raw = getattr(response, 'content', None)
+    # Keep the model's textual answer for diagnosis, never the image bytes.
+    emit_agent_event('vision.model', phase='response', frame_id=frame.get('frame_id'),
+                     mode=mode,
+                     output=raw[:4096] if isinstance(raw, str) else str(raw)[:4096],
+                     output_length=len(raw) if hasattr(raw, '__len__') else None,
+                     output_type=type(raw).__name__,
+                     duration_ms=round((time.monotonic() - started) * 1000),
+                     frame_age_at_response_s=(round(time.monotonic() - frame['received_at'], 3)
+                                              if isinstance(frame.get('received_at'), (int, float))
+                                              else None))
+    try:
         if not isinstance(raw, str):
             raise ValueError('non-text vision output')
         observation = json.loads(raw)
         if not isinstance(observation, dict):
             raise ValueError('non-object vision output')
+        fields = (('found', 'bbox_1000') if mode == 'visible_target' else
+                  ('count', 'static', 'confidence', 'bbox',
+                   'ground_contact_visible', 'contact_pixel'))
+        emit_agent_event('vision.model', phase='parsed', frame_id=frame.get('frame_id'),
+                         mode=mode,
+                         observation={key: observation.get(key) for key in fields})
         return observation
     except (TypeError, ValueError) as exc:
+        emit_agent_event('vision.gate', gate='json_response', passed=False,
+                         frame_id=frame.get('frame_id'), mode=mode,
+                         reason='vision_result_invalid',
+                         detail=str(exc))
         raise TargetUnlocalized('vision_result_invalid') from exc
+
+
+async def detect_visible_target(jpeg: bytes, target: str, frame: dict) -> dict:
+    """Find any matching visible object and its image region for visual approach."""
+    instruction = (
+        '在图像中寻找用户描述的物体。'
+        '只输出 JSON：{"found":布尔值,"bbox_1000":[左,上,右,下]或null}。'
+        '画面里有任何一个符合描述的物体就设 found=true；若有多个，选画面中最清楚的一个。'
+        '看不到符合描述的物体时设 found=false、bbox_1000=null。'
+        'bbox_1000 必须用相对于整张图的 0–1000 坐标，左上角为原点，'
+        '满足 0<=左<右<=1000、0<=上<下<=1000。不要输出像素坐标。'
+        '不要估计距离或世界坐标，不要输出 JSON 之外的文字。'
+    )
+    return await _ask_vision(jpeg, target, frame, instruction, 'visible_target')
+
+
+async def detect_ground_target(jpeg: bytes, target: str, frame: dict) -> dict:
+    """Ask vision for pixels needed by the calibrated ground-contact route."""
+    width, height = frame.get('width'), frame.get('height')
+    instruction = (
+        f'只分析给定的 {width}x{height} 像素图像中指定目标。输出纯 JSON：'
+        '{"count":整数,"confidence":0到1,"static":布尔值,'
+        '"ground_contact_visible":布尔值,"contact_pixel":[像素x,像素y],'
+        '"bbox":[左,上,右,下]}。'
+        'count 是与描述匹配的目标数量。若目标不唯一、地面接触点不可见或目标在桌面上，'
+        'ground_contact_visible 必须为 false。无法确认目标时设 count=0、confidence=0、static=false、'
+        'ground_contact_visible=false、contact_pixel=null、bbox=null。'
+        f'bbox 必须是当前图像的绝对像素坐标，左上角为原点，满足 0<=左<右<={width}、'
+        f'0<=上<下<={height}；不可输出 0~1 或 0~1000 归一化坐标。'
+        '禁止估计距离或世界坐标，也不要输出 JSON 之外的文字。'
+    )
+    return await _ask_vision(jpeg, target, frame, instruction, 'ground_contact')

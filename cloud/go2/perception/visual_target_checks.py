@@ -7,8 +7,9 @@ import numpy as np
 import pytest
 
 from cloud.go2.perception.visual_target import (
-    TargetUnlocalized, load_calibration, project_ground_contact,
-    require_avoidance_evidence, select_standoff,
+    TargetUnlocalized, detect_ground_target, detect_visible_target,
+    load_calibration, project_ground_contact,
+    select_standoff,
 )
 
 
@@ -69,11 +70,113 @@ def test_navigator_route_avoids_target_keepout():
                for x, y in path)
 
 
-def test_missing_site_evidence_blocks_runtime(tmp_path):
+def test_missing_calibration_blocks_precise_navigation(tmp_path):
     with pytest.raises(TargetUnlocalized, match='calibration_unavailable'):
         load_calibration(tmp_path / 'camera_calibration.json')
-    with pytest.raises(TargetUnlocalized, match='avoidance_unverified'):
-        require_avoidance_evidence('robot-serial', tmp_path / 'avoidance_evidence.json')
+
+
+@pytest.mark.asyncio
+async def test_detection_requests_pixel_bbox_as_json(monkeypatch):
+    from cloud.go2 import models
+    from cloud.go2.perception import visual_target
+    events = []
+
+    class VisionModel:
+        def bind(self, **kwargs):
+            assert kwargs == {'response_format': {'type': 'json_object'}}
+            return self
+
+        async def ainvoke(self, messages):
+            assert '640x480' in messages[0].content
+            assert '绝对像素坐标' in messages[0].content
+            return SimpleNamespace(content=json.dumps({
+                'count': 1, 'confidence': 0.95, 'static': True,
+                'bbox': [200, 100, 400, 300],
+            }))
+
+    monkeypatch.setattr(models, 'get_vision_llm', lambda: VisionModel())
+    monkeypatch.setattr(visual_target, 'emit_agent_event',
+                        lambda event, **fields: events.append((event, fields)))
+    result = await detect_ground_target(b'jpeg', '白色毛绒玩具', {'width': 640, 'height': 480})
+    assert result['bbox'] == [200, 100, 400, 300]
+    assert any(event == 'vision.model' and fields.get('phase') == 'response'
+               and '"confidence": 0.95' in fields['output']
+               and fields['duration_ms'] >= 0 for event, fields in events)
+    assert any(event == 'vision.model' and fields.get('phase') == 'parsed'
+               and fields['observation']['bbox'] == [200, 100, 400, 300]
+               for event, fields in events)
+
+
+@pytest.mark.asyncio
+async def test_visible_target_request_asks_only_for_presence_and_bbox(monkeypatch):
+    from cloud.go2 import models
+    from cloud.go2.perception import visual_target
+    events = []
+
+    class VisionModel:
+        def bind(self, **kwargs):
+            assert kwargs == {'response_format': {'type': 'json_object'}}
+            return self
+
+        async def ainvoke(self, messages):
+            prompt = messages[0].content
+            assert '"found"' in prompt and '"bbox_1000"' in prompt
+            assert '0–1000' in prompt and '不要输出像素坐标' in prompt
+            assert all(key not in prompt for key in ('confidence', 'count', 'static'))
+            return SimpleNamespace(content='{"found":true,"bbox_1000":[606,567,652,662]}')
+
+    monkeypatch.setattr(models, 'get_vision_llm', lambda: VisionModel())
+    monkeypatch.setattr(visual_target, 'emit_agent_event',
+                        lambda event, **fields: events.append((event, fields)))
+    result = await detect_visible_target(b'jpeg', '白色毛绒玩具',
+                                         {'width': 640, 'height': 360, 'frame_id': 43})
+    assert result == {'found': True, 'bbox_1000': [606, 567, 652, 662]}
+    assert any(event == 'vision.model' and fields.get('phase') == 'parsed'
+               and fields['observation'] == result for event, fields in events)
+
+
+@pytest.mark.asyncio
+async def test_invalid_vision_json_logs_preview_and_blocks(monkeypatch):
+    from cloud.go2 import models
+    from cloud.go2.perception import visual_target
+    events = []
+
+    class VisionModel:
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            return SimpleNamespace(content='```json\n{"bbox":[1,2,3,4]}\n```')
+
+    monkeypatch.setattr(models, 'get_vision_llm', lambda: VisionModel())
+    monkeypatch.setattr(visual_target, 'emit_agent_event',
+                        lambda event, **fields: events.append((event, fields)))
+    with pytest.raises(TargetUnlocalized, match='vision_result_invalid'):
+        await detect_ground_target(b'jpeg', '玩具', {'width': 640, 'height': 480})
+    assert any(event == 'vision.model' and fields.get('phase') == 'response'
+               and '```json' in fields['output'] for event, fields in events)
+    assert any(event == 'vision.gate' and fields.get('gate') == 'json_response'
+               and fields['passed'] is False for event, fields in events)
+
+
+@pytest.mark.asyncio
+async def test_missing_calibration_reports_cause_without_moving(monkeypatch):
+    from cloud.go2.tools import tools
+    from cloud.go2.perception import visual_target
+
+    monkeypatch.setattr(tools.go2, 'is_connected', True)
+    monkeypatch.setattr(tools.go2, 'fsm_state', 'standing')
+    monkeypatch.setattr(tools.go2, '_connected_serial', 'robot-serial', raising=False)
+
+    def missing_calibration(*, serial):
+        raise TargetUnlocalized('calibration_unavailable')
+
+    monkeypatch.setattr(visual_target, 'load_calibration', missing_calibration)
+    result = await tools._go2_precise_navigate_to_visible_target('白色猫头鹰')
+    assert result['result'] == 'blocked'
+    assert result['reason'] == 'calibration_unavailable'
+    assert '相机标定' in result['message']
+    assert result['last_trusted_pose'] is None
 
 
 def test_calibration_for_another_robot_is_rejected(tmp_path):
@@ -176,3 +279,50 @@ async def test_blocked_visual_tool_ends_graph_before_fallback_move(tmp_path):
     )
     assert calls == ['go2_navigate_to_visible_target']
     assert run.status == 'blocked'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool_result', [
+    {'result': 'blocked', 'reason': 'no_known_free_forward_path',
+     'message': '目标方向没有已知可通行区域；本次未确认前进。'},
+    {'result': 'ok', 'approached_m': 0.4,
+     'message': '已朝白色猫头鹰方向前进约 0.4 米；尚未确认到达目标。'},
+])
+async def test_visual_result_preserves_arrival_boundary_in_user_reply(tmp_path, monkeypatch, tool_result):
+    from cloud.agents.go2 import graph
+    from cloud.agents.go2.run_view import Go2RunView
+    from cloud.agents.common.checkpoint import FileCheckpointSaver
+    from cloud.agents.common.run_index import FileRunIndex
+    from cloud.go2.execution import ExecutionContext
+
+    class UnusedModel:
+        def bind_tools(self, schemas, parallel_tool_calls=False):
+            return self
+
+        async def ainvoke(self, messages):
+            raise AssertionError('visual result must not ask a model to change the confirmed outcome')
+
+    async def execute_visual(name, params, *, context):
+        assert name == 'go2_navigate_to_visible_target'
+        return tool_result
+
+    monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
+    monkeypatch.setattr(graph, 'get_store', lambda: Go2RunView(
+        checkpointer=FileCheckpointSaver(tmp_path / 'checkpoints'),
+        index=FileRunIndex(tmp_path / 'index')))
+    monkeypatch.setattr(graph, 'get_text_llm', lambda: UnusedModel())
+    monkeypatch.setattr(graph, 'execute_tool', execute_visual)
+    monkeypatch.setattr(graph.go2, 'is_connected', True)
+    monkeypatch.setattr('cloud.api.intents.publish_agent_event', lambda *_a, **_k: {})
+    context = ExecutionContext('visual-reply-session', 'admin', True,
+                               expires_at=int(time.time() + 60))
+    result = await graph.run_go2_loop(
+        'visual-reply-session', '走到白色猫头鹰旁边', context=context,
+        skill_id='go2_visual_navigate', params={'target': '白色猫头鹰'},
+        run_id='visual-reply-run')
+    assert result['result'] == tool_result['result']
+    assert result['response'] == tool_result['message']
+    if tool_result['result'] == 'ok':
+        assert '尚未确认到达' in result['response']
+    assert result['actions_taken'] == (['go2_navigate_to_visible_target']
+                                       if tool_result['result'] == 'ok' else [])

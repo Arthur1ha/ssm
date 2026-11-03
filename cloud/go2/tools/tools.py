@@ -143,6 +143,10 @@ def go2_list_teachings() -> str:
 
 # ── 导航工具 ─────────────────────────────────────────────────────
 
+_VISUAL_NAV_BLOCK_MESSAGES = {
+    "calibration_unavailable": "当前 Go2 的实测相机标定缺失或未通过校验，无法确定画面目标的位置；本次任务未发出移动指令。",
+}
+
 async def go2_tag_location(name: str) -> str:
     require_persist("save a location")
     if not go2.is_connected:
@@ -207,7 +211,7 @@ async def _locate_visible_target(target: str, calibration: dict,
     _, grid = snapshot
     if grid.measured_floor_z is None:
         raise TargetUnlocalized("measured_floor_unavailable")
-    observation = await detect_ground_target(jpeg, target)
+    observation = await detect_ground_target(jpeg, target, frame)
     if (not go2.is_connected or getattr(go2, "_odom_session_id", None) != session_id
             or math.hypot(go2.odom.get("x", 1e9) - pose["x"],
                           go2.odom.get("y", 1e9) - pose["y"]) > 0.05):
@@ -216,10 +220,10 @@ async def _locate_visible_target(target: str, calibration: dict,
     return location, pose, grid
 
 
-async def go2_navigate_to_visible_target(target: str) -> dict:
-    """One task: locate, plan a safe stop, navigate, then verify target again."""
+async def _go2_precise_navigate_to_visible_target(target: str) -> dict:
+    """Metric target navigation, available after measured site calibration."""
     from cloud.go2.perception.visual_target import (
-        TargetUnlocalized, load_calibration, require_avoidance_evidence,
+        TargetUnlocalized, load_calibration,
         select_standoff, STANDOFF_M, STANDOFF_TOLERANCE_M, TARGET_KEEPOUT_M,
     )
     from cloud.go2.navigation.navigator import navigator
@@ -233,13 +237,6 @@ async def go2_navigate_to_visible_target(target: str) -> dict:
             raise TargetUnlocalized("posture_not_calibrated")
         serial = getattr(go2, "_connected_serial", None)
         calibration = load_calibration(serial=serial)
-        require_avoidance_evidence(serial)
-        try:
-            switch = await go2.read_avoidance_switch()
-        except (RuntimeError, asyncio.TimeoutError) as exc:
-            raise TargetUnlocalized("avoidance_switch_unconfirmed") from exc
-        if switch.get("result") != "ok" or switch.get("enabled") is not True:
-            raise TargetUnlocalized("avoidance_switch_unconfirmed")
         location, pose, _ = await _locate_visible_target(target, calibration)
         task_pose = pose.copy()
         # A stale map or pose cannot authorize the movement that follows vision inference.
@@ -279,7 +276,15 @@ async def go2_navigate_to_visible_target(target: str) -> dict:
                 "target_location": verified, "stop": stop, "navigation": navigation}
     except TargetUnlocalized as exc:
         return {"result": "blocked", "reason": exc.reason, "target": target,
+                **({"message": _VISUAL_NAV_BLOCK_MESSAGES[exc.reason]}
+                   if exc.reason in _VISUAL_NAV_BLOCK_MESSAGES else {}),
                 "last_trusted_pose": task_pose}
+
+
+async def go2_navigate_to_visible_target(target: str) -> dict:
+    """Fuse the visual target with LiDAR and navigate to a mapped stop cell."""
+    from cloud.go2.perception.visual_lidar_navigate import navigate_to_visible_target
+    return await navigate_to_visible_target(target)
 
 
 def go2_list_locations() -> str:
@@ -329,7 +334,8 @@ def get_space_context() -> dict:
     return {"result": "ok", "space": read_space("go2", state=_esp32_state)}
 
 
-def send_message(target: str, content: str, reply_to: str | None = None) -> dict:
+def send_message(target: str, content: str, reply_to: str | None = None,
+                 interaction_kind: str = "message", game_id: str | None = None) -> dict:
     """Send an agent message under this process's fixed Go2 identity."""
     from cloud.api.main import get_agent_messenger
     messenger = get_agent_messenger()
@@ -338,7 +344,8 @@ def send_message(target: str, content: str, reply_to: str | None = None) -> dict
     context = current_context()
     if context.origin_kind == "user_delegated" and context.expires_at <= time.time():
         return {"result": "blocked", "error": "session_expired"}
-    return messenger.send_message("go2", target, content, reply_to)
+    return messenger.send_message("go2", target, content, reply_to,
+                                  interaction_kind=interaction_kind, game_id=game_id)
 
 
 async def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,

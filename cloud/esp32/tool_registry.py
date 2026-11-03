@@ -48,7 +48,9 @@ TOOL_DECLARATIONS = {
                      "params_schema": {"type": "object", "required": ["target", "content"],
                                        "properties": {"target": {"type": "string"},
                                                       "content": {"type": "string", "maxLength": 1000},
-                                                      "reply_to": {"type": "string"}}}},
+                                                      "reply_to": {"type": "string"},
+                                                      "interaction_kind": {"type": "string", "enum": ["message", "game_invite"]},
+                                                      "game_id": {"type": "string"}}}},
 }
 
 TOOL_DESCRIPTIONS = "可用工具（系统注入目标灯单元 ID）：\n" + "\n".join(
@@ -71,11 +73,16 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
                 and isinstance(params.get("params"), dict)
                 and ("request_id" not in params or isinstance(params["request_id"], str)))
     if tool == "send_message":
-        return (set(params) <= {"target", "content", "reply_to"}
+        return (set(params) <= {"target", "content", "reply_to", "interaction_kind", "game_id"}
                 and isinstance(params.get("target"), str)
                 and 0 < len(params["target"]) <= 120
                 and isinstance(params.get("content"), str)
                 and 0 < len(params["content"].strip()) <= 1000
+                and params.get("interaction_kind", "message") in {"message", "game_invite"}
+                and ((params.get("interaction_kind", "message") == "game_invite"
+                      and isinstance(params.get("game_id"), str)) or
+                     (params.get("interaction_kind", "message") == "message"
+                      and params.get("game_id") is None))
                 and ("reply_to" not in params or
                      (isinstance(params["reply_to"], str) and
                       0 < len(params["reply_to"]) <= 100)))

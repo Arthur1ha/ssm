@@ -699,7 +699,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail="visual navigation requires a target")
         task_id = "go2_" + uuid.uuid4().hex
         return await _internal_request("/api/go2/chat", "POST", session, {
-            "message": f"走到画面中的{target.strip()}旁边",
+            "message": f"朝画面中的{target.strip()}安全接近，未确认到达前不要声称抵达",
             "skill_id": "go2_visual_navigate",
             "params": {"target": target.strip()},
             "task_id": task_id,

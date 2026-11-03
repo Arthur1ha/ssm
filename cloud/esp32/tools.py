@@ -43,12 +43,14 @@ def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
 
 
 def send_message(target: str, content: str, reply_to: str | None = None,
-                 unit_id: str = "esp32_desk_led") -> dict:
+                 unit_id: str = "esp32_desk_led", interaction_kind: str = "message",
+                 game_id: str | None = None) -> dict:
     from cloud.api.main import get_agent_messenger
     messenger = get_agent_messenger()
     if messenger is None:
         return {"result": "error", "error": "messaging_unavailable"}
-    return messenger.send_message(unit_id, target, content, reply_to=reply_to)
+    return messenger.send_message(unit_id, target, content, reply_to=reply_to,
+                                  interaction_kind=interaction_kind, game_id=game_id)
 
 
 def get_space_context(unit_id: str = "esp32_desk_led") -> dict:

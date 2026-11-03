@@ -8,11 +8,13 @@ import math
 import numpy as np
 
 Z_FLOOR_M = 0.15
-Z_CEIL_M = 1.50
+# Go2 stands about 0.40 m high; leave 0.15 m overhead margin. Higher
+# surfaces (such as a tabletop) do not occupy its walking volume.
+Z_CEIL_M = 0.55
 SELF_RETURN_RADIUS_M = 0.25
 ROBOT_HALF_LENGTH_M = 0.35
 ROBOT_HALF_WIDTH_M = 0.155
-SAFETY_MARGIN_M = 0.07
+SAFETY_MARGIN_M = 0.04
 PATH_CLEARANCE_M = ROBOT_HALF_WIDTH_M + SAFETY_MARGIN_M
 TURN_CLEARANCE_M = math.hypot(ROBOT_HALF_LENGTH_M, ROBOT_HALF_WIDTH_M) + SAFETY_MARGIN_M
 LOCAL_FLOOR_BRIDGE_M = SELF_RETURN_RADIUS_M + 0.25
@@ -94,6 +96,9 @@ class OccupancyGrid:
                 valid = (ix >= 0) & (iy >= 0) & (ix < nx) & (iy < ny)
                 inflated[iy[valid], ix[valid]] = True
         cells[footprint] = FREE
+        # Keep floor evidence separate from the inflated obstacle layer. A turn
+        # needs known ground and raw obstacle clearance, not a second inflation.
+        self.known_floor = cells == FREE
         cells[inflated] = OCCUPIED
         self.has_free_space_evidence = bool(np.any((cells == FREE) & ~footprint))
         return cells
@@ -194,30 +199,53 @@ class OccupancyGrid:
         ys, xs = np.nonzero(self.obstacles[bottom:top, left:right])
         if not len(xs):
             return True
-        dx = self.origin[0] + (xs + left + 0.5) * self.resolution - x
-        dy = self.origin[1] + (ys + bottom + 0.5) * self.resolution - y
+        # Decoded obstacle coordinates lie on voxel lattice points, not cell centers.
+        dx = self.origin[0] + (xs + left) * self.resolution - x
+        dy = self.origin[1] + (ys + bottom) * self.resolution - y
         along = dx * c + dy * s
         across = -dx * s + dy * c
         return not bool(np.any((np.abs(along) <= ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M)
                                & (np.abs(across) <= PATH_CLEARANCE_M)))
 
     def is_turn_clear(self, x: float, y: float) -> bool:
-        """Turning in place needs the full body diagonal clear of obstacles."""
+        """Turning in place needs known ground and obstacle clearance."""
+        return self.turn_clearance_details(x, y)["clear"]
+
+    def turn_clearance_details(self, x: float, y: float) -> dict:
+        """Explain which measured-map evidence prevents an in-place turn."""
+        details = {"clear": False, "radius_m": round(TURN_CLEARANCE_M, 3)}
         try:
             ix, iy = self.odom_to_grid(x, y)
         except ValueError:
-            return False
+            return {**details, "blockers": ["center_outside_map"]}
         if not self.is_free(ix, iy) or self.obstacles is None:
-            return False
+            return {**details, "blockers": ["center_not_free"]}
         if (x - TURN_CLEARANCE_M < self.origin[0]
                 or y - TURN_CLEARANCE_M < self.origin[1]
                 or x + TURN_CLEARANCE_M >= self.origin[0] + self.width[0] * self.resolution
                 or y + TURN_CLEARANCE_M >= self.origin[1] + self.width[1] * self.resolution):
-            return False
+            return {**details, "blockers": ["turn_disk_outside_map"]}
         radius = math.ceil(TURN_CLEARANCE_M / self.resolution)
         left, right = max(0, ix - radius), min(self.width[0], ix + radius + 1)
         bottom, top = max(0, iy - radius), min(self.width[1], iy + radius + 1)
         ys, xs = np.nonzero(self.obstacles[bottom:top, left:right])
-        dx = self.origin[0] + (xs + left + 0.5) * self.resolution - x
-        dy = self.origin[1] + (ys + bottom + 0.5) * self.resolution - y
-        return not bool(np.any(dx * dx + dy * dy <= TURN_CLEARANCE_M ** 2))
+        cell_y, cell_x = np.indices(self.cells[bottom:top, left:right].shape)
+        cell_dx = self.origin[0] + (cell_x + left + 0.5) * self.resolution - x
+        cell_dy = self.origin[1] + (cell_y + bottom + 0.5) * self.resolution - y
+        turn_disk = cell_dx * cell_dx + cell_dy * cell_dy <= TURN_CLEARANCE_M ** 2
+        unknown_cells = int(np.count_nonzero(turn_disk & ~self.known_floor[bottom:top, left:right]))
+        dx = self.origin[0] + (xs + left) * self.resolution - x
+        dy = self.origin[1] + (ys + bottom) * self.resolution - y
+        obstacle_distances = np.hypot(dx, dy)
+        obstacle_count = int(np.count_nonzero(obstacle_distances <= TURN_CLEARANCE_M))
+        blockers = []
+        if unknown_cells:
+            blockers.append("unmeasured_floor")
+        if obstacle_count:
+            blockers.append("measured_obstacle")
+        return {**details, "clear": not blockers, "blockers": blockers,
+                "unknown_floor_cells": unknown_cells,
+                "turn_disk_cells": int(np.count_nonzero(turn_disk)),
+                "obstacle_cells": obstacle_count,
+                "nearest_obstacle_m": round(float(np.min(obstacle_distances)), 3)
+                if obstacle_distances.size else None}

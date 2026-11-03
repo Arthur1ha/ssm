@@ -17,6 +17,8 @@ class SocialDecision(BaseModel):
     target: str = ""
     content: str = Field(default="", max_length=1000)
     reason: str = ""
+    interaction_kind: Literal["message", "game_invite"] = "message"
+    game_id: str = ""
 
 
 class SocialState(TypedDict, total=False):
@@ -25,6 +27,7 @@ class SocialState(TypedDict, total=False):
     activity: dict[str, Any]
     opportunity: dict[str, Any]
     peers: list[dict[str, Any]]
+    playable_games: list[dict[str, Any]]
     space_summary: str
     active: bool
     connected: bool
@@ -42,7 +45,7 @@ def build_social_graph(
     *,
     profile_loader: Callable[[], dict],
     can_send: Callable[[str, str, str], bool],
-    send_message: Callable[[str, str], Awaitable[dict]],
+    send_message: Callable[..., Awaitable[dict]],
     checkpointer: Any = None,
     effect_ledger: FileEffectLedger | None = None,
 ):
@@ -67,11 +70,14 @@ def build_social_graph(
                     "skills": (peer.get("skills") or [])[:5]} for peer in state["peers"]]
         prompt = (
             f"你的社交主动性：{profile['traits']['extraversion']}/100。"
-            "只根据可靠发现判断是否要向同伴发一条有价值的短消息；"
+            "结合当前活动与可靠发现判断是否要向同伴发一条有价值的短消息；"
             "发消息不代表对方答应或完成动作，也不要推断人物身份。\n"
+            "可选普通消息、玩法邀请或跳过；邀请是提议，对方可以拒绝。"
+            "只有当前可玩列表中的目标和 game_id 可以用于 game_invite。\n"
             f"活动：{json.dumps(state.get('activity'), ensure_ascii=False)}\n"
             f"机会：{json.dumps(state['opportunity'], ensure_ascii=False)}\n"
             f"在线同伴：{json.dumps(targets, ensure_ascii=False)}\n"
+            f"当前可玩玩法：{json.dumps(state.get('playable_games', []), ensure_ascii=False)}\n"
             f"空间：{state.get('space_summary', '')}"
         )
         try:
@@ -90,6 +96,12 @@ def build_social_graph(
         if decision.target not in allowed or not decision.content.strip():
             update["status"] = "rejected"
             return update
+        if (decision.interaction_kind == "game_invite" and
+                not any(game.get("target") == decision.target and
+                        game.get("game_id") == decision.game_id for game in
+                        state.get("playable_games", []))):
+            update["status"] = "rejected"
+            return update
         update["status"] = "selected"
         return update
 
@@ -100,6 +112,12 @@ def build_social_graph(
         reason = decision.get("reason") or content
         if not can_send(state["activity_id"], target, reason):
             return {"status": "blocked"}
+        interaction_kind = decision.get("interaction_kind", "message")
+        game_id = decision.get("game_id") if interaction_kind == "game_invite" else None
+        if game_id:
+            from cloud.peers.games import game_is_playable
+            if not game_is_playable(state["activity_id"], "go2", target, game_id):
+                return {"status": "blocked"}
         run_id = state.get("run_id")
         if not isinstance(run_id, str) or not run_id:
             return {"status": "rejected", "delivery": {"result": "rejected",
@@ -107,7 +125,8 @@ def build_social_graph(
         try:
             reservation = ledger.reserve("go2", f"go2:social:{run_id}", run_id,
                                          "send_message", "send_message",
-                                         {"target": target, "content": content})
+                                         {"target": target, "content": content,
+                                          "interaction_kind": interaction_kind, "game_id": game_id})
         except ValueError:
             return {"status": "rejected", "delivery": {"result": "rejected",
                                                        "error": "effect_id_conflict"}}
@@ -116,7 +135,11 @@ def build_social_graph(
                 "result": "unknown", "error": "prior_delivery_unconfirmed"}
         else:
             try:
-                outcome = await send_message(target, content)
+                if game_id:
+                    outcome = await send_message(target, content,
+                        interaction_kind="game_invite", game_id=game_id)
+                else:
+                    outcome = await send_message(target, content)
             except Exception as exc:
                 outcome = {"result": "unknown", "error": type(exc).__name__}
         if not isinstance(outcome, dict):

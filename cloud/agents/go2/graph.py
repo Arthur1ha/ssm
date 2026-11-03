@@ -192,6 +192,10 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 def invoke_text(prompt):
                     from cloud.go2.models import get_text_llm as fresh_model
                     return asyncio.run(fresh_model().ainvoke([HumanMessage(content=prompt)])).content
+                if (step.get("tool") == "go2_navigate_to_visible_target"
+                        and status in {"ok", "blocked", "cancelled"}
+                        and isinstance(result.get("message"), str)):
+                    return
                 submit_progress(persona, run.goal, step, invoke_text, publish_text,
                                 progress_closed, min(run.deadline, time.time() + 4))
         async def finalize(current: GraphRun) -> GraphRun:
@@ -203,6 +207,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             if offline_unconfirmed:
                 current.status = "blocked"
                 current.response = factual_fallback("go2", "offline")
+                current.reply_source = "runtime"
+            elif (current.steps
+                  and current.steps[-1].get("tool") == "go2_navigate_to_visible_target"
+                  and (current.steps[-1].get("result") or {}).get("result") in {"ok", "blocked", "cancelled"}
+                  and isinstance((current.steps[-1].get("result") or {}).get("message"), str)):
+                current.response = current.steps[-1]["result"]["message"]
                 current.reply_source = "runtime"
             elif needs_persona_reply(current):
                 try:

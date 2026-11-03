@@ -91,7 +91,8 @@ class AgentMessenger:
     def send_message(
         self, sender: str, target: str, content: str, reply_to: str | None = None,
         *, conversation_id: str | None = None, deadline: float | None = None,
-        reply_kind: str = "reply",
+        reply_kind: str = "reply", interaction_kind: str = "message",
+        game_id: str | None = None,
     ) -> dict:
         now = self._now()
         if sender not in self._local_ids:
@@ -100,6 +101,12 @@ class AgentMessenger:
             return {"result": "blocked", "error": "invalid_content"}
         if reply_kind not in _REPLY_KINDS:
             return {"result": "blocked", "error": "invalid_reply_kind"}
+        if (not isinstance(interaction_kind, str)
+                or interaction_kind not in {"message", "game_invite"}
+                or (interaction_kind == "message" and game_id is not None)
+                or (interaction_kind == "game_invite" and
+                    (reply_to is not None or reply_kind != "reply"))):
+            return {"result": "blocked", "error": "invalid_interaction"}
         if not self._allowed(sender, target):
             return {"result": "blocked", "error": "target_offline_or_outside_space"}
         if (deadline is not None and (isinstance(deadline, bool)
@@ -136,6 +143,12 @@ class AgentMessenger:
             activity = get_activity_store().current()
             if activity:
                 payload["activity_id"] = activity["activity_id"]
+            if interaction_kind == "game_invite":
+                from cloud.peers.games import game_is_playable
+                if not game_is_playable(payload.get("activity_id"), sender, target, game_id):
+                    return {"result": "blocked", "error": "game_unavailable"}
+                payload["interaction_kind"] = interaction_kind
+                payload["game_id"] = game_id
             if not self._publish(payload):
                 return {"result": "error", "error": "mqtt_publish_failed"}
             self._outgoing[message_id] = {**payload, "state": "waiting_reply", "received": False,
@@ -147,7 +160,8 @@ class AgentMessenger:
                     payload["activity_id"], "message", unit_id=sender,
                     text=payload["content"], target_unit_id=target,
                     message_id=message_id, conversation_id=payload["conversation_id"],
-                    reply_to=reply_to, reply_kind=reply_kind)
+                    reply_to=reply_to, reply_kind=reply_kind,
+                    interaction_kind=interaction_kind, game_id=game_id)
             if activity_event is None and self._on_visible_message is not None:
                 self._on_visible_message(dict(payload))
         return {"result": "accepted", "message_id": message_id,
@@ -216,7 +230,8 @@ class AgentMessenger:
                 item["updated_at"] = now
             return {key: item.get(key) for key in (
                 "message_id", "conversation_id", "sender", "target", "state", "received",
-                "task_id", "result", "deadline", "updated_at")}
+                "task_id", "result", "deadline", "updated_at",
+                "interaction_kind", "game_id", "activity_id")}
 
     def handle_message(self, topic: str, raw: bytes | str) -> bool:
         """Return whether this topic is an agent message, even if rejected."""
@@ -258,11 +273,23 @@ class AgentMessenger:
                 content = payload.get("content")
                 reply_to = payload.get("reply_to")
                 round_number = payload.get("round")
+                interaction_kind = payload.get("interaction_kind", "message")
+                game_id = payload.get("game_id")
                 if (not isinstance(content, str) or not content.strip() or len(content) > _MAX_CONTENT
                         or payload.get("reply_kind") not in _REPLY_KINDS
                         or type(round_number) is not int or not 1 <= round_number <= _MAX_ROUNDS
-                        or (reply_to is not None and (not isinstance(reply_to, str) or not _ID.fullmatch(reply_to)))):
+                        or (reply_to is not None and (not isinstance(reply_to, str) or not _ID.fullmatch(reply_to)))
+                        or not isinstance(interaction_kind, str)
+                        or interaction_kind not in {"message", "game_invite"}
+                        or (interaction_kind == "message" and game_id is not None)):
                     return True
+                if interaction_kind == "game_invite":
+                    from cloud.peers.games import activity_allows, get_game
+                    game = get_game(game_id)
+                    if (reply_to is not None or payload.get("reply_kind") != "reply"
+                            or game is None or (sender, target) != game.participants
+                            or not activity_allows(payload.get("activity_id"), sender, target)):
+                        return True
                 if message_id in self._seen:
                     return True
                 if reply_to:
@@ -287,7 +314,8 @@ class AgentMessenger:
                         payload["activity_id"], "message", unit_id=sender,
                         text=content.strip(), target_unit_id=target,
                         message_id=message_id, conversation_id=conversation_id,
-                        reply_to=reply_to, reply_kind=payload["reply_kind"])
+                        reply_to=reply_to, reply_kind=payload["reply_kind"],
+                        interaction_kind=interaction_kind, game_id=game_id)
                 if (sender not in self._local_ids and activity_event is None
                         and self._on_visible_message is not None):
                     self._on_visible_message(dict(payload))

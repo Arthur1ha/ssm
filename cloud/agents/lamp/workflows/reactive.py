@@ -39,6 +39,15 @@ def _prompt(agent, state: ReactiveState) -> str:
 
     profile = get_profile()
     space = get_space_context(agent._find_led_unit(), state=agent._state)
+    games = []
+    if state["sense"].get("social_opportunity"):
+        from cloud.peers.games import playable_games
+        from cloud.peers.social import activity_peers
+        activity, peers = activity_peers(agent._find_led_unit(), space["peers"])
+        for peer in peers:
+            games.extend({"target": peer["unit_id"], **item} for item in
+                         playable_games((activity or {}).get("activity_id"),
+                                        agent._find_led_unit(), peer["unit_id"]))
     if agent._belief_summary:
         history = f"历史规律摘要：{agent._belief_summary}"
     else:
@@ -52,6 +61,7 @@ def _prompt(agent, state: ReactiveState) -> str:
         "你负责桌面灯的自主判断。一次最多调用一个工具；看到真实结果后才决定下一步。"
         "无需动作时直接回答。accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
+        "可把当前可玩玩法作为 game_invite 提议；同伴可拒绝，邀请不等于游戏完成。"
         "观测中的 teaching_candidates 是已校验且启用的主人教导。命中且当前可执行时，"
         "按其中的 agent_tool 和参数调用工具；若因安全或更高优先级要求不执行，应说明原因。"
         "仍须遵守用户让位和真实执行回执。"
@@ -60,6 +70,7 @@ def _prompt(agent, state: ReactiveState) -> str:
         "它只影响重新评估机会，不直接映射颜色。\n"
         f"观测：{json.dumps(state['sense'], ensure_ascii=False, default=str)}\n"
         f"空间：{json.dumps(space, ensure_ascii=False, default=str)}\n"
+        f"当前可玩玩法：{json.dumps(games, ensure_ascii=False)}\n"
         f"{history}\n"
         f"已观察结果：{json.dumps(state.get('steps', []), ensure_ascii=False, default=str)}"
     )

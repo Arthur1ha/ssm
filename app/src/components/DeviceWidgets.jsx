@@ -130,7 +130,7 @@ function MapWidget({ connected, endpoint }) {
       onClick={() => setExpanded(true)} disabled={!imageUrl}
       aria-label={imageUrl ? '展开导航地图' : '等待地图数据'}>
       {imageUrl ? <img src={imageUrl} alt=""/> : <span className="map-widget__empty">等待地图</span>}
-      <span className="map-widget__label">地图</span>
+      <span className="map-widget__label">局部地图</span>
       {imageUrl && <span className="map-widget__expand" aria-hidden="true">↗</span>}
     </button>
     {expanded && ReactDOM.createPortal(
@@ -139,14 +139,23 @@ function MapWidget({ connected, endpoint }) {
       }}>
         <section className="map-viewer" role="dialog" aria-modal="true" aria-label="导航地图">
           <header className="map-viewer__header">
-            <strong>导航地图</strong>
+            <strong>局部导航地图 · 机器狗居中</strong>
             <button ref={closeRef} type="button" onClick={() => setExpanded(false)} aria-label="关闭地图">×</button>
           </header>
           <div className="map-viewer__image">
             {imageUrl ? <img src={imageUrl} alt="机器狗周围的导航地图"/>
               : <span>等待地图数据</span>}
           </div>
-          <p className="map-viewer__legend">绿色 · 机器狗　灰色 · 障碍　蓝色 · 路线</p>
+          <ul className="map-viewer__legend" aria-label="地图颜色说明">
+            <li><span className="map-viewer__swatch map-viewer__swatch--robot" aria-hidden="true"/>机器狗</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--free" aria-hidden="true"/>可通行</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--obstacle" aria-hidden="true"/>障碍物</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--clearance" aria-hidden="true"/>避让区</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--unknown" aria-hidden="true"/>未探索</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--route" aria-hidden="true"/>导航路线</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--place" aria-hidden="true"/>已保存地点</li>
+            <li><span className="map-viewer__swatch map-viewer__swatch--target" aria-hidden="true"/>目的地</li>
+          </ul>
         </section>
       </div>, document.body,
     )}

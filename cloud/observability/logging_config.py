@@ -55,7 +55,10 @@ class _DowngradeUnitreeDataChannelLogs(logging.Filter):
 
 def _cleanup_old_sessions(log_dir: Path) -> None:
     cutoff = time.time() - RETENTION_DAYS * 86400
-    for path in log_dir.glob("session-*.jsonl"):
+    for path in (*log_dir.glob("session-*.jsonl"),
+                 *(log_dir / "vision").glob("*.jpg"),
+                 *(log_dir / "vision").glob("*.npz"),
+                 *(log_dir / "vision").glob("*.png")):
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink()

@@ -292,6 +292,7 @@ class ActivityStore:
         event.update({key: value for key, value in facts.items()
                       if key in {"target_unit_id", "message_id", "conversation_id", "task_id",
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
+                                 "interaction_kind", "game_id",
                                  "question_id", "action", "physical_stop", "reason",
                                  "source", "confidence", "source_event_id"}})
         if "source" in event:

@@ -72,6 +72,7 @@ function describeRunProgress(event, compact = false) {
   const action = ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
     set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
     go2_sport: '完成姿态动作', go2_move: '移动', go2_observe: '观察前方',
+    go2_navigate_to_visible_target: '视觉定位并导航到目标附近',
     go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
     get_space_context: '查看空间信息', read_state: '查看传感器状态',
     await_result: '核对执行结果', request_peer_skill: '协同处理请求',

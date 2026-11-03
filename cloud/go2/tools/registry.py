@@ -41,7 +41,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
-        ToolSpec("go2_navigate_to_visible_target", "定位当前画面中唯一、静止且接触地面的目标，沿已知自由区域到安全停靠点并复核；缺少实测标定或避障验证时拒绝移动", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
+        ToolSpec("go2_navigate_to_visible_target", "视觉识别目标并与雷达点云配对，在地图上规划到目标附近的停靠点，停稳后重新观察确认", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", _schema({"color": _string(enum=["white", "red", "yellow", "blue", "green", "cyan", "purple"], default="white"), "duration": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 60}}), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
@@ -52,6 +52,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "target": _string(minLength=1, maxLength=64),
             "content": _string(minLength=1, maxLength=1000),
             "reply_to": _string(minLength=1, maxLength=64),
+            "interaction_kind": _string(enum=["message", "game_invite"]),
+            "game_id": _string(minLength=1, maxLength=64),
         }, ("target", "content")), timeout_s=5),
         ToolSpec("request_peer_skill", "请求同伴执行公开技能，等待最终结果；只有 ok 表示目标完成，失败后不要执行依赖动作", _schema({
             "target_unit_id": _string(minLength=1),
