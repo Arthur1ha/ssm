@@ -63,7 +63,7 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                 return {"task_update": {}, "next_action": "none",
                         "decision_reason": "task_id_mismatch"}
             if update.get("stage") == "start":
-                next_action = {"game": "game_step",
+                next_action = {"game": "run_game",
                                "peer_message": "run_peer_task",
                                "teaching": "execute_teaching"}.get(goal.get("kind"), "none")
                 return {"task_update": {}, "task_stage": "running" if
@@ -72,12 +72,7 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                         "should_explore": False, "should_social": False}
             result = update.get("result") or {}
             step_count = state.get("step_count", 0) + int(update.get("step_done", False))
-            if goal.get("kind") == "game" and result.get("result") == "ok" \
-                    and step_count < 6 and update.get("now", 0) < goal.get("deadline", 0):
-                stage, next_action = "running", "game_step"
-            else:
-                stage, next_action = "finished", "none"
-            return {"task_update": {}, "task_stage": stage, "next_action": next_action,
+            return {"task_update": {}, "task_stage": "finished", "next_action": "none",
                     "step_count": step_count, "last_tool_result": result,
                     "should_explore": False, "should_social": False}
         profile = profile_loader()

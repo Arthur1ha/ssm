@@ -112,7 +112,8 @@ class AgentMessenger:
         if (deadline is not None and (isinstance(deadline, bool)
                 or not isinstance(deadline, (int, float)) or not math.isfinite(deadline))):
             return {"result": "blocked", "error": "invalid_deadline"}
-        expires = min(now + 300, deadline if deadline is not None else now + 60)
+        default_ttl = 240 if interaction_kind == "game_invite" else 60
+        expires = min(now + 300, deadline if deadline is not None else now + default_ttl)
         if expires <= now:
             return {"result": "blocked", "error": "message_expired"}
         with self._lock:

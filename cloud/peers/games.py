@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,11 +75,19 @@ def _color_hunt_available(sender: str, target: str) -> bool:
 
 
 async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
-    """Bounded search; descriptions remain candidates without object evidence."""
+    """Let Go2's existing graph choose observations and visual navigation."""
+    from cloud.agents.go2.graph import run_go2_loop
     from cloud.go2.connection import go2
+    from cloud.go2.navigation.navigator import navigator
 
     message, messenger = event["message"], event["messenger"]
-    color = live_lamp_color(str(event.get("source") or ""))
+    source = str(event.get("source") or "")
+    activity_id = event.get("activity_id")
+    if not activity_allows(activity_id, message["sender"], "go2"):
+        messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
+                              reason="activity_ended")
+        return
+    color = live_lamp_color(source)
     if color is None:
         await drive._advance_task(drive._active_goal, stage="finish",
             result={"result": "rejected", "reason": "lamp_color_unknown_or_stale"})
@@ -86,64 +99,138 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         return
     drive._active_goal = {**drive._active_goal, "kind": "game", "game_id": "color_hunt",
                           "target_color": color, "deadline": event["deadline"]}
-    task_state = await drive._advance_task(drive._active_goal, stage="start")
-    observations = []
-    reason = "structured_multiframe_evidence_unavailable"
-    color_round = 1
-    while task_state.get("next_action") == "game_step":
-        if not activity_allows(event.get("activity_id"), message["sender"], "go2"):
-            reason = "activity_ended"
-            break
+    await drive._advance_task(drive._active_goal, stage="start")
+    observed_rgb = None
+    pending_observe_rgb = None
+
+    def task_context() -> str:
+        return json.dumps({"game_id": "color_hunt", "lamp_color": live_lamp_color(source),
+                           "activity_id": activity_id}, ensure_ascii=False)
+
+    def tool_guard(name: str, _params: dict) -> dict | None:
+        nonlocal pending_observe_rgb
+        if not activity_allows(activity_id, message["sender"], "go2"):
+            return {"result": "cancelled", "error": "activity_ended"}
         if drive.user_interrupt or not go2.is_connected:
-            reason = "autonomy_interrupted_or_offline"
-            break
-        if time.time() >= event["deadline"]:
-            reason = "game_expired"
-            break
-        latest = live_lamp_color(color["source"])
+            return {"result": "cancelled", "error": "autonomy_interrupted_or_offline"}
+        latest = live_lamp_color(source)
         if latest is None:
-            reason = "lamp_color_stale"
-            break
-        if latest["rgb"] != color["rgb"]:
-            color = latest
-            color_round += 1
-            drive._active_goal = {**drive._active_goal, "target_color": color,
-                                  "color_round": color_round}
-            task_state = await drive._advance_task(drive._active_goal,
-                result={"result": "ok", "reason": "lamp_color_changed",
-                        "target_color": color})
-            continue
-        drive._last_observation = None
-        drive._last_tool_result = None
-        await drive._do_explore(observe_question=(
-            f"只描述当前画面中疑似与 RGB {color['rgb']} 同色的物品；"
-            "不能把颜色描述当作已定位或已确认。"))
-        if drive._last_observation:
-            observations.append({"rgb": color["rgb"],
-                                 "description": drive._last_observation[:240]})
-        step_result = drive._last_tool_result or {"result": "unknown"}
-        task_state = await drive._advance_task(drive._active_goal, result=step_result,
-                                               step_done=True)
-        if step_result.get("result") != "ok":
-            reason = "frontier_unavailable_or_failed"
-            break
-    status = "cancelled" if reason in {"activity_ended", "autonomy_interrupted_or_offline"} else "unknown"
-    await drive._advance_task(drive._active_goal, stage="finish", result={"result": status,
-        "target_color": color, "color_rounds": color_round,
-        "candidate_descriptions": observations, "reason": reason})
+            return {"result": "blocked", "error": "lamp_color_stale"}
+        if name == "go2_observe":
+            pending_observe_rgb = latest["rgb"]
+        elif name == "go2_navigate_to_visible_target" and observed_rgb != latest["rgb"]:
+            return {"result": "blocked", "error": "fresh_matching_observation_required"}
+        return None
+
+    def on_step(step: dict) -> None:
+        nonlocal observed_rgb
+        tool = step.get("tool")
+        receipt = step.get("result") or {}
+        if tool == "go2_observe" and receipt.get("result") == "ok":
+            latest = live_lamp_color(source)
+            observed_rgb = (pending_observe_rgb if latest and
+                            latest["rgb"] == pending_observe_rgb else None)
+        drive._activity_event("action_result", str(receipt.get("message") or
+                              receipt.get("error") or receipt.get("result"))[:500],
+                              action=tool, task_id=task_id,
+                              status=receipt.get("result", "unknown"))
+
+    goal = (
+        f"来自灯 {source} 的玩法邀请：{message.get('content', '')[:500]}。"
+        "你已自主接受 color_hunt：观察当前画面，按本轮可信任务状态中的实时灯 RGB "
+        "寻找可能同色的静止物品。先用 go2_observe 分析场景；若有清楚的候选，"
+        "自己选择 go2_navigate_to_visible_target 并给出具体目标描述。"
+        "无候选就如实结束；不要凭邀请、文字观察或模型回答宣称找到，"
+        "不要使用盲走或坐标导航代替视觉目标导航。"
+    )
+    context = replace(drive._context,
+                      expires_at=int(min(event["deadline"], time.time() + 180)))
+    graph_task = asyncio.create_task(run_go2_loop(
+        "peer_" + event["message_id"], goal, context=context,
+        run_id=event["message_id"], deadline=event["deadline"],
+        allowed_tools=frozenset({"go2_observe", "go2_navigate_to_visible_target",
+                                 "get_space_context"}),
+        tool_guard=tool_guard, task_context=task_context, on_step=on_step,
+        publish_reply=False))
+    graph_result = None
+    stop_reason = None
+    try:
+        while not graph_task.done():
+            if (not activity_allows(activity_id, message["sender"], "go2")
+                    or drive._activity_id() != activity_id):
+                stop_reason = "activity_ended"
+            elif drive.user_interrupt or not go2.is_connected:
+                stop_reason = "autonomy_interrupted_or_offline"
+            elif time.time() >= event["deadline"]:
+                stop_reason = "game_expired"
+            if stop_reason:
+                graph_task.cancel()
+                await asyncio.gather(graph_task, return_exceptions=True)
+                navigator.stop(owner_session_id=context.session_id)
+                stopped = False
+                if go2.is_connected:
+                    try:
+                        stopped = (await go2.send_command(
+                            "StopMove", completion_timeout=5.0)).get("result") == "ok"
+                    except Exception:
+                        pass
+                if not stopped:
+                    stop_reason = "stop_unconfirmed"
+                break
+            await asyncio.sleep(0.2)
+        if not stop_reason:
+            graph_result = await graph_task
+    except asyncio.CancelledError:
+        graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+        raise
+    except Exception as exc:
+        logger.exception("color_hunt graph failed message=%s", event["message_id"])
+        navigator.stop(owner_session_id=context.session_id)
+        stopped = False
+        if go2.is_connected:
+            try:
+                stopped = (await go2.send_command(
+                    "StopMove", completion_timeout=5.0)).get("result") == "ok"
+            except Exception:
+                pass
+        stop_reason = "game_graph_error" if stopped else "stop_unconfirmed"
+        graph_result = {"result": "unknown", "error": type(exc).__name__}
+
+    steps = (graph_result or {}).get("tool_results") or []
+    visual = next((step.get("result") or {} for step in reversed(steps)
+                   if step.get("tool") == "go2_navigate_to_visible_target"), None)
+    reached_candidate = bool(visual and visual.get("result") == "ok" and
+                             visual.get("confirmation") ==
+                             "odom_stopped_and_rgb_lidar_reobserved")
+    if stop_reason:
+        status = ("cancelled" if stop_reason in {"activity_ended", "game_expired",
+                                                 "autonomy_interrupted_or_offline"}
+                  else "unknown")
+        reason = stop_reason
+        reply = ("这局已中断，停步结果还未确认。" if reason == "stop_unconfirmed"
+                 else "这局已中断，没有继续执行游戏动作。")
+    elif reached_candidate:
+        status, reason = "unknown", "color_match_unverified"
+        reply = "我已按视觉与地图回执走到候选物品附近；它是否真的与灯同色还缺少可信颜色证据。"
+    else:
+        status = (graph_result or {}).get("result", "unknown")
+        if status not in {"blocked", "rejected", "error", "cancelled"}:
+            status = "unknown"
+        last_receipt = (steps[-1].get("result") or {}) if steps else {}
+        reason = (last_receipt.get("error") or last_receipt.get("reason") or
+                  (graph_result or {}).get("error") or "no_confirmed_color_match")
+        reply = (str(last_receipt.get("message"))[:160] + "；还不能确认找到与灯同色的物品。"
+                 if status == "blocked" and last_receipt.get("message") else
+                 "我检查了当前画面，但还不能确认找到与灯同色的物品。")
+    await drive._advance_task(drive._active_goal, stage="finish", result={
+        "result": status, "reason": reason, "target_color": live_lamp_color(source),
+        "graph_run_id": (graph_result or {}).get("run_id"),
+        "tool_results": steps})
     messenger.send_result(event["message_id"], status, task_id=task_id,
                           reason=reason)
-    if reason == "activity_ended":
-        reply = "活动已结束，这局取消。"
-    elif reason == "autonomy_interrupted_or_offline":
-        reply = "这局已中断，不能确认后续动作结果。"
-    else:
-        detail = ("灯色状态已过期，需要重新确认。" if reason == "lamp_color_stale" else
-                  "目前只有画面文字候选，缺少跨帧物体证据，不能确认找到。")
-        reply = f"我跟随灯的实时颜色检查了 {color_round} 轮安全探索点。" + detail
-    messenger.send_message("go2", message["sender"],
-        reply,
-        reply_to=event["message_id"], reply_kind="reply")
+    messenger.send_message("go2", message["sender"], reply,
+                           reply_to=event["message_id"], reply_kind="reply")
 
 
 GAMES: dict[str, Game] = {

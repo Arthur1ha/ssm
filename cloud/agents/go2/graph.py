@@ -54,21 +54,28 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                        skill_id: str | None = None, params: dict | None = None,
                        run_id: str | None = None, deadline: float | None = None,
                        on_step=None, resume: bool = False,
-                       trace_id: str | None = None, parent_run_id: str | None = None) -> dict:
+                       trace_id: str | None = None, parent_run_id: str | None = None,
+                       allowed_tools: frozenset[str] | None = None,
+                       tool_guard=None, task_context=None,
+                       publish_reply: bool = True) -> dict:
     view = get_store()
     async with view.index.async_session_lock("go2", session_id):
         return await _run_go2_loop_locked(
             session_id, message, context=context, view=view,
             skill_id=skill_id, params=params, run_id=run_id, deadline=deadline,
             on_step=on_step, resume=resume, trace_id=trace_id,
-            parent_run_id=parent_run_id)
+            parent_run_id=parent_run_id, allowed_tools=allowed_tools,
+            tool_guard=tool_guard, task_context=task_context,
+            publish_reply=publish_reply)
 
 
 async def _run_go2_loop_locked(session_id: str, message: str, *, context: ExecutionContext,
                                view: Go2RunView, skill_id: str | None,
                                params: dict | None, run_id: str | None,
                                deadline: float | None, on_step, resume: bool,
-                               trace_id: str | None, parent_run_id: str | None) -> dict:
+                               trace_id: str | None, parent_run_id: str | None,
+                               allowed_tools: frozenset[str] | None,
+                               tool_guard, task_context, publish_reply: bool) -> dict:
     previous = view.get(run_id, session_id, require_head=resume) if run_id else None
     if previous and not resume:
         return _result(previous)
@@ -112,11 +119,15 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         if not skill or skill.get("tool_name") not in TOOL_REGISTRY:
             return {"result": "rejected", "error": "unknown_public_skill"}
         initial_tool = (skill["tool_name"], params or {})
+        if allowed_tools is not None and initial_tool[0] not in allowed_tools:
+            return {"result": "rejected", "error": "tool_not_allowed_for_task"}
 
     def build_messages(current: GraphRun):
         from cloud.agents.go2.personality.profile import get_profile
         profile = get_profile()
         messages = go2_messages(current, supplement=supplemental)
+        if task_context is not None:
+            messages.append(HumanMessage(content="【本轮可信任务状态】\n" + str(task_context())))
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
                          run_id=current.run_id, agent_id="go2", source="profile",
                          revision=profile.get("revision"),
@@ -127,6 +138,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
         if name not in TOOL_REGISTRY:
             return {"result": "rejected", "error": "unknown_tool"}
+        if allowed_tools is not None and name not in allowed_tools:
+            return {"result": "rejected", "error": "tool_not_allowed_for_task"}
+        if tool_guard is not None:
+            blocked = tool_guard(name, arguments)
+            if blocked is not None:
+                return blocked
         if name == "request_peer_skill":
             arguments = {**arguments, "request_id": arguments.get("request_id") or step_id}
         if name in {"go2_sport", "go2_move", "go2_set_led", "go2_observe"}:
@@ -175,7 +192,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                    if step is None else {k: v for k, v in step_progress_facts(step).items() if k != "tool"}),
                 event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
                     f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
-            if phase == "observed" and step is not None:
+            if publish_reply and phase == "observed" and step is not None:
                 from cloud.agents.go2.personality.profile import get_profile
                 from cloud.agents.go2.personality.behavior import reply_persona
                 persona = reply_persona(get_profile())
@@ -251,7 +268,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             if not publish_allowed:
                 current.response = ""
                 current.reply_source = "runtime"
-            elif not context.session_id.startswith("peer_"):
+            elif publish_reply and not context.session_id.startswith("peer_"):
                 if current.response:
                     current.reply_event_id = stable_reply_event_id(
                         current.run_id, session_id=event_session,
@@ -273,8 +290,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                         parent_run_id=current.parent_run_id, source=event_source)
             return current
 
+        declarations = tool_schemas(context)
+        if allowed_tools is not None:
+            declarations = {name: schema for name, schema in declarations.items()
+                            if name in allowed_tools}
         await run_role_graph(
-            run, model=get_text_llm(), tool_schemas=tool_schemas(context),
+            run, model=get_text_llm(), tool_schemas=declarations,
             build_messages=build_messages, execute=execute, finalize=finalize,
             on_step=on_step, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS,
@@ -283,7 +304,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             resume_value=message if resume else None, checkpointer=view.checkpointer)
     progress_closed.set()
     progress("finished", None)
-    if run.status == "needs_clarification" and not context.session_id.startswith("peer_"):
+    if (run.status == "needs_clarification" and publish_reply
+            and not context.session_id.startswith("peer_")):
         run.reply_event_id = stable_reply_event_id(
             run.run_id, session_id=event_session,
             space_id=context.space_id, reply_kind="clarification")
@@ -297,7 +319,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
     if run.status != "needs_clarification":
         view.pin(run.run_id, session_id)
     result = _result(run)
-    if result["response"]:
+    if result["response"] and publish_reply:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                          run_id=run.run_id, agent_id="go2", session_id=session_id,
                          reply_kind="final", channel="http", reply=result["response"])
