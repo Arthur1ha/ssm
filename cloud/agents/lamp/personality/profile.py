@@ -35,7 +35,7 @@ def _migrate() -> dict:
 
 
 _store = ProfileStore(agent_id="esp32_desk_led", path=PROFILE_FILE,
-                      prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS, migration=_migrate)
+                      name="皮皮灯", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS, migration=_migrate)
 
 
 def get_profile() -> dict:

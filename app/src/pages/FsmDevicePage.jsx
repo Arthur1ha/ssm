@@ -26,11 +26,18 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
   }, [unitId, device?.transport, device?.state_machine]);
 
   /* ── 对话 ── */
+  const greeting = getAgentOpeningLine(card || unitId);
   const initialMsg = {
-    role: 'assistant', agent: unitId,
-    text: `你好，我是 ${card?.name || getAgentDisplayName(unitId)}，有什么可以帮你？`,
+    id: 'welcome', role: 'assistant', agent: unitId,
+    text: greeting,
   };
   const [messages, setMessages] = useState([initialMsg]);
+  useEffect(() => {
+    setMessages(previous => {
+      if (previous[0]?.id !== 'welcome' || previous[0].text === greeting) return previous;
+      return [{ ...previous[0], text: greeting }, ...previous.slice(1)];
+    });
+  }, [greeting]);
   const [sending, setSending] = useState(false);
   const [pendingRunId, setPendingRunId] = useState(null);
   const [execution, setExecution] = useState('');
@@ -335,7 +342,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
             color: offline ? 'var(--color-text-dim)' : ACCENT,
             textShadow: (isOn && !offline) ? `0 0 12px ${ACCENT}80` : 'none',
             transition: 'text-shadow 0.4s',
-          }}>{card?.name || getAgentDisplayName(unitId)}</div>
+          }}>{getAgentDisplayName(card || unitId)}</div>
         </div>
         <div className="device-header__status" title={statusLabel}>
           <i className={offline ? 'is-offline' : ''}/>
@@ -373,7 +380,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
-      <div className="device-chat-heading">与{card?.name || getAgentDisplayName(unitId)}对话</div>
+      <div className="device-chat-heading">与{getAgentDisplayName(card || unitId)}对话</div>
       {activityQuestion && <div className="device-activity-question">
         <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
         <span>{activityQuestion.text}</span>
@@ -385,7 +392,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         thinking={false}
         thinkingText=""
         thinkingAgent={unitId}
-        deviceName={card?.name}
+        deviceName={getAgentDisplayName(card || unitId)}
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : sending ? '正在处理…' : '告诉设备要做什么…'}
         disabled={offline || sending}
@@ -456,7 +463,7 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
       role="dialog" aria-modal="true" aria-hidden={!open} aria-labelledby="lamp-assets-title">
       <div className="space-drawer__handle"/>
       <header className="space-drawer__header">
-        <div><small>LAMP AGENT</small><h2 id="lamp-assets-title">灯智能体设置</h2></div>
+        <div><small>LAMP AGENT</small><h2 id="lamp-assets-title">{getAgentDisplayName(unitId)}设置</h2></div>
         <div className="space-drawer__header-actions">
           <button className="btn" onClick={load} disabled={busy}>刷新</button>
           <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭灯设置"><Icon name="x" size={14}/></button>

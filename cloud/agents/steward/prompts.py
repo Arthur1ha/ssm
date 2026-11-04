@@ -9,6 +9,25 @@ from cloud.agents.steward.personality.profile import get_profile
 from cloud.agents.steward.personality.behavior import clarification_guidance, current_persona
 from cloud.space.context import get_space_context
 from cloud.orchestrator import tools as transport
+from cloud.agents.common.replies import reply_facts
+from cloud.personality.names import agent_names
+
+
+def reply_prompt(run: Run, profile: dict) -> str:
+    """The steward speaks for the plan, leaving device voices to devices."""
+    facts = reply_facts(run)
+    return (
+        f"{current_persona(profile)}\n"
+        f"空间智能体称呼与设备 ID：{json.dumps(agent_names(), ensure_ascii=False)}。\n"
+        "现在以管家的身份直接对用户说话。先回应用户要达成的事，再交代已确认的全局结果；"
+        "若有意外，说明现状和可行的下一步。无需逐项播报状态，别重复‘已经安排好了’或照抄草稿。"
+        "设备自己的评价和口吻留给设备，别替它们发言。"
+        "草稿保留有用的承接和信息，但以步骤结果校正：只有 ok 可说完成；"
+        "accepted、executing、timeout、unknown 不算完成；部分成功须说清边界。"
+        "未实际安排的后续动作不要承诺会做。纯对话可沿用草稿的内容，不编造设备状态。"
+        "只输出给用户的话。\n"
+        + json.dumps(facts, ensure_ascii=False, default=str)
+    )
 
 def build_messages(current: Run, supplemental: str = "",
                    history: list[dict] | None = None) -> list[HumanMessage]:
@@ -22,6 +41,7 @@ def build_messages(current: Run, supplemental: str = "",
                      content_hash=hashlib.sha256(persona.encode()).hexdigest(),
                      prompt_trimmed=False)
     data = {"goal": current.goal, "supplement": supplemental,
+            "agent_names_by_id": agent_names(),
             "recent_dialogue": history or [],
             "space": get_space_context("cloud_orchestrator", state=transport._state,
                                        registry=transport._registry),

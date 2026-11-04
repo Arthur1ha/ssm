@@ -22,6 +22,7 @@ from cloud.agents.go2.memory.episode import episode_memory, EventType
 from cloud.go2.space_context import prompt_space_context
 from cloud.go2.navigation import frontier as frontier_mod
 from cloud.peers.social import SocialState, activity_peers
+from cloud.agents.common.autonomous_visibility import AutonomousReplyGate, actionable_error
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ class Drive:
         self._explore_rejected: list[tuple[float, float]] = []
         self._last_observation: str | None = None
         self._action_cooldowns: dict[str, float] = {}
+        self._reply_gate = AutonomousReplyGate()
+        self._observation_gate = AutonomousReplyGate()
 
     @property
     def last_decision(self) -> dict | None:
@@ -137,6 +140,39 @@ class Drive:
             return get_activity_store().record_event(activity_id, event_type, unit_id="go2",
                                                      text=str(text)[:500], **facts)
         return None
+
+    def _record_scene_observation(self, text: str, coordinate: tuple[float, float]) -> dict | None:
+        """Share the first scene and later scenes reached in a different area."""
+        activity_id = self._activity_id()
+        if not activity_id or not text.strip() or text.startswith("无可用视频帧"):
+            return None
+        area = ("area", round(coordinate[0] / 2), round(coordinate[1] / 2))
+        if not self._observation_gate.should_reply(
+                activity_id, completed=True, material_key=area):
+            return None
+        event = self._activity_event("observation", text)
+        if event:
+            self._observation_gate.mark_replied(activity_id, completed=True, material_key=area)
+        return event
+
+    def _motion_announcement(self, name: str, params: dict, result: dict) -> tuple:
+        scope = self._activity_id() or self.owner_session_id or "go2-autonomous"
+        completed = result.get("result") == "ok"
+        error = actionable_error(result)
+        if not completed:
+            material_key = None
+        elif name in {"go2_navigate_to_coordinate", "go2_navigate_to"}:
+            if "x" in params and "y" in params:
+                # Nearby frontier targets are one area, not a new story each time.
+                material_key = ("area", round(float(params["x"]) / 2),
+                                round(float(params["y"]) / 2))
+            else:
+                material_key = ("destination", str(params.get("name") or result.get("target") or ""))
+        elif name == "go2_sport":
+            material_key = ("gesture", str(params.get("cmd") or ""))
+        else:
+            material_key = ("action", name)
+        return scope, completed, material_key, error
 
     async def _evaluate_social(self, local_observation: dict | None = None) -> None:
         """A separate, non-motion decision at a Drive safety checkpoint."""
@@ -224,11 +260,15 @@ class Drive:
     async def _execute_motion(self, name: str, params: dict, *, publish_reply: bool = True) -> dict:
         if self.user_interrupt or not go2.is_connected:
             return {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
-        self._activity_event("action_progress", name, action=name, status="executing")
+        self._activity_event("action_progress", name, action=name, status="executing", display=False)
         result = await execute_tool(name, params, context=self._context)
         self._last_execution_result = result.get("result", "error")
+        scope, completed, material_key, error = self._motion_announcement(name, params, result)
+        visible = self._reply_gate.should_reply(
+            scope, completed=completed, material_key=material_key, error=error)
         self._activity_event("action_result", self._result_text(result), action=name,
-                             task_id=result.get("task_id"), status=self._last_execution_result)
+                             task_id=result.get("task_id"), status=self._last_execution_result,
+                             reason=error, display=visible)
         if publish_reply and go2.is_connected:
             asyncio.create_task(self._publish_motion_reply(name, params, result))
         return result
@@ -239,8 +279,14 @@ class Drive:
 
         if not go2.is_connected or self.user_interrupt:
             return
-        run_id = "auto_" + uuid.uuid4().hex
+        generation = self._generation
+        owner = self.owner_session_id
         status = str(result.get("result") or "unknown")
+        scope, completed, material_key, error = self._motion_announcement(name, params, result)
+        if not self._reply_gate.should_reply(scope, completed=completed,
+                                              material_key=material_key, error=error):
+            return
+        run_id = "auto_" + uuid.uuid4().hex
         publish_agent_event("agent_progress", agent_id="go2", scope="space",
             space_id=self._context.space_id, source="autonomous", status=status,
             run_id=run_id, step_id=run_id, stage="observed")
@@ -248,7 +294,10 @@ class Drive:
             run_id=run_id, action=name, reason="根据环境自主探索与互动",
             params=params, result=result, model=get_text_llm(),
             profile_loader=get_profile)
-        if self.user_interrupt or not go2.is_connected:
+        if (self.user_interrupt or not go2.is_connected or generation != self._generation
+                or owner != self.owner_session_id
+                or not self._reply_gate.mark_replied(scope, completed=completed,
+                                                     material_key=material_key, error=error)):
             return
         publish_agent_event("agent_reply", agent_id="go2", scope="space",
             space_id=self._context.space_id, source="autonomous",
@@ -627,7 +676,8 @@ class Drive:
         from cloud.peers.inbound import _peer_input
         context = replace(self._context, expires_at=int(min(event["deadline"], time.time() + 90)))
         task = asyncio.create_task(run_go2_loop(context.session_id, _peer_input(message, messenger),
-                context=context, run_id=event["message_id"], deadline=event["deadline"]))
+                context=context, run_id=event["message_id"], deadline=event["deadline"],
+                publish_reply=False))
         try:
             while not task.done():
                 if (self.user_interrupt or not go2.is_connected
@@ -721,8 +771,6 @@ class Drive:
             visited.append(target)
             if len(visited) > 32:
                 del visited[:-32]
-            self._activity_event("action_result", self._result_text(result),
-                                 action="explore_frontier", status="ok")
             # The camera reports what was reached; its availability never
             # changes the map target or authorizes movement.
             if time.time() >= self._vision_retry_after:
@@ -731,7 +779,7 @@ class Drive:
                     if observation and not observation.startswith("无可用视频帧"):
                         self._last_observation = observation
                         episode_memory.add(EventType.OBSERVATION, observation)
-                        event = self._activity_event("observation", observation)
+                        event = self._record_scene_observation(observation, target)
                         if event:
                             self.submit_event({"event_id": event.get("event_id", uuid.uuid4().hex),
                                 "kind": "observation", "source": "go2.camera", "ts": time.time(),
@@ -877,7 +925,8 @@ class Drive:
             nav_summary = result
 
         observation = await go2_observe("描述当前看到的场景，有什么值得继续探索的")
-        observed_event = self._activity_event("observation", observation)
+        observed_event = self._record_scene_observation(
+            observation, (target_x, target_y))
         await self._evaluate_social(observed_event)
         return f"{nav_summary} | 到达后观察：{observation}"
 
@@ -902,6 +951,8 @@ class Drive:
         self._seen_events.clear()
         self._explore_visited.clear()
         self._explore_rejected.clear()
+        self._reply_gate.reset()
+        self._observation_gate.reset()
         self.owner_session_id  = owner_session_id
         self._context = replace(context or SYSTEM_CONTEXT, origin_kind="agent_autonomous")
         self.user_interrupt = False

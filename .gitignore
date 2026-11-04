@@ -61,6 +61,7 @@ docs/research/*
 !docs/architecture/
 docs/architecture/*
 !docs/architecture/agent-langgraph-migration-comparison.md
+!docs/architecture/agent-directory-and-peer-messaging.md
 paper/
 test_script/
 # cloudflared 二进制副本，正式版在 /usr/local/bin

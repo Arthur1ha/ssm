@@ -38,18 +38,43 @@ function getAgentBubbleColor(agent) {
   return '#7EE8A2';
 }
 
+const defaultAgentNames = {
+  cloud_orchestrator: '总管家',
+  esp32_desk_led: '皮皮灯',
+  go2: '呆呆狗',
+};
+let currentAgentNames = { ...defaultAgentNames };
+
+function setAgentDisplayNames(names) {
+  currentAgentNames = { ...currentAgentNames, ...names };
+  window.dispatchEvent(new Event('agent-names-changed'));
+}
+
 function getAgentDisplayName(agent) {
   const id = typeof agent === 'string' ? agent : (agent?.agent_id || agent?.unit_id || '');
+  if (currentAgentNames[id]) return currentAgentNames[id];
   const names = {
-    orchestrator: 'SSM 管家',
-    cloud_orchestrator: 'SSM 管家',
-    go2: '机器狗',
-    esp32_desk_led: '智能灯',
+    orchestrator: currentAgentNames.cloud_orchestrator,
   };
   if (names[id]) return names[id];
   if (id.startsWith('esp32_')) return '桌面智能体';
-  if (id.startsWith('go2_')) return '机器狗';
-  return '智能体';
+  if (id.startsWith('go2_')) return currentAgentNames.go2;
+  return typeof agent === 'object' && agent?.name || '智能体';
+}
+
+function getAgentOpeningLine(agent) {
+  const id = typeof agent === 'string' ? agent : (agent?.agent_id || agent?.unit_id || '');
+  const name = getAgentDisplayName(agent);
+  if (id === 'orchestrator' || id === 'cloud_orchestrator') {
+    return `我是${name}。你说要办什么，我来安排。`;
+  }
+  if (id === 'esp32_desk_led') {
+    return `我是${name}。想怎么调光？我帮你弄得像样点。`;
+  }
+  if (id === 'go2' || id.startsWith('go2_')) {
+    return `汪，我是${name}！已经准备好和你玩耍啦。`;
+  }
+  return `我是${name}。想做什么，告诉我吧。`;
 }
 
 function describeRunProgress(event, compact = false) {
@@ -79,7 +104,8 @@ function describeRunProgress(event, compact = false) {
     save_rule: '整理待确认教导', go2_chat: '回应当前问题',
     start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
     clear_space_constraints: '撤销空间里的共同要求' })[actionId] || '处理当前请求';
-  const argumentLabels = { brightness: '亮度', duration: '时长', duration_s: '时长', speed: '速度' };
+  // Raw light settings belong in the device detail view, not conversational progress.
+  const argumentLabels = { duration: '时长', duration_s: '时长', speed: '速度' };
   const args = Object.entries(event.arguments || {}).filter(([key, value]) =>
     argumentLabels[key] && typeof value === 'number' && Number.isFinite(value))
     .map(([key, value]) => `${argumentLabels[key]} ${value}${key.startsWith('duration') ? ' 秒' : ''}`);

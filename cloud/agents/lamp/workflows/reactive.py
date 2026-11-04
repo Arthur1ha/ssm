@@ -14,7 +14,9 @@ from typing import TypedDict
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 
-from cloud.agents.lamp.prompts import fallback_reply, valid_reply
+from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
+from cloud.agents.common.runner import GraphRun
+from cloud.agents.common.replies import factual_fallback
 from cloud.agents.lamp.tools.schemas import SCHEMAS
 from cloud.observability import emit_agent_event
 
@@ -31,10 +33,13 @@ class ReactiveState(TypedDict, total=False):
     call: dict | None
     status: str
     reply: str
+    autonomy_epoch: int
 
 
 def _prompt(agent, state: ReactiveState) -> str:
     from cloud.agents.lamp.personality.profile import get_profile
+    from cloud.personality.store import render_identity
+    from cloud.personality.names import agent_names
     from cloud.space.context import get_space_context
 
     profile = get_profile()
@@ -57,7 +62,7 @@ def _prompt(agent, state: ReactiveState) -> str:
             for item in agent._belief_history[-3:]
         )
     return (
-        f"{profile['prompt']}\n"
+        f"{render_identity(profile)}\n"
         "你负责桌面灯的自主判断。一次最多调用一个工具；看到真实结果后才决定下一步。"
         "无需动作时直接回答。accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
@@ -72,6 +77,7 @@ def _prompt(agent, state: ReactiveState) -> str:
         "它只影响重新评估机会，不直接映射颜色。\n"
         f"观测：{json.dumps(state['sense'], ensure_ascii=False, default=str)}\n"
         f"空间：{json.dumps(space, ensure_ascii=False, default=str)}\n"
+        f"同伴名字与设备 ID：{json.dumps(agent_names(), ensure_ascii=False)}\n"
         f"当前可玩玩法：{json.dumps(games, ensure_ascii=False)}\n"
         f"{history}\n"
         f"已观察结果：{json.dumps(state.get('steps', []), ensure_ascii=False, default=str)}"
@@ -98,7 +104,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                          origin_kind="agent_autonomous", **fields)
 
     def gate(state):
-        if not agent._should_act() or not agent._device_online():
+        if (state["autonomy_epoch"] != agent._autonomy_epoch
+                or not agent._should_act() or not agent._device_online()):
             return {"status": "blocked", "call": None}
         return {"status": "executing"}
 
@@ -108,7 +115,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
     def plan(state):
         if state.get("turns", 0) >= 4:
             return {"status": "blocked", "call": None}
-        if not agent._should_act() or not agent._device_online():
+        if (state["autonomy_epoch"] != agent._autonomy_epoch
+                or not agent._should_act() or not agent._device_online()):
             return {"status": "blocked", "call": None}
         prompt = _prompt(agent, state)
         event(state, "model.request", stage="lamp_reactive", input=prompt)
@@ -138,7 +146,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
 
     def act(state):
         call = state["call"]
-        if not agent._should_act() or not agent._device_online():
+        if (state["autonomy_epoch"] != agent._autonomy_epoch
+                or not agent._should_act() or not agent._device_online()):
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
         args.pop("taught_id", None)
@@ -167,25 +176,45 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
 
     def reply(state):
         physical = [s for s in state.get("steps", []) if s["tool"] in PHYSICAL]
-        if not physical or not agent._should_act() or not agent._device_online():
+        if (not physical or state["autonomy_epoch"] != agent._autonomy_epoch
+                or not agent._should_act() or not agent._device_online()):
             return {"reply": ""}
         status = "ok" if all(s["result"].get("result") == "ok" for s in physical) else "partial"
         validation_status = state.get("status") if state.get("status") != "executing" else status
+        from cloud.agents.common.autonomous_visibility import actionable_error
+        from cloud.space.activity import get_activity_store
+        activity = get_activity_store().current()
+        unit_id = agent._find_led_unit()
+        scope = (activity["activity_id"] if activity and
+                 (activity.get("devices") or {}).get(unit_id, {}).get("owner") == activity["activity_id"]
+                 else "lamp-reactive")
+        completed = any((step.get("result") or {}).get("result") == "ok" for step in physical)
+        error = next((code for step in reversed(physical)
+                      if (code := actionable_error(step.get("result") or {}))), "")
+        material_key = ("light", agent._stable_light_level or state["sense"].get("light_level"))
         for i, step in enumerate(physical):
             publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
                     space_id="main", source="autonomous", status=step["result"].get("result", "unknown"),
                     run_id=state["run_id"], step_id=step["step_id"], stage="observed", sequence=i)
+        if not agent._reply_gate.should_reply(scope, completed=completed,
+                                              material_key=material_key, error=error):
+            return {"reply": ""}
         from cloud.agents.lamp.personality.profile import get_profile
-        prompt = (f"{get_profile()['prompt']}\n根据真实调灯结果用第一人称说一两句话，"
-                  "不输出 RGB 或亮度数字；未确认的动作不能说完成。\n"
-                  + json.dumps(physical, ensure_ascii=False, default=str))
+        run = GraphRun(state["run_id"], "", "自主调光时观察到：" + json.dumps(
+            state["sense"], ensure_ascii=False, default=str), time.time() + 15,
+            steps=physical, status=validation_status,
+            agent_id=agent._find_led_unit(), origin_kind="agent_autonomous")
+        prompt = persona_reply_prompt(run, get_profile())
         try:
             answer = model.invoke([HumanMessage(content=prompt)]).content
-            if not valid_reply(answer, validation_status):
+            if not valid_lamp_reply(answer, run):
                 raise ValueError("invalid_fact_claim")
         except Exception:
-            answer = fallback_reply(validation_status, physical)
-        if agent._should_act() and agent._device_online():
+            answer = factual_fallback(agent._find_led_unit(), validation_status, run)
+        if (state["autonomy_epoch"] == agent._autonomy_epoch
+                and agent._should_act() and agent._device_online()
+                and agent._reply_gate.mark_replied(scope, completed=completed,
+                                                   material_key=material_key, error=error)):
             publish("agent_reply", agent_id=agent._find_led_unit(), scope="space",
                     space_id="main", source="autonomous", status=status,
                     run_id=state["run_id"], text=answer)
@@ -250,13 +279,14 @@ def run_reactive_event(agent, sense: dict, *, model=None, publish=None,
                                  checkpointer=checkpointer)
     return graph.invoke({"sense": sense, "run_id": run_id,
                          "trace_id": "tr_" + uuid.uuid4().hex,
+                         "autonomy_epoch": agent._autonomy_epoch,
                          "steps": [], "turns": 0},
                         {"configurable": {"thread_id": f"lamp-reactive:{run_id}"}})
 
 
 def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tuple[dict, tuple] | None:
     """Apply the listener's debounce, opportunity and material-change gates."""
-    from cloud.agents.lamp.personality.behavior import light_change_bucket
+    from cloud.agents.lamp.personality.behavior import settled_light_level
     from cloud.agents.lamp.personality.profile import get_profile
     from cloud.esp32 import tools as lamp_tools
     from cloud.peers.social import activity_peers
@@ -302,8 +332,15 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
                                                 if declaration.get("action") == action), None)
             sense["teaching_candidates"] = [candidate for candidate in sense["teaching_candidates"]
                                             if candidate["agent_tool"] in VISIBLE]
-    sense["proactive_hints"] = agent._check_proactive(sense)
     profile = get_profile()
+    stable_level = settled_light_level(
+        agent, sense["light_level"], now,
+        profile["traits"]["adjustment_sensitivity"])
+    # A separate peer or teaching event can also wake the graph. Give it the
+    # settled category so a transient level does not become a lighting goal.
+    sense["light_level"] = stable_level
+    sense["settled_light_level"] = stable_level
+    sense["proactive_hints"] = agent._check_proactive(sense)
     space = get_space_context(agent._find_led_unit(), state=agent._state)
     activity, eligible = activity_peers(agent._find_led_unit(), space["peers"])
     opportunity = agent._social_state.opportunity(
@@ -317,16 +354,11 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     except Exception:
         peers = []
     peer_sig = tuple((peer.get("unit_id"), peer.get("online"),
-                      (peer.get("state_summary") or {}).get("fsm_state"))
+                      peer.get("device_connected"))
                      for peer in peers)
-    config = sense.get("led_config") or {}
-    lux_bucket = light_change_bucket(
-        sense.get("light_lux"), profile["traits"]["adjustment_sensitivity"])
     signature = (
-        profile["revision"], sense["light_level"], lux_bucket, sense["time_period"],
-        sense["sound_detected"], sense["led_state"],
-        tuple(config.get(k) for k in ("r", "g", "b", "brightness", "count")),
-        rule_sig, peer_sig,
+        profile["revision"], stable_level, sense["time_period"],
+        rule_sig, peer_sig, tuple(sense["proactive_hints"]),
         (opportunity["kind"], tuple(opportunity["event_ids"]), int(now // 300))
         if opportunity else None,
     )

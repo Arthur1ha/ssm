@@ -16,6 +16,7 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.go2.memory import daily_summary as memory
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.agents.go2.prompt_contract import build_prompt
+from cloud.personality.store import render_identity
 from cloud.go2.execution import require_persist
 from cloud.observability import emit_agent_event
 
@@ -95,7 +96,7 @@ def build_daily_summary_graph(model: Any, *, episodes_dir: Path | None = None,
         if not text or hashlib.sha256(text.encode()).hexdigest() != state["source_hash"]:
             return {"status": "source_changed"}
         bundle = build_prompt(
-            "daily_summary", personality=get_profile()["prompt"],
+            "daily_summary", personality=render_identity(get_profile()),
             user_input=f"请概括来源日期 {source_date} 的记录。", memory=text,
             memory_sources=(f"episode:{source_date}",), budget_chars=7000,
         )

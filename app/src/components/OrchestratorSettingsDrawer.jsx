@@ -13,7 +13,7 @@ function OrchestratorSettingsDrawer({ open, onClose }) {
       role="dialog" aria-modal="true" aria-hidden={!open} aria-labelledby="orchestrator-settings-title">
       <div className="space-drawer__handle"/>
       <header className="space-drawer__header">
-        <div><small>SYSTEM AGENT</small><h2 id="orchestrator-settings-title">空间管家</h2></div>
+        <div><small>SYSTEM AGENT</small><h2 id="orchestrator-settings-title">{getAgentDisplayName('cloud_orchestrator')}</h2></div>
         <button type="button" className="btn space-drawer__close" onClick={onClose} aria-label="关闭管家设置">
           <Icon name="x" size={14}/>
         </button>

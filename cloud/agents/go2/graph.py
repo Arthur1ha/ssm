@@ -13,9 +13,9 @@ from langchain_core.messages import HumanMessage
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
 from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
-from cloud.agents.go2.prompts import build_messages as go2_messages
+from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt
 from cloud.agents.go2.tools.declarations import READ_ONLY_TOOLS, tool_schemas
-from cloud.agents.common.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import needs_persona_reply, valid_persona_reply, factual_fallback
 from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.models import get_text_llm
 from cloud.go2.tools.executor import execute_tool
@@ -223,23 +223,11 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             offline_unconfirmed = not go2.is_connected and current.status == "ok" and not confirmed
             if offline_unconfirmed:
                 current.status = "blocked"
-                current.response = factual_fallback("go2", "offline")
-                current.reply_source = "runtime"
-            elif (current.steps
-                  and current.steps[-1].get("tool") == "go2_navigate_to_visible_target"
-                  and (current.steps[-1].get("result") or {}).get("result") in {"ok", "blocked", "cancelled"}
-                  and isinstance((current.steps[-1].get("result") or {}).get("message"), str)):
-                current.response = current.steps[-1]["result"]["message"]
-                current.reply_source = "runtime"
-            elif needs_persona_reply(current):
+            if needs_persona_reply(current):
                 try:
-                    if not go2.is_connected and any(step.get("effectful") for step in current.steps):
-                        raise RuntimeError("robot_disconnected")
                     from cloud.agents.go2.personality.profile import get_profile
-                    from cloud.agents.go2.personality.behavior import reply_persona
                     profile = get_profile()
-                    prompt = persona_reply_prompt(reply_persona(profile), current,
-                                                  traits=profile["traits"])
+                    prompt = persona_reply_prompt(current, profile)
                     emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
                                      run_id=current.run_id, agent_id="go2", session_id=session_id,
                                      input=prompt, goal=current.goal, template_version="persona-result-v1")
@@ -257,13 +245,15 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 except Exception as exc:
                     logger.warning("Go2 persona reply unavailable run=%s error=%s",
                                    current.run_id, type(exc).__name__)
-                    current.response = factual_fallback("go2", current.status, current)
+                    last_step = current.steps[-1] if current.steps else {}
+                    last_result = last_step.get("result") or {}
+                    if (last_step.get("tool") == "go2_navigate_to_visible_target"
+                            and isinstance(last_result.get("message"), str)
+                            and last_result["message"].strip()):
+                        current.response = last_result["message"]
+                    else:
+                        current.response = factual_fallback("go2", current.status, current)
                     current.reply_source = "runtime"
-            if (current.parent_run_id and not go2.is_connected
-                    and current.status == "ok" and not confirmed):
-                current.status = "blocked"
-                current.response = factual_fallback("go2", current.status, current)
-                current.reply_source = "runtime"
             publish_allowed = not current.parent_run_id or time.time() < current.deadline
             if not publish_allowed:
                 current.response = ""

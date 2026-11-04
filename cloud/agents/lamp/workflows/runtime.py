@@ -107,6 +107,7 @@ class ReactiveMind:
             key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
             if now - self._cooldown.get(key, 0) < 300:
                 logger.debug("cooldown skip: %s", key)
+                self._last_reactive_tool_result = {"result": "blocked", "error": "repeat_action_cooldown"}
                 return False
 
         if tool_name not in _tools_mod.TOOL_FN_MAP:
@@ -183,7 +184,7 @@ class ReactiveMind:
 
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
-        current_level = sense.get("light_level", "")
+        current_level = sense.get("settled_light_level", sense.get("light_level", ""))
         level_changed = bool(self._last_light_level and current_level != self._last_light_level)
         self._last_light_level = current_level
         if now - self._last_proactive_ts < 600:

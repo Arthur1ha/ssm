@@ -15,14 +15,14 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
-from cloud.agents.lamp.prompts import decision_messages
+from cloud.agents.lamp.prompts import (decision_messages, persona_reply_prompt,
+                                       valid_lamp_reply, has_unrequested_light_parameters)
 from cloud.agents.lamp.state import READ_ONLY_TOOLS
 from cloud.agents.lamp.tools.execute import execute_lamp_tool
 from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
-from cloud.agents.common.replies import (factual_fallback, needs_persona_reply,
-                                         persona_reply_prompt, valid_persona_reply)
+from cloud.agents.common.replies import factual_fallback, needs_persona_reply
 from cloud.agents.lamp.personality.profile import get_profile
 from cloud.agents.lamp.personality.soul import load_personality
 from cloud.esp32.physical_tasks import get as get_physical_task, stable_task_id
@@ -163,6 +163,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             status = result.get("result", "unknown")
 
             def publish_text(answer):
+                if has_unrequested_light_parameters(answer, run.goal):
+                    return
                 publish_agent_event("agent_progress", agent_id=unit_id,
                     session_id=event_session, scope="space" if autonomous else "session",
                     space_id=context.space_id, status=status, run_id=run.run_id,
@@ -174,7 +176,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             def invoke_text(prompt):
                 return get_text_llm(ChatOpenAI).invoke([HumanMessage(content=prompt)]).content
 
-            submit_progress(persona, run.goal, step, invoke_text, publish_text,
+            submit_progress(persona + "\n进展只用自然语言，不展示 RGB、亮度或色温数值。",
+                            run.goal, step, invoke_text, publish_text,
                             progress_closed, min(run.deadline, time.time() + 4))
 
     def execute(name, params, step_id):
@@ -191,10 +194,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     async def finalize(current: GraphRun) -> GraphRun:
         if needs_persona_reply(current) and (not current.parent_run_id or time.time() < current.deadline):
             try:
-                if not agent._device_online():
-                    raise RuntimeError("lamp_offline")
-                persona, _, _ = load_personality()
-                prompt = persona_reply_prompt(persona, current, traits=get_profile()["traits"])
+                prompt = persona_reply_prompt(current, get_profile())
                 emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
                                  run_id=current.run_id, agent_id=unit_id, session_id=current.session_id,
                                  input=prompt, goal=current.goal,
@@ -204,7 +204,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                 emit_agent_event("model.response", trace_id=current.trace_id or current.run_id,
                                  run_id=current.run_id, agent_id=unit_id, session_id=current.session_id,
                                  output=getattr(response, "content", ""))
-                if not valid_persona_reply(response.content, current):
+                if not valid_lamp_reply(response.content, current):
                     raise ValueError("invalid_persona_reply")
                 current.response = response.content.strip()
                 current.reply_source = "persona_model"

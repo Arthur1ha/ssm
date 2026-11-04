@@ -15,6 +15,7 @@ from cloud.go2.paths import SOUL_DIR
 from cloud.go2.execution import can_persist, require_persist
 from cloud.observability import emit_agent_event
 from cloud.agents.go2.personality import profile as unified_profile
+from cloud.personality.store import render_identity
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,8 @@ def _atomic_json(path: Path, data: dict) -> None:
 
 def load_system_prompt() -> tuple[str, str, str | None]:
     """Return the mutable personality expression, not runtime safety rules."""
-    prompt = unified_profile.get_profile()["prompt"]
-    return prompt, "default" if prompt == _DEFAULT_PERSONALITY else "custom", None
+    profile = unified_profile.get_profile()
+    return render_identity(profile), "default" if profile["prompt"] == _DEFAULT_PERSONALITY else "custom", None
 
 
 def get_system_prompt() -> str:
@@ -67,7 +68,7 @@ def get_personality_view() -> dict:
 
 def set_personality(prompt: str, social_initiative: int | None = None) -> None:
     require_persist("change personality")
-    previous = get_system_prompt()
+    previous = unified_profile.get_profile()["prompt"]
     current = unified_profile.get_profile()
     changes = {"prompt": prompt, "revision": current["revision"]}
     if social_initiative is not None:

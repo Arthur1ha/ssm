@@ -44,9 +44,15 @@ class ESP32Agent(ReactiveMind):
         self._belief_summary: str = ""
         self._beliefs_since_summary: int = 0
         self._autonomy_mode: str = "manual"   # 默认手动：连上不自动控灯，reactive 需显式开启
+        self._autonomy_epoch = 0
         self._user_hold_until: float = 0.0
         self._last_reason_sig: tuple | None = None   # 上次问 LLM 时的情境签名（实质变化门）
         self._last_reason_ts: float = 0.0
+        self._stable_light_level = ""
+        self._pending_light_level = ""
+        self._pending_light_since = 0.0
+        from cloud.agents.common.autonomous_visibility import AutonomousReplyGate
+        self._reply_gate = AutonomousReplyGate()
         from cloud.peers.social import SocialState
         self._social_state = SocialState()
 
@@ -58,6 +64,7 @@ class ESP32Agent(ReactiveMind):
         """切换自主模式；非法值抛 ValueError。"""
         if mode not in _VALID_AUTONOMY_MODES:
             raise ValueError(f"未知自主模式: {mode}")
+        self._autonomy_epoch += 1
         self._autonomy_mode = mode
         if mode == "manual":
             from cloud.peers.gateway import cancel_pending
@@ -65,6 +72,9 @@ class ESP32Agent(ReactiveMind):
                            origin_kind="agent_autonomous", reason="mode_changed")
         if mode == "reactive":
             self._last_reason_sig = None   # 切回自主时清签名，立刻按当前情境评估一次
+            self._stable_light_level = ""
+            self._pending_light_level = ""
+            self._reply_gate.reset()
         else:
             self._user_hold_until = 0.0
         logger.info("autonomy mode → %s", mode)

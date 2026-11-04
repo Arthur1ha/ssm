@@ -46,7 +46,8 @@ function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceNa
         {visibleSensors.map(agent => {
           const reading = connected && agent._online ? getSensorReading(agent, unitData) : null;
           return <span className="home-space__reading" key={agent.unit_id}>
-            <span>{agent.name || getAgentMeta(agent).label}</span>
+            <span>{defaultAgentNames[agent.unit_id] ? getAgentDisplayName(agent)
+              : agent.name || getAgentMeta(agent).label}</span>
             <strong style={{ color: reading?.color || 'var(--color-text-dim)' }}>
               {reading?.value || (connected ? '离线' : '—')}
             </strong>

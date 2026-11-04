@@ -3,8 +3,7 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
   onEndActivity, onAnswerActivity, onOpenRules }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
-  const getName = unitId => agents.find(agent => agent.unit_id === unitId)?.name
-    || getAgentDisplayName(unitId);
+  const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
   const currentCard = hasActivity ? {
     id: activity?.activity_id || activityEvents[0]?.activity_id || 'recent',
@@ -22,12 +21,12 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
       ? [...entries].reverse().find(entry => entry.type === 'user' && entry.text === context)?.requestId
       : null);
     if (!requestId) return -1;
-    const terminalIndex = entries.findIndex(entry => entry.type === 'process'
-      && entry.requestId === requestId && entry.terminal);
-    if (terminalIndex >= 0) return terminalIndex;
     const finalIndex = entries.findIndex(entry => entry.type === 'ai'
       && entry.requestId === requestId && entry.final);
-    if (finalIndex >= 0) return finalIndex;
+    if (finalIndex >= 0) return finalIndex + 1;
+    const terminalIndex = entries.findIndex(entry => entry.type === 'process'
+      && entry.requestId === requestId && entry.terminal);
+    if (terminalIndex >= 0) return terminalIndex + 1;
     for (let index = entries.length - 1; index >= 0; index--) {
       if (entries[index].requestId === requestId) return index + 1;
     }
@@ -36,7 +35,7 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
   const cardsAt = new Map();
   cards.forEach(card => {
     const anchor = findAnchor(card);
-    // A user-triggered activity belongs before that request's final reply.
+    // Keep the steward's start confirmation above its activity card.
     // Autonomous activities stay after the chat entries.
     const position = anchor >= 0 ? anchor : card === currentCard ? entries.length : 0;
     cardsAt.set(position, [...(cardsAt.get(position) || []), card]);
@@ -44,17 +43,29 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
   const rows = [];
   for (let index = 0; index <= entries.length; index++) {
     (cardsAt.get(index) || []).forEach(card => rows.push({ entry: { type: 'space_activity', card }, index: -1 }));
-    if (index < entries.length) rows.push({ entry: entries[index], index });
+    if (index >= entries.length) continue;
+    const entry = entries[index];
+    const previous = rows[rows.length - 1]?.entry;
+    if (entry.type === 'process' && previous?.type === 'process_group'
+      && previous.requestId === entry.requestId) {
+      previous.items.push(entry);
+    } else if (entry.type === 'process') {
+      rows.push({ entry: { type: 'process_group', requestId: entry.requestId,
+        items: [entry] }, index });
+    } else {
+      rows.push({ entry, index });
+    }
   }
+  rows.unshift({ entry: { type: 'ai', agent: 'cloud_orchestrator',
+    text: getAgentOpeningLine('cloud_orchestrator'), eventId: 'welcome' }, index: 'welcome' });
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (entries.length) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [entries]);
 
-  if (rows.length === 0) return null;
   return (
     <div style={{ padding: '0 16px' }}>
-      {rows.map(({ entry: e, index: i }, rowIndex) => {
+      {rows.map(({ entry: e, index: i }) => {
         if (e.type === 'space_activity') {
           const card = e.card;
           return <SpaceActivityFeed key={`activity-${card.id}`}
@@ -62,17 +73,25 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
             error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
             getName={getName}/>;
         }
-        if (e.type === 'process') {
-          const agent = e.agent || 'cloud_orchestrator';
-          const previous = rows[rowIndex - 1]?.entry;
-          const startsGroup = previous?.type !== 'process' || previous.requestId !== e.requestId
-            || previous.agent !== agent;
-          const color = getAgentBubbleColor(agent);
-          return <div key={e.eventId || `process-${i}`} className={`run-process${e.terminal ? ' run-process--terminal' : ''}`}
-            style={{ '--run-color': color }}>
-            {startsGroup && <div className="run-process__agent">{getName(agent)}</div>}
-            <div className="run-process__detail"><span className="run-process__marker" aria-hidden="true"/>{e.text}</div>
-          </div>;
+        if (e.type === 'process_group') {
+          const finished = entries.some(item => item.requestId === e.requestId
+            && item.type === 'ai' && item.final);
+          const latest = e.items[e.items.length - 1];
+          return <details key={`process-${e.requestId}-${i}`} className="run-process-summary">
+            <summary>
+              <span className="run-process-summary__marker" aria-hidden="true"/>
+              <span className="run-process-summary__text">{finished
+                ? `处理过程 · ${e.items.length} 条记录` : `正在处理 · ${latest.text}`}</span>
+              <span className="run-process-summary__toggle" aria-hidden="true"/>
+            </summary>
+            <div className="run-process-summary__list">
+              {e.items.map((item, itemIndex) => <div key={item.eventId || itemIndex}
+                className="run-process-summary__item">
+                <span>{getName(item.agent || 'cloud_orchestrator')}</span>
+                <p>{item.text}</p>
+              </div>)}
+            </div>
+          </details>;
         }
         if (e.type === 'user') {
           return (
@@ -217,6 +236,7 @@ function projectActivityEvents(events) {
   const generic = /^(?:ok|error|blocked|accepted|executing|unknown|动作已完成|处理结束|(?:空间管家)?(?:已完成[，,、·\s]*)+)$/i;
   const visible = [];
   for (const event of events) {
+    if (event.display === false) continue;
     if (event.event_type === 'started') continue; // The activity heading already says this.
     if (event.event_type === 'response' && event.status === 'ok') continue;
     const kind = activityEventKind(event);
@@ -287,15 +307,18 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
   const isEnding = Boolean(activity?.status === 'ending' || ending);
   const isEnded = activity?.status === 'ended' || events.some(event => event.event_type === 'ended');
   const isPending = !activity && !isEnded && events.length > 0;
-  const showTimeline = isActive || isEnding || isPending || expanded;
-  const summaryEvent = [...visibleEvents].reverse().find(event =>
-    ['device_left', 'action_result', 'message', 'observation'].includes(event.event_type));
+  // Keep questions visible so the user can answer without opening the record.
+  const hasActiveQuestion = isActive && visibleEvents.some(event =>
+    activityEventKind(event) === 'question');
+  const showTimeline = expanded || hasActiveQuestion;
+  const summaryEvent = [...visibleEvents].reverse().find(event => event.event_type !== 'ended');
+  const summaryName = summaryEvent?.unit_id || summaryEvent?.agent_id
+    ? getName(summaryEvent.unit_id || summaryEvent.agent_id) : '空间管家';
   const summary = summaryEvent
-    ? ['message', 'observation'].includes(activityEventKind(summaryEvent))
-      ? `${getName(summaryEvent.unit_id)}：${summaryEvent.text}`
-      : activityStatusText(summaryEvent, summaryEvent.unit_id
-        ? getName(summaryEvent.unit_id) : '空间管家')
-    : '本次活动已结束';
+    ? ['message', 'observation', 'question'].includes(activityEventKind(summaryEvent))
+      ? `${summaryName}：${summaryEvent.text}`
+      : activityStatusText(summaryEvent, summaryName)
+    : isEnded ? '本次活动已结束' : '正在等待设备动态';
   useEffect(() => setExpanded(false), [activityId, isActive, isEnding]);
   useEffect(() => {
     if (isActive && showTimeline && latestMessageId) {
@@ -317,13 +340,11 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
       {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>
         {ending ? '正在结束…' : '结束活动'}
       </button>}
-      {isEnded && events.length > 0 && <button type="button"
-        className="space-activity__toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-        {expanded ? '收起记录' : '查看记录'}
-      </button>}
     </div>
     {error && <div className="space-activity__error" role="alert">{error}</div>}
-    {!showTimeline && events.length > 0 && <div className="space-activity__summary">{summary}</div>}
+    {!showTimeline && <div className="space-activity__summary">
+      <span>最新动态</span><p>{summary}</p>
+    </div>}
     {showTimeline && <div className="space-activity__timeline">
       {visibleEvents.map((event, index) => {
         const kind = activityEventKind(event);
@@ -358,6 +379,10 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
         </div>;
       })}
     </div>}
+    {visibleEvents.length > 0 && !hasActiveQuestion && <button type="button"
+      className="space-activity__toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      {showTimeline ? '收起记录' : '查看全部记录'}
+    </button>}
   </section>;
 }
 window.SpaceActivityFeed = SpaceActivityFeed;

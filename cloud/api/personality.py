@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from cloud.personality.store import RevisionConflict
-from cloud.api.auth import require_admin, require_admin_csrf
+from cloud.api.auth import require_admin, require_admin_csrf, require_session
+from cloud.personality.names import agent_names
 
 router = APIRouter(prefix="/api/agents", tags=["personality"])
 
@@ -12,6 +13,7 @@ router = APIRouter(prefix="/api/agents", tags=["personality"])
 class PersonalityUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: StrictInt
+    name: str | None = None
     prompt: str | None = None
     traits: dict[str, StrictInt] = Field(default_factory=dict)
 
@@ -26,6 +28,11 @@ def _module(agent_id: str):
     else:
         raise HTTPException(status_code=404, detail="unknown agent")
     return profile
+
+
+@router.get("/names")
+def get_agent_names(_session: dict = Depends(require_session)):
+    return agent_names()
 
 
 @router.get("/{agent_id}/personality")

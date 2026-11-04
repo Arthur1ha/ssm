@@ -32,10 +32,11 @@ def _read_json(path: Path) -> dict | None:
 
 
 class ProfileStore:
-    def __init__(self, *, agent_id: str, path: Path, prompt: str,
+    def __init__(self, *, agent_id: str, path: Path, name: str, prompt: str,
                  trait_specs: dict[str, dict], migration: Callable[[], dict] | None = None):
         self.agent_id = agent_id
         self.path = path
+        self.name = name
         self.prompt = prompt
         self.trait_specs = trait_specs
         self.migration = migration
@@ -46,7 +47,7 @@ class ProfileStore:
         traits.update({key: value for key, value in migrated.get("traits", {}).items()
                        if key in traits and type(value) is int and 0 <= value <= 100})
         prompt = migrated.get("prompt")
-        return {"schema_version": 1, "agent_id": self.agent_id,
+        return {"schema_version": 1, "agent_id": self.agent_id, "name": self.name,
                 "prompt": prompt if isinstance(prompt, str) and prompt.strip() else self.prompt,
                 "traits": traits, "revision": 1,
                 "metadata": migrated.get("metadata", {})}
@@ -63,7 +64,8 @@ class ProfileStore:
         return data
 
     def _view(self, data: dict) -> dict:
-        return {"agent_id": self.agent_id, "prompt": data["prompt"],
+        return {"agent_id": self.agent_id, "name": data.get("name") or self.name,
+                "prompt": data["prompt"],
                 "traits": dict(data["traits"]), "trait_specs": deepcopy(self.trait_specs),
                 "revision": data["revision"]}
 
@@ -73,7 +75,7 @@ class ProfileStore:
 
     def update_profile(self, changes: dict, context: Any) -> dict:
         require_admin_context(context)
-        if not isinstance(changes, dict) or set(changes) - {"prompt", "traits", "revision"}:
+        if not isinstance(changes, dict) or set(changes) - {"name", "prompt", "traits", "revision"}:
             raise ValueError("unknown personality field")
         if type(changes.get("revision")) is not int:
             raise ValueError("revision is required")
@@ -81,6 +83,9 @@ class ProfileStore:
             data = self._load()
             if changes["revision"] != data["revision"]:
                 raise RevisionConflict("personality was changed; reload before saving")
+            name = changes.get("name", data.get("name") or self.name)
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 24 or not name.strip().isprintable():
+                raise ValueError("name must contain 1–24 printable characters")
             prompt = changes.get("prompt", data["prompt"])
             if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
                 raise ValueError("prompt must contain 1–4000 characters")
@@ -91,7 +96,7 @@ class ProfileStore:
                 spec = self.trait_specs[key]
                 if type(value) is not int or not spec["min"] <= value <= spec["max"]:
                     raise ValueError(f"{key} must be an integer from {spec['min']} to {spec['max']}")
-            updated = {**data, "prompt": prompt.strip(),
+            updated = {**data, "name": name.strip(), "prompt": prompt.strip(),
                        "traits": {**data["traits"], **incoming}, "revision": data["revision"] + 1}
             write_record(self.path, updated)
             return self._view(updated)
@@ -131,3 +136,11 @@ class ProfileStore:
             data.update(prompt=prompt.strip(), revision=data["revision"] + 1)
             write_record(self.path, data)
             return True
+
+
+def render_identity(profile: dict) -> str:
+    """Give the saved name priority over older names embedded in persona text."""
+    name = profile.get("name") or profile.get("agent_id") or "智能体"
+    return (f"{profile['prompt']}\n"
+            f"你现在的名字是「{name}」。对外用这个名字自称；"
+            "若上面的人格文案含有旧名字，以这里的名字为准。")

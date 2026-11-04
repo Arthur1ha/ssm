@@ -14,14 +14,14 @@ from langchain_core.messages import HumanMessage
 
 from cloud.agents.common.runner import GraphRun as Run, run_role_graph
 from cloud.agents.steward.state import build_intent_run_context
-from cloud.agents.steward.prompts import build_messages
+from cloud.agents.steward.prompts import build_messages, reply_prompt
 from cloud.agents.steward.tools import STEWARD_TOOL_SCHEMAS, make_executor
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
 from cloud.agents.common.models import get_text_model
-from cloud.agents.common.replies import needs_persona_reply, persona_reply_prompt, valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import needs_persona_reply, valid_persona_reply, factual_fallback
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
 from cloud.observability import bind_context, emit_agent_event
@@ -196,8 +196,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
             return current
         try:
             profile = get_profile()
-            prompt = persona_reply_prompt(current_persona(profile), current,
-                                          traits=profile["traits"])
+            prompt = reply_prompt(current, profile)
             emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
                              run_id=current.run_id, agent_id="cloud_orchestrator", session_id=session_id,
                              input=prompt, goal=current.goal,

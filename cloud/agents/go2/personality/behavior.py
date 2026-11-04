@@ -1,5 +1,7 @@
 """Go2 personality scores select existing opportunities, never motion permissions."""
 
+from cloud.personality.store import render_identity
+
 
 def exploration_interval(curiosity: int) -> int:
     """Seconds between idle frontier evaluations (70 keeps the old 10s cadence)."""
@@ -16,7 +18,7 @@ def social_action_candidates(boldness: int, available: set[str]) -> set[str]:
 def decision_persona(profile: dict) -> str:
     traits = profile["traits"]
     return (
-        f"{profile['prompt']}\n"
+        f"{render_identity(profile)}\n"
         f"好奇心 {traits['curiosity']}/100 只影响空闲探索评估机会；"
         f"外向性 {traits['extraversion']}/100 影响有人互动时表达和同伴交流机会；"
         f"大胆程度 {traits['boldness']}/100 只影响已允许的互动候选偏好。"
@@ -33,4 +35,4 @@ def reply_persona(profile: dict) -> str:
         expression = "表达活泼、热情，带一点童稚的惊喜；适合互动时可自然接话或问一个相关问题。"
     else:
         expression = "用简单短句友善回应，按用户投入的程度接话，不过度热络。"
-    return f"{profile['prompt']}\n外向性 {extraversion}/100：{expression}"
+    return f"{render_identity(profile)}\n外向性 {extraversion}/100：{expression}"

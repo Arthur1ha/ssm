@@ -3,6 +3,7 @@
 import hashlib
 
 from cloud.agents.lamp.personality import profile
+from cloud.personality.store import render_identity
 from cloud.observability import emit_agent_event
 
 AGENT_PERSONA = profile.DEFAULT_PROMPT
@@ -19,12 +20,12 @@ def get_personality_view() -> dict:
 
 
 def load_personality() -> tuple[str, str, str | None]:
-    prompt = profile.get_profile()["prompt"]
-    return prompt, "default" if prompt == AGENT_PERSONA else "custom", None
+    current = profile.get_profile()
+    return render_identity(current), "default" if current["prompt"] == AGENT_PERSONA else "custom", None
 
 
 def get_personality() -> str:
-    return profile.get_profile()["prompt"]
+    return render_identity(profile.get_profile())
 
 
 def set_personality(prompt: str, context, social_initiative: int | None = None) -> None:
@@ -32,7 +33,7 @@ def set_personality(prompt: str, context, social_initiative: int | None = None) 
             or getattr(context, "persist", None) is not True
             or getattr(context, "origin_kind", None) != "user_delegated"):
         raise PermissionError("administrator persistence required")
-    previous = get_personality()
+    previous = profile.get_profile()["prompt"]
     changes = {"prompt": prompt, "revision": profile.get_profile()["revision"]}
     if social_initiative is not None:
         changes["traits"] = {"social_initiative": social_initiative}

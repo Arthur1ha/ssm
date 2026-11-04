@@ -20,6 +20,7 @@ def clarification_guidance(tendency: int) -> str:
 def current_persona(profile: dict | None = None) -> str:
     """Render the saved steward identity with its current speaking preference."""
     from cloud.agents.steward.personality.profile import get_profile
+    from cloud.personality.store import render_identity
     profile = profile or get_profile()
     warmth = profile["traits"]["warmth"]
-    return f"{profile['prompt']}\n温暖程度 {warmth}/100，{warmth_guidance(warmth)}"
+    return f"{render_identity(profile)}\n温暖程度 {warmth}/100，{warmth_guidance(warmth)}"

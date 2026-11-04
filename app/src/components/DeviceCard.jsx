@@ -13,12 +13,12 @@ function HomeDeviceRow({ agent, unitData, connected }) {
 
   return <button type="button" className="home-device-row"
     onClick={() => navigate('#/devices/' + encodeURIComponent(uid))}
-    aria-label={`查看${agent.name || uid}，${detail}`}>
+    aria-label={`查看${getAgentDisplayName(agent)}，${detail}`}>
     <span className="home-device-row__icon" style={{ color: meta.color, background: `${meta.color}16` }}>
       <Icon name={meta.icon} size={18}/>
     </span>
     <span className="home-device-row__text">
-      <strong>{agent.name || uid}</strong>
+      <strong>{getAgentDisplayName(agent)}</strong>
       <small>{detail}</small>
     </span>
     <span className={`home-device-row__dot${online ? ' is-online' : ''}`} aria-hidden="true"/>

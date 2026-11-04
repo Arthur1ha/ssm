@@ -89,7 +89,7 @@ function Go2AssetsDrawer({ open, onClose }) {
         role="dialog" aria-modal="true" aria-labelledby="go2-assets-title">
         <div className="space-drawer__handle"/>
         <header className="space-drawer__header">
-          <div><small>GO2 MANAGEMENT</small><h2 id="go2-assets-title">Go2 设置</h2></div>
+          <div><small>GO2 MANAGEMENT</small><h2 id="go2-assets-title">{getAgentDisplayName('go2')}设置</h2></div>
           <div className="space-drawer__header-actions">
             <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
               {loading ? '同步中…' : '刷新资产'}
@@ -139,7 +139,7 @@ function Go2AssetsDrawer({ open, onClose }) {
 
           <section className="asset-section">
             <div className="asset-section__heading">
-              <div><small>PERSONALITY</small><h3>Go2 人格与特质</h3></div>
+              <div><small>PERSONALITY</small><h3>{getAgentDisplayName('go2')}的人格与特质</h3></div>
               <span>长期生效</span>
             </div>
             <AgentPersonalitySettings agentId="go2" active={open}/>

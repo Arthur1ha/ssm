@@ -34,7 +34,8 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
         display: 'flex', flexDirection: 'column', gap: 10 }}>
         {messages.map((m, i) => {
           const agentColor = getAgentBubbleColor(m.agent);
-          const displayName = m.agentName || (m.agent === thinkingAgent && deviceName)
+          const displayName = defaultAgentNames[m.agent] ? getAgentDisplayName(m.agent)
+            : m.agentName || (m.agent === thinkingAgent && deviceName)
             || getAgentDisplayName(m.agent);
           if (m.role === 'process') {
             const previous = messages[i - 1];

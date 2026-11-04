@@ -53,6 +53,14 @@ function App({ session, logout, refreshSession }) {
   const [activityQuestion, setActivityQuestion] = useState(null);
   const [pendingRule, setPendingRule]  = useState(null);
   const [savingRule,  setSavingRule]   = useState(false);
+  const [, setAgentNamesRevision] = useState(0);
+
+  useEffect(() => {
+    const onNamesChanged = () => setAgentNamesRevision(value => value + 1);
+    window.addEventListener('agent-names-changed', onNamesChanged);
+    apiClient.request('/api/agents/names').then(setAgentDisplayNames).catch(() => {});
+    return () => window.removeEventListener('agent-names-changed', onNamesChanged);
+  }, []);
 
   const visibleActivityId = displayActivity?.activity_id || activityEvents[0]?.activity_id;
   useEffect(() => {
@@ -299,11 +307,9 @@ function App({ session, logout, refreshSession }) {
           {!loadingAgents && !agentsError && !hasDevices &&
             <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}
 
-          {(activityLog.length > 0 || activityHistory.length > 0 || displayActivity || activityEvents.length > 0 || activityError) && (
-            <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
-              <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
-            </div>
-          )}
+          <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
+            <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
+          </div>
 
           <ActivityFeed entries={activityLog} agents={agents} activity={displayActivity}
             activityHistory={activityHistory}

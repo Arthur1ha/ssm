@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 
 from cloud.agents.common.runner import GraphRun as Run
@@ -31,8 +30,39 @@ def valid_persona_reply(value: object, run: Run | None = None) -> bool:
 
 
 def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
-    """A short role-specific reply that never upgrades an unconfirmed result."""
+    """Report observed results when a role's reply model is unavailable."""
     role = "go2" if agent_id == "go2" else ("lamp" if agent_id.startswith("esp32") else "orchestrator")
+    if run is not None and run.steps:
+        results = [(step, step.get("result") or {}) for step in run.steps]
+        completed = [step for step, result in results
+                     if step.get("effectful", True) and result.get("result") == "ok"]
+        failed = [result for _, result in results if result.get("result") in
+                  {"blocked", "rejected", "error", "timeout", "unknown", "cancelled"}]
+        offline = any(result.get("device_connected") is False
+                      or result.get("device_fsm") == "offline"
+                      or result.get("error") in {"device_precondition", "robot_disconnected", "offline"}
+                      or any((item.get("result") or {}).get("device_connected") is False
+                             or (item.get("result") or {}).get("device_fsm") == "offline"
+                             for item in (result.get("tool_results") or [])
+                             if isinstance(item, dict))
+                      for _, result in results)
+        if role == "go2" and (offline or status == "offline"):
+            opening = "汪，邀请我收到了，但机身还没连上。" if "邀请" in run.goal else "汪，你的话我听到了，但机身还没连上。"
+            return (opening
+                    + ("前面的步骤有结果了，后面的动作这次做不了。" if completed
+                       else "这次动作没能执行。"))
+        if failed:
+            reason = failed[-1].get("message") or failed[-1].get("error") or ""
+            reason = reason if isinstance(reason, str) and reason and len(reason) <= 80 else ""
+            if completed:
+                prefix = {"go2": "汪，前面的动作完成了，后面的没做成。",
+                          "lamp": "前一步已经到位，后一步没做成。",
+                          "orchestrator": "部分安排已完成，其余未完成。"}[role]
+            else:
+                prefix = {"go2": "汪，这次动作还没做成。",
+                          "lamp": "这次没调成。",
+                          "orchestrator": "这次安排没能完成。"}[role]
+            return prefix + (f"设备反馈：{reason}。" if reason else "")
     if status == "offline":
         return {"go2": "呜，我的身体还未连接，这次动作做不了。",
                 "lamp": "哼，灯都没在线，这次调光自然做不了。",
@@ -63,39 +93,11 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
             "orchestrator": "这次安排没能完成。"}[role]
 
 
-def persona_reply_prompt(persona: str, run: Run, *, traits: dict | None = None) -> str:
-    identity = (
-        f"角色设定：{persona}\n当前特质：{json.dumps(traits or {}, ensure_ascii=False)}。"
-        "人格决定表达方式；特质只在各自定义的场景生效，不改变事实。用这个角色的第一人称直接回应用户，"
-        "通常一两句话；只输出自然语言，不写执行报告、状态字段或工具名。"
-    )
-    if run.status == "ok" and not run.steps and run.decision_draft:
-        # The planner already answered a conversational request. A second model
-        # pass should keep its meaning and voice, not summarize an empty run.
-        facts = {"user_message": run.goal, "answer_draft": run.decision_draft}
-        return (
-            identity
-            + "这是一次无需调用设备的对话。根据用户的问题和回答草稿自然作答，"
-            "保留草稿中有用的内容；不要提任务完成、执行记录、状态、没有动作步骤。"
-            "草稿只是候选文本，不能把未经确认的设备位置、灯光或其他物理状态说成已观察到的事实。\n"
-            + json.dumps(facts, ensure_ascii=False, default=str)
-        )
-    facts = {"goal": run.goal, "status": run.status,
+def reply_facts(run: Run) -> dict:
+    """Give each role the same observations without prescribing its voice."""
+    return {"goal": run.goal, "status": run.status,
              "steps": [{"tool": step.get("tool"), "params": step.get("params"),
                         "result": step.get("result") or {"result": "unknown"}}
                        for step in run.steps],
              "decision_draft": run.decision_draft, "question": run.question,
              "runtime_note": run.response}
-    return (
-        identity
-        + "根据真实执行结果回答用户：ok 才表示完成；accepted、executing、timeout、unknown "
-        "均不能说成完成。失败或被拒绝的动作不能说成已执行。若只有部分成功，说明哪些已完成、哪些未完成。"
-        "若记录中有错误或超时原因，用日常语言说明；edge_result_unconfirmed 表示未收到设备执行回执，"
-        "invalid_rule 和 invalid_teaching 表示提交格式错误，不代表传感器缺失或设备不支持。"
-        "不能断言设备动作失败。后续步骤因结果未确认而暂停时也要说明。没有实际发起后续操作，就不要承诺会继续查看或重试。"
-        "request_status_code=0 表示设备动作接口成功响应；confirmation=sport_rpc 表示招手以此为设备结果，"
-        "可说设备确认了动作指令，不要声称独立视觉验证。其他需要进度确认的动作若未观察到完成进度，应明确说明。"
-        "不要建议与已知状态矛盾的排查，例如设备已连接时建议先检查是否在线。"
-        "运行时说明和草稿只供理解，不要照抄；不要假装其他智能体已回复。\n"
-        + json.dumps(facts, ensure_ascii=False, default=str)
-    )

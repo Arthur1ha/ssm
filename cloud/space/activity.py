@@ -294,7 +294,7 @@ class ActivityStore:
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
                                  "interaction_kind", "game_id",
                                  "question_id", "action", "physical_stop", "reason",
-                                 "source", "confidence", "source_event_id"}})
+                                 "source", "confidence", "source_event_id", "display"}})
         if "source" in event:
             event["source"] = str(event["source"])[:64]
         if "confidence" in event and (isinstance(event["confidence"], bool)

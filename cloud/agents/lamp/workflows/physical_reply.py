@@ -10,9 +10,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
-from cloud.agents.common.replies import (
-    factual_fallback, persona_reply_prompt, valid_persona_reply,
-)
+from cloud.agents.common.replies import factual_fallback
+from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.lamp.personality.profile import get_profile
 from cloud.observability import emit_agent_event
@@ -72,8 +71,7 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
         )
         try:
             profile = get_profile()
-            prompt = persona_reply_prompt(profile["prompt"], run,
-                                          traits=profile["traits"])
+            prompt = persona_reply_prompt(run, profile)
             emit_agent_event("model.request", agent_id=state["unit_id"],
                              run_id=state["task_id"], trace_id=state["trace_id"],
                              input=prompt, stage="physical_reply")
@@ -82,14 +80,14 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
             emit_agent_event("model.response", agent_id=state["unit_id"],
                              run_id=state["task_id"], trace_id=state["trace_id"],
                              output=answer, stage="physical_reply")
-            if not valid_persona_reply(answer, run):
+            if not valid_lamp_reply(answer, run):
                 raise ValueError("invalid_persona_reply")
             return {"response": answer.strip()}
         except Exception as exc:
             emit_agent_event("model.error", agent_id=state["unit_id"],
                              run_id=state["task_id"], trace_id=state["trace_id"],
                              error=type(exc).__name__, stage="physical_reply")
-            return {"response": factual_fallback(state["unit_id"], status),
+            return {"response": factual_fallback(state["unit_id"], status, run),
                     "persona_error": True}
 
     async def publish_node(state: ReplyState) -> ReplyState:

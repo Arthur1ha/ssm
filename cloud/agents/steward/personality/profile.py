@@ -21,7 +21,7 @@ TRAIT_SPECS = {
                               "effect": "歧义意图处理", "default": 50, "min": 0, "max": 100},
 }
 _store = ProfileStore(agent_id="cloud_orchestrator", path=PROFILE_FILE,
-                      prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS)
+                      name="总管家", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS)
 
 
 def get_profile() -> dict:

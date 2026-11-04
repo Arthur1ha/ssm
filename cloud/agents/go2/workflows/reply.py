@@ -10,7 +10,8 @@ from langgraph.graph import START, END, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.runner import GraphRun
-from cloud.agents.common.replies import persona_reply_prompt, valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import valid_persona_reply, factual_fallback
+from cloud.agents.go2.prompts import persona_reply_prompt
 
 
 class ReplyState(TypedDict, total=False):
@@ -35,8 +36,7 @@ async def run_autonomous_reply_graph(*, run_id: str, action: str, reason: str,
                        status=status, agent_id="go2", origin_kind="agent_autonomous")
         try:
             profile = profile_loader()
-            response = await model.ainvoke([HumanMessage(content=persona_reply_prompt(
-                profile["prompt"], run, traits=profile["traits"]))])
+            response = await model.ainvoke([HumanMessage(content=persona_reply_prompt(run, profile))])
             answer = response.content
             if not valid_persona_reply(answer, run):
                 raise ValueError("invalid_persona_reply")

@@ -2,6 +2,7 @@
 function AgentPersonalitySettings({ agentId, active = true }) {
   const { useCallback, useEffect, useState } = React;
   const [profile, setProfile] = useState(null);
+  const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [traits, setTraits] = useState({});
   const [loading, setLoading] = useState(false);
@@ -14,6 +15,8 @@ function AgentPersonalitySettings({ agentId, active = true }) {
     try {
       const next = await apiClient.request(`/api/agents/${encodeURIComponent(agentId)}/personality`);
       setProfile(next);
+      setAgentDisplayNames({ [agentId]: next.name });
+      setName(next.name || '');
       setPrompt(next.prompt || '');
       setTraits({ ...next.traits });
     } catch (error) {
@@ -25,17 +28,19 @@ function AgentPersonalitySettings({ agentId, active = true }) {
 
   const save = async event => {
     event.preventDefault();
-    if (!profile || saving || !prompt.trim()) return;
+    if (!profile || saving || !name.trim() || !prompt.trim()) return;
     setSaving(true);
     setFeedback(null);
     try {
       const next = await apiClient.request(`/api/agents/${encodeURIComponent(agentId)}/personality`, {
-        method: 'PUT', body: { prompt: prompt.trim(), traits, revision: profile.revision },
+        method: 'PUT', body: { name: name.trim(), prompt: prompt.trim(), traits, revision: profile.revision },
       });
       setProfile(next);
+      setAgentDisplayNames({ [agentId]: next.name });
+      setName(next.name || '');
       setPrompt(next.prompt || '');
       setTraits({ ...next.traits });
-      setFeedback({ tone: 'ok', text: '人格与特质已保存' });
+      setFeedback({ tone: 'ok', text: '名字、人格与特质已保存，下次决策起使用新名字' });
     } catch (error) {
       const reason = error?.status === 409
         ? '配置已在其他窗口更新；当前输入已保留，请复制内容后重新打开设置再保存'
@@ -45,13 +50,18 @@ function AgentPersonalitySettings({ agentId, active = true }) {
   };
 
   const specs = profile?.trait_specs || {};
-  const changed = profile && (prompt !== profile.prompt || Object.keys(specs)
+  const changed = profile && (name !== profile.name || prompt !== profile.prompt || Object.keys(specs)
     .some(key => Number(traits[key]) !== Number(profile.traits?.[key])));
 
   return <div className="agent-personality">
     {loading && !profile && <p className="asset-empty" role="status">正在读取人格配置…</p>}
     {!profile && !loading && <button type="button" className="btn" onClick={load}>重试加载</button>}
     {profile && <form className="personality-editor" onSubmit={save}>
+      <label className="agent-personality__prompt-label" htmlFor={`personality-name-${agentId}`}>
+        名字 <small>保存后自动加入后续决策与回复提示词，无需写进人格文案</small>
+      </label>
+      <input id={`personality-name-${agentId}`} type="text" value={name} maxLength="24"
+        onChange={event => setName(event.target.value)} placeholder="给智能体起个名字"/>
       <label className="agent-personality__prompt-label" htmlFor={`personality-prompt-${agentId}`}>
         人格文案 <small>身份、说话方式，以及遇到不确定情况时的处理习惯</small>
       </label>
@@ -75,7 +85,7 @@ function AgentPersonalitySettings({ agentId, active = true }) {
       </div>
       <div className="agent-personality__actions">
         <small>版本 {profile.revision} · {prompt.length} / 4000</small>
-        <button type="submit" className="btn btn--accent" disabled={saving || loading || !changed || !prompt.trim()}>
+        <button type="submit" className="btn btn--accent" disabled={saving || loading || !changed || !name.trim() || !prompt.trim()}>
           {saving ? '保存中…' : '保存人格设置'}
         </button>
       </div>

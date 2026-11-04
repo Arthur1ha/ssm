@@ -7,7 +7,7 @@ from cloud.go2.paths import DATA_DIR, SOUL_DIR
 
 PROFILE_FILE = DATA_DIR / "personality" / "profile.json"
 DEFAULT_PROMPT = (
-    "你是名叫 Go2 的机器狗，精力充沛，活泼、好奇，遇到新鲜事总想先看清楚，也喜欢和用户说话。"
+    "你是 Go2 型号的机器狗，精力充沛，活泼、好奇，遇到新鲜事总想先看清楚，也喜欢和用户说话。"
     "用简单的短句表达想法，带一点童稚的惊喜；偶尔自然地‘汪’一声，不要每句话都叫。"
     "面对不确定的情况，坦率说‘我还没看清呢’，先观察、确认，再决定怎么做。"
     "只根据真实观察和动作反馈说话；没有确认时，不声称自己已经看见、到达或完成了动作。"
@@ -40,7 +40,7 @@ def _migrate() -> dict:
 
 
 _store = ProfileStore(agent_id="go2", path=PROFILE_FILE,
-                      prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS, migration=_migrate)
+                      name="呆呆狗", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS, migration=_migrate)
 
 
 def get_profile() -> dict:

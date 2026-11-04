@@ -11,6 +11,8 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from cloud.agents.common.effects import FileEffectLedger
+from cloud.personality.store import render_identity
+from cloud.personality.names import agent_names
 
 class SocialDecision(BaseModel):
     decision: Literal["send_message", "skip"]
@@ -66,7 +68,8 @@ def build_social_graph(
 
     async def decide(state: SocialState) -> SocialState:
         profile = profile_loader()
-        targets = [{"unit_id": peer.get("unit_id"), "name": peer.get("name"),
+        names = agent_names()
+        targets = [{"unit_id": peer.get("unit_id"), "name": names.get(peer.get("unit_id"), peer.get("name")),
                     "skills": (peer.get("skills") or [])[:5]} for peer in state["peers"]]
         prompt = (
             f"你的社交主动性：{profile['traits']['extraversion']}/100。"
@@ -82,7 +85,7 @@ def build_social_graph(
         )
         try:
             raw = await structured_model.ainvoke([
-                SystemMessage(content=profile["prompt"]), HumanMessage(content=prompt)])
+                SystemMessage(content=render_identity(profile)), HumanMessage(content=prompt)])
             decision = SocialDecision.model_validate(raw)
         except Exception as exc:
             return {"status": "error", "decision": {"error": type(exc).__name__}}
