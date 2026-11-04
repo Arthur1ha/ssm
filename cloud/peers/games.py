@@ -46,32 +46,45 @@ def live_lamp_color(source: str) -> dict | None:
         if (all(type(value) is int and 0 <= value <= 255 for value in rgb)
                 and type(values.get("brightness")) is int
                 and values["brightness"] > 0):
-            return {"rgb": rgb, "as_of": entry["as_of"], "source": source}
+            return {"rgb": rgb, "brightness": values["brightness"],
+                    "as_of": entry["as_of"], "source": source}
     return None
 
 
 def _color_hunt_available(sender: str, target: str) -> bool:
-    if (sender, target) != ("esp32_desk_led", "go2"):
-        return False
-    from cloud.go2.connection import go2
-    from cloud.go2.mode.free_explore import drive
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.esp32.service import get_agent
+    # An invitation is a proposal. Color and motion prerequisites belong to
+    # the execution stage, after Go2 has accepted the game.
+    return (sender, target) == ("esp32_desk_led", "go2")
 
-    lamp = get_agent()
-    if lamp is None or lamp.get_autonomy_mode() != "reactive":
-        return False
 
-    if not go2.is_connected or drive.user_interrupt or drive._pending_question_id:
-        return False
-    if (not drive._activity_id() or drive.owner_session_id != drive._activity_id()
-            or drive._task is None or drive._task.done()):
-        return False
-    try:
-        snapshot, _ = navigator._snapshot()
-    except Exception:
-        return False
-    return bool(snapshot and live_lamp_color("esp32_desk_led"))
+async def _wait_for_lamp_color(event: dict, drive: object) -> tuple[dict | None, str]:
+    """Wait for the lamp's edge-confirmed color result on Go2's acceptance."""
+    messenger = event["messenger"]
+    acceptance_id = event.get("acceptance_message_id")
+    if not acceptance_id:
+        return None, "acceptance_unconfirmed"
+    deadline = min(event["deadline"], time.time() + 60)
+    confirmed_at = None
+    while time.time() < deadline:
+        if (not activity_allows(event.get("activity_id"), event["message"]["sender"], "go2")
+                or drive._activity_id() != event.get("activity_id")):
+            return None, "activity_ended"
+        if drive.user_interrupt:
+            return None, "autonomy_interrupted"
+        status = messenger.get_status(acceptance_id) or {}
+        state = status.get("state")
+        if state == "ok":
+            confirmed_at = confirmed_at or time.time()
+            color = live_lamp_color(str(event.get("source") or ""))
+            if color and color["as_of"] >= int(event.get("acceptance_sent_at") or 0):
+                return color, ""
+            if time.time() - confirmed_at >= 3:
+                return None, "lamp_color_unknown_or_stale"
+        if state in {"blocked", "rejected", "error", "cancelled", "unknown",
+                     "unanswered", "unconfirmed_start"}:
+            return None, str((status.get("result") or {}).get("reason") or state)
+        await asyncio.sleep(0.2)
+    return None, "lamp_color_timeout"
 
 
 async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
@@ -87,15 +100,26 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
                               reason="activity_ended")
         return
-    color = live_lamp_color(source)
+    color, color_error = await _wait_for_lamp_color(event, drive)
     if color is None:
         await drive._advance_task(drive._active_goal, stage="finish",
-            result={"result": "rejected", "reason": "lamp_color_unknown_or_stale"})
+            result={"result": "rejected", "reason": color_error})
         messenger.send_result(event["message_id"], "rejected", task_id=task_id,
-                              reason="lamp_color_unknown_or_stale")
+                              reason=color_error)
         messenger.send_message("go2", message["sender"],
-            "我没读到这盏灯的新鲜 RGB 和亮度，先不按邀请文字猜颜色。",
+            "这局还没拿到灯出题后的新鲜颜色，先不凭邀请文字猜。",
             reply_to=event["message_id"], reply_kind="reply")
+        return
+    try:
+        snapshot, snapshot_error = navigator._snapshot()
+    except Exception:
+        snapshot, snapshot_error = None, "map_unavailable"
+    if not go2.is_connected or snapshot is None:
+        reason = "go2_disconnected" if not go2.is_connected else snapshot_error or "map_unavailable"
+        await drive._advance_task(drive._active_goal, stage="finish",
+                                  result={"result": "blocked", "reason": reason})
+        messenger.send_result(event["message_id"], "blocked", task_id=task_id,
+                              reason=reason)
         return
     drive._active_goal = {**drive._active_goal, "kind": "game", "game_id": "color_hunt",
                           "target_color": color, "deadline": event["deadline"]}

@@ -208,7 +208,7 @@ def make_executor(run, context: dict, resume: bool = False):
             return {"result": "cancelled", "error": "higher_priority_user_request"}
         if context.get("expires_at") and context["expires_at"] <= time.time():
             return {"result": "timeout", "error": "session_expired"}
-        if name in {"invoke_skill", "send_message", "set_space_constraint",
+        if name in {"invoke_skill", "set_space_constraint",
                     "clear_space_constraints", "save_rule"} and any(
                         step.get("tool") == "start_activity" and
                         (step.get("result") or {}).get("result") == "ok"
@@ -239,12 +239,25 @@ def make_executor(run, context: dict, resume: bool = False):
                 return {"result": "rejected", "error": "activity_start_unavailable_or_stale"}
             return {"result": "ok", "activity": started["activity"]}
         if name == "send_message":
+            started = next((step.get("result") or {} for step in run.steps
+                            if step.get("tool") == "start_activity"
+                            and (step.get("result") or {}).get("result") == "ok"), None)
+            if started is not None:
+                activity = started.get("activity") or {}
+                target = args.get("target")
+                if (context.get("origin_kind") != "user_delegated"
+                        or target not in (activity.get("devices") or {})
+                        or (activity["devices"][target]).get("status") != "joined"
+                        or any(step.get("tool") == "send_message" for step in run.steps)):
+                    return {"result": "rejected", "error": "activity_message_denied"}
             messenger = getattr(transport, "_messenger", None)
             if messenger is None:
                 return {"result": "error", "error": "message_bus_unavailable"}
             return messenger.send_message(
                 "cloud_orchestrator", args.get("target"), args.get("content"),
-                args.get("reply_to"))
+                args.get("reply_to"),
+                activity_id=(started.get("activity") or {}).get("activity_id")
+                if started is not None else None)
         if name == "set_space_constraint":
             if context.get("origin_kind", "user_delegated") != "user_delegated":
                 return {"result": "rejected", "error": "verified_user_required"}

@@ -371,6 +371,9 @@ class Navigator:
         if pose_age is None or now - pose_age > POSE_STALE_S:
             return None, "localization_unavailable"
         if map_age is None or now - map_age > MAP_STALE_S:
+            logger.info("[Go2/Nav] map unavailable: %s",
+                        "no_voxel_packet" if map_age is None else
+                        "voxel_stale age=%.1fs" % (now - map_age))
             return None, "map_unavailable"
         pose_frame = getattr(go2, "odom_frame_id", None)
         map_frame = getattr(go2, "voxel_frame_id", None)
@@ -381,9 +384,13 @@ class Navigator:
             return None, "localization_unavailable"
         try:
             grid = go2.occupancy_grid
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            logger.info("[Go2/Nav] map unavailable: grid_build_%s", type(exc).__name__)
             return None, "map_unavailable"
         if grid is None or grid.frame_id != map_frame or not getattr(grid, "has_free_space_evidence", False):
+            logger.info("[Go2/Nav] map unavailable: %s", "grid_missing" if grid is None else
+                        "grid_frame_mismatch" if grid.frame_id != map_frame else
+                        "no_free_space_evidence")
             return None, "map_unavailable"
         return (odom, grid), None
 

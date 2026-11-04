@@ -545,10 +545,13 @@ class Drive:
             return
         choice = decision["choice"]
         if choice != "accept":
+            reason = str(decision.get("reason") or "decision_unavailable")[:200]
+            logger.info("[Drive] peer proposal %s choice=%s reason=%s",
+                        event["message_id"], choice, reason)
             if choice == "decline":
-                messenger.send_result(event["message_id"], "rejected", reason="autonomous_declined")
+                messenger.send_result(event["message_id"], "rejected", reason=reason)
             else:
-                messenger.send_result(event["message_id"], "unknown", reason="autonomous_deferred")
+                messenger.send_result(event["message_id"], "unknown", reason=reason)
             return
         task_id = "peer_" + event["message_id"]
         game = None
@@ -576,6 +579,16 @@ class Drive:
                 messenger.send_result(event["message_id"], "unknown",
                                       reason="prior_game_execution_unconfirmed")
                 return
+            acceptance_sent_at = time.time()
+            acceptance = messenger.send_message(
+                "go2", message["sender"], "我接受寻找同色物品。请先选颜色并设置灯，确认后我再找。",
+                reply_to=event["message_id"], reply_kind="accepted")
+            if acceptance.get("result") != "accepted":
+                messenger.send_result(event["message_id"], "unknown",
+                                      reason="acceptance_delivery_unconfirmed")
+                return
+            event["acceptance_message_id"] = acceptance["message_id"]
+            event["acceptance_sent_at"] = acceptance_sent_at
         self._active_goal = {"kind": "peer_message", "event_id": event["event_id"],
                              "task_id": task_id, "deadline": event["deadline"]}
         messenger.send_progress(event["message_id"], task_id)

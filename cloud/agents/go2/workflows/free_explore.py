@@ -55,8 +55,14 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                     "next_action": "none", "last_tool_result": update.get("result") or {},
                     "should_explore": False, "should_social": False}
         if state.get("interrupted") or state.get("pending_question") or not state.get("connected"):
+            event = state.get("pending_event") or {}
+            reason = ("user_interrupted" if state.get("interrupted") else
+                      "pending_question" if state.get("pending_question") else
+                      "go2_disconnected")
             return {"should_explore": False, "should_social": False,
-                    "next_action": "none", "task_stage": "blocked"}
+                    "next_action": "none", "task_stage": "blocked",
+                    "event_decision": "defer" if event.get("kind") == "peer_message" else "",
+                    "decision_reason": reason}
         if update:
             goal = state.get("current_goal") or {}
             if update.get("event_id") != goal.get("event_id"):
@@ -88,6 +94,8 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                 if model is None:
                     return {"should_explore": False, "event_decision": "defer",
                             "decision_reason": "model_unavailable"}
+                decision = None
+                decision_error = ""
                 try:
                     raw = await model.with_structured_output(
                         EventDecision, method="function_calling").ainvoke([
@@ -105,13 +113,17 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                     ])
                     decision = EventDecision.model_validate(raw)
                     choice = decision.choice
-                except Exception:
+                except Exception as exc:
                     choice = "defer"
+                    decision_error = "arbitration_" + type(exc).__name__
                 if choice not in {"accept", "defer", "decline"}:
                     choice = "defer"
+                    decision_error = "invalid_arbitration_choice"
                 return {"should_explore": False, "should_social": False,
                         "event_decision": choice,
-                        "decision_reason": getattr(decision, "reason", "") if choice != "defer" else "decision_unavailable",
+                        "decision_reason": (decision_error or
+                                            (str(decision.reason).strip()[:200] if decision else "") or
+                                            "decision_unavailable"),
                         "current_goal": ({"kind": "peer_message", "event_id": event.get("event_id"),
                                           "deadline": event.get("deadline")}
                                          if choice == "accept" else state.get("current_goal") or {}),

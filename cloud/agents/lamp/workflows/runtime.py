@@ -90,6 +90,8 @@ class ReactiveMind:
             activity, peers = activity_peers(led_unit, context["peers"])
             target = str(params.get("target") or "")
             topic = str(params.get("reason") or params.get("content") or "")
+            if activity and self._social_state.activity_id != activity["activity_id"]:
+                self._social_state.reset(activity["activity_id"])
             if (not activity or target not in {peer["unit_id"] for peer in peers}
                     or not self._social_state.can_send(target, topic)):
                 self._last_reactive_tool_result = {"result": "blocked", "error": "social_gate"}

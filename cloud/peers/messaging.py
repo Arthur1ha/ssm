@@ -93,6 +93,7 @@ class AgentMessenger:
         *, conversation_id: str | None = None, deadline: float | None = None,
         reply_kind: str = "reply", interaction_kind: str = "message",
         game_id: str | None = None,
+        activity_id: str | None = None,
     ) -> dict:
         now = self._now()
         if sender not in self._local_ids:
@@ -142,8 +143,14 @@ class AgentMessenger:
             }
             from cloud.space.activity import get_activity_store
             activity = get_activity_store().current()
-            if activity:
-                payload["activity_id"] = activity["activity_id"]
+            current_activity_id = activity.get("activity_id") if activity else None
+            if activity_id is not None:
+                if (sender != "cloud_orchestrator" or not isinstance(activity_id, str)
+                        or not _ID.fullmatch(activity_id)):
+                    return {"result": "blocked", "error": "activity_not_current"}
+                payload["activity_id"] = activity_id
+            elif current_activity_id:
+                payload["activity_id"] = current_activity_id
             if interaction_kind == "game_invite":
                 from cloud.peers.games import game_is_playable
                 if not game_is_playable(payload.get("activity_id"), sender, target, game_id):

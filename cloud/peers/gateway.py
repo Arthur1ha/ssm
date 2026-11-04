@@ -132,6 +132,8 @@ def _skill_policy(initiator: str, target: str, skill_id: str, params: dict, orig
             raise PermissionError("unsupported coordination skill")
         return
     if target == "go2":
+        if skill_id == "go2_observe":
+            return
         if skill_id == "go2_visual_navigate":
             if origin == "user_delegated" and isinstance(params.get("target"), str) and params["target"].strip():
                 return

@@ -62,6 +62,7 @@ def _prompt(agent, state: ReactiveState) -> str:
         "无需动作时直接回答。accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
         "在空间活动中，若当前可玩玩法非空且没有更高优先级事件，优先考虑用 game_invite 邀请同伴玩一局；"
+        "如果本轮先调灯，完成后仍有可玩玩法与社交机会，应再决定是否发送邀请；"
         "仍可选择普通交流或不发消息，同伴也可拒绝。邀请不等于游戏完成。"
         "观测中的 teaching_candidates 是已校验且启用的主人教导。命中且当前可执行时，"
         "按其中的 agent_tool 和参数调用工具；若因安全或更高优先级要求不执行，应说明原因。"
@@ -345,7 +346,13 @@ def run_reactive_sensor_event(agent, event: dict, *, now: float | None = None,
     result = run_reactive_event(agent, sense, **kwargs)
     opportunity = sense.get("social_opportunity")
     if result.get("status") != "error":
-        if opportunity:
+        sent = any(step.get("tool") == "send_message" and
+                   (step.get("result") or {}).get("result") == "accepted"
+                   for step in result.get("steps") or [])
+        if opportunity and sent:
             agent._social_state.evaluated(opportunity)
-        agent._last_reason_sig = signature
+        # A physical action can finish this short Graph run before its social
+        # choice. Keep the opportunity pending for the next sensor event.
+        if not opportunity or sent or not result.get("steps"):
+            agent._last_reason_sig = signature
     return result

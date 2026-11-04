@@ -103,8 +103,14 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
     """Called by AgentMessenger's worker, never by the MQTT network callback."""
     if message.get("kind") != "message":
         return
-    # A reply may produce one local user-visible acknowledgement. It never
-    # starts another peer turn, so the two agents cannot answer indefinitely.
+    if (message.get("reply_to") and message.get("target") == "esp32_desk_led"
+            and message.get("sender") == "go2"
+            and message.get("reply_kind") == "accepted"
+            and (messenger.get_status(message["reply_to"]) or {}).get("interaction_kind")
+                == "game_invite"):
+        _handle_color_hunt_acceptance(messenger, message, state)
+        return
+    # Ordinary replies never start another peer turn.
     if message.get("reply_to"):
         _publish_go2_reply_ack(messenger, message)
         return
@@ -115,7 +121,8 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
         members = (activity or {}).get("devices") or {}
         if (not activity or activity.get("activity_id") != activity_id
                 or activity.get("status") not in {"starting", "active", "partial"}
-                or members.get(message.get("sender"), {}).get("status") != "joined"
+                or (message.get("sender") != "cloud_orchestrator" and
+                    members.get(message.get("sender"), {}).get("status") != "joined")
                 or members.get(message.get("target"), {}).get("status") != "joined"):
             messenger.send_result(message["message_id"], "cancelled", reason="activity_ended")
             return
@@ -158,4 +165,106 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
         _finish(messenger, message, result)
     except Exception as exc:
         logger.exception("peer message failed id=%s target=%s", message["message_id"], target)
+        messenger.send_result(message["message_id"], "error", reason=type(exc).__name__)
+
+
+def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
+    """Let the lamp choose a new color only after Go2 accepts its game invite."""
+    from cloud.peers.games import activity_allows, live_lamp_color
+    from cloud.space.activity import get_activity_store
+
+    original = messenger.get_status(message["reply_to"]) or {}
+    activity_id = message.get("activity_id")
+    if (original.get("interaction_kind") != "game_invite"
+            or original.get("game_id") != "color_hunt"
+            or original.get("sender") != "esp32_desk_led"
+            or original.get("target") != "go2"
+            or original.get("activity_id") != activity_id
+            or original.get("state") not in {"waiting_start", "waiting_result"}
+            or not activity_allows(activity_id, "esp32_desk_led", "go2")):
+        messenger.send_result(message["message_id"], "rejected",
+                              reason="invalid_game_acceptance")
+        return
+    from cloud.esp32.service import get_agent
+    from cloud.api.intents import _dispatch_mqtt_task
+    agent = get_agent()
+    if agent is None or not agent._should_act() or not agent._device_online():
+        messenger.send_result(message["message_id"], "blocked",
+                              reason="lamp_autonomy_unavailable")
+        return
+    context = ExecutionContext("peer_" + message["conversation_id"], "agent", False,
+                               "main", "agent_autonomous", int(message["deadline"]))
+    session = {"session_id": context.session_id, "actor": "agent",
+               "persist": False, "expires_at": context.expires_at}
+    dispatched_color = False
+    dispatched_power = False
+
+    def dispatch(unit_id, action, params, _context, _source, *, task_id=None):
+        nonlocal dispatched_color, dispatched_power
+        if action not in {"SET_STATE", "SET_COLOR"} or not agent._should_act():
+            raise PermissionError("game_color_only")
+        if action == "SET_STATE":
+            if params.get("state") != "ON" or dispatched_power or dispatched_color:
+                raise PermissionError("game_power_not_allowed")
+            dispatched_power = True
+        elif dispatched_color:
+            raise PermissionError("game_color_already_chosen")
+        else:
+            dispatched_color = True
+        task_id = _dispatch_mqtt_task(unit_id, action, params, session,
+                                      source="peer_game_color", task_id=task_id)
+        return task_id
+
+    try:
+        setup_started_at = time.time()
+        result = agent.run_user_loop(
+            "Go2 已接受寻找同色物品。请为这一局选择一个明确的颜色，用 set_led_color 设置灯；"
+            "若灯尚未开启，先用 set_led_state 开灯并等待回执。"
+            "等待设备真实回执。只执行一次设色，不发送同伴消息。",
+            "esp32_desk_led", context, dispatch, lighting_only=True,
+            run_id=message["message_id"])
+        color_step = next((step for step in reversed(result.get("steps") or [])
+                           if step.get("tool") == "set_led_color"
+                           and (step.get("result") or {}).get("result") == "ok"), None)
+        params = (color_step or {}).get("params") or {}
+        color = None
+        if color_step and result.get("result") == "ok":
+            color_deadline = time.monotonic() + min(
+                3, max(0, float(message["deadline"]) - time.time()))
+            while time.monotonic() < color_deadline:
+                color = live_lamp_color("esp32_desk_led")
+                if (color and color["as_of"] >= int(setup_started_at)
+                        and tuple(params.get(key) for key in ("r", "g", "b")) == color["rgb"]
+                        and ("brightness" not in params
+                             or params["brightness"] == color["brightness"])):
+                    break
+                time.sleep(0.1)
+        if (not color_step or result.get("result") != "ok" or not color
+                or dispatched_power and not any(
+                    step.get("tool") == "set_led_state"
+                    and (step.get("result") or {}).get("result") == "ok"
+                    for step in result.get("steps") or [])
+                or color["as_of"] < int(setup_started_at)
+                or tuple(params.get(key) for key in ("r", "g", "b")) != color["rgb"]
+                or ("brightness" in params and params["brightness"] != color["brightness"])):
+            reason = "lamp_color_unknown_or_stale" if color_step else "lamp_color_not_confirmed"
+            messenger.send_result(message["message_id"], "rejected", reason=reason)
+            return
+        if not activity_allows(activity_id, "esp32_desk_led", "go2"):
+            messenger.send_result(message["message_id"], "cancelled", reason="activity_ended")
+            return
+        if not agent._should_act() or not agent._device_online():
+            messenger.send_result(message["message_id"], "cancelled",
+                                  reason="lamp_autonomy_unavailable")
+            return
+        color_task_id = (color_step.get("result") or {}).get("task_id")
+        if color_task_id:
+            messenger.send_progress(message["message_id"], color_task_id)
+        messenger.send_result(message["message_id"], "ok", task_id=color_task_id)
+        get_activity_store().record_event(activity_id, "action_result",
+            unit_id="esp32_desk_led", text="游戏出题颜色已确认",
+            action="set_led_color", status="ok",
+            task_id=(color_step.get("result") or {}).get("task_id"))
+    except Exception as exc:
+        logger.exception("color hunt setup failed id=%s", message["message_id"])
         messenger.send_result(message["message_id"], "error", reason=type(exc).__name__)
