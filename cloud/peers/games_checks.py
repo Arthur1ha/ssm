@@ -42,7 +42,7 @@ def check() -> None:
     store, mqtt, delivered = _Activity(), _Mqtt(), []
     game = Game("color_hunt", "寻找同色物品", "按实时灯色寻找物品",
                 ("esp32_desk_led", "go2"), lambda _sender, _target: True,
-                lambda *_args: None)
+                lambda *_args: None, "我换灯色，你找同色物品。")
     with (patch("cloud.space.activity.get_activity_store", return_value=store),
           patch.dict("cloud.peers.games.GAMES", {"color_hunt": game}, clear=True)):
         messenger = AgentMessenger(mqtt, None, None,
@@ -52,11 +52,13 @@ def check() -> None:
             assert [item["game_id"] for item in playable_games(
                 "act_test", "esp32_desk_led", "go2")] == ["color_hunt"]
             assert playable_games("act_test", "go2", "esp32_desk_led") == []
-            sent = messenger.send_message("esp32_desk_led", "go2", "找一找同色物品",
+            sent = messenger.send_message("esp32_desk_led", "go2",
+                "来玩 color_hunt，先把机身灯调成同色",
                 interaction_kind="game_invite", game_id="color_hunt")
             assert sent["result"] == "accepted"
             assert 200 < messenger.get_status(sent["message_id"])["deadline"] - time.time() <= 241
             topic, raw = mqtt.sent[-1]
+            assert json.loads(raw)["content"] == "我换灯色，你找同色物品。"
             assert messenger.handle_message(topic, raw)
             messenger._workers.submit(lambda: None).result()
             assert len(delivered) == 1 and delivered[0]["game_id"] == "color_hunt"

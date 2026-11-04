@@ -302,9 +302,12 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                                                       text=event["text"], status=status,
                                                       source_event_id=event["event_id"])
                 elif (event_type == "agent_progress" and agent_id == "esp32_desk_led"
-                      and facts.get("stage") == "observed"
+                      and facts.get("stage") in {"planned", "executing", "observed"}
                       and facts.get("tool") in {"set_led_state", "set_led_color", "blink_led"}):
-                    kind = ("action_result" if status in {"ok", "error", "blocked", "cancelled",
+                    stage = facts["stage"]
+                    kind = ("action" if stage == "planned" else
+                            "action_progress" if stage == "executing" else
+                            "action_result" if status in {"ok", "error", "blocked", "cancelled",
                                                            "timeout", "rejected", "unknown"}
                             else "action_progress")
                     get_activity_store().record_event(activity_id, kind, unit_id=agent_id,

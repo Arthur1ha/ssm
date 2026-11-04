@@ -16,7 +16,8 @@ from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
 from cloud.agents.lamp.prompts import (decision_messages, persona_reply_prompt,
-                                       valid_lamp_reply, has_unrequested_light_parameters)
+                                       valid_lamp_reply, has_unrequested_light_parameters,
+                                       has_internal_terms)
 from cloud.agents.lamp.state import READ_ONLY_TOOLS
 from cloud.agents.lamp.tools.execute import execute_lamp_tool
 from cloud.agents.lamp.tools.schemas import visible_schemas
@@ -163,7 +164,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             status = result.get("result", "unknown")
 
             def publish_text(answer):
-                if has_unrequested_light_parameters(answer, run.goal):
+                if (has_unrequested_light_parameters(answer, run.goal)
+                        or has_internal_terms(answer)):
                     return
                 publish_agent_event("agent_progress", agent_id=unit_id,
                     session_id=event_session, scope="space" if autonomous else "session",
@@ -192,7 +194,12 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                  unit_id=unit_id, session_id=context.session_id)
 
     async def finalize(current: GraphRun) -> GraphRun:
-        if needs_persona_reply(current) and (not current.parent_run_id or time.time() < current.deadline):
+        if current.status == "error" and not current.steps:
+            # The decision model failed before dispatch. There is no device
+            # receipt for a second model to interpret or invent.
+            current.response = factual_fallback(unit_id, current.status, current)
+            current.reply_source = "runtime"
+        elif needs_persona_reply(current) and (not current.parent_run_id or time.time() < current.deadline):
             try:
                 prompt = persona_reply_prompt(current, get_profile())
                 emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,

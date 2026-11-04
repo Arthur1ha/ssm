@@ -37,9 +37,13 @@ def sense(state, last_sound_ts: float = 0.0) -> dict:
     period = ("深夜" if hour < 6 else "清晨" if hour < 9 else "上午" if hour < 12
               else "下午" if hour < 18 else "傍晚" if hour < 21 else "夜间")
     light_data = light_data or {}
+    light_ts = light_data.get("ts")
+    light_fresh = isinstance(light_ts, (int, float)) and 0 <= now - light_ts <= 90
+    if not light_fresh:
+        light_data = {}
     value = light_data.get("value", 0)
     return {
-        "light_available": bool(light_data), "sound_available": sound_available,
+        "light_available": light_fresh, "sound_available": sound_available,
         "light_level": light_data.get("level", "UNKNOWN"),
         "light_value": value, "light_lux": light_data.get("lux", value),
         "sound_detected": sound_detected, "sound_recent": sound_detected,

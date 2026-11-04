@@ -796,6 +796,7 @@ body {
 .space-activity__summary span { display: block; margin-bottom: 3px; color: var(--color-text-dim); font-size: 10px; }
 .space-activity__summary p { overflow-wrap: anywhere; }
 .space-activity__timeline { padding: 10px 14px 12px; }
+.space-activity--live .space-activity__timeline { max-height: 420px; overflow-y: auto; }
 .space-activity--ended .space-activity__timeline { border-top: 1px solid var(--color-border); }
 .space-activity__item { display: grid; grid-template-columns: 36px minmax(0,1fr); gap: 9px; position: relative; }
 .space-activity__item + .space-activity__item { margin-top: 11px; }

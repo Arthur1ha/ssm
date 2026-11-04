@@ -185,7 +185,9 @@ class ReactiveMind:
     def _check_proactive(self, sense: dict) -> list[str]:
         now = time.time()
         current_level = sense.get("settled_light_level", sense.get("light_level", ""))
-        level_changed = bool(self._last_light_level and current_level != self._last_light_level)
+        level_changed = bool(self._last_light_level not in ("", "UNKNOWN")
+                             and current_level not in ("", "UNKNOWN")
+                             and current_level != self._last_light_level)
         self._last_light_level = current_level
         if now - self._last_proactive_ts < 600:
             return []

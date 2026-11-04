@@ -24,6 +24,17 @@ PHYSICAL = {"set_led_state", "set_led_color", "blink_led"}
 VISIBLE = PHYSICAL | {"send_message", "request_peer_skill", "list_peers", "get_space_context"}
 
 
+def _action_text(name: str, args: dict, stage: str) -> str:
+    if name == "set_led_state":
+        action = "关掉桌面灯" if args.get("state") == "OFF" else "打开桌面灯"
+    elif name == "blink_led":
+        action = "让灯闪几下"
+    else:
+        action = "调整桌面光线"
+    return (f"准备{action}" if stage == "planned"
+            else f"正在核对并尝试{action}")
+
+
 class ReactiveState(TypedDict, total=False):
     sense: dict
     run_id: str
@@ -64,9 +75,12 @@ def _prompt(agent, state: ReactiveState) -> str:
     return (
         f"{render_identity(profile)}\n"
         "你负责桌面灯的自主判断。一次最多调用一个工具；看到真实结果后才决定下一步。"
-        "无需动作时直接回答。accepted、executing、timeout 不表示完成。"
+        "只有 lighting_eligible 为 true 才能调用物理灯光工具；入场本身不是调光理由。"
+        "同一轮完成一次灯光动作后不要再改灯。无需动作时直接回答。"
+        "accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
         "在空间活动中，若当前可玩玩法非空且没有更高优先级事件，优先考虑用 game_invite 邀请同伴玩一局；"
+        "game_id 只填工具参数，不写入消息正文；邀请只描述玩法规则，不追加机身灯等玩法未要求的前置条件。"
         "如果本轮先调灯，完成后仍有可玩玩法与社交机会，应再决定是否发送邀请；"
         "仍可选择普通交流或不发消息，同伴也可拒绝。邀请不等于游戏完成。"
         "观测中的 teaching_candidates 是已校验且启用的主人教导。命中且当前可执行时，"
@@ -151,9 +165,19 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
         args.pop("taught_id", None)
+        if name in PHYSICAL and (not state["sense"].get("lighting_eligible")
+                or any(step.get("tool") in PHYSICAL for step in state.get("steps", []))):
+            event(state, "tool.rejected", tool=name, reason="lighting_not_eligible")
+            return {"status": "blocked", "call": None}
         if name == "request_peer_skill":
             args["request_id"] = call["id"]
         event(state, "tool.dispatch", tool=name, params=args, tool_call_id=call["id"])
+        if name in PHYSICAL:
+            for stage in ("planned", "executing"):
+                publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
+                        space_id="main", source="autonomous", status=stage,
+                        run_id=state["run_id"], step_id=call["id"],
+                        stage=stage, tool=name, text=_action_text(name, args, stage))
         started = time.monotonic()
         if name in PHYSICAL:
             from cloud.esp32.physical_tasks import stable_task_id
@@ -166,6 +190,11 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         event(state, "tool.result", tool=name, step_id=call["id"], result=result,
               status=result.get("result", "unknown"),
               duration_ms=round((time.monotonic() - started) * 1000))
+        if name in PHYSICAL:
+            publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
+                    space_id="main", source="autonomous",
+                    status=result.get("result", "unknown"), run_id=state["run_id"],
+                    step_id=call["id"], stage="observed", tool=name)
         status = ("executing" if ok and result.get("result") == "ok"
                   else result.get("result", "error"))
         return {"steps": [*state.get("steps", []), step], "call": None,
@@ -192,10 +221,6 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         error = next((code for step in reversed(physical)
                       if (code := actionable_error(step.get("result") or {}))), "")
         material_key = ("light", agent._stable_light_level or state["sense"].get("light_level"))
-        for i, step in enumerate(physical):
-            publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
-                    space_id="main", source="autonomous", status=step["result"].get("result", "unknown"),
-                    run_id=state["run_id"], step_id=step["step_id"], stage="observed", sequence=i)
         if not agent._reply_gate.should_reply(scope, completed=completed,
                                               material_key=material_key, error=error):
             return {"reply": ""}
@@ -295,6 +320,8 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     now = time.time() if now is None else now
     if not agent._should_act() or not agent._device_online():
         return None
+    if event.get("enqueue_ts", now) < getattr(agent, "_autonomy_since", 0):
+        return None
     unit = str(event.get("unit_id") or "")
     last_events = getattr(agent, "_graph_last_event_ts", None)
     if last_events is None:
@@ -341,6 +368,10 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     sense["light_level"] = stable_level
     sense["settled_light_level"] = stable_level
     sense["proactive_hints"] = agent._check_proactive(sense)
+    # Entering reactive mode is only a baseline observation. A lighting action
+    # needs a subsequent material trigger and a fresh light reading.
+    sense["lighting_eligible"] = bool(sense.get("teaching_candidates") or
+                                      sense.get("light_available") and sense["proactive_hints"])
     space = get_space_context(agent._find_led_unit(), state=agent._state)
     activity, eligible = activity_peers(agent._find_led_unit(), space["peers"])
     opportunity = agent._social_state.opportunity(

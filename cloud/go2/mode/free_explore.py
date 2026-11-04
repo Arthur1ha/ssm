@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections import deque
@@ -150,10 +151,53 @@ class Drive:
         if not self._observation_gate.should_reply(
                 activity_id, completed=True, material_key=area):
             return None
-        event = self._activity_event("observation", text)
+        event = self._activity_event("observation", self._scene_summary(text))
         if event:
             self._observation_gate.mark_replied(activity_id, completed=True, material_key=area)
         return event
+
+    @staticmethod
+    def _scene_summary(text: str) -> str:
+        """Keep the vision model's factual notes compact in the observation card."""
+        details = []
+        for line in text.splitlines():
+            line = re.sub(r"^[\s*#\-•]*(?:\d+[.)、]\s*)?", "", line).replace("**", "").strip()
+            if not line or line.rstrip("：:") in {"场景描述（低视角）", "场景描述", "值得记录", "值得记录（导航/避障相关）"}:
+                continue
+            details.append(line)
+            if len(details) == 3:
+                break
+        if len(details) > 1:
+            return ("；".join(item.rstrip("。；;，,") for item in details) + "。")[:240]
+        return (details[0] if details else text.strip())[:240]
+
+    async def _publish_scene_reply(self, summary: str, observation_event_id: str) -> None:
+        """Let Go2 speak about a recorded view, without turning raw vision into dialogue."""
+        from cloud.agents.go2.workflows.reply import run_autonomous_reply_graph
+        from cloud.api.intents import publish_agent_event
+
+        generation, owner = self._generation, self.owner_session_id
+        activity_id = self._activity_id()
+        if not activity_id or not go2.is_connected or self.user_interrupt:
+            return
+        try:
+            answer = await run_autonomous_reply_graph(
+                run_id="scene_" + observation_event_id, action="go2_observe",
+                reason="到达后观察周围", params={},
+                result={"result": "ok", "message": summary},
+                model=get_text_llm(), profile_loader=get_profile,
+                observation=summary)
+        except Exception:
+            logger.exception("[Drive] 场景人格回复失败")
+            return
+        if (generation != self._generation or owner != self.owner_session_id
+                or self._activity_id() != activity_id or self.user_interrupt
+                or not go2.is_connected):
+            return
+        publish_agent_event("agent_reply", agent_id="go2", scope="space",
+            space_id=self._context.space_id, source="autonomous", status="ok",
+            run_id="scene_" + observation_event_id, text=answer,
+            observation_event_id=observation_event_id)
 
     def _motion_announcement(self, name: str, params: dict, result: dict) -> tuple:
         scope = self._activity_id() or self.owner_session_id or "go2-autonomous"
@@ -257,18 +301,34 @@ class Drive:
         elif result.get("status") == "error":
             self._social_retry_after = time.time() + 30
 
-    async def _execute_motion(self, name: str, params: dict, *, publish_reply: bool = True) -> dict:
+    async def _execute_motion(self, name: str, params: dict, *, publish_reply: bool = True,
+                              task_id: str | None = None) -> dict:
         if self.user_interrupt or not go2.is_connected:
-            return {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
-        self._activity_event("action_progress", name, action=name, status="executing", display=False)
-        result = await execute_tool(name, params, context=self._context)
+            result = {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
+            if task_id:
+                self._activity_event("action_result", result["message"], action=name,
+                                     task_id=task_id, status="cancelled")
+            return result
+        self._activity_event("action_progress", "", action=name, status="executing",
+                             task_id=task_id, display=bool(task_id))
+        try:
+            result = await execute_tool(name, params, context=self._context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("[Drive] action result unavailable tool=%s", name)
+            result = {"result": "unknown", "error": type(exc).__name__,
+                      "message": "动作结果尚未确认"}
         self._last_execution_result = result.get("result", "error")
         scope, completed, material_key, error = self._motion_announcement(name, params, result)
         visible = self._reply_gate.should_reply(
             scope, completed=completed, material_key=material_key, error=error)
-        self._activity_event("action_result", self._result_text(result), action=name,
-                             task_id=result.get("task_id"), status=self._last_execution_result,
-                             reason=error, display=visible)
+        result_text = ("已到达前方可通行的新区域" if task_id and name == "go2_navigate_to_coordinate"
+                       and completed else self._result_text(result))
+        self._activity_event("action_result", result_text, action=name,
+                             task_id=task_id or result.get("task_id"),
+                             status=self._last_execution_result,
+                             reason=error, display=bool(task_id) or visible)
         if publish_reply and go2.is_connected:
             asyncio.create_task(self._publish_motion_reply(name, params, result))
         return result
@@ -303,15 +363,21 @@ class Drive:
             space_id=self._context.space_id, source="autonomous",
             status=status, run_id=run_id, text=answer)
 
-    async def _navigate(self, name: str | None = None, coordinate: tuple[float, float] | None = None) -> dict:
+    async def _navigate(self, name: str | None = None, coordinate: tuple[float, float] | None = None,
+                        *, task_id: str | None = None, publish_reply: bool = True) -> dict:
         from cloud.go2.navigation.navigator import navigator
         owner_session_id = self.owner_session_id
         if (owner_session_id and owner_session_id.startswith("act_")
                 and self._activity_id() != owner_session_id):
+            if task_id:
+                self._activity_event("action_result", "活动已结束，导航取消", action="go2_navigate_to_coordinate"
+                                     if coordinate is not None else "go2_navigate_to",
+                                     task_id=task_id, status="cancelled")
             return {"result": "cancelled", "reason": "activity_ended"}
         tool, params = (("go2_navigate_to_coordinate", {"x": coordinate[0], "y": coordinate[1]})
                         if coordinate is not None else ("go2_navigate_to", {"name": name}))
-        nav_task = asyncio.create_task(self._execute_motion(tool, params))
+        nav_task = asyncio.create_task(self._execute_motion(
+            tool, params, publish_reply=publish_reply, task_id=task_id))
         try:
             while not nav_task.done():
                 if (self.user_interrupt or not go2.is_connected
@@ -328,8 +394,12 @@ class Drive:
                             stopped = receipt.get("result") == "ok"
                         except Exception:
                             pass
-                    return {"result": "cancelled" if stopped else "unknown",
-                            "message": "导航被打断" if stopped else "停步未确认"}
+                    outcome = {"result": "cancelled" if stopped else "unknown",
+                               "message": "导航被打断" if stopped else "停步未确认"}
+                    if task_id:
+                        self._activity_event("action_result", outcome["message"], action=tool,
+                                             task_id=task_id, status=outcome["result"])
+                    return outcome
                 if self._events and await self._interrupt_for_event():
                     stopped = owner_session_id is not None and navigator.stop(owner_session_id=owner_session_id)
                     nav_task.cancel()
@@ -342,8 +412,12 @@ class Drive:
                             stopped = False
                     if not stopped:
                         self.user_interrupt = True
-                    return {"result": "cancelled" if stopped else "unknown",
-                            "reason": "autonomous_task_handoff" if stopped else "stop_unconfirmed"}
+                    outcome = {"result": "cancelled" if stopped else "unknown",
+                               "reason": "autonomous_task_handoff" if stopped else "stop_unconfirmed"}
+                    if task_id:
+                        self._activity_event("action_result", "导航已中断" if stopped else "停步尚未确认",
+                                             action=tool, task_id=task_id, status=outcome["result"])
+                    return outcome
                 await asyncio.sleep(0.5)
             return nav_task.result()
         except asyncio.CancelledError:
@@ -351,6 +425,9 @@ class Drive:
             await asyncio.gather(nav_task, return_exceptions=True)
             if owner_session_id is not None:
                 navigator.stop(owner_session_id=owner_session_id)
+            if task_id:
+                self._activity_event("action_result", "导航已中断，停步结果尚未确认",
+                                     action=tool, task_id=task_id, status="unknown")
             raise
 
     @property
@@ -747,7 +824,11 @@ class Drive:
                     logger.info("[Drive] 探索暂停：当前位置没有可达的未知边界")
                 break
             logger.info("[Drive] 地图边界目标 step=%d x=%.2f y=%.2f", step, *target)
-            result = await self._navigate(coordinate=target)
+            task_id = "explore_" + uuid.uuid4().hex
+            self._activity_event("action", "我想去前面安全可达的新区域看看。",
+                                 action="go2_navigate_to_coordinate", task_id=task_id)
+            result = await self._navigate(coordinate=target, task_id=task_id,
+                                          publish_reply=False)
             self._last_tool_result = result
             status = result.get("result")
             episode_memory.add(
@@ -781,6 +862,8 @@ class Drive:
                         episode_memory.add(EventType.OBSERVATION, observation)
                         event = self._record_scene_observation(observation, target)
                         if event:
+                            asyncio.create_task(self._publish_scene_reply(
+                                event["text"], event["event_id"]))
                             self.submit_event({"event_id": event.get("event_id", uuid.uuid4().hex),
                                 "kind": "observation", "source": "go2.camera", "ts": time.time(),
                                 "deadline": time.time() + 5, "activity_id": self._activity_id()})

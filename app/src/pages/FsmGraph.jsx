@@ -15,7 +15,7 @@ function FsmGraph({ states = [], transitions = [], current = '', onFire, onSelec
   const CX = W / 2, CY = H / 2;
   const LAYOUT_R = 88;
   const NODE_R = 27;
-  const outgoing = transitions.filter(t => t.src === current && t.dst !== current && !t.safety);
+  const outgoing = transitions.filter(t => t.src === current && t.dst !== current && !t.safety && !t.graph_hidden);
 
   const pos = useMemo(() => {
     const map = {};

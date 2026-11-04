@@ -9,6 +9,36 @@ import pytest
 from cloud.agents.common.autonomous_visibility import AutonomousReplyGate, actionable_error
 
 
+def test_lamp_does_not_treat_old_light_snapshot_as_current(monkeypatch):
+    from cloud.esp32 import perception
+    from cloud.esp32.state import ESP32State
+
+    state = ESP32State()
+    state.on_agent_msg("esp32_desk_light", "state",
+                       {"level": "DARK", "value": 2109, "ts": 100})
+    monkeypatch.setattr(perception.time, "time", lambda: 1000)
+    stale = perception.sense(state)
+    assert stale["light_available"] is False
+    assert stale["light_level"] == "UNKNOWN"
+    state.on_agent_msg("esp32_desk_light", "state",
+                       {"level": "DARK", "value": 2109, "ts": 990})
+    fresh = perception.sense(state)
+    assert fresh["light_available"] is True
+    assert fresh["light_level"] == "DARK"
+
+
+def test_lamp_first_fresh_reading_is_a_baseline(monkeypatch):
+    from cloud.agents.lamp.workflows.runtime import ReactiveMind
+
+    monkeypatch.setattr("cloud.agents.lamp.workflows.runtime.time.time", lambda: 1000)
+    agent = SimpleNamespace(_last_light_level="UNKNOWN", _last_proactive_ts=0,
+                            _work_start_ts=0, _last_act_ts=0)
+    sense = {"light_level": "DARK", "sound_detected": False}
+    assert ReactiveMind._check_proactive(agent, sense) == []
+    sense["light_level"] = "DIM"
+    assert ReactiveMind._check_proactive(agent, sense) == ["env_changed"]
+
+
 def test_device_replies_need_completion_attention_or_material_change():
     gate = AutonomousReplyGate()
     scope = "act_work"
@@ -53,6 +83,9 @@ def test_lamp_ignores_raw_light_and_own_led_changes(monkeypatch):
         _find_led_unit=lambda: "esp32_desk_led", _sense=lambda: dict(observed),
         _check_proactive=lambda _sense: [],
     )
+    agent._autonomy_since = 101
+    assert reactive.prepare_sensor_event(agent, {"enqueue_ts": 100}, now=102) is None
+    agent._autonomy_since = 0
     first = reactive.prepare_sensor_event(agent, {}, now=100)
     assert first is not None
     agent._last_reason_sig = first[1]
@@ -111,10 +144,11 @@ def test_lamp_blocked_autonomous_action_stays_silent(monkeypatch):
     monkeypatch.setattr(space_context, "get_space_context", lambda *_args, **_kwargs: {
         "peers": [], "recent_discoveries": []})
     monkeypatch.setattr(lamp_profile, "get_profile", lambda: {
-        "prompt": "你是智能灯。", "traits": {"social_initiative": 70,
+        "agent_id": "esp32_desk_led", "name": "皮皮灯", "prompt": "你是智能灯。",
+        "traits": {"social_initiative": 70,
                                            "adjustment_sensitivity": 50}})
     result = run_reactive_event(
-        agent, {"light_level": "DARK"}, model=model,
+        agent, {"light_level": "DARK", "lighting_eligible": True}, model=model,
         publish=lambda kind, **facts: published.append((kind, facts)),
         checkpointer=InMemorySaver())
     assert result["status"] == "blocked"

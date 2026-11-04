@@ -17,6 +17,7 @@ class FsmTransition(TypedDict):
     action: NotRequired[str]   # MQTT action 名（如 SET_STATE），供前端直接派发
     params: NotRequired[dict]  # 该转移的默认 params（颜色/亮度等）
     safety: NotRequired[bool]  # 高优先级安全转移，仍走同一状态机派发路径
+    graph_hidden: NotRequired[bool]  # 通过其他控件执行的动作，不在状态图里画线
 
 
 class StateView(TypedDict):

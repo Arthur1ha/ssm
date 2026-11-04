@@ -152,9 +152,14 @@ class AgentMessenger:
             elif current_activity_id:
                 payload["activity_id"] = current_activity_id
             if interaction_kind == "game_invite":
-                from cloud.peers.games import game_is_playable
+                from cloud.peers.games import game_is_playable, get_game
                 if not game_is_playable(payload.get("activity_id"), sender, target, game_id):
                     return {"result": "blocked", "error": "game_unavailable"}
+                # The protocol ID selects the game; the invitation is public
+                # copy owned by the game, never an unconstrained model draft.
+                game = get_game(game_id)
+                if game and game.invitation:
+                    payload["content"] = game.invitation
                 payload["interaction_kind"] = interaction_kind
                 payload["game_id"] = game_id
             if not self._publish(payload):

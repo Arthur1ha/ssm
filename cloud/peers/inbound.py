@@ -29,6 +29,11 @@ def _peer_input(message: dict, messenger) -> str:
 def _finish(messenger, message: dict, result: dict, *, reply_key: str = "reply") -> None:
     original_id = message["message_id"]
     reply = str(result.get(reply_key) or result.get("response") or "我暂时无法处理这条消息。")[:1000]
+    if message.get("interaction_kind") == "game_invite":
+        from cloud.peers.games import get_game
+        game = get_game(message.get("game_id"))
+        if game:
+            reply = reply.replace(game.game_id, game.name)
     status = result.get("result", "error")
     task_id = result.get("task_id")
     if task_id:

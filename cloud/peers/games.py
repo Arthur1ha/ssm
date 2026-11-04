@@ -20,6 +20,7 @@ class Game:
     participants: tuple[str, str]
     available: Callable[[str, str], bool]
     execute: Callable[[object, dict, str], Awaitable[None]]
+    invitation: str = ""
 
 
 def activity_allows(activity_id: str | None, sender: str, target: str) -> bool:
@@ -261,7 +262,8 @@ GAMES: dict[str, Game] = {
     "color_hunt": Game("color_hunt", "寻找同色物品",
                        "灯改变颜色，狗按实时灯色寻找同色物品；缺少跨帧证据时不能确认找到。",
                        ("esp32_desk_led", "go2"),
-                       _color_hunt_available, _run_color_hunt),
+                       _color_hunt_available, _run_color_hunt,
+                       "我来换一种灯色，你在安全范围里找找有没有同色的东西。先等我把灯色设好；看不准就告诉我看不准，别勉强。"),
 }
 
 

@@ -173,7 +173,8 @@ NEW_LED_FSM: StateMachine = {
     "initial": "OFF",
     "transitions": [
         {"src": src, "dst": dst, "trigger": trigger, "label": label,
-         "action": action, "params": params}
+         "action": action, "params": params,
+         "graph_hidden": trigger == "CMD_COLOR"}
         for src, dst, trigger, label, action, params in _NEW_LED_TRANSITIONS
     ],
     "views": {

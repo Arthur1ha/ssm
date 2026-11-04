@@ -125,6 +125,8 @@ def normalize_card(payload: dict) -> dict:
                 raise ValueError("transition.action must be a string")
             if "params" in transition and not isinstance(transition["params"], dict):
                 raise ValueError("transition.params must be an object")
+            if "graph_hidden" in transition and not isinstance(transition["graph_hidden"], bool):
+                raise ValueError("transition.graph_hidden must be a boolean")
         if not isinstance(sm.get("views", {}), dict):
             raise ValueError("state_machine.views must be an object")
         for state, view in sm.get("views", {}).items():
