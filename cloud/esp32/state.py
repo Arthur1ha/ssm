@@ -23,10 +23,15 @@ class ESP32State:
                 if unit_id not in self._capability_registry[tag]:
                     self._capability_registry[tag].append(unit_id)
 
-    def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict):
+    def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict,
+                     *, received_at: float | None = None):
         with self._lock:
             bucket = self._actuators if self._is_actuator(unit_id) else self._sensors
-            bucket.setdefault(unit_id, {})[msg_type] = payload
+            snapshot = dict(payload)
+            snapshot.pop("_received_at", None)
+            if received_at is not None:
+                snapshot["_received_at"] = received_at
+            bucket.setdefault(unit_id, {})[msg_type] = snapshot
 
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:

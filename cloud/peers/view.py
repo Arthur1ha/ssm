@@ -8,6 +8,7 @@ from typing import Any
 
 from cloud.cards.registry import CardRegistry
 from cloud.space.registry import SpaceRegistry, card_device_id, get_space_registry
+from cloud.space.freshness import state_observed_at
 
 STATE_MAX_AGE_S = 60.0
 _STATE_FIELDS = ("ism", "fsm_state", "connected", "battery_soc", "brightness")
@@ -16,11 +17,8 @@ _STATE_FIELDS = ("ism", "fsm_state", "connected", "battery_soc", "brightness")
 def _state_summary(state: Any, now: float) -> dict[str, Any]:
     if not isinstance(state, dict):
         return {"status": "unknown"}
-    raw_ts = state.get("ts")
-    if isinstance(raw_ts, bool) or not isinstance(raw_ts, (int, float)) or not math.isfinite(raw_ts):
-        return {"status": "unknown"}
-    as_of = float(raw_ts)
-    if as_of <= 0 or as_of > now + 5:
+    as_of = state_observed_at(state, now)
+    if as_of is None:
         return {"status": "unknown"}
     if now - as_of > STATE_MAX_AGE_S:
         return {"status": "stale", "as_of": as_of}

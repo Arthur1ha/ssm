@@ -113,7 +113,7 @@ class AgentMessenger:
         if (deadline is not None and (isinstance(deadline, bool)
                 or not isinstance(deadline, (int, float)) or not math.isfinite(deadline))):
             return {"result": "blocked", "error": "invalid_deadline"}
-        default_ttl = 240 if interaction_kind == "game_invite" else 60
+        default_ttl = 300 if interaction_kind == "game_invite" else 60
         expires = min(now + 300, deadline if deadline is not None else now + default_ttl)
         if expires <= now:
             return {"result": "blocked", "error": "message_expired"}
@@ -152,14 +152,12 @@ class AgentMessenger:
             elif current_activity_id:
                 payload["activity_id"] = current_activity_id
             if interaction_kind == "game_invite":
-                from cloud.peers.games import game_is_playable, get_game
+                from cloud.peers.games import (game_is_playable, get_game,
+                                               valid_color_hunt_invitation)
                 if not game_is_playable(payload.get("activity_id"), sender, target, game_id):
                     return {"result": "blocked", "error": "game_unavailable"}
-                # The protocol ID selects the game; the invitation is public
-                # copy owned by the game, never an unconstrained model draft.
-                game = get_game(game_id)
-                if game and game.invitation:
-                    payload["content"] = game.invitation
+                if game_id == "color_hunt" and not valid_color_hunt_invitation(payload["content"]):
+                    payload["content"] = get_game(game_id).invitation
                 payload["interaction_kind"] = interaction_kind
                 payload["game_id"] = game_id
             if not self._publish(payload):

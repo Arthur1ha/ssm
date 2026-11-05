@@ -222,18 +222,30 @@ def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
 
     try:
         setup_started_at = time.time()
-        result = agent.run_user_loop(
-            "Go2 已接受寻找同色物品。请为这一局选择一个明确的颜色，用 set_led_color 设置灯；"
+        setup_goal = (
+            "Go2 已接受寻找同色物品。请优先用 set_led_color 设成白色，便于它找白色玩偶；"
+            "若你有明确理由，也可以选择其他容易辨认的颜色。"
             "若灯尚未开启，先用 set_led_state 开灯并等待回执。"
-            "等待设备真实回执。只执行一次设色，不发送同伴消息。",
-            "esp32_desk_led", context, dispatch, lighting_only=True,
-            run_id=message["message_id"])
+            "等待设备真实回执。只执行一次设色，不发送同伴消息。")
+        result = agent.run_user_loop(
+            setup_goal, "esp32_desk_led", context, dispatch,
+            lighting_only=True, run_id=message["message_id"])
+        if (result.get("result") == "error" and not result.get("steps")
+                and not dispatched_power and not dispatched_color
+                and time.time() + 10 < message["deadline"]):
+            # A model connection error before the first tool has no physical
+            # side effect; a fresh graph run may safely retry the decision.
+            logger.warning("color hunt setup model failed before action; retrying id=%s",
+                           message["message_id"])
+            result = agent.run_user_loop(
+                setup_goal, "esp32_desk_led", context, dispatch,
+                lighting_only=True, run_id="retry_" + message["message_id"])
         color_step = next((step for step in reversed(result.get("steps") or [])
                            if step.get("tool") == "set_led_color"
                            and (step.get("result") or {}).get("result") == "ok"), None)
         params = (color_step or {}).get("params") or {}
         color = None
-        if color_step and result.get("result") == "ok":
+        if color_step:
             color_deadline = time.monotonic() + min(
                 3, max(0, float(message["deadline"]) - time.time()))
             while time.monotonic() < color_deadline:
@@ -244,7 +256,7 @@ def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
                              or params["brightness"] == color["brightness"])):
                     break
                 time.sleep(0.1)
-        if (not color_step or result.get("result") != "ok" or not color
+        if (not color_step or not color
                 or dispatched_power and not any(
                     step.get("tool") == "set_led_state"
                     and (step.get("result") or {}).get("result") == "ok"
@@ -273,3 +285,71 @@ def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
     except Exception as exc:
         logger.exception("color hunt setup failed id=%s", message["message_id"])
         messenger.send_result(message["message_id"], "error", reason=type(exc).__name__)
+
+
+def change_color_for_game(activity_id: str, invite_id: str,
+                          original_rgb: tuple[int, int, int], deadline: float) -> dict:
+    """Run the lamp's one allowed plot twist after Go2 confirms arrival."""
+    from cloud.peers.games import _color_name, activity_allows, live_lamp_color
+    from cloud.esp32.service import get_agent
+    from cloud.api.intents import _dispatch_mqtt_task
+
+    if not activity_allows(activity_id, "esp32_desk_led", "go2"):
+        return {"result": "cancelled", "reason": "activity_ended"}
+    agent = get_agent()
+    if agent is None or not agent._should_act() or not agent._device_online():
+        return {"result": "blocked", "reason": "lamp_autonomy_unavailable"}
+    context = ExecutionContext("peer_game_twist_" + invite_id, "agent", False,
+                               "main", "agent_autonomous", int(deadline))
+    session = {"session_id": context.session_id, "actor": "agent",
+               "persist": False, "expires_at": context.expires_at}
+    sent = False
+
+    def dispatch(unit_id, action, params, _context, _source, *, task_id=None):
+        nonlocal sent
+        rgb = tuple(params.get(key) for key in ("r", "g", "b"))
+        if (unit_id != "esp32_desk_led" or action != "SET_COLOR" or sent
+                or not all(type(value) is int and 0 <= value <= 255 for value in rgb)
+                or _color_name(rgb) is None
+                or sum(abs(a - b) for a, b in zip(rgb, original_rgb)) < 240
+                or not activity_allows(activity_id, "esp32_desk_led", "go2")
+                or not agent._should_act() or time.time() >= deadline):
+            raise PermissionError("game_twist_color_not_allowed")
+        sent = True
+        return _dispatch_mqtt_task(unit_id, action, params, session,
+                                   source="peer_game_twist", task_id=task_id)
+
+    started_at = time.time()
+    result = agent.run_user_loop(
+        "机器狗已按视觉和地图回执抵达本局候选物品附近。现在请只调用一次 set_led_color，"
+        "将灯改为与刚才出题颜色明显不同的颜色；优先选蓝色。不要关灯，不发同伴消息。"
+        "等待设备真实回执后结束。",
+        "esp32_desk_led", context, dispatch, lighting_only=True,
+        run_id="twist_" + invite_id)
+    if (result.get("result") == "error" and not result.get("steps") and not sent
+            and time.time() + 10 < deadline):
+        # A model failure before dispatch has no physical side effect. Retry
+        # through a fresh graph run while keeping the same guarded dispatcher.
+        logger.warning("color hunt twist model failed before action; retrying id=%s", invite_id)
+        result = agent.run_user_loop(
+            "机器狗已确认到达同色物品附近。请只调用一次 set_led_color，优先设成蓝色，"
+            "也可选其他与原色明显不同、能清楚命名的颜色。等待真实回执后结束。",
+            "esp32_desk_led", context, dispatch, lighting_only=True,
+            run_id="retry_twist_" + invite_id)
+    color_step = next((step for step in reversed(result.get("steps") or [])
+                       if step.get("tool") == "set_led_color"
+                       and (step.get("result") or {}).get("result") == "ok"), None)
+    params = (color_step or {}).get("params") or {}
+    expected = tuple(params.get(key) for key in ("r", "g", "b"))
+    if color_step:
+        until = min(time.monotonic() + 3, time.monotonic() + max(0, deadline - time.time()))
+        while time.monotonic() < until:
+            color = live_lamp_color("esp32_desk_led")
+            if (color and color["as_of"] >= int(started_at)
+                    and color["rgb"] == expected and color["rgb"] != original_rgb):
+                return {"result": "ok", "color": color,
+                        "task_id": (color_step.get("result") or {}).get("task_id")}
+            time.sleep(0.1)
+    return {"result": "unknown", "reason": (
+        "twist_model_unavailable" if result.get("result") == "error" and not sent
+        else "twist_color_unconfirmed")}

@@ -90,11 +90,22 @@ async def set_activity_mode(mode: str, activity_id: str) -> dict:
             control_lease.release(activity_id)
             return {"ok": True, "mode": "manual", "physical_stop": "unknown"}
         try:
+            # End the local velocity stream before handing the lease to a new activity.
+            go2.stop_velocity()
+        except Exception as exc:
+            logging.warning("[Go2/Activity] zero velocity not confirmed: %s", exc)
+        try:
             stop = await go2.send_command("StopMove", completion_timeout=5.0)
         except Exception as exc:
             logging.warning("[Go2/Activity] stop not confirmed: %s", exc)
             return {"ok": True, "mode": "manual", "physical_stop": "unknown"}
-        if stop.get("result") == "ok":
+        # StopMove normally returns "accepted" after its Sport RPC response;
+        # it has no completion waiter. Once the autonomous task is cancelled and
+        # the stop request is accepted, its old software lease must not block
+        # the next activity. A rejected RPC still keeps the lease until expiry.
+        if (stop.get("result") == "ok" or
+                (stop.get("result") == "accepted" and
+                 stop.get("request_status_code") in (None, 0))):
             control_lease.release(activity_id)
         return {"ok": True, "mode": "manual",
                 "physical_stop": "confirmed" if stop.get("result") == "ok" else "unknown"}

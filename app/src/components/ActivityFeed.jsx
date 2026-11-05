@@ -3,6 +3,7 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
   onEndActivity, onAnswerActivity, onOpenRules }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
+  const currentActivityRef = useRef(null);
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
   const currentCard = hasActivity ? {
@@ -60,18 +61,30 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
     text: getAgentOpeningLine('cloud_orchestrator'), eventId: 'welcome' }, index: 'welcome' });
 
   useEffect(() => {
-    if (entries.length) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [entries]);
+    if (!entries.length) return;
+    if (activity?.activity_id) {
+      currentActivityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [entries, activity?.activity_id]);
+  useEffect(() => {
+    if (activity?.activity_id) {
+      currentActivityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [activity?.activity_id]);
 
   return (
     <div style={{ padding: '0 16px' }}>
       {rows.map(({ entry: e, index: i }) => {
         if (e.type === 'space_activity') {
           const card = e.card;
-          return <SpaceActivityFeed key={`activity-${card.id}`}
-            activity={card.activity} events={card.events} ending={card.ending}
-            error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
-            getName={getName}/>;
+          return <div key={`activity-${card.id}`} ref={card === currentCard ? currentActivityRef : null}>
+            <SpaceActivityFeed
+              activity={card.activity} events={card.events} ending={card.ending}
+              error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
+              getName={getName}/>
+          </div>;
         }
         if (e.type === 'process_group') {
           const finished = entries.some(item => item.requestId === e.requestId
@@ -228,7 +241,7 @@ function activityActionText(event, name, compact) {
   if (event.event_type === 'action_progress') return `${compact ? '' : subject}正在${label}`;
   const outcome = {
     ok: ['explore_frontier', 'go2_navigate_to_coordinate'].includes(action)
-      ? '已到达可探索区域' : `已${label}`,
+      ? '自由探索已到达新的地图探索点' : `已${label}`,
     accepted: `已收到${label}请求`, executing: `正在${label}`,
     blocked: `暂时无法${label}`, rejected: `无法${label}`,
     cancelled: `已停止${label}`, error: `${label}没有成功`,

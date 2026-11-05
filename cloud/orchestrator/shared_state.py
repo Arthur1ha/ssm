@@ -23,12 +23,17 @@ class SharedState:
         with self._lock:
             self._manifests[unit_id] = payload
 
-    def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict):
+    def on_agent_msg(self, unit_id: str, msg_type: str, payload: dict,
+                     *, received_at: float | None = None):
         with self._lock:
             bucket = self._actuators if self._is_actuator(unit_id) else self._sensors
             if unit_id not in bucket:
                 bucket[unit_id] = {}
-            bucket[unit_id][msg_type] = payload
+            snapshot = dict(payload)
+            snapshot.pop("_received_at", None)
+            if received_at is not None:
+                snapshot["_received_at"] = received_at
+            bucket[unit_id][msg_type] = snapshot
 
     def set_decision_active(self, active: bool):
         with self._lock:

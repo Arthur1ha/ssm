@@ -27,6 +27,25 @@ def test_lamp_does_not_treat_old_light_snapshot_as_current(monkeypatch):
     assert fresh["light_level"] == "DARK"
 
 
+def test_live_light_reading_survives_unsynced_device_clock(monkeypatch):
+    from cloud.esp32 import perception
+    from cloud.esp32.state import ESP32State
+
+    state = ESP32State()
+    monkeypatch.setattr(perception.time, "time", lambda: 1800000000)
+    state.on_agent_msg("esp32_desk_light", "state",
+                       {"level": "DIM", "value": 700, "ts": 426})
+    assert perception.sense(state)["light_available"] is False
+    state.on_agent_msg("esp32_desk_light", "state",
+                       {"level": "DIM", "value": 700, "ts": 428},
+                       received_at=1799999999)
+    assert perception.sense(state)["light_available"] is True
+    state.on_agent_msg("esp32_desk_light", "state",
+                       {"level": "DIM", "value": 700, "ts": 1799999000},
+                       received_at=1799999999)
+    assert perception.sense(state)["light_available"] is True
+
+
 def test_lamp_first_fresh_reading_is_a_baseline(monkeypatch):
     from cloud.agents.lamp.workflows.runtime import ReactiveMind
 
@@ -103,6 +122,12 @@ def test_lamp_ignores_raw_light_and_own_led_changes(monkeypatch):
     changed = reactive.prepare_sensor_event(agent, {}, now=136)
     assert changed is not None
     assert changed[0]["settled_light_level"] == "DIM"
+
+    observed["light_available"] = True
+    recovered = reactive.prepare_sensor_event(agent, {}, now=150)
+    assert recovered is not None
+    assert "light_recovered" in recovered[0]["proactive_hints"]
+    assert recovered[0]["lighting_eligible"] is True
 
 
 def test_lamp_blocked_autonomous_action_stays_silent(monkeypatch):

@@ -32,6 +32,7 @@ class ESP32Agent(ReactiveMind):
         from cloud.agents.lamp.personality.soul import ensure_personality_profile
         ensure_personality_profile()
         self._state = state
+        self._llm_injected = llm is not None
         self._llm   = llm if llm is not None else self._make_llm()
         self._event_queue: queue.Queue = queue.Queue()
         self._belief_history: list[dict] = []
@@ -75,6 +76,7 @@ class ESP32Agent(ReactiveMind):
         if mode == "reactive":
             self._last_reason_sig = None   # 切回自主时清签名，立刻按当前情境评估一次
             baseline = self._sense()
+            self._autonomy_light_missing = not (baseline or {}).get("light_available", False)
             self._stable_light_level = (baseline or {}).get("light_level", "UNKNOWN")
             self._last_light_level = self._stable_light_level
             self._pending_light_level = ""
@@ -121,3 +123,7 @@ class ESP32Agent(ReactiveMind):
 
     def _make_llm(self):
         return get_text_model("lamp")
+
+    def _llm_for_run(self):
+        """Use a fresh async client for each run's event loop."""
+        return self._llm if self._llm_injected else self._make_llm()

@@ -168,13 +168,24 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
             try:
                 await _switch_mode(unit_id, mode or "", activity_id)
                 store.set_device(activity_id, unit_id, mode=mode or "", status="joined", owner=activity_id)
+                if unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+                    from cloud.esp32.service import get_agent
+                    agent = get_agent()
+                    if agent and not (agent._sense() or {}).get("light_available"):
+                        store.record_event(
+                            activity_id, "message", unit_id=unit_id,
+                            text="光线传感器暂无新读数，暂不自动调灯；收到新读数后会重新评估。",
+                        )
             except Exception as exc:
                 store.set_device(activity_id, unit_id, mode=mode or "", status="unavailable",
-                                 error=type(exc).__name__)
+                                 error=str(exc) or type(exc).__name__)
         if not store.matches_user_request(source_event_id, user_revision):
             await _end_locked("superseded_user_request")
             raise HTTPException(status_code=409, detail="activity request was superseded")
-        return store.activate(activity_id) or store.get(activity_id) or record
+        active = store.activate(activity_id) or store.get(activity_id) or record
+        from cloud.peers.games import invite_color_hunt_after_join
+        asyncio.create_task(invite_color_hunt_after_join(activity_id))
+        return active
 
 
 @router.get("/api/activity/current")

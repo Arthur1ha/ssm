@@ -250,7 +250,9 @@ def on_message(client, userdata, msg):
         payload = raw
 
     # CardRegistry 处理 card 与 manifest topic（更新 card-driven 规划注册表）
-    registry.handle_message(topic, raw)
+    received_at = time.time() if not getattr(msg, "retain", False) else None
+    registry.handle_message(topic, raw, retained=bool(getattr(msg, "retain", False)),
+                            received_at=received_at)
 
     if topic == "ssm/decision/active":
         state.set_decision_active(payload == "true" or payload is True)
@@ -309,7 +311,7 @@ def on_message(client, userdata, msg):
             return
 
         if msg_type in ("state", "event") and isinstance(payload, dict):
-            state.on_agent_msg(unit_id, msg_type, payload)
+            state.on_agent_msg(unit_id, msg_type, payload, received_at=received_at)
 
         return
 

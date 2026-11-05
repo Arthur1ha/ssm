@@ -75,7 +75,8 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
             emit_agent_event("model.request", agent_id=state["unit_id"],
                              run_id=state["task_id"], trace_id=state["trace_id"],
                              input=prompt, stage="physical_reply")
-            reply = await agent._llm.ainvoke([HumanMessage(content=prompt)])
+            model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+            reply = await model.ainvoke([HumanMessage(content=prompt)])
             answer = reply.content
             emit_agent_event("model.response", agent_id=state["unit_id"],
                              run_id=state["task_id"], trace_id=state["trace_id"],

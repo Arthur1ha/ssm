@@ -45,7 +45,8 @@ class CardRegistry:
         ])
         logger.info("[CardRegistry] Subscribed to card / manifest / status")
 
-    def handle_message(self, topic: str, payload: bytes | str) -> None:
+    def handle_message(self, topic: str, payload: bytes | str, *,
+                       retained: bool = False, received_at: float | None = None) -> None:
         """处理 MQTT 消息，更新注册表及最近一次设备状态。
 
         topic 匹配 ssm/agents/+/status：
@@ -73,6 +74,9 @@ class CardRegistry:
                 return
             if not isinstance(state, dict):
                 return
+            state.pop("_received_at", None)
+            if not retained:
+                state["_received_at"] = time.time() if received_at is None else received_at
             unit_id = parts[2]
             with self._lock:
                 self._states[unit_id] = state

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import math
 import time
 
@@ -26,6 +27,19 @@ from cloud.observability import emit_agent_event
 STOP_SPEED_M_S = 0.30  # Match the existing navigator speed; diagonal joystick axes split the command.
 TARGET_CLEARANCE_M = ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M
 VISUAL_CENTER_OFFSET = 0.15
+GAME_STOP_CELL_TOLERANCE_M = 0.45
+_arrival_by_navigation = contextvars.ContextVar("go2_arrival_by_navigation", default=False)
+
+
+@contextlib.contextmanager
+def accept_navigation_arrival():
+    """For a scoped game run, trust a confirmed stop without another camera pass."""
+    token = _arrival_by_navigation.set(True)
+    try:
+        yield
+    finally:
+        _arrival_by_navigation.reset(token)
+
 
 _REASONS = {
     "invalid_target": "目标描述无效",
@@ -39,6 +53,7 @@ _REASONS = {
     "pose_3d_unavailable": "缺少相机采集时的三维姿态",
     "object_returns_unavailable": "目标区域内没有可定位的雷达物体点",
     "stop_unreachable": "地图中找不到目标附近可达停靠点",
+    "arrival_unconfirmed": "未能确认停稳在目标附近",
     "arrival_target_unconfirmed": "抵达停靠点后未能重新确认目标",
     "target_not_centered": "目标仍偏离画面中央，当前地图中没有可继续靠近的停靠点",
 }
@@ -119,8 +134,8 @@ async def _locate(target: str) -> tuple[tuple[float, float], dict, dict, float]:
                      if isinstance(frame_at, (int, float)) else None,
                      voxel_skew_s=round(voxel_at - frame_at, 3)
                      if isinstance(frame_at, (int, float)) else None)
-    target_xy, _, _ = _paired_target_xy(frame, voxel, voxel_at, bbox)
     save_paired_sample(image_path, frame, voxel, voxel_at, bbox)
+    target_xy, _, _ = _paired_target_xy(frame, voxel, voxel_at, bbox)
     return target_xy, current_pose, current_grid, offset
 
 
@@ -162,7 +177,7 @@ async def _update_visual_heading_while_moving(target: str,
 
 
 async def navigate_to_visible_target(target: str) -> dict:
-    """Follow the measured map to a visible object's free stop cell and reobserve."""
+    """Follow the measured map to a visible object's free stop cell."""
     if not isinstance(target, str) or not target.strip() or len(target) > 100:
         return {"result": "blocked", "reason": "invalid_target", "message": _REASONS["invalid_target"]}
     if not go2.is_connected:
@@ -179,10 +194,13 @@ async def navigate_to_visible_target(target: str) -> dict:
             raise TargetUnlocalized("stop_unreachable")
         bias = _visual_heading_bias(target_xy, pose, offset)
         guidance = {"bias": bias, "offset": offset}
+        stop_cell_tolerance = (GAME_STOP_CELL_TOLERANCE_M
+                               if _arrival_by_navigation.get() else None)
         emit_agent_event("vision.gate", gate="mapped_stop", passed=True,
                          target_odom_xy=[round(v, 3) for v in target_xy], stop=stop,
                          image_offset=round(offset, 3), heading_bias_rad=round(bias, 3),
-                         odom_session=pose.get("session_id"))
+                         odom_session=pose.get("session_id"),
+                         stop_cell_tolerance_m=stop_cell_tolerance)
         if not stop["already_near"]:
             emit_agent_event("vision.motion", phase="request", kind="rgb_lidar_navigation",
                              target_odom_xy=[round(v, 3) for v in target_xy],
@@ -199,7 +217,8 @@ async def navigate_to_visible_target(target: str) -> dict:
                     speed_limit=STOP_SPEED_M_S, holonomic=True,
                     face_target=target_xy,
                     face_target_bias_rad=lambda: guidance["bias"],
-                    stop_when_near_target_m=APPROACH_STOP_RADIUS_M)
+                    stop_when_near_target_m=APPROACH_STOP_RADIUS_M,
+                    stop_cell_tolerance_m=stop_cell_tolerance)
             finally:
                 visual_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -215,6 +234,15 @@ async def navigate_to_visible_target(target: str) -> dict:
                         "reason": navigation.get("reason"), "target": target,
                         "navigation": navigation,
                         "message": f"前往「{target}」时已停止：{navigation.get('message') or navigation.get('reason')}"}
+        elif _arrival_by_navigation.get():
+            if not await navigator._confirm_stopped((pose["x"], pose["y"], True), None):
+                raise TargetUnlocalized("arrival_unconfirmed")
+        if _arrival_by_navigation.get():
+            return {"result": "ok", "target": target,
+                    "confirmation": "odom_stopped_near_mapped_stop",
+                    "target_odom_xy": [round(v, 3) for v in target_xy],
+                    "stop": stop, "navigation": navigation,
+                    "message": f"已在「{target}」前的安全停靠位置停稳。"}
         try:
             final_xy, final_pose, _, final_offset = await _locate(target)
         except TargetUnlocalized as exc:

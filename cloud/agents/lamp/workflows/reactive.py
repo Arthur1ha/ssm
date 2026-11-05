@@ -80,9 +80,12 @@ def _prompt(agent, state: ReactiveState) -> str:
         "accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
         "在空间活动中，若当前可玩玩法非空且没有更高优先级事件，优先考虑用 game_invite 邀请同伴玩一局；"
-        "game_id 只填工具参数，不写入消息正文；邀请只描述玩法规则，不追加机身灯等玩法未要求的前置条件。"
+        "game_id 只填工具参数，不写入消息正文；邀请时用你的口吻说清规则："
+        "你亮一种颜色，狗在环境里找同色物品，找到了就算狗赢。"
+        "不要提机器狗机身调色或玩法代号。"
         "如果本轮先调灯，完成后仍有可玩玩法与社交机会，应再决定是否发送邀请；"
         "仍可选择普通交流或不发消息，同伴也可拒绝。邀请不等于游戏完成。"
+        "判断游戏输赢只看本局目标导航回执；狗之后自由探索到达别处，不等于找到游戏目标。"
         "观测中的 teaching_candidates 是已校验且启用的主人教导。命中且当前可执行时，"
         "按其中的 agent_tool 和参数调用工具；若因安全或更高优先级要求不执行，应说明原因。"
         "仍须遵守用户让位和真实执行回执。"
@@ -100,7 +103,7 @@ def _prompt(agent, state: ReactiveState) -> str:
 
 def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
     """Compile one sensor-event graph; all device work stays in `_dispatch_tool`."""
-    model = model or agent._llm
+    model = model or (agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm)
     from langchain_core.utils.function_calling import convert_to_openai_tool
     declarations = []
     for name in VISIBLE:
@@ -368,6 +371,10 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     sense["light_level"] = stable_level
     sense["settled_light_level"] = stable_level
     sense["proactive_hints"] = agent._check_proactive(sense)
+    if (sense.get("light_available") and stable_level != "UNKNOWN"
+            and getattr(agent, "_autonomy_light_missing", False)):
+        sense["proactive_hints"].append("light_recovered")
+    agent._autonomy_light_missing = not sense.get("light_available", False)
     # Entering reactive mode is only a baseline observation. A lighting action
     # needs a subsequent material trigger and a fresh light reading.
     sense["lighting_eligible"] = bool(sense.get("teaching_candidates") or

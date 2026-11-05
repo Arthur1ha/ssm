@@ -3,6 +3,8 @@
 import datetime
 import time
 
+from cloud.space.freshness import state_observed_at
+
 
 def sense(state, last_sound_ts: float = 0.0) -> dict:
     sensors = state.sensor_snapshot()
@@ -17,8 +19,8 @@ def sense(state, last_sound_ts: float = 0.0) -> dict:
     for unit_id, data in sensors.items():
         if unit_id.endswith("_sound"):
             sound_available = True
-            event_ts = (data.get("event") or {}).get("ts", 0)
-            sound_detected = sound_detected or bool(event_ts and now - event_ts < 5)
+            event_ts = state_observed_at(data.get("event") or {}, now)
+            sound_detected = sound_detected or bool(event_ts and 0 <= now - event_ts < 5)
             break
 
     led_state = "UNKNOWN"
@@ -37,8 +39,8 @@ def sense(state, last_sound_ts: float = 0.0) -> dict:
     period = ("深夜" if hour < 6 else "清晨" if hour < 9 else "上午" if hour < 12
               else "下午" if hour < 18 else "傍晚" if hour < 21 else "夜间")
     light_data = light_data or {}
-    light_ts = light_data.get("ts")
-    light_fresh = isinstance(light_ts, (int, float)) and 0 <= now - light_ts <= 90
+    light_ts = state_observed_at(light_data, now)
+    light_fresh = light_ts is not None and 0 <= now - light_ts <= 90
     if not light_fresh:
         light_data = {}
     value = light_data.get("value", 0)

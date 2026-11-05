@@ -116,6 +116,71 @@ async def test_visible_target_hands_reachable_stop_to_navigator_and_rechecks(mon
     assert kwargs["face_target_bias_rad"]() == pytest.approx(
         fusion._visual_heading_bias((2.28, -0.85), pose, 0.3))
     assert kwargs["stop_when_near_target_m"] == fusion.APPROACH_STOP_RADIUS_M
+    assert kwargs["stop_cell_tolerance_m"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("navigation_status", ["succeeded", "blocked"])
+async def test_game_arrival_uses_navigation_receipt_without_visual_recheck(
+        monkeypatch, navigation_status):
+    observations = []
+
+    async def locate(_target):
+        observations.append(_target)
+        if len(observations) > 1:
+            raise AssertionError("arrival must not trigger another visual detection")
+        return ((2.0, 0.0), {"x": 0.0, "y": 0.0, "heading": 0.0,
+                              "session_id": "s"}, object(), 0.0)
+
+    navigation_options = []
+
+    async def navigate(*_args, **kwargs):
+        navigation_options.append(kwargs)
+        return {"status": navigation_status, "reason": "no_known_free_path"}
+
+    monkeypatch.setattr(fusion, "go2", SimpleNamespace(is_connected=True, fsm_state="standing"))
+    monkeypatch.setattr(fusion, "current_context", lambda: SimpleNamespace(session_id="game"))
+    monkeypatch.setattr(fusion, "control_lease", SimpleNamespace(acquire=lambda _: None))
+    monkeypatch.setattr(fusion, "_locate", locate)
+    monkeypatch.setattr(fusion, "select_reachable_stop", lambda *_: {
+        "x": 1.5, "y": 0.0, "already_near": False})
+    monkeypatch.setattr(fusion, "navigator", SimpleNamespace(go_to_coordinate=navigate))
+    monkeypatch.setattr(fusion, "emit_agent_event", lambda *a, **k: None)
+
+    with fusion.accept_navigation_arrival():
+        result = await fusion.navigate_to_visible_target("白色猫头鹰")
+
+    assert observations == ["白色猫头鹰"]
+    assert navigation_options[0]["stop_cell_tolerance_m"] == fusion.GAME_STOP_CELL_TOLERANCE_M
+    assert result["result"] == ("ok" if navigation_status == "succeeded" else "blocked")
+    if navigation_status == "succeeded":
+        assert result["confirmation"] == "odom_stopped_near_mapped_stop"
+    assert fusion._arrival_by_navigation.get() is False
+
+
+@pytest.mark.asyncio
+async def test_game_already_near_requires_confirmed_stop(monkeypatch):
+    async def locate(_target):
+        return ((0.7, 0.0), {"x": 0.0, "y": 0.0, "heading": 0.0,
+                             "session_id": "s"}, object(), 0.0)
+
+    async def confirm(*_args):
+        return False
+
+    monkeypatch.setattr(fusion, "go2", SimpleNamespace(is_connected=True, fsm_state="standing"))
+    monkeypatch.setattr(fusion, "current_context", lambda: SimpleNamespace(session_id="game"))
+    monkeypatch.setattr(fusion, "control_lease", SimpleNamespace(acquire=lambda _: None))
+    monkeypatch.setattr(fusion, "_locate", locate)
+    monkeypatch.setattr(fusion, "select_reachable_stop", lambda *_: {
+        "x": 0.0, "y": 0.0, "already_near": True})
+    monkeypatch.setattr(fusion, "navigator", SimpleNamespace(_confirm_stopped=confirm))
+    monkeypatch.setattr(fusion, "emit_agent_event", lambda *a, **k: None)
+
+    with fusion.accept_navigation_arrival():
+        result = await fusion.navigate_to_visible_target("白色猫头鹰")
+
+    assert result["result"] == "blocked"
+    assert result["reason"] == "arrival_unconfirmed"
 
 
 def test_visual_heading_bias_corrects_map_camera_disagreement():
@@ -245,6 +310,38 @@ def test_replan_routes_around_measured_body_clearance_failure():
     assert (13, 10) in direct
     assert (13, 10) not in rerouted
     assert rerouted[0] == direct[0] and rerouted[-1] == direct[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_clear", [True, False])
+async def test_game_stop_cell_tolerance_checks_clearance_and_stillness(
+        monkeypatch, body_clear):
+    from cloud.go2.navigation import navigator as nav_module
+
+    pose = {"x": 0.45, "y": 4.50, "heading": 1.8, "session_id": "s"}
+    commands = []
+    grid = SimpleNamespace(is_body_clear=lambda *_: body_clear)
+    monkeypatch.setattr(nav_module, "go2", SimpleNamespace(
+        _odom_session_id="s", move_velocity=lambda *args, **kwargs: commands.append(args)))
+    nav = nav_module.Navigator()
+    monkeypatch.setattr(nav, "_snapshot", lambda: ((pose.copy(), grid), None))
+    monkeypatch.setattr(nav, "_plan_path", lambda *_: (
+        [(0, 0)], grid, (0.5, 4.9, False)))
+    confirmed = []
+
+    async def confirm(*args):
+        confirmed.append(args)
+        return True
+
+    monkeypatch.setattr(nav, "_confirm_stopped", confirm)
+    result = await nav.go_to_coordinate(
+        0.5, 4.9, holonomic=True, face_target=(0.125, 5.925),
+        keepout=(0.125, 5.925, 0.39),
+        stop_when_near_target_m=0.89, stop_cell_tolerance_m=0.45)
+
+    assert result["status"] == ("succeeded" if body_clear else "blocked")
+    assert bool(confirmed) is body_clear
+    assert commands and all(command == (0, 0, 0) for command in commands)
 
 
 @pytest.mark.asyncio

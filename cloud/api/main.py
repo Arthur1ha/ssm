@@ -94,7 +94,9 @@ def _on_esp32_message(client, userdata, msg):
         payload = {}
 
     # CardRegistry 处理 card 和 manifest topic（更新设备注册表）
-    get_registry().handle_message(topic, raw)
+    received_at = time.time() if not getattr(msg, "retain", False) else None
+    get_registry().handle_message(topic, raw, retained=bool(getattr(msg, "retain", False)),
+                                  received_at=received_at)
     get_constraint_store().handle_message(topic, raw)
     get_activity_store().handle_message(topic, raw)
     if _agent_messenger is not None and _agent_messenger.handle_message(topic, raw):
@@ -138,7 +140,15 @@ def _on_esp32_message(client, userdata, msg):
         if msg_type == "manifest" and isinstance(payload, dict):
             _esp32_state.on_manifest(unit_id, payload)
         if msg_type in ("state", "event") and isinstance(payload, dict):
-            _esp32_state.on_agent_msg(unit_id, msg_type, payload)
+            agent = esp32_agent_mod.get_agent() if unit_id.endswith("_light") else None
+            light_was_available = bool(agent and (agent._sense() or {}).get("light_available"))
+            _esp32_state.on_agent_msg(
+                unit_id, msg_type, payload,
+                received_at=received_at,
+            )
+            if (msg_type == "state" and agent and not light_was_available
+                    and (agent._sense() or {}).get("light_available")):
+                agent.push_sensor_event(unit_id, payload)
             if msg_type == "state" and unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
                 agent = esp32_agent_mod.get_agent()
                 if agent:
@@ -158,12 +168,13 @@ def _on_esp32_message(client, userdata, msg):
                 intents_module.record_lamp_task_result(task_id, payload)
 
     elif len(parts) == 4 and parts[1] == "task":
-        # 识别"用户/编排器对设备的命令"（排除灯智能体自身的 agent_auto 任务），
+        # 识别用户/编排器命令；灯自身的游戏设色与变色不能触发用户让位，
         # reactive 模式触发让位窗口，避免自主调光立刻翻掉用户设置。
         if (parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
                 and isinstance(payload, dict)
                 and payload.get("session_id") not in (None, "agent_auto", "auto")
-                and payload.get("source") != "peer_autonomous"):
+                and payload.get("source") not in {
+                    "peer_autonomous", "peer_game_color", "peer_game_twist"}):
             agent = esp32_agent_mod.get_agent()
             if agent:
                 agent.mark_user_command(parts[2])

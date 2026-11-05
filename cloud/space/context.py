@@ -10,6 +10,7 @@ from cloud.cards.registry import CardRegistry, get_registry
 from cloud.peers.view import STATE_MAX_AGE_S, list_peers
 from cloud.space.constraints import ConstraintStore, get_constraint_store
 from cloud.space.activity import get_activity_store
+from cloud.space.freshness import state_observed_at
 
 _VALUES = ("ism", "fsm_state", "connected", "battery_soc", "brightness",
            "r", "g", "b", "value", "level", "detected", "presence")
@@ -20,11 +21,9 @@ def _summarize(unit_id: str, entry: Any, now: float) -> dict[str, Any]:
     state = entry.get("state") if isinstance(entry, dict) else None
     if not isinstance(state, dict):
         return {"source": unit_id, "status": "unknown"}
-    raw_ts = state.get("ts")
-    if (isinstance(raw_ts, bool) or not isinstance(raw_ts, (int, float))
-            or not math.isfinite(raw_ts) or raw_ts <= 0 or raw_ts > now + 5):
+    as_of = state_observed_at(state, now)
+    if as_of is None:
         return {"source": unit_id, "status": "unknown"}
-    as_of = float(raw_ts)
     if now - as_of > STATE_MAX_AGE_S:
         return {"source": unit_id, "status": "stale", "as_of": as_of}
     values = {key: state[key] for key in _VALUES if key in state and

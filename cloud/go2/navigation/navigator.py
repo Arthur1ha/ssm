@@ -109,6 +109,7 @@ class Navigator:
                                holonomic: bool = False,
                                face_target: tuple[float, float] | None = None,
                                stop_when_near_target_m: float | None = None,
+                               stop_cell_tolerance_m: float | None = None,
                                face_target_bias_rad: float | Callable[[], float] = 0.0) -> dict:
         task = asyncio.current_task()
         self._begin("exploration target", owner_session_id, task)
@@ -119,6 +120,7 @@ class Navigator:
                                                           "holonomic": holonomic,
                                                           "face_target": face_target,
                                                           "stop_when_near_target_m": stop_when_near_target_m,
+                                                          "stop_cell_tolerance_m": stop_cell_tolerance_m,
                                                           "face_target_bias_rad": face_target_bias_rad,
                                                           "session_id": getattr(go2, "_odom_session_id", None)})
 
@@ -220,7 +222,7 @@ class Navigator:
                     planned = self._plan_path(loc, fresh_grid, odom, avoided_points)
                     if planned is None:
                         reason = "body_clearance_unavailable" if avoided_points else "no_known_free_path"
-                        message = ("机身空间不足，地图中没有可绕行路线" if avoided_points
+                        message = ("地图未确认机身可通行路线，已停止" if avoided_points
                                    else "目标不在已知可通行区域")
                         return self._finish("blocked", reason, message, task_id)
                     path, grid_obj, goal = planned
@@ -241,6 +243,18 @@ class Navigator:
                     )
                 dx, dy = goal[0] - odom["x"], goal[1] - odom["y"]
                 dist = math.hypot(dx, dy)
+                stop_cell_tolerance = loc.get("stop_cell_tolerance_m")
+                if (near_radius is not None and stop_cell_tolerance is not None
+                        and 0 < stop_cell_tolerance <= 0.5
+                        and dist <= stop_cell_tolerance):
+                    body_clear = getattr(fresh_grid, "is_body_clear", None)
+                    if body_clear is None or not body_clear(odom["x"], odom["y"], odom["heading"]):
+                        return self._finish("blocked", "body_clearance_unavailable",
+                                            "地图未确认当前停步位置安全，已停止", task_id)
+                    self.actual_goal = {"x": odom["x"], "y": odom["y"], "adjusted": True}
+                    if await self._confirm_stopped((odom["x"], odom["y"], True), None):
+                        return self._finish("succeeded", None, "已在目标停靠点附近停稳", task_id)
+                    return self._finish("failed", "arrival_unconfirmed", "未能确认停稳抵达", task_id)
                 arrival_tolerance = ARRIVAL_THRESHOLD / 2 if near_radius is not None else ARRIVAL_THRESHOLD
                 if dist < arrival_tolerance:
                     if loc.get("heading") is not None:
@@ -290,7 +304,7 @@ class Navigator:
                 if body_clear is not None:
                     if not body_clear(odom["x"], odom["y"], odom["heading"]):
                         return self._finish("blocked", "body_clearance_unavailable",
-                                            "当前机身朝向与障碍距离不足，已停止", task_id)
+                                            "地图未确认当前机身周围可通行空间，已停止", task_id)
                     if vx == 0 and vy == 0 and yaw != 0:
                         turn_clear = getattr(fresh_grid, "is_turn_clear", None)
                         if turn_clear is not None and not turn_clear(odom["x"], odom["y"]):
@@ -329,7 +343,7 @@ class Navigator:
                             path = None
                             continue
                         return self._finish("blocked", "body_clearance_unavailable",
-                                            "下一步机身空间不足，已停止", task_id)
+                                            "地图未确认下一步机身可通行空间，已停止", task_id)
                 go2.move_velocity(vx, vy, yaw, deadman_s=0.3)
                 last_command = {"vx": round(vx, 3), "vy": round(vy, 3),
                                 "yaw": round(yaw, 3)}

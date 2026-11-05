@@ -323,7 +323,7 @@ class Drive:
         scope, completed, material_key, error = self._motion_announcement(name, params, result)
         visible = self._reply_gate.should_reply(
             scope, completed=completed, material_key=material_key, error=error)
-        result_text = ("已到达前方可通行的新区域" if task_id and name == "go2_navigate_to_coordinate"
+        result_text = ("自由探索已到达新的地图探索点" if task_id and name == "go2_navigate_to_coordinate"
                        and completed else self._result_text(result))
         self._activity_event("action_result", result_text, action=name,
                              task_id=task_id or result.get("task_id"),

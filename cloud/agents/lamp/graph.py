@@ -139,6 +139,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     event_source = ("autonomous" if autonomous else
                     "delegated_skill" if run.parent_run_id else "device_chat")
     progress_closed = threading.Event()
+    run_model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
 
     def progress(phase, step):
         result = (step or {}).get("result") or {}
@@ -205,9 +206,9 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                 emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
                                  run_id=current.run_id, agent_id=unit_id, session_id=current.session_id,
                                  input=prompt, goal=current.goal,
-                                 model=str(getattr(agent._llm, "model_name", "unknown")),
+                                 model=str(getattr(run_model, "model_name", "unknown")),
                                  template_version="persona-result-v1")
-                response = await agent._llm.ainvoke([HumanMessage(content=prompt)])
+                response = await run_model.ainvoke([HumanMessage(content=prompt)])
                 emit_agent_event("model.response", trace_id=current.trace_id or current.run_id,
                                  run_id=current.run_id, agent_id=unit_id, session_id=current.session_id,
                                  output=getattr(response, "content", ""))
@@ -253,7 +254,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                       parent_run_id=run.parent_run_id or None, agent_id=unit_id,
                       session_id=context.session_id, origin_kind=run.origin_kind):
         run = asyncio.run(run_role_graph(
-            run, model=agent._llm,
+            run, model=run_model,
             tool_schemas=visible_schemas(lighting_only=lighting_only),
             build_messages=lambda current: decision_messages(
                 current, agent=agent, unit_id=unit_id, supplement=text if resume else ""),
