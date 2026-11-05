@@ -2,19 +2,22 @@
 import json
 import logging
 import time
+import fcntl
+import threading
 from collections import deque
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import NotRequired, Optional, TypedDict
 
 from cloud.go2.paths import MEMORY_DIR
-from cloud.go2.execution import can_persist
+from cloud.go2.execution import ExecutionContext, can_persist
 
 logger = logging.getLogger(__name__)
 
 _EPISODES_DIR = MEMORY_DIR / "episodes"
 _RETENTION_DAYS = 7
+_UNSUMMARIZED_RETENTION_DAYS = 30
 _BUFFER_SIZE = 20
 
 
@@ -25,12 +28,14 @@ class EventType(str, Enum):
     OBSERVATION    = "OBSERVATION"
     AGENT_RESPONSE = "AGENT_RESPONSE"
     IDENTITY_CHANGE = "IDENTITY_CHANGE"
+    DIALOGUE = "DIALOGUE"
 
 
 class MemoryEntry(TypedDict):
     ts:         float
     event_type: str
     content:    str
+    run_id:     NotRequired[str]
 
 
 def _fmt_ts(ts: float) -> str:
@@ -75,6 +80,7 @@ class EpisodeMemory:
         self._dir = Path(episodes_dir) if episodes_dir else _EPISODES_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
         self._buffer: deque[MemoryEntry] = deque(maxlen=_BUFFER_SIZE)
+        self._write_lock = threading.RLock()
         self._cleanup_old()
         self._load_recent()
 
@@ -83,18 +89,22 @@ class EpisodeMemory:
         return self._dir
 
     def _cleanup_old(self) -> None:
-        cutoff = (datetime.now().date() - timedelta(days=_RETENTION_DAYS))
+        today = datetime.now().date()
+        cutoff = today - timedelta(days=_RETENTION_DAYS)
+        hard_cutoff = today - timedelta(days=_UNSUMMARIZED_RETENTION_DAYS)
         deleted = 0
         for f in self._dir.glob("*.jsonl"):
             try:
                 d = datetime.strptime(f.stem, "%Y-%m-%d").date()
             except ValueError:
                 continue
-            if d < cutoff:
+            summary = self._dir.parent / "summaries" / f"{f.stem}.md"
+            summarized = summary.exists() and summary.stat().st_size > 0
+            if d < hard_cutoff or (d < cutoff and summarized):
                 f.unlink()
                 deleted += 1
         if deleted:
-            logger.info("[EpisodeMemory] 清理过期文件 %d 个（保留 %d 天）", deleted, _RETENTION_DAYS)
+            logger.info("[EpisodeMemory] 清理已摘要或超过保留期的文件 %d 个", deleted)
 
     def _load_recent(self) -> None:
         today = datetime.now().date()
@@ -123,6 +133,36 @@ class EpisodeMemory:
             fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
         logger.debug("[EpisodeMemory] +%s %s", event_type.value, content)
         return True
+
+    def add_dialogue(self, run_id: str, user_text: str, response: str,
+                     context: ExecutionContext) -> bool:
+        """Save one completed administrator dialogue, keyed by its durable run ID."""
+        if (context.actor != "admin" or not context.persist
+                or context.origin_kind != "user_delegated" or not run_id
+                or not user_text.strip() or not response.strip()):
+            return False
+        entry: MemoryEntry = {
+            "ts": time.time(), "event_type": EventType.DIALOGUE.value,
+            "content": f"用户：{user_text.strip()[:700]}\nGo2：{response.strip()[:700]}",
+            "run_id": run_id,
+        }
+        day = datetime.fromtimestamp(entry["ts"]).strftime("%Y-%m-%d")
+        path = _day_file(day, self._dir)
+        with self._write_lock:
+            with (self._dir / f"{day}.lock").open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    if path.exists():
+                        for row in read_day(day, self._dir):
+                            if row.get("run_id") == run_id and row.get("event_type") == EventType.DIALOGUE.value:
+                                return False
+                    with path.open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                        stream.flush()
+                    self._buffer.append(entry)
+                    return True
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
 
     def entries(self) -> list[MemoryEntry]:
         """返回内存缓冲中的最近事件列表。"""

@@ -137,7 +137,7 @@ function describeRunProgress(event, compact = false) {
     timeout: '等待结果超时，完成情况未确认', blocked: '未执行',
     rejected: '被拒绝', cancelled: '已取消', error: '执行失败',
   }[event.status] || '结果已更新';
-  const stateLabels = { ON: '已开启', OFF: '已关闭', BLINKING: '正在闪烁',
+  const stateLabels = { ON: '已开启', OFF: '已关闭', BLINKING: '正在闪烁', ERROR: '硬件异常',
     DIM: '柔光', BRIGHT: '亮光', COLOR: '彩光' };
   const detail = stateLabels[event.result_state] ? `，设备${stateLabels[event.result_state]}` : '';
   const reason = typeof event.reason === 'string' && /^[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\s，。！？：；、（）“”·0-9]+$/.test(event.reason)
@@ -165,10 +165,11 @@ function isDeviceOnline(agent, unitData) {
 // 灯的运行状态与颜色参数分开显示。旧固件的 retained 状态只作迁移期展示。
 function getLedStateInfo(state = {}) {
   const labels = {
-    OFF: '熄灭', ON: '常亮', BLINKING: '闪烁',
+    OFF: '熄灭', ON: '常亮', BLINKING: '闪烁', ERROR: '硬件异常',
     DIM: '柔光', BRIGHT: '亮光', COLOR: '彩光', BLINK: '闪烁',
   };
   const ism = state.ism || '';
+  if (ism === 'ERROR') return { label: labels.ERROR, details: '', color: null };
   const channel = value => Number.isInteger(value) && value >= 0 && value <= 255;
   const hasRgb = channel(state.r) && channel(state.g) && channel(state.b);
   const hasBrightness = channel(state.brightness);

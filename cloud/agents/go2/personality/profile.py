@@ -1,9 +1,7 @@
-"""Go2 profile, including migration and safe daily evolution updates."""
-
-import json
+"""Go2 personality profile and daily trait evolution."""
 
 from cloud.personality.store import ProfileStore
-from cloud.go2.paths import DATA_DIR, SOUL_DIR
+from cloud.go2.paths import DATA_DIR
 
 PROFILE_FILE = DATA_DIR / "personality" / "profile.json"
 DEFAULT_PROMPT = (
@@ -22,25 +20,8 @@ TRAIT_SPECS = {
 }
 
 
-def _migrate() -> dict:
-    try:
-        personality = json.loads((SOUL_DIR / "personality.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        personality = {}
-    try:
-        traits = json.loads((SOUL_DIR / "traits.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        traits = {}
-    if not isinstance(personality, dict):
-        personality = {}
-    if not isinstance(traits, dict):
-        traits = {}
-    return {"prompt": personality.get("prompt"), "traits": traits,
-            "metadata": {"last_evolved": traits.get("last_evolved")}}
-
-
 _store = ProfileStore(agent_id="go2", path=PROFILE_FILE,
-                      name="呆呆狗", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS, migration=_migrate)
+                      name="呆呆狗", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS)
 
 
 def get_profile() -> dict:

@@ -17,7 +17,6 @@ from cloud.go2.tools.tools import go2_observe, get_text_llm
 from cloud.go2.tools.executor import execute_tool
 from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
 from cloud.go2.perception.vision import VisionFrame
-from cloud.agents.go2.personality.legacy import get_system_prompt
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.agents.go2.memory.episode import episode_memory, EventType
 from cloud.go2.space_context import prompt_space_context

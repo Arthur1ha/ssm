@@ -22,6 +22,8 @@ from cloud.go2.tools.executor import execute_tool
 from cloud.go2.tools.registry import TOOL_REGISTRY
 from cloud.go2.connection import go2
 from cloud.go2.execution import ExecutionContext
+from cloud.agents.go2.memory.episode import episode_memory
+from cloud.agents.go2.memory.recall import recall_memory
 
 _view: Go2RunView | None = None
 logger = logging.getLogger(__name__)
@@ -125,7 +127,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
     def build_messages(current: GraphRun):
         from cloud.agents.go2.personality.profile import get_profile
         profile = get_profile()
-        messages = go2_messages(current, supplement=supplemental)
+        remembered = recall_memory(
+            current.goal + (" " + supplemental if supplemental else ""),
+            actor=context.actor, persist=context.persist, session_id=session_id,
+            episode_store=episode_memory)
+        messages = go2_messages(current, supplement=supplemental,
+                                memory=remembered.text if remembered.fragments else "")
         if task_context is not None:
             messages.append(HumanMessage(content="【本轮可信任务状态】\n" + str(task_context())))
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
@@ -307,6 +314,14 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             text=run.response, reply_kind="clarification",
             event_id=run.reply_event_id)
     if run.status != "needs_clarification":
+        if run.response and not context.session_id.startswith("peer_"):
+            dialogue = run.goal
+            if supplemental:
+                dialogue += "\n用户补充：" + supplemental
+            try:
+                episode_memory.add_dialogue(run.run_id, dialogue, run.response, context)
+            except Exception:
+                logger.exception("Go2 dialogue memory write failed run=%s", run.run_id)
         view.pin(run.run_id, session_id)
     result = _result(run)
     if result["response"] and publish_reply:

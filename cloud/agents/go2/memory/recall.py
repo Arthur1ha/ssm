@@ -17,7 +17,7 @@ MAX_SUMMARIES = 3
 MAX_HISTORY_TURNS = 6
 _DATE_RE = re.compile(r"20\d{2}-\d{2}-\d{2}")
 _CHINESE_DATE_RE = re.compile(r"(?:(20\d{2})年)?(1[0-2]|0?[1-9])月(3[01]|[12]\d|0?[1-9])日?")
-_HISTORY_WORDS = ("今天", "昨天", "前天", "发生", "做了", "做过", "去过", "去哪", "哪里", "哪儿", "记得", "历史", "最近")
+_HISTORY_WORDS = ("今天", "昨天", "前天", "发生", "做了", "做过", "去过", "去哪", "哪里", "哪儿", "记得", "历史", "最近", "之前", "上次", "聊过")
 _LOCATION_WORDS = ("去过", "去哪", "地点", "位置", "路线", "探索", "走廊", "房间")
 _CURRENT_WORDS = ("当前位置", "现在在哪", "目前在哪", "现在位置")
 _STOP_WORDS = set("的了吗呢是我你他她它在有今天昨天最近什么事情哪里哪儿做了发生过去现在请问一下")
@@ -163,9 +163,11 @@ def recall_memory(
         {EventType.OBSERVATION.value, EventType.ACTION_TAKEN.value, EventType.VISION_CHANGE.value}
         if location_question else
         {EventType.ACTION_TAKEN.value, EventType.OBSERVATION.value, EventType.IDENTITY_CHANGE.value,
-         EventType.VISION_CHANGE.value, EventType.USER_COMMAND.value, EventType.AGENT_RESPONSE.value}
+         EventType.VISION_CHANGE.value, EventType.USER_COMMAND.value, EventType.AGENT_RESPONSE.value,
+         EventType.DIALOGUE.value}
         if history_question else
-        {EventType.ACTION_TAKEN.value, EventType.OBSERVATION.value, EventType.IDENTITY_CHANGE.value}
+        {EventType.ACTION_TAKEN.value, EventType.OBSERVATION.value, EventType.IDENTITY_CHANGE.value,
+         EventType.DIALOGUE.value}
     )
     candidates = [row for row in rows if row.get("event_type") in wanted_types]
     candidates.sort(key=lambda row: (_relevance(question, row.get("content", "")), row.get("ts", 0)), reverse=True)

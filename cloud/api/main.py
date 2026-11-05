@@ -254,14 +254,17 @@ async def lifespan(app):
             go2_router_module._publish_go2_state()
 
     go2_heartbeat = asyncio.create_task(publish_go2_heartbeat())
+    from cloud.agents.go2.workflows.daily_maintenance import maintenance_loop
+    go2_memory_maintenance = asyncio.create_task(maintenance_loop())
 
     try:
         yield
     finally:
         activity_reconcile.cancel()
         go2_heartbeat.cancel()
+        go2_memory_maintenance.cancel()
         try:
-            await go2_heartbeat
+            await asyncio.gather(go2_heartbeat, go2_memory_maintenance)
         except asyncio.CancelledError:
             pass
 

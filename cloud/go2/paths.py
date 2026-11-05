@@ -11,4 +11,3 @@ DATA_DIR = Path(
     os.getenv("GO2_DATA_DIR", str(Path(__file__).resolve().parent / "data"))
 )
 MEMORY_DIR = DATA_DIR / "memory"
-SOUL_DIR = DATA_DIR / "soul"

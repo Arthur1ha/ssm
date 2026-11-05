@@ -2,7 +2,7 @@
 function Go2AssetsDrawer({ open, onClose }) {
   const { useCallback, useEffect, useState } = React;
   const [locations, setLocations] = useState([]);
-  const [memory, setMemory] = useState({ taught: [], today: '' });
+  const [memory, setMemory] = useState({ taught: [], today: '', summaries: [], last_evolved: null });
   const [locationName, setLocationName] = useState('');
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState('');
@@ -23,6 +23,8 @@ function Go2AssetsDrawer({ open, onClose }) {
       setMemory({
         taught: Array.isArray(memoryResult.value?.taught) ? memoryResult.value.taught : [],
         today: memoryResult.value?.today || '（今天暂无记录）',
+        summaries: Array.isArray(memoryResult.value?.summaries) ? memoryResult.value.summaries : [],
+        last_evolved: memoryResult.value?.last_evolved || null,
       });
     }
     const failures = [locationResult, memoryResult]
@@ -152,6 +154,13 @@ function Go2AssetsDrawer({ open, onClose }) {
             </div>
             <div className="memory-block">
               <h4>今日事件</h4><pre>{memory.today || '（今天暂无记录）'}</pre>
+            </div>
+            <div className="memory-block">
+              <h4>每日摘要</h4>
+              {memory.summaries.length ? memory.summaries.map(item => (
+                <div key={item.date}><strong>{item.date}</strong><pre>{item.summary}</pre></div>
+              )) : <p className="asset-empty">还没有每日摘要。</p>}
+              <p>特质最近更新：{memory.last_evolved || '尚未更新'}</p>
             </div>
             <div className="memory-block">
               <h4>已教习惯</h4>

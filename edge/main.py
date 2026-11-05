@@ -49,6 +49,7 @@ def publish_snapshot():
 def on_reconnect():
     print("[Main] Reconnected — re-publishing manifests and states")
     publish_snapshot()
+    trigger_map.republish_recent_results()
 
 # ── MQTT setup ───────────────────────────────────────────────
 mqtt.set_callback(trigger_map.on_mqtt)
@@ -57,9 +58,6 @@ mqtt.set_reconnect_callback(on_reconnect)
 mqtt.subscribe("ssm/task/{}/+".format(UNIT_LED))
 
 mqtt.begin()
-
-# ── 首次发布 manifest + 初始状态 ─────────────────────────────
-publish_snapshot()
 
 print("[Main] Entering main loop.")
 

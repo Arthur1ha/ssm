@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from cloud.go2.paths import MEMORY_DIR
-from cloud.agents.go2.memory.episode import read_day
+from cloud.agents.go2.memory.episode import _EPISODES_DIR, read_day
 from cloud.go2.tools.tools import get_text_llm
 from cloud.go2.execution import can_persist
 
@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 _SUMMARIES_DIR = MEMORY_DIR / "summaries"
 _SUMMARY_INPUT_CHARS = 5000
 _SUMMARY_INPUT_EVENTS = 40
-_BACKFILL_DAYS = 7
 _BACKFILL_PER_CALL = 1
 
 
@@ -76,12 +75,18 @@ def get_recent_summaries(
 async def ensure_yesterday_summary(
     episodes_dir: Optional[Path] = None, base_dir: Optional[Path] = None
 ) -> None:
-    """Backfill at most one retained day per call, including yesterday."""
+    """Backfill one recorded, completed day per call, oldest first."""
     if not can_persist():
         return
     attempts = 0
-    for days_ago in range(_BACKFILL_DAYS, 0, -1):
-        source_date = (date.today() - timedelta(days=days_ago)).isoformat()
+    source_dir = Path(episodes_dir) if episodes_dir else _EPISODES_DIR
+    for path in sorted(source_dir.glob("*.jsonl")):
+        try:
+            source_date = date.fromisoformat(path.stem).isoformat()
+        except ValueError:
+            continue
+        if source_date >= date.today().isoformat():
+            continue
         if get_summary(source_date, base_dir) is not None:
             continue
         if not _get_episodes_for_date(source_date, episodes_dir):

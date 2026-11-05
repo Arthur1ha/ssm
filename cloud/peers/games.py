@@ -95,8 +95,9 @@ async def _game_line(agent_id: str, facts: str, fallback: str) -> str:
     from cloud.agents.common.models import get_text_model
     from langchain_core.messages import HumanMessage
     if agent_id == "go2":
-        from cloud.agents.go2.personality.legacy import load_system_prompt
-        persona = load_system_prompt()[0]
+        from cloud.agents.go2.personality.profile import get_profile
+        from cloud.personality.store import render_identity
+        persona = render_identity(get_profile())
     else:
         from cloud.agents.lamp.personality.profile import get_profile
         from cloud.personality.store import render_identity

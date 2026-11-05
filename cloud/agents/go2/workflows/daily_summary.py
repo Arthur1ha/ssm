@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import tempfile
 from typing import Any, TypedDict
@@ -14,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.go2.memory import daily_summary as memory
+from cloud.agents.go2.memory.episode import EventType, read_day
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.agents.go2.prompt_contract import build_prompt
 from cloud.personality.store import render_identity
@@ -32,13 +33,31 @@ class SummaryState(TypedDict, total=False):
 
 
 def _bounded_episodes(source_date: str, episodes_dir: Path | None) -> tuple[str, int]:
-    episodes = memory._get_episodes_for_date(source_date, episodes_dir)
-    count = len(episodes)
+    rows = read_day(source_date, episodes_dir)
+    count = len(rows)
     if count > memory._SUMMARY_INPUT_EVENTS:
-        episodes = episodes[:10] + episodes[-(memory._SUMMARY_INPUT_EVENTS - 10):]
-    if not episodes:
+        # Conversations matter for trait changes even on a noisy sensor day.
+        dialogue = [i for i, row in enumerate(rows)
+                    if row.get("event_type") == EventType.DIALOGUE.value]
+        chosen = set(dialogue[-20:])
+        chosen.update(range(min(5, count)))
+        chosen.update(range(max(0, count - 15), count))
+        for i in range(count - 1, -1, -1):
+            if len(chosen) >= memory._SUMMARY_INPUT_EVENTS:
+                break
+            chosen.add(i)
+        rows = [rows[i] for i in sorted(chosen)]
+    if not rows:
         return "", 0
-    limit = max(40, memory._SUMMARY_INPUT_CHARS // len(episodes) - 1)
+    limit = max(40, memory._SUMMARY_INPUT_CHARS // len(rows) - 1)
+    episodes = []
+    for row in rows:
+        content = row["content"]
+        if row.get("event_type") == EventType.DIALOGUE.value and "\nGo2：" in content:
+            user_text, reply = content.split("\nGo2：", 1)
+            half = max(15, (limit - 16) // 2)
+            content = user_text[:half] + "；Go2：" + reply[:half]
+        episodes.append(f"[{datetime.fromtimestamp(row['ts']).strftime('%H:%M')}] {content}")
     return "\n".join(line[:limit] for line in episodes)[:memory._SUMMARY_INPUT_CHARS], count
 
 

@@ -87,7 +87,7 @@ UNIT_CONFIGS = {
             'fsm_version': 2,
             'num_pixels': WS2812_NUM,
             'commands': ['SET_COLOR', 'SET_STATE', 'BLINK'],
-            'ism_states': ['OFF', 'ON', 'BLINKING'],
+            'ism_states': ['OFF', 'ON', 'BLINKING', 'ERROR'],
             'capabilities': [
                 {'action': 'SET_COLOR', 'params': ['r', 'g', 'b', 'brightness']},
                 {'action': 'SET_STATE', 'params': ['state'], 'values': ['OFF', 'ON']},

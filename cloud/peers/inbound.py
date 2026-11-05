@@ -72,11 +72,12 @@ def _publish_go2_reply_ack(messenger, message: dict) -> None:
         return
     status = messenger.get_status(message["reply_to"]) or {}
     confirmed = status.get("state") == "ok"
-    from cloud.agents.go2.personality.legacy import load_system_prompt
+    from cloud.agents.go2.personality.profile import get_profile
+    from cloud.personality.store import render_identity
     from cloud.agents.common.models import get_text_model
     from langchain_core.messages import HumanMessage
 
-    persona, _, _ = load_system_prompt()
+    persona = render_identity(get_profile())
     prompt = (
         f"{persona}\n"
         "智能灯刚回复了你的协作消息。请用自己的口吻，面向用户说一句简短回应。"

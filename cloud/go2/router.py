@@ -904,12 +904,17 @@ async def go2_drive_state(context=Depends(require_authenticated_read)):
 
 @router.get("/memory")
 async def go2_memory(context=Depends(require_admin_read)):
-    """返回 Go2 的成长资产：调教记录 + 今天的事件流。"""
+    """返回 Go2 的成长资产、今日事件及近期每日摘要。"""
     context = _normalize_context(context)
     _require_admin_persist(context)
     from cloud.agents.common import teachings
     from cloud.agents.go2.memory.episode import episode_memory
-    return {"taught": teachings.list_for("go2", space_id=context.space_id), "today": episode_memory.format_today()}
+    from cloud.agents.go2.memory.daily_summary import get_recent_summaries
+    from cloud.agents.go2.personality.profile import get_evolution_metadata
+    return {"taught": teachings.list_for("go2", space_id=context.space_id),
+            "today": episode_memory.format_today(),
+            "summaries": get_recent_summaries(7),
+            "last_evolved": get_evolution_metadata().get("last_evolved")}
 
 
 @router.get("/autonomy")
@@ -964,21 +969,34 @@ async def go2_identity_recognize(context: ExecutionContext = Depends(require_int
 async def go2_personality_get(context=Depends(require_admin_read)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.agents.go2.personality.legacy import get_personality_view
-    return get_personality_view()
+    from cloud.agents.go2.personality.profile import get_profile
+    profile = get_profile()
+    return {"prompt": profile["prompt"],
+            "social_initiative": profile["traits"]["extraversion"]}
 
 
 @router.post("/personality")
 async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_service_context)):
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.agents.go2.personality.legacy import set_personality, get_personality_view
-    with use_context(context):
-        try:
-            set_personality(req.prompt, req.social_initiative)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, **get_personality_view()}
+    from cloud.agents.go2.personality.profile import get_profile, update_profile
+    from cloud.personality.store import RevisionConflict
+    from cloud.observability import emit_agent_event
+    current = get_profile()
+    changes = {"revision": current["revision"], "prompt": req.prompt}
+    if req.social_initiative is not None:
+        changes["traits"] = {"extraversion": req.social_initiative}
+    try:
+        updated = update_profile(changes, context)
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    emit_agent_event("persona.changed", agent_id="go2", operator_kind="admin",
+                     before_hash=hashlib.sha256(current["prompt"].encode()).hexdigest(),
+                     after_hash=hashlib.sha256(updated["prompt"].encode()).hexdigest())
+    return {"ok": True, "prompt": updated["prompt"],
+            "social_initiative": updated["traits"]["extraversion"]}
 
 
 @router.get("/debug/voxel_map")

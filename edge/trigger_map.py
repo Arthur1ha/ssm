@@ -141,6 +141,11 @@ class TriggerMap:
                 else:
                     self._bsm.led_set_state("OFF")
             except Exception as exc:
+                self._blink_restore = None
+                self._blink_id = None
+                self._blink_config = None
+                self._ism_led.transition(Trigger.LED_FAIL)
+                self._publish_led_state()
                 if self._pending_blink:
                     tid, sid = self._pending_blink
                     self._pending_blink = None
@@ -208,6 +213,13 @@ class TriggerMap:
             if len(self._recent_results) > 16:
                 self._recent_results.pop(0)
         self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), payload)
+
+    def republish_recent_results(self):
+        """Restore terminal acknowledgements lost during a broker outage."""
+        for payload in self._recent_results:
+            if not self._mqtt.publish(
+                    "ssm/result/{}/{}".format(UNIT_LED, payload["task_id"]), payload):
+                break
 
     def _publish_led_state(self, force=False):
         state = self._ism_led.state
