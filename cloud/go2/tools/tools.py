@@ -124,11 +124,13 @@ async def go2_observe(question: str = "描述你看到的场景") -> str:
     return resp.content
 
 
-def go2_status() -> str:
-    if not go2.is_connected:
-        return "Go2 未连接"
-    s = go2._robot_state
-    return f"已连接 | mode={s.get('mode')} body_height={s.get('body_height')} velocity={s.get('velocity')}"
+async def go2_life(action: str) -> dict:
+    from cloud.go2.router import perform_life_control
+    return await perform_life_control(action, current_context())
+
+
+def go2_status() -> dict:
+    return {"result": "ok", **go2.state_snapshot(), "telemetry": go2._robot_state}
 
 
 def go2_list_teachings() -> str:
@@ -385,6 +387,7 @@ TOOL_FN_MAP = {
     "go2_move":                   go2_move,
     "go2_observe":                go2_observe,
     "go2_status":                 go2_status,
+    "go2_life":                   go2_life,
     "go2_list_teachings":         go2_list_teachings,
     "go2_tag_location":           go2_tag_location,
     "go2_navigate_to":            go2_navigate_to,

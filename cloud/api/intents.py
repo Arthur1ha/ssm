@@ -400,6 +400,9 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
         unit_id, message_type = parts[2], parts[3]
         configured = set(get_space_registry().get_space()["device_ids"])
         card = get_registry().get_card(unit_id)
+        if card:
+            from cloud.esp32.presentation import project_card
+            card = project_card(card)
         device_id = card_device_id(card or {"unit_id": unit_id})
         if device_id not in configured and unit_id not in configured:
             return False
@@ -663,6 +666,17 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail=f"{normalized} requires {key}")
         encoded = urllib.parse.quote(value, safe="")
         return await _internal_request(f"/api/go2/navigation/locations/{encoded}", "DELETE", session)
+    if normalized in {"life", "request_rest", "wake", "start_explore", "stop_explore"}:
+        operation = params.get("action") if normalized == "life" else normalized
+        if not isinstance(operation, str) or operation not in {"request_rest", "wake", "start_explore", "stop_explore"}:
+            raise HTTPException(status_code=400, detail="unsupported Go2 life action")
+        allowed = {"action"} if normalized == "life" else set()
+        if set(params) - allowed:
+            raise HTTPException(status_code=400, detail="unsupported Go2 life parameters")
+        if operation == "start_explore" and session["actor"] != "admin":
+            raise HTTPException(status_code=403, detail="only an administrator may start exploration")
+        ensure_go2_action("LIFE")
+        return await _internal_request("/api/go2/life", "POST", session, {"action": operation})
     if normalized == "velocity":
         ensure_go2_action("VELOCITY")
         return await _internal_request("/api/go2/velocity", "POST", session, params)
@@ -724,7 +738,13 @@ async def create_command(
 ):
     if "/" in unit_id or not unit_id.strip():
         raise HTTPException(status_code=400, detail="invalid unit id")
-    if not (unit_id == "go2" and req.action.lower() == "set_personality"):
+    go2_life_control = unit_id == "go2" and req.action.lower() in {
+        "life", "request_rest", "wake", "start_explore", "stop_explore",
+    }
+    # Life controls validate busy state and ownership before affecting tasks.
+    # Cancelling the global activity first would turn a refused rest request
+    # into a silent exploration stop, and could cancel another session's work.
+    if not go2_life_control and not (unit_id == "go2" and req.action.lower() == "set_personality"):
         from cloud.api.activity import user_intervention
         await user_intervention()
         from cloud.peers.gateway import cancel_pending

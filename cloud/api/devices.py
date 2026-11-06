@@ -50,6 +50,8 @@ def _readable_card(card: dict[str, Any]) -> Response:
 
 
 def _card_response(card: dict[str, Any]) -> dict[str, Any]:
+    from cloud.esp32.presentation import project_card
+    card = project_card(card)
     keys = (
         "card_schema_version", "version", "unit_id", "device_id", "parent_id", "name", "description", "agent_type",
         "online", "transport", "services", "state", "state_machine", "skills", "modes", "telemetry",
@@ -85,4 +87,5 @@ async def device_agent_card(unit_id: str, _session: dict[str, Any] = Depends(req
     card = _fixed_cards().get(unit_id)
     if card is None:
         raise HTTPException(status_code=404, detail=f"unit '{unit_id}' is not in the current space")
-    return _readable_card(card)
+    from cloud.esp32.presentation import project_card
+    return _readable_card(project_card(card))

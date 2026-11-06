@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.go2.mode.free_explore import drive
 from cloud.go2.perception.vision import vision_loop
@@ -54,6 +55,7 @@ _active_identity_cb = None
 _autonomy_mode   = "manual"  # "manual" | "free_explore"
 _activity_mode_owner: str | None = None
 _connect_task: asyncio.Task | None = None
+go2._autonomy_resume_callback = drive.resume_after_user
 
 
 def get_activity_mode_owner() -> str | None:
@@ -172,6 +174,11 @@ def _require_admin_persist(context: ExecutionContext) -> None:
 
 
 def _acquire_motion(context: ExecutionContext) -> None:
+    runtime = runtime_for(go2)
+    if runtime is not None:
+        reason = runtime.active_reason() or go2.body_ready_reason()
+        if reason or go2.fsm_state not in {'standing', 'moving'} or go2.pending_action:
+            raise HTTPException(status_code=400, detail=reason or 'body_not_ready')
     previous = control_lease.snapshot()
     try:
         control_lease.acquire(context)
@@ -287,6 +294,9 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
     """统一重配视觉消费者；身份在两种 autonomy 模式下都可保持运行。"""
     global _active_rule_cb, _active_drive_cb, _active_identity_cb
     drive.stop()
+    runtime = runtime_for(go2)
+    if runtime is not None:
+        runtime.commit('autonomy_config', autonomy_mode=mode)
     for callback in (_active_rule_cb, _active_drive_cb, _active_identity_cb):
         if callback is not None:
             vision_loop.remove_callback(callback)
@@ -299,7 +309,7 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
     if identity_skill.enabled:
         _active_identity_cb = _on_identity_vision_frame
         vision_loop.add_callback(_active_identity_cb)
-    if mode == "free_explore":
+    if mode == "free_explore" and (runtime is None or runtime.data['activity_state'] == 'active'):
         _active_drive_cb = drive.on_vision_frame
         vision_loop.add_callback(_active_drive_cb)
         drive.start(owner_session_id=owner_session_id, context=context)
@@ -362,7 +372,11 @@ async def go2_connect(context: ExecutionContext = Depends(require_intervening_se
 
 @router.delete("/connection")
 async def go2_disconnect(context: ExecutionContext = Depends(require_intervening_service_context)):
-    global _autonomy_mode, _activity_mode_owner
+    global _autonomy_mode, _activity_mode_owner, _connect_task
+    if _connect_task is not None and not _connect_task.done():
+        _connect_task.cancel()
+        await asyncio.gather(_connect_task, return_exceptions=True)
+    _connect_task = None
     from cloud.peers.gateway import cancel_pending
     cancel_pending(initiator_unit_id="go2", reason="mode_changed")
     await go2.disconnect()
@@ -377,13 +391,8 @@ async def go2_disconnect(context: ExecutionContext = Depends(require_intervening
 
 @router.get("/connection")
 async def go2_status(context=Depends(require_authenticated_read)):
-    return {
-        "connected":        go2.is_connected,
-        "fsm_state":        go2.fsm_state,
-        "available_actions": go2.available_actions,
-        "state":            go2._robot_state,
-        "error":            getattr(go2, "_last_error", None),
-    }
+    return {**go2.state_snapshot(), "state": go2._robot_state,
+            "error": getattr(go2, "_last_error", None)}
 
 
 @router.get("/diagnostics/avoidance")
@@ -441,21 +450,134 @@ async def go2_state(context=Depends(require_authenticated_read)):
                     state = await asyncio.wait_for(q.get(), timeout=2.0)
                 except asyncio.TimeoutError:
                     state = {}
-                payload = {
-                    "connected": go2.is_connected,
-                    "fsm_state": go2.fsm_state,
-                    "available_actions": go2.available_actions,
-                    "state": go2._robot_state,
-                    "error": getattr(go2, "_last_error", None),
-                }
-                if isinstance(state, dict):
-                    payload.update(state)
-                payload["fsm_state"] = go2.fsm_state
+                payload = {**go2.state_snapshot(), "state": go2._robot_state,
+                           "error": getattr(go2, "_last_error", None)}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             go2.remove_state_queue(q)
 
     return StreamingResponse(sse_gen(), media_type="text/event-stream")
+
+
+class LifeRequest(BaseModel):
+    action: str
+
+
+async def prepare_user_interaction(context: ExecutionContext):
+    """Cancel owned motion, finish its cleanup, then observe a fresh stop."""
+    runtime = runtime_for(go2)
+    if runtime is None:
+        return
+    from cloud.go2.navigation.navigator import navigator
+    current_task = asyncio.current_task()
+    drive_task = getattr(drive, '_task', None)
+    nav_task = getattr(navigator, '_task', None)
+    def active(task):
+        return isinstance(task, asyncio.Task) and task is not current_task and not task.done()
+    exploring = runtime.data['life_state'] == 'explore' or (runtime.exploration_enabled and active(drive_task))
+    navigation = active(nav_task)
+    if not exploring and not navigation:
+        return
+    owner = (runtime.data['life_owner'] if runtime.data['life_state'] == 'explore' else
+             getattr(navigator, 'owner_session_id', None) if navigation else drive.owner_session_id)
+    if owner not in (None, context.session_id) and context.actor != 'admin':
+        raise ValueError('exploration_owned_by_another_session')
+    owned_tasks = [task for task, task_owner in (
+        (drive_task, getattr(drive, 'owner_session_id', None)),
+        (nav_task, getattr(navigator, 'owner_session_id', None)))
+        if task_owner == owner and active(task)]
+    moving = (go2.fsm_state == 'moving' or navigation
+              or getattr(go2, '_velocity_command_active', False)
+              or go2._command_lock.locked())
+    drive._user_handoff_in_progress = True
+    try:
+        if exploring:
+            pause = getattr(drive, 'pause_for_user', None)
+            if pause is not None:
+                pause(owner_session_id=owner)
+            else:
+                drive.stop(owner_session_id=owner)
+        navigator.stop(owner_session_id=owner)
+        if owned_tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*owned_tasks, return_exceptions=True), timeout=2)
+            except asyncio.TimeoutError as exc:
+                raise ValueError('exploration_cancellation_unconfirmed') from exc
+        if moving:
+            sent_at = time.monotonic()
+            if not go2.pending_action and go2.fsm_state in {'standing', 'moving'} and go2.body_confirmation == 'observed':
+                go2._motion_observation_enabled = True
+            go2._stationary_samples = 0
+            go2.stop_velocity()
+            for _ in range(20):
+                if (go2.fsm_state == 'standing' and go2.body_confirmation == 'observed'
+                        and go2._stationary_samples >= 3
+                        and (getattr(go2, '_sport_state_observed_at', None) or 0) > sent_at):
+                    break
+                await asyncio.sleep(.1)
+            else:
+                go2.runtime.body('unknown', confirmation='unknown')
+                raise ValueError('exploration_stop_unconfirmed')
+    finally:
+        drive._user_handoff_in_progress = False
+
+
+
+async def perform_life_control(action: str, context: ExecutionContext):
+    from cloud.go2.state import LIFE_ACTIONS
+    from cloud.go2.navigation.navigator import navigator
+    if action not in LIFE_ACTIONS:
+        raise ValueError('unknown life action')
+    if not go2.is_connected:
+        raise ValueError('Go2 未连接')
+    runtime = go2.runtime
+    # Validate without preempting tasks or leases: a busy rest never stops work.
+    if action == 'start_explore' and (context.actor != 'admin' or not context.persist):
+        return {'result': 'rejected', 'error': 'admin_only_tool_denied'}
+    reason = runtime.life_reasons(navigation_busy=(navigator.mode.value != 'idle' or
+             (isinstance(getattr(navigator, '_task', None), asyncio.Task) and not navigator._task.done())))[action]
+    if action in {'request_rest', 'start_explore'}:
+        reason = reason or go2.body_ready_reason()
+    if reason:
+        raise ValueError(reason)
+    if action == 'stop_explore':
+        owner = runtime.data['life_owner'] or drive.owner_session_id
+        if owner not in (None, context.session_id) and context.actor != 'admin':
+            raise ValueError('exploration_owned_by_another_session')
+    if action == 'start_explore':
+        snapshot, navigation_reason = navigator._snapshot()
+        if snapshot is None:
+            raise ValueError(navigation_reason or 'navigation_unavailable')
+    control_lease.acquire(context)
+    if action == 'request_rest':
+        if go2.body_ready_reason():
+            raise ValueError(go2.body_ready_reason())
+        runtime.request_rest(navigation_busy=(navigator.mode.value != 'idle' or
+             (isinstance(getattr(navigator, '_task', None), asyncio.Task) and not navigator._task.done())))
+        drive.stop()
+    elif action == 'wake':
+        runtime.wake()
+    elif action == 'start_explore':
+        global _autonomy_mode, _activity_mode_owner
+        _autonomy_mode = 'free_explore'
+        _activity_mode_owner = None
+        runtime.commit('autonomy_config', autonomy_mode='free_explore')
+        _configure_vision_consumers('free_explore', context.session_id, context)
+    else:
+        owner = runtime.data['life_owner'] or drive.owner_session_id
+        if owner not in (None, context.session_id) and context.actor != 'admin':
+            raise ValueError('exploration_owned_by_another_session')
+        await prepare_user_interaction(context)
+        drive.stop(owner_session_id=owner)
+        runtime.exploration_enabled = False
+        runtime.commit('stop_explore', life_state='idle', life_owner=None, life_task_id=None)
+    return {'result': 'ok', 'action': action, **go2.state_snapshot()}
+
+
+@router.post('/life')
+async def go2_life(req: LifeRequest, context: ExecutionContext = Depends(require_service_context)):
+    from cloud.go2.tools.executor import execute_tool
+    return await execute_tool('go2_life', {'action': req.action}, context=_normalize_context(context))
 
 
 class CommandRequest(BaseModel):
@@ -481,14 +603,23 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     from cloud.go2.actions import MOTION_COMMANDS
     if cmd not in MOTION_COMMANDS:
         raise HTTPException(status_code=400, detail=f"Unknown command: {cmd}")
+    if cmd != 'StopMove':
+        await prepare_user_interaction(context)
     _check_direct_motion(cmd, req.params or {}, context)
     _cancel_pending_peer_requests(context)
+    token = None
+    if cmd != 'StopMove' and go2.runtime.data['life_state'] == 'idle':
+        token = go2.runtime.begin_life('play', context.session_id, 'command_' + uuid.uuid4().hex)
     try:
         result = await go2.send_command(cmd, req.params or None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    finally:
+        if token:
+            go2.runtime.finish_life(token)
+        drive.resume_after_user()
     return result
 
 
@@ -499,6 +630,8 @@ async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
     command = "Move" if any((req.vx, req.vy, req.vyaw)) else "StopMove"
+    if command != 'StopMove':
+        await prepare_user_interaction(context)
     _check_direct_motion(command, {"x": req.vx, "y": req.vy, "z": req.vyaw}
                          if command == "Move" else {}, context)
     _cancel_pending_peer_requests(context)
@@ -803,6 +936,10 @@ async def nav_go(req: NavigateRequest, context: ExecutionContext = Depends(requi
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
+    try:
+        await prepare_user_interaction(context)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
     task_id = navigator.start_go_to(req.name, owner_session_id=context.session_id)
@@ -818,6 +955,10 @@ async def nav_start_patrol(req: PatrolRequest, context: ExecutionContext = Depen
     if not req.stops:
         raise HTTPException(status_code=400, detail="stops 不能为空")
     context = _normalize_context(context)
+    try:
+        await prepare_user_interaction(context)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
     result = await navigator.start_patrol(req.stops, owner_session_id=context.session_id)
@@ -1054,6 +1195,10 @@ async def nav_go_home(context: ExecutionContext = Depends(require_intervening_se
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
+    try:
+        await prepare_user_interaction(context)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _acquire_motion(context)
     from cloud.go2.navigation.navigator import navigator
     task = asyncio.create_task(navigator.go_to("home", owner_session_id=context.session_id))

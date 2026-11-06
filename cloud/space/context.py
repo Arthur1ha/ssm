@@ -12,7 +12,9 @@ from cloud.space.constraints import ConstraintStore, get_constraint_store
 from cloud.space.activity import get_activity_store
 from cloud.space.freshness import state_observed_at
 
-_VALUES = ("ism", "fsm_state", "connected", "battery_soc", "brightness",
+_VALUES = ("connection_state", "activity_state", "life_state", "body_state",
+           "body_confirmation", "control_mode", "autonomy_mode", "epoch", "revision",
+           "state_schema_version", "ism", "fsm_state", "connected", "battery_soc", "brightness",
            "r", "g", "b", "value", "level", "detected", "presence")
 _MAX_UNITS = 24
 
@@ -27,7 +29,8 @@ def _summarize(unit_id: str, entry: Any, now: float) -> dict[str, Any]:
     if now - as_of > STATE_MAX_AGE_S:
         return {"source": unit_id, "status": "stale", "as_of": as_of}
     values = {key: state[key] for key in _VALUES if key in state and
-              (isinstance(state[key], (str, bool, int)) or
+              ((state[key] is None and key in {"activity_state", "life_state"}) or
+               isinstance(state[key], (str, bool, int)) or
                (isinstance(state[key], float) and math.isfinite(state[key])))}
     return {"source": unit_id, "status": "current", "as_of": as_of,
             "values": values}

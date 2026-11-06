@@ -30,8 +30,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._completion_target: str | None = None
         self._completion_samples = 0
         self._motion_epoch = 0
+        self._action_deadline = None
         self._velocity_timer = None
         self._move_control_active = False
+        self._velocity_command_active = False
         self._odom_session_id = uuid.uuid4().hex
         self._latest_frame = None
         self._latest_frame_meta = None
@@ -39,6 +41,14 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
+        self._motion_observation_enabled = False
+        self._velocity_command_active = False
+        if self._status_task is not None:
+            self._status_task.cancel()
+            self._status_task = None
+        if self._velocity_timer is not None:
+            self._velocity_timer.cancel()
+            self._velocity_timer = None
         self._finish_pending("cancelled", "reconnecting")
         self._motion_epoch += 1
         self.pending_action = None
@@ -47,6 +57,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._latest_frame = None
         self._latest_frame_meta = None
         self._move_control_active = False
+        self._velocity_command_active = False
         self._odom_session_id = uuid.uuid4().hex
         self._last_state_received_at = None
         self._sport_state_observed_at = None
@@ -65,26 +76,43 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             device_type="Go2",
         )
 
+        connection = self._conn
+        session_id = self._odom_session_id
         try:
-            await self._conn.connect()
+            await connection.connect()
         except Exception as exc:
+            if self._conn is not connection or session_id != self._odom_session_id:
+                return
             self.is_connected = False
             self.fsm_state = "offline"
             logger.error("[Go2/Conn] 连接失败: %s", exc)
             raise
 
+        if self._conn is not connection or session_id != self._odom_session_id:
+            await connection.disconnect()
+            return
+
         # Native 解码器返回米制点云（ndarray N×3），比 LibVoxel 的格索引更易过滤地板
         self._conn.datachannel.set_decoder(decoder_type="native")
 
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LF_SPORT_MOD_STATE"],          self._on_state)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["ROBOTODOM"],                    self._on_odom)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LOW_STATE"],                    self._on_low_state)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["ULIDAR_ARRAY"],                 self._on_voxel_map)
-        self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LIDAR_NAVIGATION_GLOBAL_PATH"], self._on_global_path)
-        await self._conn.datachannel.disableTrafficSaving(True)
+        connection = self._conn
+        def current(callback):
+            def receive(message):
+                if self._conn is connection and self.is_connected:
+                    callback(message)
+            return receive
+        for topic, callback in (("LF_SPORT_MOD_STATE", self._on_state),
+                                ("ROBOTODOM", self._on_odom), ("LOW_STATE", self._on_low_state),
+                                ("ULIDAR_ARRAY", self._on_voxel_map),
+                                ("LIDAR_NAVIGATION_GLOBAL_PATH", self._on_global_path)):
+            self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], current(callback))
+        await connection.datachannel.disableTrafficSaving(True)
+        if self._conn is not connection or session_id != self._odom_session_id:
+            return
 
         self.is_connected = True
-        self.fsm_state = "standing"
+        self.fsm_state = None
+        self._motion_observation_enabled = False
         logger.info("[Go2/Conn] WebRTC 连接成功 serial=%s", serial)
         self._connected_serial = serial
 
@@ -105,13 +133,9 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._last_state_received_at = time.monotonic()
         self._status_task = asyncio.create_task(self._status_loop())
 
-        # 激活 Sport 模块：连接后不发 SPORT_MOD 命令时 WIRELESS_CONTROLLER 会被静默忽略
-        try:
-            await self.balance_stand()
-        except Exception:
-            pass
 
     async def disconnect(self) -> None:
+        owner = self.runtime.data['life_owner']
         self._connected_serial = None
         self._latest_frame = None
         self._latest_frame_meta = None
@@ -122,11 +146,20 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._motion_epoch += 1
         self.pending_action = None
         self.body_confirmation = "unknown"
+        self._motion_observation_enabled = False
+        self._velocity_command_active = False
         self.is_connected = False
         self.fsm_state = "offline"
         self._last_state_received_at = None
         self._sport_state_observed_at = None
         self.reset_sensor_epoch()
+        if owner:
+            from cloud.go2.control import session_tasks
+            session_tasks.cancel(owner)
+        # Only the installed device owns the process-wide navigator.
+        if self is globals().get('go2'):
+            from cloud.go2.navigation.navigator import navigator
+            navigator.stop(owner_session_id=owner) if owner else navigator.stop()
         if self._status_task and not self._status_task.done():
             if self._status_task is not asyncio.current_task():
                 self._status_task.cancel()
@@ -204,13 +237,33 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
                 "motion_channel": "WIRELESS_CONTROLLER", "connection_method": "Remote"}
 
     def _finish_pending(self, result: str, error: str) -> None:
+        pending = self.pending_action
+        if pending and error in {'disconnected', 'reconnecting'}:
+            self.runtime.commit('body_action_interrupted', last_action={
+                **pending, 'phase': 'cancelled' if result == 'cancelled' else 'error',
+                'result': result, 'error': error, 'finished_at': time.time()})
         if self._completion is not None and not self._completion.done():
             self._completion.set_result({"result": result, "error": error})
         self._completion = None
         self._completion_target = None
         self._completion_samples = 0
+        if self._action_deadline is not None:
+            self._action_deadline.cancel()
+            self._action_deadline = None
 
-    def _validate_motion(self, cmd: str, params: dict | None = None) -> str:
+    def _expire_body_action(self, request_id):
+        deadline = self._action_deadline
+        self._action_deadline = None
+        if deadline is not None:
+            deadline.cancel()
+        pending = self.pending_action
+        if pending and pending.get('request_id') == request_id:
+            terminal = {**pending, 'phase': 'timeout', 'result': 'timeout',
+                        'error': 'completion_not_observed', 'finished_at': time.time(), 'ts': time.time()}
+            self.runtime.commit('body_action_timeout', pending_action={**pending, 'phase': 'timeout'},
+                                last_action=terminal)
+
+    def _validate_motion(self, cmd: str, params: dict | None = None) -> str | None:
         spec = ACTIONS.get(cmd)
         if spec is None:
             raise ValueError(f"Unknown command: {cmd}")
@@ -220,15 +273,19 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             raise ValueError(f"Unsupported parameters for {cmd}")
         if self.pending_action is not None and cmd != "StopMove":
             raise CommandBlocked("body_action_unconfirmed")
+        if cmd != "StopMove":
+            reason = self.runtime.active_reason() or self.body_ready_reason()
+            if reason:
+                raise CommandBlocked(reason)
         target = self.fsm_next(cmd)
         # Continuous movement updates and emergency stop are idempotent.
         if cmd == "Move" and self.fsm_state == "moving":
             target = "moving"
         if cmd == "StopMove" and self.fsm_state not in ("offline", "connecting"):
-            target = self.fsm_state if self.fsm_state in {"standing", "lying", "sitting"} else "unknown"
+            target = self.fsm_state if self.fsm_state in {"standing", "lying", "sitting"} else None
         if cmd == "BalanceStand" and self.fsm_state == "standing":
             target = "standing"
-        if target is None:
+        if target is None and cmd != "StopMove":
             raise CommandBlocked(f"{cmd} blocked in {self.fsm_state}")
         if cmd == "Move":
             velocity = {k: (params or {}).get(k, 0.0) for k in ("x", "y", "z")}
@@ -260,7 +317,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             return {"result": "accepted", "confirmation": "sport_rpc" if code == 0 else "transport",
                     "confirmation_scope": "request", "fsm_state": self.fsm_state,
                     "target_state": spec.expected_state,
-                    "completion_supported": spec.completion == "body_height",
+                    "completion_supported": spec.completion == "joint_posture" and self._joint_observation_available,
                     "pending_action": self.pending_action.copy() if self.pending_action else None,
                     "request_status_code": code}
         try:
@@ -270,13 +327,13 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             # A deadline only bounds waiting. It is never posture evidence and
             # does not trigger retries or an unverified recovery command.
             if self._completion is waiter and self.pending_action is not None:
-                self.pending_action["phase"] = "timeout"
+                self._expire_body_action(self.pending_action['request_id'])
             return {"result": "timeout", "error": "completion_not_observed",
                     "fsm_state": self.fsm_state, "target_state": spec.expected_state,
                     "confirmation_scope": "request", "request_status_code": code}
         except asyncio.CancelledError:
             if self._completion is waiter and self.pending_action is not None:
-                self.pending_action["phase"] = "cancelled_unconfirmed"
+                self.pending_action = {**self.pending_action, "phase": "cancelled_unconfirmed"}
             raise
         finally:
             if self._completion is waiter:
@@ -293,7 +350,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         spec = ACTIONS[cmd]
         if cmd == "EnterMoveControl":
             self._move_control_active = True
-            self.fsm_state = next_state
+            self.runtime.commit("remote_enter", control_mode="remote")
             return None, None
         source = self.fsm_state
         old_pending = self.pending_action
@@ -310,13 +367,25 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         body_action = cmd not in {"StopMove", "Move", "BalanceStand"}
         waiter = None
         if body_action:
+            self._motion_observation_enabled = False
+            self._action_observation = {'request_id': request_id,
+                                        'baseline': self._last_motor_positions,
+                                        'motion_seen': False, 'acknowledged': False}
+            self._posture_candidate_since = None
+            self._posture_candidate_samples = 0
             self.pending_action = {"command": cmd, "request_id": request_id,
+                                   "label": spec.label,
                                    "target_state": spec.expected_state,
                                    "execution_state": spec.execution_state,
-                                   "phase": "sending"}
+                                   "source_state": source,
+                                   "life_task_id": self.runtime.data['life_task_id'],
+                                   "sent_at": time.time(), "ts": time.time(), "phase": "sending"}
             self.body_confirmation = "unknown"
-            self.fsm_state = "unknown"
+            self.fsm_state = None
             self._move_control_active = False
+        previous_velocity_requested = self._velocity_command_active
+        if cmd == 'Move':
+            self._velocity_command_active = True
         options = {"api_id": spec.api_id}
         if params:
             options["parameter"] = params
@@ -326,17 +395,17 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
                 timeout=min(spec.timeout_s, 5.0))
         except asyncio.CancelledError:
             if epoch == self._motion_epoch and connection is self._conn and body_action:
-                self.pending_action["phase"] = "cancelled_unconfirmed"
+                self.pending_action = {**self.pending_action, "phase": "cancelled_unconfirmed"}
             raise
         except Exception as exc:
             if epoch != self._motion_epoch or connection is not self._conn:
                 cancelled = asyncio.get_running_loop().create_future()
                 cancelled.set_result({"result": "cancelled", "error": "superseded_during_send"})
                 return cancelled, None
+            self._finish_pending("error", "disconnected")
             self.is_connected = False
             self.fsm_state = "offline"
             self.body_confirmation = "unknown"
-            self._finish_pending("error", "disconnected")
             raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
         if epoch != self._motion_epoch or connection is not self._conn or not self.is_connected:
             cancelled = asyncio.get_running_loop().create_future()
@@ -347,25 +416,38 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         status = header.get("status") if isinstance(header, dict) else None
         code = status.get("code") if isinstance(status, dict) else None
         if type(code) is int and code != 0:
+            if cmd == 'Move':
+                self._velocity_command_active = previous_velocity_requested
             if body_action:
+                self.runtime.finish_body_action(request_id, 'error', phase='rejected',
+                                                error='sport_rpc_rejected')
+                self._action_observation = None
                 self.pending_action = old_pending
                 self.fsm_state = source
                 self.body_confirmation = "previous_observation"
             return None, response
         if body_action:
-            self.pending_action["phase"] = "accepted" if code == 0 else "sent"
-            if spec.completion == "body_height":
+            observation = self._action_observation
+            observation['acknowledged'] = True
+            self.pending_action = {**self.pending_action,
+                                   "phase": "executing" if observation['motion_seen'] else
+                                   "accepted" if code == 0 else "sent"}
+            self._action_deadline = asyncio.get_running_loop().call_later(
+                spec.timeout_s, self._expire_body_action, request_id)
+            if spec.completion == "joint_posture" and self._joint_observation_available:
                 waiter = asyncio.get_running_loop().create_future()
                 self._completion = waiter
                 self._completion_target = spec.expected_state
                 self._completion_samples = 0
         elif cmd == "StopMove":
+            self._velocity_command_active = False
             self._move_control_active = False
             if self.pending_action is not None:
-                self.pending_action["phase"] = "stop_requested_unconfirmed"
+                self.pending_action = {**self.pending_action, "phase": "stop_requested_unconfirmed"}
             self.fsm_state = next_state
         elif cmd == "Move":
-            self.fsm_state = next_state
+            self._motion_observation_enabled = True
+            self._stationary_samples = 0
         logger.info("[Go2/Conn] 发送命令: %s request=%s code=%s", cmd, request_id, code)
         return waiter, response
 
@@ -391,8 +473,6 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         target = self._validate_motion(
             "Move" if active else "StopMove", {"x": vx, "y": vy, "z": vyaw} if active else None,
         )
-        if not active and self._move_control_active and self.fsm_state == "moving":
-            target = "moving"  # 摇杆归零只停运动；由 StopMove 退出控制状态。
         if self._command_lock.locked() and any((vx, vy, vyaw)):
             raise CommandBlocked("command_in_flight")
         try:
@@ -406,7 +486,13 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
         self._finish_pending("cancelled", "velocity_override")
         self._motion_epoch += 1
-        self.fsm_state = target
+        self._velocity_command_active = active
+        if active:
+            self._motion_observation_enabled = True
+            self._stationary_samples = 0
+        elif self.fsm_state == "moving":
+            self.runtime.body(None, confirmation="unknown")
+        self._state_changed()
         if self._velocity_timer:
             self._velocity_timer.cancel()
             self._velocity_timer = None
@@ -416,9 +502,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
     def stop_velocity(self) -> dict:
         """紧急停止和会话清理同时退出遥控状态。"""
-        stopped_state = self.fsm_state if self.fsm_state in {"standing", "lying", "sitting"} else "unknown"
+        stopped_state = self.fsm_state if self.fsm_state in {"standing", "lying", "sitting"} else None
         result = self.move_velocity(0, 0, 0)
         self._move_control_active = False
+        self.runtime.commit("remote_exit", control_mode="normal")
         self.fsm_state = stopped_state
         result["fsm_state"] = stopped_state
         return result

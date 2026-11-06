@@ -249,9 +249,15 @@ async def lifespan(app):
     activity_reconcile = asyncio.create_task(reconcile_activity_once())
 
     async def publish_go2_heartbeat():
+        from cloud.esp32.presentation import publish_control_change
+        last_control = None
+        last_go2_heartbeat = time.monotonic()
         while True:
-            await asyncio.sleep(30)
-            go2_router_module._publish_go2_state()
+            await asyncio.sleep(1)
+            last_control = publish_control_change(last_control)
+            if time.monotonic() - last_go2_heartbeat >= 30:
+                go2_router_module._publish_go2_state()
+                last_go2_heartbeat = time.monotonic()
 
     go2_heartbeat = asyncio.create_task(publish_go2_heartbeat())
     from cloud.agents.go2.workflows.daily_maintenance import maintenance_loop

@@ -7,6 +7,7 @@ import math
 import time
 
 from cloud.agents.common.runner import invoke_blocking
+from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.go2.actions import ACTIONS
 from cloud.go2.control import LeaseConflict, control_lease
@@ -67,6 +68,11 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
     """Shared preflight for tools, FSM buttons, and joystick commands."""
     if not go2.is_connected:
         raise ValueError("Go2 未连接")
+    runtime = runtime_for(go2)
+    if command != 'StopMove' and runtime is not None:
+        reason = runtime.active_reason() or go2.body_ready_reason()
+        if reason:
+            raise ValueError(reason)
     pending = getattr(go2, "pending_action", None)
     if isinstance(pending, dict):
         running = ACTIONS.get(pending.get("command"))
@@ -142,6 +148,9 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
         return _audit(name, context, {"result": "rejected", "error": "visitor_persistence_denied"})
     try:
         if spec.motion:
+            if context.origin_kind != 'agent_autonomous':
+                from cloud.go2.router import prepare_user_interaction
+                await prepare_user_interaction(context)
             check_motion_preconditions(name, params, context)
         elif name != "go2_status" and not go2.is_connected and name in {"go2_observe", "go2_recognize_person", "go2_set_led"}:
             raise ValueError("Go2 未连接")
@@ -153,6 +162,10 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
     from cloud.go2.tools.tools import TOOL_FN_MAP
     fn = TOOL_FN_MAP[name]
     started = time.monotonic()
+    runtime = runtime_for(go2)
+    life_token = None
+    if spec.motion and name != 'go2_life' and runtime is not None and runtime.data['life_state'] == 'idle':
+        life_token = runtime.begin_life('play', context.session_id, 'tool_' + str(id(asyncio.current_task())))
     try:
         with use_context(context):
             if inspect.iscoroutinefunction(fn):
@@ -173,4 +186,7 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
     except Exception as exc:
         logger.exception("Go2 tool %s failed", name)
         result = {"result": "error", "error": type(exc).__name__, "message": str(exc)}
+    finally:
+        if life_token is not None:
+            runtime.finish_life(life_token)
     return _audit(name, context, result, int((time.monotonic() - started) * 1000))

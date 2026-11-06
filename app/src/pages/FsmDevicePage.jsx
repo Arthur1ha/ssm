@@ -1,5 +1,5 @@
 /* FsmDevicePage — 通用状态机设备页。
- * 固定控制区展示 Card 声明的状态与转移；当前态内容和对话排在其后。
+ * 标题显示连接状态，白板统一展示状态与转移，富控件和对话按需呈现。
  * 核心控制由 Agent Card 的 transport / state_machine 驱动。
  */
 function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuestion }) {
@@ -13,7 +13,26 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
   const transport = card?.transport || null;
   const cardLoaded = !!card;
   const [streamState, setStreamState] = useState(null);
-  const [previewState, setPreviewState] = useState(null);
+  const [streamHealth, setStreamHealth] = useState('');
+  const [eventsHealthy, setEventsHealthy] = useState(apiClient.eventsConnected !== false && apiClient.devicesSynced !== false);
+  useEffect(() => {
+    const opened = () => setEventsHealthy(false);
+    const synced = () => setEventsHealthy(apiClient.eventsConnected !== false);
+    const closed = () => setEventsHealthy(false);
+    apiClient.addEventListener('events-open', opened);
+    apiClient.addEventListener('events-error', closed);
+    apiClient.addEventListener('devices-syncing', closed);
+    apiClient.addEventListener('devices-synced', synced);
+    return () => {
+      apiClient.removeEventListener('events-open', opened);
+      apiClient.removeEventListener('events-error', closed);
+      apiClient.removeEventListener('devices-syncing', closed);
+      apiClient.removeEventListener('devices-synced', synced);
+    };
+  }, []);
+  const [controlBusy, setControlBusy] = useState(false);
+  const controlPending = useRef(false);
+  const snapshotCursor = useRef({ unitId, state: null, retired: new Set() });
 
   useEffect(() => {
     if (device?.transport || device?.state_machine) return;
@@ -177,73 +196,87 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
   }, [unitId, modeIds]);
 
   const switchMode = (axis, value) => {
-    if (offline || !axis.set_action && !axis.set) return;
+    if (offline || stateHealth === 'reconnecting' || !axis.set_action && !axis.set) return;
     commandBus.command(unitId, axis.set_action || 'set_mode', { axis: axis.id, value }).then(result => {
       if (result.mode === value) {
         setModeVals(prev => ({ ...prev, [axis.id]: value }));
         setExecution('模式已更新');
       } else reportExecution(result);
-    });
+    }).catch(error => reportExecution({result:'error', error:apiErrorText(error)}));
   };
 
   useEffect(() => {
     const url = transport?.state_stream;
     setStreamState(null);
+    setStreamHealth('');
     if (!url || !url.startsWith('/api/')) return;
+    let active = true;
     const es = new EventSource(url);
+    es.onopen = () => { if (active) setStreamHealth('live'); };
+    es.onerror = () => { if (active) setStreamHealth('reconnecting'); };
     es.onmessage = event => {
+      if (!active) return;
       try {
         const state = JSON.parse(event.data);
-        if (state && typeof state === 'object') setStreamState(state);
+        setStreamHealth('live');
+        if (state && typeof state === 'object') setStreamState(previous => ({ unitId,
+          state: mergeStateSnapshot(previous?.unitId === unitId ? previous.state : null,
+            state, snapshotCursor.current.retired) }));
       } catch (_) {}
     };
-    return () => es.close();
+    return () => { active = false; es.close(); };
   }, [unitId, transport?.state_stream]);
 
   const snapshot = liveState?.state || card?.state || {};
-  const runtimeState = streamState ? { ...snapshot, ...streamState } : snapshot;
+  if (snapshotCursor.current.unitId !== unitId) {
+    snapshotCursor.current = { unitId, state: null, retired: new Set() };
+  }
+  const cursor = snapshotCursor.current;
+  cursor.state = mergeStateSnapshot(cursor.state, snapshot, cursor.retired);
+  cursor.state = mergeStateSnapshot(cursor.state, streamState?.unitId === unitId ? streamState.state : null, cursor.retired);
+  const runtimeState = cursor.state || {};
+  const regions = stateMachineRegions(sm);
+  const primaryRegion = primaryStateRegion(sm);
+  const stateHealth = transport?.state_stream ? streamHealth : eventsHealthy ? 'live' : 'reconnecting';
   const stateField = sm?.state_field || (!card?.card_schema_version
     ? ('fsm_state' in runtimeState ? 'fsm_state' : 'ism' in runtimeState ? 'ism' : '') : '');
   const connectionField = sm?.connection_field || (!card?.card_schema_version && 'connected' in runtimeState ? 'connected' : '');
-  const current = stateField ? runtimeState[stateField] || '' : '';
+  const current = runtimeState[primaryRegion?.state_field || stateField] || '';
   const connected = connectionField ? runtimeState[connectionField] === true : !!(card?._online ?? card?.online);
   const offline = !(card?._online ?? card?.online) || (connectionField && !connected);
   const meta = getAgentMeta(card || { unit_id: unitId, name: unitId });
   const ACCENT = meta.color;
   const hasUserMsg = messages.some(m => m.role === 'user');
-  const visibleWidgets = widgets.filter(w => w.visible !== false
-    && (!w.states?.length || w.states.includes(current))
-    && (!w.requires_connection || connected)
-    && (!w.preview_only || previewState === current));
-  const hasBoardWidget = visibleWidgets.some(widget => widget.type !== 'video' && widget.type !== 'map');
-  const statusLabel = offline ? '离线' : `在线 · ${sm?.views?.[current]?.label || '状态待同步'}`;
-  const hasActionPreview = (sm?.states || []).some(state => {
-    const type = sm?.views?.[state]?.type;
-    return type === 'robot_pose' || type === 'image';
+  const statusLabel = runtimeState.connection_state === 'connecting' ? '连接中'
+    : offline ? '未连接' : stateHealth === 'reconnecting' ? '状态同步中' : '在线';
+  const safetyTransitions = regions.flatMap(region => (region.transitions || [])
+    .filter(t => t.safety && t.action && t.src === runtimeState[region.state_field]));
+  // Missing posture feedback must never remove the independent stop control.
+  const safetyAction = safetyTransitions[0] || (connected
+    ? regions.flatMap(region => region.transitions || []).find(t => t.safety && t.action) : null);
+  const effectiveModeVals = { ...modeVals };
+  modes.forEach(axis => {
+    if (axis.state_field && runtimeState[axis.state_field] != null) effectiveModeVals[axis.id] = runtimeState[axis.state_field];
   });
-  const safetyTransitions = (sm?.transitions || []).filter(t => t.safety && t.action);
-  const safetyAction = safetyTransitions.find(t => t.src === current) || safetyTransitions[0];
 
   /* ── 派发 FSM 转移 ── */
   const dispatchTransition = async t => {
-    if (offline) return;
+    if (offline || (stateHealth === 'reconnecting' || controlPending.current) && !t?.safety) return;
     if (!t?.action) {
       setExecution(t?.hint || '当前状态不允许这个动作');
       return;
     }
+    if (!t.safety) { controlPending.current = true; setControlBusy(true); }
     setExecution('正在等待设备执行反馈…');
-    const result = await commandBus.command(unitId, t.action, t.params || {});
-    if (t.safety && result?.ok) {
-      setExecution(`${t.label}已发送，等待状态同步`);
-    } else if (result?.result === 'accepted' && result.fsm_state === t.dst) {
-      setExecution('');
-    } else {
+    try {
+      const result = await commandBus.command(unitId, t.action, t.params || {});
       reportExecution(result);
+    } catch (error) {
+      reportExecution({ result: 'error', error: apiErrorText(error, '这次请求没有完成，请检查设备状态') });
+    } finally {
+      if (!t.safety) { controlPending.current = false; setControlBusy(false); }
     }
   };
-  const fire = trigger => dispatchTransition((sm?.transitions || []).find(
-    t => t.src === current && t.trigger === trigger
-  ));
 
   /* ── 发送对话 ── */
   const handleSend = text => {
@@ -307,11 +340,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
 
   const isGo2 = unitId === 'go2' || card?.device_id === 'go2'; // dedicated asset settings only
   const isLamp = (card?.skills || []).some(skill => skill.id === 'adjust_lighting');
-  useEffect(() => { setPreviewState(null); }, [unitId]);
-  const isOn = !!current && current !== sm?.initial;
 
   return (
-    <div style={{
+    <div className="device-page" style={{
       position: 'fixed', inset: 0,
       background: 'var(--color-bg)', color: '#ccc',
       fontFamily: 'var(--font-sans)',
@@ -320,7 +351,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     }}>
 
       {/* ── 头部 ── */}
-      <div style={{
+      <div className="device-page__header" style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '7px 16px',
         borderBottom: '1px solid var(--color-border)',
@@ -340,14 +371,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           <div style={{
             fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             color: offline ? 'var(--color-text-dim)' : ACCENT,
-            textShadow: (isOn && !offline) ? `0 0 12px ${ACCENT}80` : 'none',
-            transition: 'text-shadow 0.4s',
           }}>{getAgentDisplayName(card || unitId)}</div>
         </div>
         <div className="device-header__status" title={statusLabel}>
           <i className={offline ? 'is-offline' : ''}/>
           <span>{statusLabel}</span>
         </div>
+        {safetyAction && <button type="button" className="device-header__stop btn btn--danger"
+          disabled={offline || !connected} onClick={() => dispatchTransition(safetyAction)}>{safetyAction.label}</button>}
         <button type="button" className="device-header__settings"
           onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>
       </div>
@@ -355,27 +386,17 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
-        <div className={`device-state-workspace${hasBoardWidget ? ' device-state-workspace--expanded' : ''}`} style={{
-          filter: offline ? 'grayscale(1)' : 'none',
-          opacity: offline ? 0.45 : 1,
-          pointerEvents: offline ? 'none' : 'auto',
-          transition: 'filter 0.2s, opacity 0.2s',
-        }}>
-          <FsmBoard unitId={unitId} sm={sm} current={current} widgets={widgets}
-            onFire={fire} report={reportExecution} actor={actor} color={ACCENT}
-            liveState={runtimeState}
-            stateField={stateField} connectionField={connectionField}
-            connected={connected} selectedState={previewState}
-            onSelectState={hasActionPreview
-              ? state => setPreviewState(previous => previous === state ? null : state)
-              : null}
-            legacyLed={sm?.state_field === 'ism' && sm?.states?.includes('BRIGHT')}/>
+        <div className="device-state-workspace device-state-workspace--shared">
+          <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current}
+            widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
+            actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth}
+            onTransition={dispatchTransition} report={reportExecution}/>
         </div>
       )}
 
       {/* ── ChatPanel（撑满剩余高度）；离线整体置灰并禁用输入 ── */}
-      <div style={{
-        flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column',
+      <div className="device-page__chat" style={{
+        flex: '1 1 180px', minHeight: 150, display: 'flex', flexDirection: 'column',
         filter: offline ? 'grayscale(1)' : 'none',
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
@@ -421,7 +442,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       </div>
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         card={card}
-        modes={modes} modeVals={modeVals} onSwitchMode={switchMode}
+        modes={modes} modeVals={effectiveModeVals} onSwitchMode={switchMode}
         offline={offline} connected={connected} safetyAction={safetyAction}
         onSafety={() => { setSettingsOpen(false); dispatchTransition(safetyAction); }}
         isGo2={isGo2} isLamp={isLamp} actor={actor} unitId={unitId}
@@ -494,107 +515,9 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
   </>;
 }
 
-function FsmBoard({ unitId, sm, current, widgets, onFire, report, actor, color, liveState, stateField, connectionField, legacyLed, connected, selectedState, onSelectState }) {
-  const { useState, useRef, useEffect } = React;
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const drag = useRef(null);
-  const pointers = useRef(new Map());
-  const pinch = useRef(null);
-  const activeWidgets = widgets.map((widget, index) => ({ ...widget, _index: index }))
-    .filter(widget => !widget.states?.length || widget.states.includes(current));
-  const visibleWidgets = activeWidgets.filter(widget => widget.visible !== false)
-    .sort((a, b) => (a.order ?? a._index) - (b.order ?? b._index));
-  const placement = widget => widget.placement === 'media' || (!widget.placement && widget.type === 'video')
-    ? 'media' : 'controls';
-  const displayed = visibleWidgets.filter(widget => (!widget.requires_connection || connected)
-    && (!widget.preview_only || selectedState === current));
-  const videoWidgets = displayed.filter(widget => widget.type === 'video');
-  const mapWidget = displayed.find(widget => widget.type === 'map' && placement(widget) === 'media');
-  const mediaWidgets = displayed.filter(widget => widget !== mapWidget && widget.type !== 'video' && placement(widget) === 'media');
-  const controlWidgets = displayed.filter(widget => widget.type !== 'video' && placement(widget) === 'controls');
-  const hasColorControl = controlWidgets.some(widget => widget.type === 'led_color' || widget.type === 'color_swatches');
-  const hiddenWidgets = activeWidgets.filter(widget => widget.visible === false);
-  const previewTarget = selectedState || current;
-  const view = sm?.views?.[previewTarget];
-  const showPreview = connected && (view?.type === 'robot_pose' || view?.type === 'image');
-  const renderWidget = widget => <div key={`${widget.type}-${widget._index}`}
-    className={`device-board__widget device-board__widget--${placement(widget)}`}>
-    {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState, stateField, connectionField, connected)}
-  </div>;
-
-  // A new state starts with the graph centered in its own draggable viewport.
-  useEffect(() => {
-    drag.current = null;
-    pointers.current.clear();
-    pinch.current = null;
-    setPan({ x: 0, y: 0 });
-    setZoom(1);
-  }, [current]);
-
-  const startPan = event => {
-    if (event.button !== 0 || event.target.closest('[role="button"], button')) return;
-    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, pan };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    if (pointers.current.size === 2) {
-      const [a, b] = [...pointers.current.values()];
-      pinch.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom };
-      drag.current = null;
-    }
-  };
-  const movePan = event => {
-    if (pointers.current.has(event.pointerId)) {
-      pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    }
-    if (pinch.current && pointers.current.size === 2) {
-      const [a, b] = [...pointers.current.values()];
-      const distance = Math.hypot(a.x - b.x, a.y - b.y);
-      setZoom(Math.max(0.85, Math.min(1.2, pinch.current.zoom * distance / Math.max(1, pinch.current.distance))));
-      return;
-    }
-    if (drag.current?.id !== event.pointerId) return;
-    setPan({
-      x: Math.max(-180, Math.min(180, drag.current.pan.x + event.clientX - drag.current.x)),
-      y: Math.max(-150, Math.min(150, drag.current.pan.y + event.clientY - drag.current.y)),
-    });
-  };
-  const endPan = event => {
-    pointers.current.delete(event.pointerId);
-    if (pointers.current.size < 2) pinch.current = null;
-    if (drag.current?.id === event.pointerId) drag.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-  };
-  return <div className="device-board" style={{ '--board-accent': color }}>
-    {(videoWidgets.length > 0 || mapWidget || showPreview) && <div className="device-board__media-row">
-      {videoWidgets.length > 0 && <div className="device-board__video">
-        {videoWidgets.map(renderWidget)}
-      </div>}
-      {mapWidget && <div className="device-board__map">{renderWidget(mapWidget)}</div>}
-      {showPreview && <div className="device-board__preview">
-        <StateVisual view={view} state={previewTarget} color={color}/>
-      </div>}
-    </div>}
-    <div className="device-board__viewport"
-      onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onPointerCancel={endPan}>
-      <div className="device-board__canvas" style={{ transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})` }}>
-        {sm ? <FsmGraph states={sm.states} transitions={sm.transitions} current={current}
-          onFire={onFire} color={color} views={sm.views || {}} layout={sm.layout || {}}
-          onSelectState={onSelectState} selectedState={selectedState}/>
-          : <div className="device-state-workspace__fallback">{current || '—'}</div>}
-      </div>
-    </div>
-    {hiddenWidgets.map(widget => <React.Fragment key={`hidden-${widget._index}`}>
-      {window.fsmWidget?.(unitId, current, [widget], report, actor, liveState, stateField, connectionField, connected)}
-    </React.Fragment>)}
-    {(mediaWidgets.length > 0 || controlWidgets.length > 0) && <div className={`device-board__widget-tray${hasColorControl ? ' device-board__widget-tray--color' : ''}`}>
-      {mediaWidgets.map(renderWidget)}
-      {controlWidgets.map(renderWidget)}
-    </div>}
-    {legacyLed && <div className="device-board__footer">
-      <span className="device-board__legacy">旧版状态机 · 固件待更新</span>
-    </div>}
-  </div>;
+function FsmBoard(props) {
+  return <DeviceStateBoard {...props} offline={!props.connected}
+    onTransition={transition => props.onFire?.(transition.trigger)}/>;
 }
 
 function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, isLamp, actor, unitId, onGo2Settings, onLampSettings }) {

@@ -24,10 +24,13 @@ function consumeInviteTokenFromUrl() {
 }
 
 function SessionGate({ children }) {
-  const { useCallback, useEffect, useState } = React;
+  const { useCallback, useEffect, useState, useRef } = React;
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [bootError, setBootError] = useState('');
+  const [bootAttempt, setBootAttempt] = useState(0);
+  const inviteTokenRef = useRef(null);
 
   const applySession = useCallback(data => {
     const next = normalizeSession(data);
@@ -47,13 +50,21 @@ function SessionGate({ children }) {
   useEffect(() => {
     let active = true;
     const boot = async () => {
+      setLoading(true);
+      setBootError('');
       // Consume and scrub the fragment before the first network round trip.
       // A query-string token is deliberately ignored.
-      const inviteToken = consumeInviteTokenFromUrl();
+      if (inviteTokenRef.current === null) inviteTokenRef.current = consumeInviteTokenFromUrl();
+      const inviteToken = inviteTokenRef.current;
       try {
         const data = await apiClient.request('/api/me', { suppressUnauthorized: true });
         if (active) applySession(data);
       } catch (meError) {
+        // A failed connection is not evidence that the cookie is invalid.
+        if (meError.status !== 401) {
+          if (active) setBootError('暂时连不上空间，请检查网络后重试');
+          return;
+        }
         if (!inviteToken) {
           if (active) setSession(null);
           return;
@@ -65,7 +76,12 @@ function SessionGate({ children }) {
           if (!active) return;
           applySession(data);
         } catch (exchangeError) {
-          if (active) setError(apiErrorText(exchangeError, '邀请无效或已过期'));
+          if (!active) return;
+          if (!exchangeError.status || exchangeError.status >= 500) {
+            setBootError('暂时连不上空间，请稍后重试');
+          } else {
+            setError(apiErrorText(exchangeError, '邀请无效或已过期'));
+          }
         }
       } finally {
         if (active) setLoading(false);
@@ -83,7 +99,7 @@ function SessionGate({ children }) {
       active = false;
       apiClient.removeEventListener('unauthorized', unauthorized);
     };
-  }, [applySession]);
+  }, [applySession, bootAttempt]);
 
   useEffect(() => {
     if (!session?.expires_at) return;
@@ -124,6 +140,7 @@ function SessionGate({ children }) {
   };
 
   if (loading) return <SessionLoading/>;
+  if (bootError) return <SessionLoading error={bootError} onRetry={() => setBootAttempt(value => value + 1)}/>;
   if (!session) return <SessionEntry error={error} onAdminLogin={adminLogin} onVisitorJoin={visitorJoin}/>;
   return children({
     session, logout, refreshSession: loadMe,
@@ -142,12 +159,13 @@ function extractInviteToken(value) {
   }
 }
 
-function SessionLoading() {
+function SessionLoading({ error, onRetry }) {
   return (
-    <main className="session-entry" aria-busy="true">
+    <main className="session-entry" aria-busy={!error}>
       <div className="session-entry__mark">SSM</div>
-      <div className="session-entry__pulse"/>
-      <p>正在确认通行权限…</p>
+      {!error && <div className="session-entry__pulse"/>}
+      <p role={error ? 'alert' : 'status'}>{error || '正在确认通行权限…'}</p>
+      {error && <button type="button" className="btn btn--accent" onClick={onRetry}>重新连接</button>}
     </main>
   );
 }

@@ -24,7 +24,7 @@ function navigate(hash) { window.location.hash = hash; }
 function App({ session, logout, refreshSession }) {
   const { useState, useEffect, useRef } = React;
   const {
-    connected, agents, loadingAgents, agentsError, unitData, refreshAgents,
+    connected, agents, loadingAgents, hasLoadedAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
   const recentEvents = useSpaceActivity(agents);
   const { activity: currentActivity, displayActivity, events: activityEvents, ending: activityEnding,
@@ -166,8 +166,7 @@ function App({ session, logout, refreshSession }) {
     apiClient.addEventListener('server-event', onEvent);
     return () => apiClient.removeEventListener('server-event', onEvent);
   }, [currentActivity?.activity_id]);
-  const ready = !loadingAgents;
-  const hasDevices = ready && agents.length > 0;
+  const hasDevices = agents.length > 0;
   const suggestions = hasDevices ? SUGGESTIONS : [];
 
   const handleSend = (text, options = {}) => {
@@ -236,7 +235,8 @@ function App({ session, logout, refreshSession }) {
 
   /* 当前激活的设备 uid（来自 hash） */
   const m = currentHash.match(/^#\/devices\/([^/]+)$/);
-  const activeUid = m ? m[1] : null;
+  let activeUid = null;
+  try { activeUid = m ? decodeURIComponent(m[1]) : null; } catch (_) { /* Malformed route. */ }
 
   /* 显示中的 uid：激活态 or 正在退出的那个 */
   const displayUid = activeUid || exitingUid;
@@ -286,7 +286,15 @@ function App({ session, logout, refreshSession }) {
           </div>
         </div>
 
-        {/* 可滚动主体 */}
+        {!hasLoadedAgents ? <div className="home-loading" aria-busy={loadingAgents}>
+          <p role={agentsError ? 'alert' : 'status'}>
+            {agentsError || '正在准备你的空间…'}
+          </p>
+          {agentsError && <button type="button" className="btn" onClick={refreshAgents} disabled={loadingAgents}>
+            {loadingAgents ? '重试中…' : '重新加载'}
+          </button>}
+        </div> : <>
+        {/* 卡片、对话和输入栏在首次设备快照就绪后一起显示。 */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {agentsError && (
             <div style={{ padding: '14px 16px 0' }}>
@@ -298,12 +306,9 @@ function App({ session, logout, refreshSession }) {
               </div>
             </div>
           )}
-          {hasDevices && <>
-            <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
-              connected={connected} recentEvents={recentEvents}/>
-          </>}
-          {!loadingAgents && !agentsError && !hasDevices &&
-            <DeviceEmptyState isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>}
+          <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
+            connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
+            isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
           <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
             <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
@@ -380,6 +385,8 @@ function App({ session, logout, refreshSession }) {
             }
           />
         </div>
+
+        </>}
 
         {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}

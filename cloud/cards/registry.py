@@ -28,6 +28,7 @@ class CardRegistry:
         """初始化空注册表。"""
         self._cards: dict[str, AgentCard] = {}
         self._states: dict[str, dict] = {}
+        self._retired_epochs: dict[str, list[str]] = {}
         self._statuses: dict[str, bool] = {}
         self._status_seen_at: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -79,6 +80,37 @@ class CardRegistry:
                 state["_received_at"] = time.time() if received_at is None else received_at
             unit_id = parts[2]
             with self._lock:
+                previous = self._states.get(unit_id, {})
+                if state.get("state_schema_version") == 2:
+                    epoch, revision = state.get("epoch"), state.get("revision")
+                    if not isinstance(epoch, str) or not epoch or type(revision) is not int or revision < 0:
+                        return
+                    if epoch in self._retired_epochs.get(unit_id, ()):
+                        return
+                    if previous.get("state_schema_version") == 2 and previous.get("epoch") == epoch:
+                        previous_revision = previous.get("revision", -1)
+                        if revision < previous_revision:
+                            return
+                        if revision == previous_revision:
+                            # Stable state is periodically published as a heartbeat.
+                            # Equal versions may refresh freshness, never change facts.
+                            ignored = {"ts", "_received_at"}
+                            facts = lambda item: {key: value for key, value in item.items() if key not in ignored}
+                            if retained or facts(previous) != facts(state):
+                                return
+                            old_ts, new_ts = previous.get("ts"), state.get("ts")
+                            if (type(old_ts) in (int, float) and
+                                    (type(new_ts) not in (int, float) or new_ts < old_ts)):
+                                return
+                    old_epoch = previous.get("epoch")
+                    if isinstance(old_epoch, str) and old_epoch != epoch:
+                        retired = self._retired_epochs.setdefault(unit_id, [])
+                        retired.append(old_epoch)
+                        del retired[:-16]
+                elif previous.get("state_schema_version") == 2:
+                    # A legacy message has no generation/order evidence and
+                    # cannot overwrite the running v2 state after migration.
+                    return
                 self._states[unit_id] = state
                 if unit_id in self._cards:
                     self._cards[unit_id]["state"] = self._normalize_runtime_state(unit_id, state)
@@ -109,6 +141,7 @@ class CardRegistry:
                         del self._cards[unit_id]
                         logger.info("[CardRegistry] Removed card: %s", unit_id)
                     self._states.pop(unit_id, None)
+                    self._retired_epochs.pop(unit_id, None)
             else:
                 try:
                     data = json.loads(raw)
@@ -177,10 +210,12 @@ class CardRegistry:
                 logger.warning("[CardRegistry] Failed to build card from manifest: %s", exc)
 
     def _normalize_runtime_state(self, unit_id: str, state: dict, card: AgentCard | None = None) -> dict:
-        """Translate old LED retained values only when a three-state Card is active."""
+        """Translate legacy light values only for the current lighting contract."""
         active = card or self._cards.get(unit_id)
         sm = active.get("state_machine", {}) if active else {}
-        if (sm.get("state_field") == "ism" and set(sm.get("states", [])) == {"OFF", "ON", "BLINKING"}):
+        states = set(sm.get("states", []))
+        if (sm.get("state_field") == "ism" and {"OFF", "ON", "BLINKING"} <= states
+                and not states.intersection({"BRIGHT", "DIM", "COLOR", "BLINK"})):
             aliases = {"BRIGHT": "ON", "DIM": "ON", "COLOR": "ON", "BLINK": "BLINKING"}
             observed = state.get("ism")
             if observed in aliases:

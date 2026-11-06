@@ -112,11 +112,7 @@ function MapWidget({ connected, endpoint }) {
     if (!expanded) return;
     closeRef.current?.focus();
     const onKeyDown = event => {
-      if (event.key === 'Escape') setExpanded(false);
-      if (event.key === 'Tab') {
-        event.preventDefault();
-        closeRef.current?.focus();
-      }
+      if (event.key === 'Escape') { event.stopPropagation(); setExpanded(false); }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => {
@@ -134,10 +130,7 @@ function MapWidget({ connected, endpoint }) {
       {imageUrl && <span className="map-widget__expand" aria-hidden="true">↗</span>}
     </button>
     {expanded && ReactDOM.createPortal(
-      <div className="map-viewer__backdrop" onPointerDown={event => {
-        if (event.target === event.currentTarget) setExpanded(false);
-      }}>
-        <section className="map-viewer" role="dialog" aria-modal="true" aria-label="导航地图">
+        <section className="map-viewer" role="dialog" aria-modal="false" aria-label="导航地图">
           <header className="map-viewer__header">
             <strong>局部导航地图 · 机器狗居中</strong>
             <button ref={closeRef} type="button" onClick={() => setExpanded(false)} aria-label="关闭地图">×</button>
@@ -157,7 +150,7 @@ function MapWidget({ connected, endpoint }) {
             <li><span className="map-viewer__swatch map-viewer__swatch--target" aria-hidden="true"/>目的地</li>
           </ul>
         </section>
-      </div>, document.body,
+      , document.body,
     )}
   </>;
 }
@@ -198,7 +191,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
   }, []);
 
   const onDown = useCallback((e) => {
-    if (disabled) return;
+    if (disabled || activeRef.current) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     activeRef.current = true;
     setDrag(true);
@@ -217,10 +210,16 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
   const stopRef = useRef(onStop);
   stopRef.current = onStop;
   useEffect(() => {
+    if (disabled && activeRef.current) release();
+  }, [disabled, release]);
+  useEffect(() => {
     const stop = () => {
       if (!activeRef.current) return;
       activeRef.current = false;
       clearInterval(timerRef.current);
+      deltaRef.current = { dx: 0, dy: 0 };
+      setDrag(false);
+      setKnob({ x: 0, y: 0 });
       stopRef.current();
     };
     const hidden = () => { if (document.hidden) stop(); };
@@ -246,9 +245,35 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 7 }}>
-      <div ref={padRef} style={pad}
+      <div ref={padRef} style={pad} role="group" tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled} aria-label={`${label}摇杆，方向键控制，松开停止`}
+        onKeyDown={event => {
+          if (disabled) return;
+          const directions = {ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0]};
+          if (event.key === 'Escape' || event.key === ' ') {
+            event.preventDefault(); if (activeRef.current) release(); return;
+          }
+          const delta = directions[event.key];
+          if (!delta) return;
+          event.preventDefault();
+          if (activeRef.current) return;
+          activeRef.current = true;
+          setDrag(true);
+          deltaRef.current = {dx:delta[0],dy:delta[1]};
+          setKnob({x:delta[0]*R,y:delta[1]*R});
+          onMove(delta[0], delta[1]);
+          timerRef.current = setInterval(() => {
+            if (activeRef.current) onMove(deltaRef.current.dx, deltaRef.current.dy);
+          }, 120);
+        }}
+        onKeyUp={event => {
+          if (event.key.startsWith('Arrow') && activeRef.current) { event.preventDefault(); release(); }
+        }}
+        onBlur={() => { if (activeRef.current) release(); }}
         onPointerDown={onDown} onPointerMove={onMove_}
-        onPointerUp={release} onPointerCancel={release}
+        onPointerUp={() => { if (activeRef.current) release(); }}
+        onPointerCancel={() => { if (activeRef.current) release(); }}
+        onLostPointerCapture={() => { if (activeRef.current) release(); }}
       >
         {/* crosshairs */}
         <div style={{ position: "absolute", left: R - 0.5, top: 10, width: 1,

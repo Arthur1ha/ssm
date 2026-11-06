@@ -1,6 +1,8 @@
 import queue
 import time
 import logging
+import threading
+import math
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,9 @@ class ESP32Agent(ReactiveMind):
         self._autonomy_epoch = 0
         self._autonomy_since = 0.0
         self._user_hold_until: float = 0.0
+        self._control_view_lock = threading.Lock()
+        self._control_view_signature = None
+        self._control_view_ts = 0.0
         self._last_reason_sig: tuple | None = None   # 上次问 LLM 时的情境签名（实质变化门）
         self._last_reason_ts: float = 0.0
         self._stable_light_level = ""
@@ -61,6 +66,20 @@ class ESP32Agent(ReactiveMind):
     def get_autonomy_mode(self) -> str:
         """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""
         return self._autonomy_mode
+
+    def control_snapshot(self) -> dict:
+        """Project cloud control facts without changing the edge lighting state."""
+        with self._control_view_lock:
+            mode = self._autonomy_mode
+            holding = mode == "reactive" and time.time() < self._user_hold_until
+            state = "holding" if holding else "ready" if mode == "reactive" else "manual"
+            hold_until = self._user_hold_until if holding else None
+            signature = (mode, state, hold_until)
+            if signature != self._control_view_signature:
+                self._control_view_signature = signature
+                self._control_view_ts = max(time.time(), math.nextafter(self._control_view_ts, math.inf))
+            return {"autonomy_mode": mode, "control_state": state,
+                    "control_hold_until": hold_until, "control_ts": self._control_view_ts}
 
     def set_autonomy_mode(self, mode: str) -> None:
         """切换自主模式；非法值抛 ValueError。"""

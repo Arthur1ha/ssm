@@ -50,6 +50,7 @@ def build_messages(run, *, supplement: str = "", memory: str = ""):
     persona = decision_persona(get_profile())
     state = (f"connected={go2.is_connected}; "
              f"fsm={getattr(go2, 'fsm_state', 'unknown')}; "
+             f"分层状态={go2.state_snapshot() if hasattr(go2, 'state_snapshot') else {}}; "
              f"space={prompt_space_context()}")
     goal = run.goal
     facts = [{"tool": step.get("tool"), "result": step.get("result")}

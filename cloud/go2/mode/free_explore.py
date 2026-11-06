@@ -12,6 +12,7 @@ from dataclasses import replace
 from enum import Enum
 from typing import Optional
 
+from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.go2.tools.tools import go2_observe, get_text_llm
 from cloud.go2.tools.executor import execute_tool
@@ -302,7 +303,7 @@ class Drive:
 
     async def _execute_motion(self, name: str, params: dict, *, publish_reply: bool = True,
                               task_id: str | None = None) -> dict:
-        if self.user_interrupt or not go2.is_connected:
+        if self.user_interrupt or not go2.is_connected or (runtime_for(go2) and go2.runtime.active_reason()):
             result = {"result": "cancelled", "message": "自主模式已中断或设备已断开"}
             if task_id:
                 self._activity_event("action_result", result["message"], action=name,
@@ -609,6 +610,19 @@ class Drive:
     async def _advance_task(self, goal: dict, *, stage: str = "", result: dict | None = None,
                             step_done: bool = False) -> dict:
         """Persist one task transition; Drive only adapts the selected device step."""
+        runtime = runtime_for(go2)
+        if not hasattr(self, '_life_task_tokens'):
+            self._life_task_tokens = {}
+        event_id = goal['event_id']
+        if runtime is not None:
+            if stage == 'start':
+                if runtime.active_reason():
+                    return {'current_goal': {}, 'result': {'result': 'blocked', 'error': runtime.active_reason()}}
+                self._life_task_tokens[event_id] = runtime.begin_life('play', self.owner_session_id, event_id)
+            elif stage == 'finish':
+                token = self._life_task_tokens.pop(event_id, None)
+                if token:
+                    runtime.finish_life(token)
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.go2.workflows.free_explore import build_motivation_graph
         saver = FileCheckpointSaver()
@@ -627,6 +641,20 @@ class Drive:
         return state
 
     async def _handle_event(self, event: dict, graph, saver, thread_id) -> None:
+        try:
+            return await self._handle_event_owned(event, graph, saver, thread_id)
+        finally:
+            token = getattr(self, '_life_task_tokens', {}).pop(event.get('event_id'), None)
+            runtime = runtime_for(go2)
+            if runtime is not None and token:
+                runtime.finish_life(token)
+
+    async def _handle_event_owned(self, event: dict, graph, saver, thread_id) -> None:
+        runtime = runtime_for(go2)
+        if runtime is not None and runtime.active_reason():
+            if event.get('kind') == 'peer_message':
+                event['messenger'].send_result(event['message_id'], 'cancelled', reason='device_rest_or_offline')
+            return
         if event.get("deadline", 0) <= time.time():
             if event.get("kind") == "peer_message":
                 event["messenger"].send_result(event["message_id"], "cancelled", reason="message_expired")
@@ -796,10 +824,21 @@ class Drive:
                 str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply")
 
     async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:
+        runtime = runtime_for(go2)
+        if runtime is not None and (runtime.active_reason() or not runtime.exploration_enabled):
+            return
+        token = runtime.begin_life('explore', self.owner_session_id, 'explore_' + __import__('uuid').uuid4().hex) if runtime else None
+        try:
+            return await self._do_explore_owned(observe_question)
+        finally:
+            if token:
+                runtime.finish_life(token)
+
+    async def _do_explore_owned(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:
         """Explore measured map frontiers; vision describes arrivals separately."""
         from cloud.go2.navigation.navigator import navigator
 
-        if self.user_interrupt or self._pending_question_id:
+        if self.user_interrupt or self._pending_question_id or (runtime_for(go2) and (go2.runtime.active_reason() or not go2.runtime.exploration_enabled)):
             logger.info("[Drive] 探索进入即被打断")
             return
 
@@ -807,7 +846,7 @@ class Drive:
         rejected = self._explore_rejected
         logger.info("[Drive] 开始地图驱动的自主探索")
         for step in range(1):
-            if self.user_interrupt or not go2.is_connected:
+            if self.user_interrupt or not go2.is_connected or (runtime_for(go2) and go2.runtime.active_reason()):
                 break
             snapshot, reason = navigator._snapshot()
             if snapshot is None:
@@ -876,7 +915,7 @@ class Drive:
     async def _exec_explore_tool(self, tool: str, params: dict) -> str:
         """执行探索中 LLM 决策的工具调用，导航工具可被打断。"""
         self._last_execution_result = "ok"
-        if self.user_interrupt or not go2.is_connected:
+        if self.user_interrupt or not go2.is_connected or (runtime_for(go2) and go2.runtime.active_reason()):
             self._last_execution_result = "cancelled"
             return "自主模式已中断或设备已断开"
         try:
@@ -1018,10 +1057,62 @@ class Drive:
 
     # ── 生命周期 ───────────────────────────────────────────────────
 
+    def pause_for_user(self, owner_session_id: str | None = None) -> bool:
+        """Cancel current work, retaining permission for a fresh later decision."""
+        if owner_session_id is not None and self.owner_session_id != owner_session_id:
+            return False
+        runtime = runtime_for(go2)
+        allowed = runtime.exploration_enabled if runtime is not None else False
+        paused = (self.owner_session_id, self._context,
+                  runtime.data['epoch'] if runtime is not None else None)
+        self._pause_in_progress = True
+        try:
+            stopped = self.stop(owner_session_id=owner_session_id)
+            if stopped and allowed and paused[0] is not None:
+                self._paused_exploration = paused
+                runtime.exploration_enabled = True
+            return stopped
+        finally:
+            self._pause_in_progress = False
+
+    def resume_after_user(self) -> bool:
+        if getattr(self, '_pause_in_progress', False) or getattr(self, '_user_handoff_in_progress', False):
+            return False
+        paused = getattr(self, '_paused_exploration', None)
+        runtime = runtime_for(go2)
+        if not paused or runtime is None:
+            return False
+        if (not runtime.exploration_enabled or runtime.data['epoch'] != paused[2]
+                or runtime.data['autonomy_mode'] != 'free_explore'):
+            self._paused_exploration = None
+            return False
+        if (runtime.active_reason() or runtime.data['life_state'] != 'idle'
+                or runtime.data['control_mode'] != 'normal' or go2.pending_action
+                or go2.fsm_state != 'standing' or go2.body_ready_reason()):
+            return False
+        from cloud.go2.control import control_lease
+        from cloud.go2.navigation.navigator import navigator
+        lease = control_lease.snapshot()
+        if lease is not None and lease.owner_session_id != paused[0]:
+            return False
+        nav_task = getattr(navigator, '_task', None)
+        if isinstance(nav_task, asyncio.Task) and not nav_task.done():
+            return False
+        if go2._command_lock.locked():
+            return False
+        self._paused_exploration = None
+        self.start(paused[0], paused[1])
+        return True
+
     def start(self, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
         """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
+        runtime = runtime_for(go2)
+        if runtime is not None:
+            if runtime.active_reason():
+                return
+            runtime.exploration_enabled = True
         self._state            = MotivationalState.IDLE
         self._curiosity        = 0
         self._person_present   = False
@@ -1045,6 +1136,15 @@ class Drive:
         """停止内驱动循环，取消后台任务，同时停止 navigator 避免孤儿导航 task。"""
         if owner_session_id is not None and self.owner_session_id != owner_session_id:
             return False
+        self._paused_exploration = None
+        runtime = runtime_for(go2)
+        if runtime is not None:
+            runtime.exploration_enabled = False
+            if runtime.data['life_state'] == 'explore' and runtime.data['life_owner'] == self.owner_session_id:
+                runtime.finish_life((runtime.data['epoch'], runtime.data['life_task_id']))
+            for token in getattr(self, '_life_task_tokens', {}).values():
+                runtime.finish_life(token)
+            self._life_task_tokens = {}
         owned_session = self.owner_session_id
         active = self._task is not None
         self.user_interrupt = True

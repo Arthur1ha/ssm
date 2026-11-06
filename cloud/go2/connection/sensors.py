@@ -10,6 +10,7 @@ class Go2Sensors:
     def __init__(self) -> None:
         super().__init__()
         self._robot_state: dict = {}
+        self._body_fresh_timer = None
         self._last_state_received_at: float | None = None
         self._odom: dict = {}
         self._odom_received_at: float | None = None
@@ -31,10 +32,19 @@ class Go2Sensors:
         self._voxel_count = 0
         self._global_path: list[dict] = []   # 机器人自身规划的全局路径点
         self._state_queues: list[asyncio.Queue] = []
+        self._state_queue_loops = {}
         self._odom_queues: list[asyncio.Queue] = []
 
     def reset_sensor_epoch(self) -> None:
         """Discard all pose/map observations when a WebRTC session changes."""
+        reset_body = getattr(self, '_reset_body_observations', None)
+        if callable(reset_body):
+            reset_body()
+        if self._body_fresh_timer is not None:
+            self._body_fresh_timer.cancel()
+            self._body_fresh_timer = None
+        self._robot_state = {}
+        self._last_state_received_at = None
         self._odom = {}
         self._odom_received_at = None
         self._odom_source_ts = None
@@ -70,26 +80,42 @@ class Go2Sensors:
                         inner.get("progress") if isinstance(inner, dict) else None,
                         inner.get("mode") if isinstance(inner, dict) else None)
         self._last_state_received_at = time.monotonic()
-        self._sport_state_observed_at = self._last_state_received_at
+        height = inner.get('body_height')
+        velocity = inner.get('velocity')
+        valid_height = type(height) in (int, float) and math.isfinite(height) and height > 0
+        valid_velocity = (isinstance(velocity, (list, tuple)) and len(velocity) >= 3
+                          and all(type(v) in (int, float) and math.isfinite(v) for v in velocity))
+        if valid_height or valid_velocity:
+            self._sport_state_observed_at = self._last_state_received_at
+            motor_fresh = not self._joint_observation_available or (self._last_motor_observed_at is not None
+                and self._last_state_received_at - self._last_motor_observed_at <= 2)
+            self.runtime.commit('telemetry_received', body_telemetry_fresh=motor_fresh)
+            if self._body_fresh_timer is not None:
+                self._body_fresh_timer.cancel()
+            try:
+                self._body_fresh_timer = asyncio.get_running_loop().call_later(2.01, self._refresh_body_freshness)
+            except RuntimeError:
+                self._body_fresh_timer = None
         raw_progress = inner.get("progress")
         progress = raw_progress if type(raw_progress) in (int, float) and math.isfinite(raw_progress) else None
         if progress is not None:
             self._fsm_on_progress(progress)
         self._fsm_on_posture(inner.get("body_height"))
+        self._fsm_on_velocity(inner.get("velocity"), inner.get("yaw_speed"))
         self._robot_state = {
             "mode":        inner.get("mode"),
             "progress":    progress,
             "body_height": inner.get("body_height"),
             "velocity":    inner.get("velocity"),
+            "yaw_speed":   inner.get("yaw_speed"),
             "fsm_state":   self.fsm_state,
             "body_confirmation": self.body_confirmation,
             "pending_action": self.pending_action.copy() if self.pending_action else None,
         }
-        for q in self._state_queues:
-            try:
-                q.put_nowait(self._robot_state.copy())
-            except asyncio.QueueFull:
-                pass
+        self._push_state_queues()
+        resume = getattr(self, '_autonomy_resume_callback', None)
+        if resume is not None:
+            resume()
 
     def _on_odom(self, msg: dict) -> None:
         data = msg.get("data", {})
@@ -176,12 +202,28 @@ class Go2Sensors:
         self._low_state_received_at = now
         self._low_state_count += 1
         data = msg.get("data", {})
+        if not isinstance(data, dict):
+            return
+        motors = data.get('motor_state')
+        positions = None
+        if (isinstance(motors, list) and len(motors) >= 12
+                and all(isinstance(motor, dict) and motor.get('lost', 0) == 0
+                        and type(motor.get('q')) in (int, float)
+                        and math.isfinite(motor['q']) and abs(motor['q']) < 4.5
+                        for motor in motors[:12])):
+            values = [motor['q'] for motor in motors[:12]]
+            if max(abs(value) for value in values) > .1:
+                positions = values
         self._low_state = {
             "battery_soc": data.get("bms_state", {}).get("soc"),
             "power_v":     data.get("power_v"),
-            "imu_rpy":     data.get("imu_state", {}).get("rpy", [0.0, 0.0, 0.0]),
+            "imu_rpy":     data.get("imu_state", {}).get("rpy"),
             "foot_force":  data.get("foot_force", [0, 0, 0, 0]),
+            "motor_positions": positions,
         }
+        observe_body = getattr(self, '_fsm_on_joint_observation', None)
+        if callable(observe_body):
+            observe_body(now)
 
     # ── 数据属性 ──────────────────────────────────────────────────────────
 
@@ -252,11 +294,16 @@ class Go2Sensors:
     def new_state_queue(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=20)
         self._state_queues.append(q)
+        try:
+            self._state_queue_loops[q] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._state_queue_loops[q] = None
         return q
 
     def remove_state_queue(self, q: asyncio.Queue) -> None:
         try:
             self._state_queues.remove(q)
+            self._state_queue_loops.pop(q, None)
         except ValueError:
             pass
 

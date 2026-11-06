@@ -11,7 +11,9 @@ from cloud.space.registry import SpaceRegistry, card_device_id, get_space_regist
 from cloud.space.freshness import state_observed_at
 
 STATE_MAX_AGE_S = 60.0
-_STATE_FIELDS = ("ism", "fsm_state", "connected", "battery_soc", "brightness")
+_STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state",
+           "body_confirmation", "control_mode", "autonomy_mode", "epoch", "revision",
+           "state_schema_version", "ism", "fsm_state", "connected", "battery_soc", "brightness")
 
 
 def _state_summary(state: Any, now: float) -> dict[str, Any]:
@@ -25,7 +27,8 @@ def _state_summary(state: Any, now: float) -> dict[str, Any]:
     summary = {"status": "current", "as_of": as_of}
     for key in _STATE_FIELDS:
         value = state.get(key)
-        if isinstance(value, (str, bool, int)) or (isinstance(value, float) and math.isfinite(value)):
+        if ((key in state and value is None and key in {"activity_state", "life_state"})
+                or isinstance(value, (str, bool, int)) or (isinstance(value, float) and math.isfinite(value))):
             summary[key] = value
     return summary
 

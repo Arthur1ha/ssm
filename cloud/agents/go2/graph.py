@@ -20,6 +20,7 @@ from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.models import get_text_llm
 from cloud.go2.tools.executor import execute_tool
 from cloud.go2.tools.registry import TOOL_REGISTRY
+from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.go2.execution import ExecutionContext
 from cloud.agents.go2.memory.episode import episode_memory
@@ -142,7 +143,24 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                          prompt_trimmed=False)
         return messages
 
+    interaction_token = None
+    runtime = runtime_for(go2)
+    # Explicit read/life skills keep status lookup and wake reachable without
+    # claiming an interaction. Other accepted Graph tasks own play until their
+    # true terminal or clarification event, including time spent waiting on LLM.
+    read_or_life = initial_tool is not None and (initial_tool[0] in READ_ONLY_TOOLS or initial_tool[0] == 'go2_life')
+    if runtime is not None and not runtime.active_reason() and not read_or_life:
+        if context.origin_kind != 'agent_autonomous':
+            from cloud.go2.router import prepare_user_interaction
+            try:
+                await prepare_user_interaction(context)
+            except ValueError as exc:
+                return {'result': 'blocked', 'error': str(exc), 'run_id': run.run_id}
+        if runtime.data['life_state'] == 'idle':
+            interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
+
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
+        nonlocal interaction_token
         if name not in TOOL_REGISTRY:
             return {"result": "rejected", "error": "unknown_tool"}
         if allowed_tools is not None and name not in allowed_tools:
@@ -158,15 +176,30 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                              run_id=run.run_id, agent_id="go2", task_id=step_id,
                              action=name, params=arguments, transport="webrtc",
                              status="pending_execution")
+        runtime = runtime_for(go2)
+        if name not in READ_ONLY_TOOLS and name != 'go2_life' and runtime is not None:
+            if context.origin_kind != 'agent_autonomous':
+                from cloud.go2.router import prepare_user_interaction
+                try:
+                    await prepare_user_interaction(context)
+                except ValueError as exc:
+                    return {'result': 'blocked', 'error': str(exc)}
+            if not runtime.active_reason() and runtime.data['life_state'] == 'idle':
+                interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
+        # A life command is itself the requested task, so release this Graph's
+        # completed interaction before evaluating idle-only rest.
+        if name == 'go2_life' and interaction_token is not None:
+            runtime.finish_life(interaction_token)
+            interaction_token = None
         result = await execute_tool(name, arguments, context=context)
         if name in {"go2_sport", "go2_move", "go2_set_led", "go2_observe"}:
             result = {**result, "device_connected": bool(go2.is_connected),
-                      "device_fsm": str(getattr(go2, "fsm_state", "unknown"))}
+                      "device_fsm": getattr(go2, "fsm_state", None)}
             emit_agent_event("device.result", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", task_id=step_id,
                              status=result.get("result"), result=result,
                              device_connected=bool(go2.is_connected),
-                             device_fsm=str(getattr(go2, "fsm_state", "unknown")),
+                             device_fsm=getattr(go2, "fsm_state", None),
                              device_snapshot_at=time.time(),
                              completion_basis=(result.get("confirmation") or "webrtc_result")
                              if result.get("result") == "ok" else "tool_boundary")
@@ -291,14 +324,22 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         if allowed_tools is not None:
             declarations = {name: schema for name, schema in declarations.items()
                             if name in allowed_tools}
-        await run_role_graph(
-            run, model=get_text_llm(), tool_schemas=declarations,
-            build_messages=build_messages, execute=execute, finalize=finalize,
-            on_step=on_step, on_progress=progress,
-            effectful=lambda name: name not in READ_ONLY_TOOLS,
-            initial_tool=initial_tool, resume=resume,
-            terminal_tools=frozenset({"go2_navigate_to_visible_target"}),
-            resume_value=message if resume else None, checkpointer=view.checkpointer)
+        try:
+            await run_role_graph(
+                run, model=get_text_llm(), tool_schemas=declarations,
+                build_messages=build_messages, execute=execute, finalize=finalize,
+                on_step=on_step, on_progress=progress,
+                effectful=lambda name: name not in READ_ONLY_TOOLS,
+                initial_tool=initial_tool, resume=resume,
+                terminal_tools=frozenset({"go2_navigate_to_visible_target"}),
+                resume_value=message if resume else None, checkpointer=view.checkpointer)
+        finally:
+            if interaction_token is not None:
+                go2.runtime.finish_life(interaction_token)
+            if context.origin_kind != 'agent_autonomous':
+                from cloud.go2.mode.free_explore import drive
+                drive.resume_after_user()
+
     progress_closed.set()
     progress("finished", None)
     if (run.status == "needs_clarification" and publish_reply

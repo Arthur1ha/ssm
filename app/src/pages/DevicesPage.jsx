@@ -12,7 +12,8 @@ function DeviceEmptyState({ isAdmin, onAddDevice }) {
   );
 }
 
-function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceName }) {
+function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceName,
+  loading = false, error = '', isAdmin, onAddDevice }) {
   const { useState } = React;
   const [sensorsOpen, setSensorsOpen] = useState(false);
   const devices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
@@ -21,13 +22,15 @@ function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceNa
   const visibleSensors = sensorsOpen ? sensors : sensors.slice(0, 3);
   const latestEvent = recentEvents[0];
 
-  if (!agents.length) return null;
-
   return <section className="home-space" aria-label={`${spaceName || '当前空间'}概览`}>
     <header className="home-space__heading">
-      <h2>空间现在</h2>
-      <span>{connected ? `${onlineCount}/${agents.length} 在线` : '状态待同步'}</span>
+      <h2>空间伙伴</h2>
+      <span>{loading ? '正在同步…' : error || !connected ? '状态待同步' : `${onlineCount}/${agents.length} 位在线`}</span>
     </header>
+
+    {!agents.length && (loading || error
+      ? <p className="home-space__placeholder" role="status">{error ? '暂时没收到伙伴们的消息，请重试。' : '正在听听伙伴们的近况…'}</p>
+      : <DeviceEmptyState isAdmin={isAdmin} onAddDevice={onAddDevice}/>)}
 
     {devices.length > 0 && <div className="home-space__devices">
       {devices.map(agent => <HomeDeviceRow key={agent.unit_id} agent={agent}

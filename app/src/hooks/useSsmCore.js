@@ -2,11 +2,13 @@
 const _EXCL_TYPES = new Set(['decision']);
 const _EXCL_PLAT = new Set(['cloud']);
 
-function mergeDeviceState(previous, unitId, state) {
+function mergeDeviceState(previous, unitId, state, cursors = new Map()) {
   if (!state || typeof state !== 'object' || !Object.keys(state).length) return previous;
   const current = previous[unitId]?.state;
-  if (current && (current.ts || 0) > (state.ts || 0)) return previous;
-  return { ...previous, [unitId]: { ...(previous[unitId] || {}), state } };
+  if (!cursors.has(unitId)) cursors.set(unitId, new Set());
+  const next = mergeStateSnapshot(current, state, cursors.get(unitId));
+  if (next === current) return previous;
+  return { ...previous, [unitId]: { ...(previous[unitId] || {}), state: next } };
 }
 
 function useSsmCore() {
@@ -14,9 +16,11 @@ function useSsmCore() {
   const [connected, setConnected] = useState(apiClient.eventsConnected);
   const [agents, setAgents] = useState([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
+  const [hasLoadedAgents, setHasLoadedAgents] = useState(false);
   const [agentsError, setAgentsError] = useState('');
   const [unitData, setUnitData] = useState({});
   const refreshSeqRef = useRef(0);
+  const stateCursors = useRef(new Map());
 
   const normalizeDevices = useCallback(devices => (Array.isArray(devices) ? devices : [])
     .filter(device => device.agent_type && !_EXCL_TYPES.has(device.agent_type) && !_EXCL_PLAT.has(device.hw_platform))
@@ -32,8 +36,11 @@ function useSsmCore() {
       const list = normalizeDevices(devices);
       setAgents(list);
       setUnitData(previous => list.reduce(
-        (data, device) => mergeDeviceState(data, device.unit_id, device.state), previous
+        (data, device) => mergeDeviceState(data, device.unit_id, device.state, stateCursors.current), previous
       ));
+      setHasLoadedAgents(true);
+      apiClient.devicesSynced = true;
+      if (apiClient.dispatchEvent) apiClient.dispatchEvent(new Event('devices-synced'));
       return list;
     } catch (error) {
       if (seq !== refreshSeqRef.current) return [];
@@ -47,8 +54,17 @@ function useSsmCore() {
   useEffect(() => { refreshAgents(); }, [refreshAgents]);
 
   useEffect(() => {
-    const connectedHandler = () => setConnected(true);
-    const disconnectedHandler = () => setConnected(false);
+    const connectedHandler = () => {
+      setConnected(true);
+      apiClient.devicesSynced = false;
+      if (apiClient.dispatchEvent) apiClient.dispatchEvent(new Event('devices-syncing'));
+      // SSE carries changes, so one snapshot closes gaps after reconnect.
+      refreshAgents();
+    };
+    const disconnectedHandler = () => {
+      setConnected(false);
+      apiClient.devicesSynced = false;
+    };
     const serverEventHandler = event => {
       const outer = event.detail || {};
       const payload = outer.payload || outer.data || outer;
@@ -74,13 +90,13 @@ function useSsmCore() {
       });
       if (isCardUpdate) {
         setUnitData(previous => payload.card
-          ? { ...previous, [unitId]: { ...(previous[unitId] || {}), state: payload.card.state || {} } }
+          ? mergeDeviceState(previous, unitId, payload.card.state || {}, stateCursors.current)
           : Object.fromEntries(Object.entries(previous).filter(([id]) => id !== unitId)));
         refreshAgents();
       }
       if (payload.state || payload.event) {
         setUnitData(previous => {
-          const withState = payload.state ? mergeDeviceState(previous, unitId, payload.state) : previous;
+          const withState = payload.state ? mergeDeviceState(previous, unitId, payload.state, stateCursors.current) : previous;
           return payload.event
             ? { ...withState, [unitId]: { ...(withState[unitId] || {}), event: payload.event } }
             : withState;
@@ -98,6 +114,6 @@ function useSsmCore() {
     };
   }, [refreshAgents]);
 
-  return { connected, agents, loadingAgents, agentsError, unitData, refreshAgents };
+  return { connected, agents, loadingAgents, hasLoadedAgents, agentsError, unitData, refreshAgents };
 }
 window.useSsmCore = useSsmCore;

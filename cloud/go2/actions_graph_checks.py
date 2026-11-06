@@ -65,10 +65,10 @@ async def test_new_action_acceptance_pauses_graph_and_does_not_replay(
     monkeypatch.setattr(go2, "is_connected", True)
     monkeypatch.setattr(go2, "_conn", SimpleNamespace(datachannel=SimpleNamespace(
         pub_sub=SimpleNamespace(publish_request_new=publish))))
-    monkeypatch.setattr(go2, "_fsm_state", "sitting" if command == "RiseSit" else "standing")
+    go2.runtime.body("sitting" if command == "RiseSit" else "standing", confirmation='observed')
     monkeypatch.setattr(go2, "_completion", None)
     monkeypatch.setattr(go2, "pending_action", None)
-    monkeypatch.setattr(go2, "body_confirmation", "unknown")
+    monkeypatch.setattr(go2, "body_confirmation", "observed")
     owner = control_lease.snapshot()
     if owner is not None:
         control_lease.release(owner.owner_session_id)
@@ -82,7 +82,7 @@ async def test_new_action_acceptance_pauses_graph_and_does_not_replay(
         assert result["actions_taken"] == []
         device_result = result["tool_results"][0]["result"]
         assert device_result["confirmation_scope"] == "request"
-        assert device_result["device_fsm"] == "unknown"
+        assert device_result["device_fsm"] is None
         assert len(publications) == 1
         assert publications[0][1]["api_id"] == ACTIONS[command].api_id
         repeated = await graph.run_go2_loop(

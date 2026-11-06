@@ -4,6 +4,7 @@ Run explicitly: uv run python -m pytest cloud/go2/action_gateway_checks.py
 """
 
 from importlib import import_module
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,10 +34,11 @@ def robot(monkeypatch, tmp_path):
         control_lease.release(owner.owner_session_id)
     connection = Go2Connection()
     connection.is_connected = True
-    connection.fsm_state = "standing"
+    connection.runtime.body("standing", confirmation="observed")
+    connection._sport_state_observed_at = time.monotonic()
     connection.send_command = AsyncMock(return_value={
         "result": "accepted", "confirmation": "sport_rpc", "confirmation_scope": "request",
-        "request_status_code": 0, "fsm_state": "unknown",
+        "request_status_code": 0, "fsm_state": None,
         "pending_action": {"command": "Sit", "phase": "accepted"},
     })
     monkeypatch.setattr(router, "go2", connection)
@@ -54,7 +56,7 @@ def robot(monkeypatch, tmp_path):
 async def test_new_actions_use_tool_boundary_and_preserve_confirmation(robot, command):
     from cloud.go2.tools.executor import execute_tool
 
-    robot.fsm_state = ACTIONS[command].source_states[0]
+    robot.runtime.body(ACTIONS[command].source_states[0], confirmation="observed")
     result = await execute_tool("go2_sport", {"cmd": command}, context=VISITOR)
     assert result["result"] == "accepted"
     assert result["action"] == command
@@ -70,7 +72,7 @@ async def test_new_actions_use_tool_boundary_and_preserve_confirmation(robot, co
 async def test_new_actions_keep_existing_visitor_lease_conflicts(robot, command):
     from cloud.go2.tools.executor import execute_tool
 
-    robot.fsm_state = ACTIONS[command].source_states[0]
+    robot.runtime.body(ACTIONS[command].source_states[0], confirmation="observed")
     control_lease.acquire(OTHER_VISITOR)
     result = await execute_tool("go2_sport", {"cmd": command}, context=VISITOR)
     assert result["result"] == "blocked"
@@ -80,11 +82,11 @@ async def test_new_actions_keep_existing_visitor_lease_conflicts(robot, command)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state,command", [("lying", "Content"), ("sitting", "FrontJump"),
-                                         ("standing", "RiseSit"), ("unknown", "Sit")])
+                                         ("standing", "RiseSit"), (None, "Sit")])
 async def test_illegal_body_transition_is_rejected_before_tool_dispatch(robot, state, command):
     from cloud.go2.tools.executor import execute_tool
 
-    robot.fsm_state = state
+    robot.runtime.body(state, confirmation="unknown" if state is None else "observed")
     result = await execute_tool("go2_sport", {"cmd": command}, context=VISITOR)
     assert result["result"] == "blocked"
     robot.send_command.assert_not_called()
@@ -107,7 +109,7 @@ async def test_catalog_actions_do_not_bypass_tool_parameter_or_role_checks(robot
 async def test_direct_http_command_accepts_only_catalog_params(robot, command):
     from cloud.go2.router import CommandRequest, go2_command
 
-    robot.fsm_state = ACTIONS[command].source_states[0]
+    robot.runtime.body(ACTIONS[command].source_states[0], confirmation="observed")
     with pytest.raises(HTTPException) as error:
         await go2_command(CommandRequest(cmd=command, params={"force": True}), context=VISITOR)
     assert error.value.status_code == 400
@@ -133,7 +135,7 @@ async def test_ordinary_stop_cannot_claim_interruption_of_new_actions(robot, com
     from cloud.go2.tools.executor import execute_tool
     from cloud.go2.router import CommandRequest, go2_command
 
-    robot.fsm_state = "unknown"
+    robot.runtime.body(None, confirmation="unknown")
     robot.pending_action = {"command": command, "phase": "accepted"}
     result = await execute_tool("go2_sport", {"cmd": "StopMove"}, context=VISITOR)
     assert result["result"] == "blocked"
@@ -149,7 +151,7 @@ async def test_emergency_stop_remains_reachable_with_uninterruptible_pending_act
     router = import_module("cloud.go2.router")
     from cloud.go2.navigation.navigator import navigator
 
-    robot.fsm_state = "unknown"
+    robot.runtime.body(None, confirmation="unknown")
     robot.pending_action = {"command": "FrontJump", "phase": "accepted"}
     robot.stop_velocity = MagicMock()
     monkeypatch.setattr(navigator, "stop", MagicMock())
@@ -159,7 +161,7 @@ async def test_emergency_stop_remains_reachable_with_uninterruptible_pending_act
     result = await router.emergency_stop(context=VISITOR)
     assert result["ok"] is True
     robot.stop_velocity.assert_called_once_with()
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     assert robot.pending_action["command"] == "FrontJump"
 
 
@@ -167,7 +169,7 @@ async def test_emergency_stop_remains_reachable_with_uninterruptible_pending_act
 async def test_joystick_zero_keeps_stop_wire_params_empty(robot):
     from cloud.go2.router import VelocityRequest, go2_velocity
 
-    robot.fsm_state = "moving"
+    robot.runtime.body("moving", confirmation="observed")
     robot.move_velocity = MagicMock(return_value={"result": "accepted"})
     result = await go2_velocity(VelocityRequest(vx=0, vy=0, vyaw=0), context=VISITOR)
     assert result["result"] == "accepted"
@@ -196,7 +198,7 @@ def test_card_capabilities_and_topology_derive_from_same_catalog():
     assert schema == get_tool_spec("go2_sport").params_schema
     assert set(schema["properties"]["cmd"]["enum"]) == set(SPORT_COMMANDS)
     graph = _go2_state_machine()
-    assert set(graph["states"]) == {*BODY_STATES, "unknown"}
+    assert set(graph["states"]) == set(BODY_STATES)
     for command in NEW_COMMANDS:
         action = ACTIONS[command]
         transition = next(t for t in graph["transitions"] if t["trigger"] == command)
@@ -211,5 +213,7 @@ def test_card_capabilities_and_topology_derive_from_same_catalog():
                        for t in graph["transitions"])
     stops = {t["src"]: t for t in graph["transitions"] if t.get("safety")}
     assert stops["sitting"]["dst"] == "sitting"
-    assert stops["jumping"]["dst"] == "unknown"
-    assert stops["unknown"]["dst"] == "unknown"
+    assert stops["jumping"]["dst"] == "jumping"
+    assert "unknown" not in stops
+    assert "unknown" not in graph["views"]
+    assert all(edge["src"] != "unknown" and edge["dst"] != "unknown" for edge in graph["transitions"])

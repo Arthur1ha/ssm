@@ -63,7 +63,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
     ? (liveState?.[connectionField] ?? status.connected)
     : onlineConnection;
   const state = (stateField ? liveState?.[stateField] : undefined) || status.fsm_state;
-  const connecting = state === 'connecting' || busy;
+  const connecting = liveState?.connection_state === 'connecting' || state === 'connecting' || busy;
 
   useEffect(() => {
     if (!checked || !widget.auto_connect || connected || connecting || connectRequestedRef.current) return;
@@ -169,7 +169,17 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
     clearTimeout(settleTimer.current);
   }, []);
 
+  const disabledRef = React.useRef(!!widget._disabled);
+  disabledRef.current = !!widget._disabled;
+  React.useEffect(() => {
+    if (!widget._disabled) return;
+    queued.current = null;
+    adjusting.current = false;
+    clearTimeout(sendTimer.current);
+  }, [widget._disabled]);
+
   const flushColor = async () => {
+    if (disabledRef.current) { queued.current = null; return; }
     clearTimeout(sendTimer.current);
     sendTimer.current = null;
     if (sending.current || !queued.current) return;
@@ -211,6 +221,7 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   };
 
   const queueColor = (values, immediate = false) => {
+    if (disabledRef.current) return;
     const nextDraft = {
       hue: ((Number(values.hue) % 360) + 360) % 360,
       saturation: Math.min(1, Math.max(0, Number(values.saturation))),
@@ -264,12 +275,13 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   return <div className="device-led-controls">
     <div className="device-led-controls__layout">
     <div className="device-led-controls__picker">
-      <div ref={wheelRef} className="device-led-controls__wheel" role="slider" tabIndex={0}
+      <div ref={wheelRef} className="device-led-controls__wheel" role="slider" tabIndex={widget._disabled ? -1 : 0} aria-disabled={!!widget._disabled}
         aria-label="选择灯光颜色" aria-valuemin="0" aria-valuemax="359"
         aria-valuenow={Math.round(draft.hue)}
         aria-valuetext={`色相 ${Math.round(draft.hue)} 度，饱和度 ${Math.round(draft.saturation * 100)}%`}
         style={{ '--wheel-x': `${markerX}%`, '--wheel-y': `${markerY}%`, '--wheel-color': `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})` }}
         onPointerDown={event => {
+          if (disabledRef.current) return;
           wheelRef.current.setPointerCapture(event.pointerId);
           adjusting.current = true;
           updateWheel(event);
@@ -313,6 +325,30 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   </div>;
 }
 
+function JoystickControls({ unitId, widget, report, liveState, connected }) {
+  const velocity = React.useRef({vx:0,vy:0,vyaw:0});
+  const feedback = React.useRef(report);
+  feedback.current = report;
+  const action = widget.action;
+  const emit = React.useCallback(() => commandBus.velocity(unitId,action,{...velocity.current},result => {
+    if (!['accepted','ok'].includes(result?.result)) feedback.current?.(result);
+  }), [unitId,action]);
+  const move = React.useCallback((dx,dy) => {
+    velocity.current.vx = +(-dy*.5).toFixed(2);
+    velocity.current.vy = +(-dx*.5).toFixed(2);
+    emit();
+  }, [emit]);
+  const turn = React.useCallback(dx => { velocity.current.vyaw = +(-dx*.8).toFixed(2); emit(); }, [emit]);
+  const stopMove = React.useCallback(() => { velocity.current.vx=0; velocity.current.vy=0; emit(); }, [emit]);
+  const stopTurn = React.useCallback(() => { velocity.current.vyaw=0; emit(); }, [emit]);
+  const disabled = !connected || !stateWidgetEnabled(widget,liveState);
+  const Joystick = window.VirtualJoystick;
+  return <div className="device-joysticks">
+    <Joystick label="移动" radius={36} disabled={disabled} onMove={move} onStop={stopMove}/>
+    <Joystick label="转向" radius={36} disabled={disabled} onMove={turn} onStop={stopTurn}/>
+  </div>;
+}
+
 function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor', liveState = null, stateField = '', connectionField = '', onlineConnection = false) {
   if (!widgets || !widgets.length) return null;
 
@@ -324,38 +360,24 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
   if (!active.length) return null;
 
-  const sendVelocity = (action, vx, vy, vyaw) => commandBus.velocity(
-    unitId, action, { vx, vy, vyaw }, result => {
-      if (result?.result !== 'accepted' && result?.result !== 'ok') report(result);
-    },
-  );
-
   const nodes = active.map((w, idx) => {
     if (w.type === 'led_color' || w.type === 'color_swatches') {
-      return <ColorSwatchesWidget key={'color' + idx} unitId={unitId} widget={w} report={report} ledState={liveState}/>;
+      return <fieldset key={'color' + idx} className="device-state-control-fieldset" disabled={w._disabled}>
+        <ColorSwatchesWidget unitId={unitId} widget={w} report={report} ledState={liveState}/></fieldset>;
     }
     if (w.type === 'connection') {
       return <ConnectionWidget key={'conn' + idx} widget={w} unitId={unitId} actor={actor} liveState={liveState} stateField={stateField} connectionField={connectionField} onlineConnection={onlineConnection}/>;
     }
     if (w.type === 'joystick' && VirtualJoystick) {
-      const action = w.action;
-      return (
-        <div key={'joy' + idx} className="device-joysticks">
-          <VirtualJoystick label="移动" radius={36} disabled={false}
-            onMove={(dx, dy) => sendVelocity(action, +(-dy * 0.5).toFixed(2), +(-dx * 0.5).toFixed(2), 0)}
-            onStop={() => sendVelocity(action, 0, 0, 0)}/>
-          <VirtualJoystick label="转向" radius={36} disabled={false}
-            onMove={(dx) => sendVelocity(action, 0, 0, +(-dx * 0.8).toFixed(2))}
-            onStop={() => sendVelocity(action, 0, 0, 0)}/>
-        </div>
-      );
+      return <JoystickControls key={'joy' + idx} unitId={unitId} widget={w} report={report}
+        liveState={liveState} connected={onlineConnection}/>;
     }
     if (w.type === 'video' && VideoCanvas && w.endpoint?.startsWith('/api/')) {
       return (
         <div key={'cam' + idx} className="device-state-video" style={{ aspectRatio: '16/9', background: '#0a0c14',
           border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
           overflow: 'hidden' }}>
-          <VideoCanvas connected={true} endpoint={w.endpoint}/>
+          <VideoCanvas connected={onlineConnection} endpoint={w.endpoint}/>
         </div>
       );
     }

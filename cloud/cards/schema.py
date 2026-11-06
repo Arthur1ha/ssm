@@ -18,6 +18,11 @@ class FsmTransition(TypedDict):
     params: NotRequired[dict]  # 该转移的默认 params（颜色/亮度等）
     safety: NotRequired[bool]  # 高优先级安全转移，仍走同一状态机派发路径
     graph_hidden: NotRequired[bool]  # 通过其他控件执行的动作，不在状态图里画线
+    availability_key: NotRequired[str]  # 默认 action；参数化动作可绑定独立门禁键
+    required_actor: NotRequired[Literal["admin", "visitor"]]  # UI 提示，权限仍由服务端校验
+    available_only: NotRequired[bool]  # 不可用时不展示次要入口（例如待命时关闭探索许可）
+    completion: NotRequired[str]  # 真实完成依据；unavailable 不得承诺可串联执行
+    description: NotRequired[str]
 
 
 class StateView(TypedDict):
@@ -30,16 +35,41 @@ class StateView(TypedDict):
     symbol: NotRequired[str]
 
 
+class StateRegion(TypedDict):
+    """Optional parallel/hierarchical region; runtime values stay in state."""
+
+    id: str
+    label: str
+    state_field: str
+    states: list[str]
+    transitions: list[FsmTransition]
+    views: NotRequired[dict[str, StateView]]
+    layout: NotRequired[dict[str, dict[str, float]]]
+    parent: NotRequired[dict[str, str]]  # {region, state} activation condition
+    retain_when_inactive: NotRequired[bool]  # Show observed body facts in rest.
+    available_actions_field: NotRequired[str]  # state 中的动作键列表；缺少时只依拓扑展示
+    blocked_actions_field: NotRequired[str]  # state 中的 {动作键: 阻止原因}
+    until_field: NotRequired[str]  # 可选 Unix 秒截止时间；到期仍等服务端状态同步
+    diagram_group: NotRequired[str]  # 白板中的空间分组，不改变区域的运行语义
+    node_radius: NotRequired[int]  # 白板坐标中的圆形节点半径
+
+
 class StateMachine(TypedDict):
     """智能体静态状态机拓扑。不含当前态——当前态由实时通道提供。"""
 
     states: list[str]
     state_field: str
     connection_field: NotRequired[str]
+    regions: NotRequired[list[StateRegion]]
+    primary_region: NotRequired[str]  # 默认主区，控件/动作预览不依赖固定设备区域名
+    execution_field: NotRequired[str]  # 当前请求，值为 {command,label,phase,...}
+    last_execution_field: NotRequired[str]  # 最近终态结果，值为 {command,label,result,...}
+    freshness_field: NotRequired[str]  # state 中的布尔新鲜度字段；false 时禁止普通动作
     transitions: list[FsmTransition]
     initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
     views: NotRequired[dict[str, StateView]]  # 状态语义与预览；前端不按设备类型硬编码
-    layout: NotRequired[dict[str, dict[str, float]]]  # 可选节点位置，x/y 为 0..1 的画布比例
+    layout: NotRequired[dict[str, dict[str, float]]]  # 相对初始画布的比例；大于 1 可延伸到平移区域
+    diagram: NotRequired[dict]  # {width,height,sections:[{label,top}]}，仅影响白板布局
 
 
 class SkillInvoke(TypedDict):
@@ -95,6 +125,7 @@ class ModeAxis(TypedDict):
     label: str          # 轴名，如 "自主性"
     options: list[ModeOption]
     set_action: NotRequired[str]
+    state_field: NotRequired[str]  # 有实时值时取代独立 GET/本地模式副本
     get: NotRequired[str]        # http: GET 端点，返回 {mode}
     set: NotRequired[str]        # http: PUT 端点，body 发 {mode: value}
     get_topic: NotRequired[str]  # mqtt: 读当前值的 topic
@@ -114,8 +145,12 @@ class Widget(TypedDict):
 
     type: Literal["connection", "joystick", "video", "map", "color_swatches", "led_color"]
     states: list[str]            # 在哪些状态下显示（空=全程）
+    state_field: NotRequired[str]  # 默认绑定 state_machine.primary_region
     placement: NotRequired[Literal["media", "controls"]]  # 语义区域，前端按屏幕尺寸排版
     order: NotRequired[int]      # 同一区域内的显示顺序
+    node_state: NotRequired[str]  # 选择该节点时展开控件
+    enter_action: NotRequired[str]  # 启用控件前执行的能力命令
+    exit_action: NotRequired[str]  # 停止并退出控件的能力命令
     endpoint: NotRequired[str]   # 绑定的 transport 端点
     status_endpoint: NotRequired[str]
     auto_connect: NotRequired[bool]
@@ -127,6 +162,10 @@ class Widget(TypedDict):
     preview_only: NotRequired[bool]
     channels: NotRequired[list[str]]
     swatches: NotRequired[list[dict]]
+    enabled_when: NotRequired[dict]  # 字段→标量或标量数组，逐项 AND 匹配，无表达式执行
+    available_actions_field: NotRequired[str]
+    blocked_actions_field: NotRequired[str]
+    availability_key: NotRequired[str]
 
 
 class AgentCard(TypedDict):

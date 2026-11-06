@@ -24,9 +24,12 @@ class Go2Video:
         loop = asyncio.get_event_loop()
         logger.info("[Go2/Video] 采集开始")
         last_encode = 0.0
-        while self.is_connected:
+        session = getattr(self, '_odom_session_id', None)
+        while self.is_connected and session == getattr(self, '_odom_session_id', None):
             try:
                 frame = await track.recv()  # 必须持续 drain，否则 aiortc 缓冲区积压
+                if session != getattr(self, '_odom_session_id', None) or not self.is_connected:
+                    break
                 captured_at = time.time()
                 received_at = time.monotonic()
                 pose_at_capture = getattr(self, "_odom", {}).copy()
@@ -45,7 +48,10 @@ class Go2Video:
                     img.save(buf, format="JPEG", quality=40)
                     return buf.getvalue()
 
-                self._latest_frame = await loop.run_in_executor(None, encode)
+                encoded = await loop.run_in_executor(None, encode)
+                if session != getattr(self, '_odom_session_id', None) or not self.is_connected:
+                    break
+                self._latest_frame = encoded
                 self._frame_sequence += 1
                 self._latest_frame_meta = {"frame_id": self._frame_sequence,
                                            "captured_at": captured_at,

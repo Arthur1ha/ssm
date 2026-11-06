@@ -38,17 +38,11 @@
   </style>
 </head>
 <body>
-  <script>
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('message', e => {
-        if (e.data?.type === 'SW_UPDATED') window.location.reload();
-      });
-    }
-  </script>
-
   <!-- Plain JS globals (load before React) -->
+  <script src="src/utils/stateMachine.js"></script>
   <script src="src/utils/agentMeta.js"></script>
   <script src="src/utils/color.js"></script>
+  <script src="src/utils/stateSnapshot.js"></script>
   <script src="src/utils/qrLibrary.js"></script>
   <script src="src/ApiClient.js"></script>
 
@@ -77,6 +71,7 @@
   <script type="text/babel" src="src/pages/fsmWidgets.jsx"></script>
   <script type="text/babel" src="src/pages/StateVisual.jsx"></script>
   <script type="text/babel" src="src/pages/FsmGraph.jsx"></script>
+  <script type="text/babel" src="src/pages/HierarchicalFsmBoard.jsx"></script>
   <script type="text/babel" src="src/components/AgentPersonalitySettings.jsx"></script>
   <script type="text/babel" src="src/components/Go2AssetsDrawer.jsx"></script>
   <script type="text/babel" src="src/pages/FsmDevicePage.jsx"></script>

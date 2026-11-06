@@ -32,7 +32,7 @@ def robot_at(state="standing", code=0):
 
     robot = Go2Connection()
     robot.is_connected = True
-    robot.fsm_state = state
+    robot.runtime.body(state, confirmation='observed')
     robot._conn = SimpleNamespace(datachannel=SimpleNamespace(pub_sub=SimpleNamespace(
         publish_request_new=publish, publish_without_callback=lambda *a, **k: None)))
     return robot, sent
@@ -48,14 +48,14 @@ async def test_new_actions_use_declared_sport_mapping_without_claiming_completio
     assert result["confirmation_scope"] == "request"
     assert result["completion_supported"] is False
     assert result["target_state"] == target
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     assert robot.pending_action["command"] == command
     assert robot.available_actions == []
     # The recorded heights overlap sitting and standing. Neither height nor an
     # uncorrelated progress cycle may unlock the next action.
     for height, progress in ((0.07, 0), (0.32, 0.5), (0.32, 0), (0.32, 0)):
         robot._on_state({"data": {"body_height": height, "progress": progress}})
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     with pytest.raises(CommandBlocked, match="unconfirmed"):
         await robot.send_command("Hello")
     with pytest.raises(CommandBlocked, match="unconfirmed"):
@@ -74,7 +74,7 @@ async def test_sit_does_not_unlock_rise_sit_without_a_real_sitting_observation()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source,command", [("lying", "Sit"), ("sitting", "Dance1"),
-                                            ("sitting", "Move"), ("unknown", "FrontJump")])
+                                            ("sitting", "Move"), (None, "FrontJump")])
 async def test_illegal_sources_do_not_publish(source, command):
     robot, sent = robot_at(source)
     with pytest.raises(CommandBlocked):
@@ -101,11 +101,11 @@ async def test_stop_request_does_not_resolve_unconfirmed_jump_or_invent_standing
     request_id = robot.pending_action["request_id"]
     stopped = await robot.send_command("StopMove")
     assert stopped["result"] == "accepted"
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     assert robot.pending_action["request_id"] == request_id
     assert robot.pending_action["phase"] == "stop_requested_unconfirmed"
     robot.stop_velocity()
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     with pytest.raises(CommandBlocked):
         await robot.send_command("Hello")
     assert len(sent) == 2
@@ -132,36 +132,30 @@ async def test_unknown_parameters_and_library_commands_are_rejected_before_publi
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command,initial,height,target", [
     ("StandDown", "standing", 0.07, "lying"), ("StandUp", "lying", 0.32, "standing")])
-async def test_stand_waiter_uses_three_post_response_samples_not_target_assignment(command, initial, height, target):
+async def test_height_only_feedback_does_not_confirm_stand_commands(command, initial, height, target):
     robot, sent = robot_at(initial)
-    task = asyncio.create_task(robot.send_command(command, completion_timeout=1))
-    for _ in range(6):
-        await asyncio.sleep(0)
-        if robot._completion is not None:
-            break
-    assert robot.fsm_state == "unknown"
-    for _ in range(2):
-        robot._on_state({"data": {"body_height": height}})
-    assert not task.done()
-    robot._on_state({"data": {"body_height": height}})
-    result = await task
-    assert result == {"result": "ok", "confirmation": "body_height", "fsm_state": target,
-                      "body_height": height}
-    assert robot.fsm_state == target
-    assert robot.pending_action is None
+    result = await robot.send_command(command)
+    assert result["result"] == "accepted"
+    assert result["completion_supported"] is False
+    for _ in range(8):
+        robot._on_state({"data": {"body_height": height, "velocity": [0, 0, 0]}})
+    assert robot.fsm_state is None
+    assert robot.pending_action["command"] == command
     assert len(sent) == 1
 
 
 @pytest.mark.asyncio
-async def test_posture_timeout_cannot_release_pending_motion_or_retry():
+async def test_posture_timeout_cannot_release_pending_motion_from_height_alone():
     robot, sent = robot_at()
-    result = await robot.send_command("StandDown", completion_timeout=0.001)
-    assert result["result"] == "timeout"
-    assert robot.fsm_state == "unknown"
+    result = await robot.send_command("StandDown")
+    assert result["result"] == "accepted"
+    robot._expire_body_action(robot.pending_action["request_id"])
+    assert robot.runtime.data["last_action"]["result"] == "timeout"
+    assert robot.fsm_state is None
     assert robot.pending_action["phase"] == "timeout"
     for _ in range(3):
         robot._on_state({"data": {"body_height": 0.32, "progress": 0}})
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     with pytest.raises(CommandBlocked):
         await robot.send_command("Hello")
     assert len(sent) == 1
@@ -169,6 +163,7 @@ async def test_posture_timeout_cannot_release_pending_motion_or_retry():
 
 def test_uncorrelated_progress_never_completes_old_or_new_gestures():
     robot = Go2FSM()
+    robot.is_connected = True
     for state in ("greeting", "stretching", "dancing1", "dancing2", "jumping"):
         robot.fsm_state = state
         robot._fsm_on_progress(0.8)
@@ -201,7 +196,7 @@ async def test_old_request_failure_after_reconnect_cannot_mutate_new_connection(
     new_connection = SimpleNamespace()
     robot._conn = new_connection
     robot.is_connected = True
-    robot.fsm_state = "unknown"
+    robot.fsm_state = None
     new_pending = {"command": "RiseSit", "request_id": "new-connection-action", "phase": "accepted"}
     robot.pending_action = new_pending
     fail_old.set()
@@ -209,24 +204,30 @@ async def test_old_request_failure_after_reconnect_cannot_mutate_new_connection(
     assert result["result"] == "cancelled"
     assert robot.is_connected is True
     assert robot._conn is new_connection
-    assert robot.fsm_state == "unknown"
-    assert robot.pending_action is new_pending
+    assert robot.fsm_state is None
+    assert robot.pending_action == new_pending
 
 
 @pytest.mark.asyncio
-async def test_cancelled_posture_wait_does_not_unlock_or_accept_late_height():
+async def test_cancelled_posture_wait_does_not_accept_height_only_recovery():
     robot, sent = robot_at()
+    # Explicitly supported joint-feedback capability creates a physical waiter.
+    # The cancellation regression then withholds LOW/IMU observations.
+    robot._joint_observation_available = True
+    import time
+    robot._last_motor_observed_at = time.monotonic()
     task = asyncio.create_task(robot.send_command("StandDown"))
     for _ in range(8):
         await asyncio.sleep(0)
         if robot._completion is not None:
             break
+    assert robot._completion is not None
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert robot.pending_action["phase"] == "cancelled_unconfirmed"
     for _ in range(3):
         robot._on_state({"data": {"body_height": 0.07}})
-    assert robot.fsm_state == "unknown"
+    assert robot.fsm_state is None
     assert robot._completion is None
     assert len(sent) == 1

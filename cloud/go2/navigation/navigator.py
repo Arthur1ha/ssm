@@ -9,6 +9,7 @@ import time
 from enum import Enum
 from typing import Callable, Optional
 
+from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.agents.go2.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
@@ -60,6 +61,7 @@ class Navigator:
         self.owner_session_id: str | None = None
         self.last_trusted_pose: dict | None = None
         self.task_records: dict[str, dict] = {}
+        self._life_tokens = {}
 
     @property
     def state(self) -> dict:
@@ -71,8 +73,13 @@ class Navigator:
 
     def _begin(self, name: str, owner_session_id: str, task: asyncio.Task) -> str:
         import uuid
+        runtime = runtime_for(go2)
+        if runtime is not None and (runtime.active_reason() or go2.body_ready_reason() or go2.fsm_state not in {'standing', 'moving'} or go2.pending_action):
+            raise ValueError(runtime.active_reason() or 'body_not_ready')
         self.stop()
         self.task_id = uuid.uuid4().hex
+        if runtime is not None and runtime.data['life_state'] == 'idle':
+            self._life_tokens[self.task_id] = runtime.begin_life('play', owner_session_id, self.task_id)
         self.status = "accepted"
         self.reason = None
         self.message = None
@@ -84,6 +91,15 @@ class Navigator:
         self.mode = NavMode.GOING_TO
         self.owner_session_id = owner_session_id
         self._task = task
+        if runtime is not None:
+            runtime.commit('navigation_accepted', navigation_active=True)
+            accepted_id, accepted_epoch = self.task_id, runtime.data['epoch']
+            def finished(_task):
+                if self.task_id == accepted_id and runtime.data['epoch'] == accepted_epoch:
+                    runtime.commit('navigation_finished', navigation_active=False)
+                    from cloud.go2.mode.free_explore import drive
+                    drive.resume_after_user()
+            task.add_done_callback(finished)
         self.task_records[self.task_id] = {"task_id": self.task_id, "status": "accepted",
                                            "target": name, "reason": None, "message": None}
         if len(self.task_records) > 50:
@@ -96,7 +112,11 @@ class Navigator:
 
     def start_go_to(self, name: str, owner_session_id: str = "system") -> str:
         task = asyncio.create_task(self._run_to(name))
-        return self._begin(name, owner_session_id, task)
+        try:
+            return self._begin(name, owner_session_id, task)
+        except BaseException:
+            task.cancel()
+            raise
 
     async def go_to(self, name: str, owner_session_id: str = "system") -> dict:
         self._begin(name, owner_session_id, asyncio.current_task())
@@ -370,11 +390,17 @@ class Navigator:
             except (RuntimeError, ValueError):
                 logger.warning("[Go2/Nav] stop packet could not be sent")
             if self._task is task:
+                runtime = runtime_for(go2)
+                if runtime is not None:
+                    runtime.commit('navigation_finished', navigation_active=False)
                 self._task = None
                 self.mode = NavMode.IDLE
                 self.owner_session_id = None
                 self.current_path = None
                 self.current_grid_obj = None
+            if runtime_for(go2) is not None:
+                from cloud.go2.mode.free_explore import drive
+                drive.resume_after_user()
 
     def _snapshot(self):
         now = time.monotonic()
@@ -502,6 +528,10 @@ class Navigator:
 
     def _finish(self, status: str, reason: str | None, message: str, task_id: str | None,
                 diagnostics: dict | None = None) -> dict:
+        runtime = runtime_for(go2)
+        token = self._life_tokens.pop(task_id, None)
+        if runtime is not None and token:
+            runtime.finish_life(token)
         result = {"task_id": task_id, "status": status, "reason": reason, "message": message,
                   "last_trusted_pose": self.last_trusted_pose, "actual_goal": self.actual_goal}
         if diagnostics is not None:
@@ -526,6 +556,10 @@ class Navigator:
             self.status, self.reason, self.message = "cancelled", "cancelled", "导航已取消"
             if self.task_id in self.task_records:
                 self.task_records[self.task_id].update(status="cancelled", reason="cancelled", message="导航已取消")
+        runtime = runtime_for(go2)
+        token = self._life_tokens.pop(self.task_id, None)
+        if runtime is not None and token:
+            runtime.finish_life(token)
         self.mode = NavMode.IDLE
         self.target = None
         self.patrol_stops = []

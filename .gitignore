@@ -56,6 +56,13 @@ docs/superpowers/plans/*
 !docs/superpowers/plans/2026-11-03-extensible-peer-games.md
 !docs/superpowers/plans/2026-11-06-go2-hierarchical-state-and-actions.md
 !docs/superpowers/plans/2026-11-06-go2-actions-ab-review.md
+!docs/superpowers/plans/2026-11-06-go2-hierarchy-cg-review.md
+!docs/superpowers/plans/go2-hierarchy-cg/
+docs/superpowers/plans/go2-hierarchy-cg/*
+!docs/superpowers/plans/go2-hierarchy-cg/mobile.png
+!docs/superpowers/plans/go2-hierarchy-cg/rest-mobile.png
+!docs/superpowers/plans/go2-hierarchy-cg/desktop.png
+!docs/superpowers/plans/go2-hierarchy-cg/tablet.png
 !docs/research/
 docs/research/*
 !docs/research/2026-10-30-ai-character-personality-systems.md

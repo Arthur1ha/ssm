@@ -3,19 +3,31 @@ function RobotPoseVisual({ pose, label }) {
   const variants = {
     offline:     { y: 68, angle: 0,  feet: [[52, 117], [92, 117], [143, 117], [181, 117]] },
     lying:       { y: 80, angle: 0,  feet: [[53, 116], [91, 116], [145, 116], [184, 116]] },
+    sitting:     { y: 63, angle: -18, feet: [[68, 115], [98, 113], [160, 117], [185, 117]] },
     standing:    { y: 48, angle: 0,  feet: [[52, 116], [91, 116], [145, 116], [184, 116]] },
     moving:      { y: 48, angle: 0,  feet: [[38, 116], [106, 108], [130, 108], [198, 116]] },
     greeting:    { y: 48, angle: 0,  feet: [[52, 116], [91, 116], [145, 116], [205, 24]] },
     stretching:  { y: 67, angle: -8, feet: [[48, 116], [87, 116], [153, 116], [199, 116]] },
     'dance-left':  { y: 48, angle: -13, feet: [[48, 116], [86, 107], [150, 116], [194, 72]] },
     'dance-right': { y: 48, angle: 13, feet: [[41, 78], [90, 116], [150, 107], [190, 116]] },
+    content:     { y: 62, angle: 0, feet: [[63, 112], [92, 110], [148, 110], [183, 112]] },
+    finger_heart:{ y: 49, angle: -7, feet: [[49, 116], [92, 116], [164, 37], [184, 37]] },
+    pouncing:    { y: 46, angle: 18, feet: [[43, 93], [73, 101], [183, 100], [218, 107]] },
+    jumping:     { y: 29, angle: -7, feet: [[57, 82], [101, 80], [143, 82], [185, 79]] },
   };
-  const cfg = variants[pose] || variants.standing;
+  const poseId = ({ dancing1: 'dance-left', dancing2: 'dance-right', 'finger-heart': 'finger_heart',
+    'front-pounce': 'pouncing', 'front-jump': 'jumping' })[pose] || pose;
+  const cfg = variants[poseId];
+  if (!cfg) return <svg className="device-pose" viewBox="0 0 240 140" role="img" aria-label="暂无姿态示意">
+    <rect x="55" y="45" width="130" height="52" rx="12" fill="none" stroke="currentColor" strokeDasharray="5 5" opacity=".35"/>
+    <text x="120" y="80" textAnchor="middle" fontSize="30" fill="currentColor" opacity=".65">?</text>
+    <path d="M24 118 H216" stroke="currentColor" opacity=".2"/>
+  </svg>;
   const roots = [68, 96, 145, 170];
   const muted = pose === 'offline';
 
   return (
-    <svg className="device-pose" viewBox="0 0 240 140" role="img" aria-label={`${label}动作预设图`}>
+    <svg className="device-pose" viewBox="0 0 240 140" role="img" aria-label={`${label}动作示意图，不代表实际观测画面`}>
       <path d="M18 118 H222" stroke="currentColor" strokeOpacity=".22" strokeWidth="1"/>
       <path d="M35 125 H76 M164 125 H204" stroke="currentColor" strokeOpacity=".1" strokeWidth="1"/>
       <g opacity={muted ? .35 : 1} transform={`rotate(${cfg.angle} 122 75)`}>
@@ -35,6 +47,9 @@ function RobotPoseVisual({ pose, label }) {
         <path d={`M57 ${cfg.y + 10} l-12 -4`} stroke="currentColor" strokeWidth="5" strokeLinecap="round"/>
       </g>
       {pose === 'moving' && <path d="M15 63 H42 M20 72 H36" stroke="currentColor" strokeOpacity=".55" strokeWidth="2" strokeLinecap="round"/>}
+      {poseId === 'finger_heart' && <path d="M171 21 C157 7 148 24 171 38 C194 24 185 7 171 21Z" fill="currentColor" fillOpacity=".2" stroke="currentColor"/>}
+      {poseId === 'jumping' && <path d="M77 108 Q120 95 163 108 M89 115 H151" stroke="currentColor" opacity=".35" fill="none"/>}
+      {poseId === 'pouncing' && <path d="M15 45 H43 M22 55 H40" stroke="currentColor" opacity=".45"/>}
       {(pose === 'dance-left' || pose === 'dance-right') && <path d="M42 34 l6 -10 6 10 M201 27 l5 -8 5 8" stroke="currentColor" strokeOpacity=".5" fill="none"/>}
     </svg>
   );

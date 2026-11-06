@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from cloud.cards.schema import AgentCard, SkillDef, StateMachine, Transport
 from cloud.cards.validation import normalize_card
 
@@ -165,11 +167,16 @@ _NEW_LED_TRANSITIONS = [
     ("BLINKING", "BLINKING", "CMD_BLINK", "再闪烁", "BLINK", {"count": 3}),
     ("BLINKING", "OFF", "BLINK_DONE", "自动熄灭", "", {}),
     ("BLINKING", "ON", "BLINK_DONE", "自动常亮", "", {}),
+    ("BLINKING", "ERROR", "LED_FAIL", "恢复灯光失败", "", {}),
+    ("ERROR", "OFF", "CMD_OFF", "重试关灯", "SET_STATE", {"state": "OFF"}),
+    ("ERROR", "ON", "CMD_ON", "重试开灯", "SET_STATE", {"state": "ON"}),
+    ("ERROR", "ON", "CMD_COLOR", "重新调色", "SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
+    ("ERROR", "BLINKING", "CMD_BLINK", "重试闪烁", "BLINK", {"count": 3}),
 ]
 
 NEW_LED_FSM: StateMachine = {
     "state_field": "ism",
-    "states": ["OFF", "ON", "BLINKING"],
+    "states": ["OFF", "ON", "BLINKING", "ERROR"],
     "initial": "OFF",
     "transitions": [
         {"src": src, "dst": dst, "trigger": trigger, "label": label,
@@ -184,6 +191,8 @@ NEW_LED_FSM: StateMachine = {
                "type": "light_ring"},
         "BLINKING": {"label": "闪烁", "description": "闪烁结束后恢复先前灯光。",
                      "type": "light_ring"},
+        "ERROR": {"label": "灯光异常", "description": "上次灯光恢复失败，可重试控制并等待设备真实回执。",
+                  "type": "light_ring"},
     },
 }
 
@@ -200,6 +209,7 @@ NEW_SET_STATE_SKILL: SkillDef = {
 _LED_MODES: list[dict] = [{
     "id": "autonomy",
     "label": "自主性",
+    "state_field": "autonomy_mode",
     "options": [
         {"value": "manual",   "label": "仅听指令", "description": "只执行用户/编排器命令，不自发改灯"},
         {"value": "reactive", "label": "自动调光", "description": "灯自发根据环境调色温与亮度"},
@@ -238,6 +248,25 @@ _LED_WIDGETS: list[dict] = [{
 }]
 
 WIDGET_DEFS: dict[str, list[dict]] = {"led": _LED_WIDGETS}
+
+_LAMP_CONTROL_REGION = {
+    "id": "control", "label": "控制", "state_field": "control_state",
+    "until_field": "control_hold_until",
+    "states": ["manual", "ready", "holding"],
+    "views": {
+        "manual": {"label": "仅听指令", "description": "用户或编排器控制，暂停自发调光。", "type": "generic"},
+        "ready": {"label": "自动调光", "description": "允许灯大脑按环境决定是否调光。", "type": "generic"},
+        "holding": {"label": "尊重当前设置", "description": "暂缓自动调光，直到用户让位窗口结束。", "type": "generic"},
+    },
+    "transitions": [
+        {"src": "manual", "dst": "ready", "trigger": "reactive_enabled", "label": "开启自动调光"},
+        {"src": "ready", "dst": "manual", "trigger": "manual_enabled", "label": "切为仅听指令"},
+        {"src": "ready", "dst": "holding", "trigger": "external_command", "label": "用户或同伴介入"},
+        {"src": "holding", "dst": "holding", "trigger": "external_command", "label": "延长让位窗口"},
+        {"src": "holding", "dst": "ready", "trigger": "hold_expired", "label": "让位窗口结束"},
+        {"src": "holding", "dst": "manual", "trigger": "manual_enabled", "label": "切为仅听指令"},
+    ],
+}
 
 
 def _copy_widgets(widgets: list[dict]) -> list[dict]:
@@ -318,8 +347,22 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
                 {"id": "sensor.light_changed", "fields": {"level": "string"}},
             ]
             card["autonomous_skills"] = ["set_light_color", "set_light_state", "blink_light"]
-        card["state_machine"] = (NEW_LED_FSM if fsm_key == "led" and
-                                 manifest.get("fsm_version") == 2 else FSM_DEFS[fsm_key])
+        machine = deepcopy(NEW_LED_FSM if fsm_key == "led" and
+                           manifest.get("fsm_version") == 2 else FSM_DEFS[fsm_key])
+        # A lamp and a robot share the same region contract. The flat fields
+        # remain available to older consumers and the edge keeps its own enums.
+        machine["primary_region"] = "device"
+        machine["regions"] = [{
+            "id": "device", "label": "照明" if fsm_key == "led" else "设备状态",
+            **{key: deepcopy(machine[key]) for key in
+               ("state_field", "states", "transitions", "views") if key in machine},
+        }]
+        if fsm_key == "led":
+            # Cloud-owned configuration/temporary hold is independent from
+            # edge-owned lighting. API/SSE overlays it without republishing the
+            # physical retained state topic or moving authority off the edge.
+            machine["regions"].append(deepcopy(_LAMP_CONTROL_REGION))
+        card["state_machine"] = machine
         modes = MODE_DEFS.get(fsm_key)
         if modes:
             card["modes"] = modes

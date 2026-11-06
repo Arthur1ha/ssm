@@ -1,5 +1,7 @@
 """Finite single-hop coordination policy for public device skills."""
 
+from cloud.go2.actions import SPORT_COMMANDS
+
 
 def allows_step(task: dict, skill: dict, kind: str, origin_kind: str) -> bool:
     delegated = origin_kind == "user_delegated"
@@ -13,7 +15,10 @@ def allows_step(task: dict, skill: dict, kind: str, origin_kind: str) -> bool:
         return delegated and isinstance(params.get("goal"), str) and bool(params["goal"].strip())
     if (task.get("unit_id") == "go2" and task.get("skill_id") == "go2_sport"
             and kind == "http"):
-        return params.get("cmd") in ({"Hello", "Dance1", "Dance2"} if delegated else {"Hello"})
+        return params.get("cmd") in (set(SPORT_COMMANDS) if delegated else {"Hello"})
+    if (task.get("unit_id") == "go2" and task.get("skill_id") == "go2_life"
+            and kind == "http"):
+        return delegated and params.get("action") in {"request_rest", "wake", "start_explore", "stop_explore"}
     if task.get("unit_id") == "go2" and task.get("skill_id") == "go2_move" and kind == "http":
         duration = params.get("duration")
         speed = params.get("speed", 0.3)

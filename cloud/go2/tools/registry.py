@@ -41,6 +41,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_sport", _SPORT_DESCRIPTION, _schema({"cmd": _string(enum=_SPORT)}, ("cmd",)), motion=True, timeout_s=max(ACTIONS[cmd].timeout_s for cmd in SPORT_COMMANDS) + 10, result_rule="device"),
         ToolSpec("go2_move", "按方向、速度和时长定时移动；实际位移未确认", _schema({"direction": _string(enum=_DIRECTIONS), "speed": _number(exclusiveMinimum=0, maximum=0.5, default=0.3), "duration": _number(exclusiveMinimum=0, maximum=10, default=1)}, ("direction",)), motion=True, timeout_s=35, result_rule="device"),
         ToolSpec("go2_observe", "用摄像头回答当前画面问题", _schema({"question": _string(default="描述你看到的场景")}), timeout_s=32),
+        ToolSpec("go2_life", "休息保持连接和姿态；唤醒回待命；开启探索需管理员，停止探索不重放旧任务", _schema({"action": _string(enum=["request_rest", "wake", "start_explore", "stop_explore"])}, ("action",)), timeout_s=8, result_rule="device"),
         ToolSpec("go2_status", "查询设备连接和姿态", _schema({}), timeout_s=3),
         ToolSpec("go2_list_teachings", "列出已保存教导及自动执行状态", _schema({}), timeout_s=5),
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),

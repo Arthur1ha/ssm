@@ -183,8 +183,9 @@ function getLedStateInfo(state = {}) {
 function getStateLabel(agent, unitData) {
   const uid  = agent.unit_id;
   const s    = (unitData[uid] || {}).state || {};
+  if (agent.state_machine) return stateMachineSummary(agent.state_machine, s);
   switch (agentKind(agent)) {
-    case 'robot':  return agent.state_machine?.views?.[s.fsm_state]?.label || '状态待同步';
+    case 'robot':  return stateMachineSummary(agent.state_machine, s);
     case 'led': {
       const info = getLedStateInfo(s);
       return info.details && s.ism !== 'OFF' ? `${info.label} · ${info.details}` : info.label;

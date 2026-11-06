@@ -7,6 +7,7 @@ class ApiClient extends EventTarget {
     this.csrfToken = '';
     this.eventSource = null;
     this.eventsConnected = false;
+    this.devicesSynced = false;
   }
 
   setCsrfToken(token) {

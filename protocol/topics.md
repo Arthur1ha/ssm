@@ -39,6 +39,49 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 |-------|--------|------|
 | `ssm/agents/{unit_id}/state` | ESP32 | 灯：`{"unit_id":"esp32_desk_led","ism":"ON","r":255,"g":200,"b":80,"brightness":180,"ts":1234567890}`；`OFF` 时 RGB/亮度全为 0；`BLINKING` 时附带 `count`，RGB/亮度是闪烁配置而非瞬时相位。旧固件的 `BRIGHT/DIM/COLOR/BLINK` 在迁移期仍可被展示。传感器继续在各自 unit_id 下发送独立的当前读数，不合并到灯的状态。 |
 
+
+### Go2 分层运行快照（state schema v2）
+
+`ssm/agents/go2/state` 由 Go2 服务 retained 发布，来自与 `GET /api/go2/connection`、
+`/api/go2/connection/stream` SSE 相同的 `state_snapshot()`。字段为：
+
+- `unit_id=go2`、`state_schema_version=2`、`epoch`、`revision`、Unix 秒 `ts`。
+- `connected`、`connection_state=offline|connecting|online`；服务的 status/LWT 仍决定发现在线状态，WebRTC 控制连接由这些字段表示。
+- `activity_state=active|rest|null`；`life_state=idle|play|explore|null`，休息或离线时生活区域不激活。
+- `body_state` 为 12 个业务身体状态；未取得可靠反馈时为 `null`（无已确认姿态，不是额外状态节点），`body_confirmation` 区分已确认与待确认；休息保留身体事实。
+- `control_mode=normal|remote` 与实际 `moving` 独立；`autonomy_mode=manual|free_explore` 是配置，不能推断当前生活状态。
+- `pending_action`、`available_actions`、`blocked_actions`、`available_life_actions`、`life_blocked_reasons` 描述真实执行阶段和当前门禁；可附带 `life_owner`、`life_task_id` 供任务追溯。
+- 可选 `last_action` 保存最近动作终态，包含动作名、关联 ID、阶段、结果与确认依据；`body_observation_source`、`body_observed_at`、`body_telemetry_fresh` 解释身体观测来源与新鲜度。`exploration_enabled` 表示当前探索许可，和 `autonomy_mode` 配置及 `life_state` 当前任务分别表达。`last_transition` 提供最近事实变化原因。
+
+`body_observation_source=joint_posture` 表示结合当前连接的关节、IMU 和平面运动反馈检查姿态，不是仅靠高度或开机默认值。当前动作阶段可由本次发送后的关节运动证据进入 `executing`；`last_action.phase=completed|recovered|rejected|error` 与 `result` 分开解释：恢复到可靠姿态不等于之前超时或取消的动作已经成功。动作目录声明 `completion=joint_posture` 时，仅在相应真实观测可用时等待完成；缺少该反馈仍返回请求接受且保持未确认。
+- 迁移字段 `fsm_state` 只从新快照投影：离线/连接中为旧占位，在线为身体状态。
+
+同 epoch 按 revision 排序，旧 revision 不覆盖当前状态；相同 revision 只有事实内容一致的非 retained 心跳可刷新接收时间，不允许改写事实。新 epoch 可从较小 revision 开始。
+消费者拒绝已退役 epoch 的晚到事件。`ts` 用于新鲜度，不用于代替版本排序。
+离线、重连和服务重启均不代表站立或动作完成，也不重发未完成身体动作。
+RPC 接受仅表示请求接受；缺少可靠完成证据时保持未确认，不解锁依赖动作。
+
+Card 的 `state_machine.regions` 是可选静态声明，区域包含 `id`、`label`、`state_field`、
+`states`、`transitions`、`views`，可用 `parent:{region,state}` 表达激活关系。
+Go2 声明 connection、activity、life、body 四区；body 的 `retain_when_inactive` 保留休息期间的身体展示。
+顶层平面身体图仍保留；灯也通过同一结构声明自己的照明区域，旧平面卡在页面消费边界适配单区。`primary_region`、区域实时动作门禁绑定、命令与自动事件转移等公共字段见 [Agent Card 契约](agent-card.md)。实时值只来自 state/SSE，不复制进静态 Card。
+
+生活控制通过已认证 `POST /api/commands/go2` 发送
+`{action:"LIFE",params:{action:"request_rest|wake|start_explore|stop_explore"}}`，
+也兼容上述四个操作直接作为 action。网关转交 `/api/go2/life` 并保留可信身份，复用共享工具、控制租约与状态门禁。
+开启探索保留管理员边界；休息不自动趴下，唤醒不自动起立或恢复探索。
+本期没有自动唤醒条件、自然语言条件规则或用户动作组合。
+
+### 灯云端控制展示投影（非 MQTT 物理 state）
+
+灯的设备／Agent Card API 和 `/api/events` SSE 可在边缘照明快照外附加
+`autonomy_mode=manual|reactive`、`control_state=manual|ready|holding`、
+`control_hold_until`（Unix 秒或 null）和独立的严格递增变化游标 `control_ts`。
+这些值来自已有灯 Agent 的模式和用户／同伴让位窗口；让位到期由现有服务投递变化。
+消费者分别按物理 `ts` 与云端 `control_ts` 合并，云端投影不更新物理新鲜度，
+不覆盖原 `ism`、颜色、亮度或 MQTT status/LWT，也不发布到 ESP32 的 retained state topic。
+静态控制区域和公共字段说明见 [Agent Card 契约](agent-card.md)。
+
 ### 传感器事件
 
 传感器是灯智能体的感知输入，不参与 Agent Card 发现；云端灯大脑继续订阅它们的 `state/event`。PWA 通过 API/SSE 获取设备信息，不直接连接 MQTT。
