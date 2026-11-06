@@ -8,6 +8,7 @@ import time
 
 from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.connection import go2
+from cloud.go2.actions import ACTIONS
 from cloud.go2.control import LeaseConflict, control_lease
 from cloud.go2.execution import ExecutionContext, current_context, use_context
 from cloud.go2.tools.registry import get_tool_spec
@@ -66,6 +67,26 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
     """Shared preflight for tools, FSM buttons, and joystick commands."""
     if not go2.is_connected:
         raise ValueError("Go2 未连接")
+    pending = getattr(go2, "pending_action", None)
+    if isinstance(pending, dict):
+        running = ACTIONS.get(pending.get("command"))
+        if command != "StopMove":
+            raise ValueError("body_action_pending_confirmation")
+        if running is None or not running.interruptible:
+            raise ValueError("action_interrupt_not_confirmed; use emergency stop if needed")
+    if command:
+        action = ACTIONS.get(command)
+        if action is None:
+            raise ValueError(f"Unknown command: {command}")
+        extra = params.keys() - set(action.parameter_keys)
+        if extra:
+            raise ValueError("unknown action params: " + ", ".join(sorted(extra)))
+        # The connection checks pending hardware work as well as the body graph.
+        # Timed moves carry direction/duration at this layer; their velocity is
+        # validated when the actual Move command is sent.
+        validator = getattr(go2, "_validate_motion", None)
+        if validator is not None and (command != "Move" or {"x", "y", "z"} & params.keys()):
+            validator(command, params)
     if command and hasattr(go2, "fsm_next"):
         state = getattr(go2, "fsm_state", "")
         permitted = command == "StopMove" and state not in ("offline", "connecting")
@@ -84,7 +105,8 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
 def check_motion_preconditions(name: str, params: dict, context: ExecutionContext) -> None:
     command = (params.get("cmd") if name == "go2_sport" else
                "Move" if name == "go2_move" else None)
-    check_direct_motion(command, params, context)
+    action_params = {} if name in {"go2_sport", "go2_move"} else params
+    check_direct_motion(command, action_params, context)
 
 
 def normalize_result(name: str, raw: object) -> dict:

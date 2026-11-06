@@ -8,6 +8,7 @@ from dataclasses import asdict, is_dataclass
 from langchain_core.messages import HumanMessage
 
 from cloud.go2.connection import go2
+from cloud.go2.actions import SPORT_COMMANDS
 from cloud.go2.control import control_lease
 from cloud.go2.execution import current_context, require_admin, require_persist
 
@@ -15,7 +16,7 @@ from cloud.go2.models import get_text_llm, get_vision_llm
 
 # ── 工具函数 ──────────────────────────────────────────────────────
 
-_VALID_SPORT_CMDS = {"StandUp", "StandDown", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"}
+_VALID_SPORT_CMDS = frozenset(SPORT_COMMANDS)
 _SPORT_CMD_BY_LOWER = {c.lower(): c for c in _VALID_SPORT_CMDS}
 
 
@@ -39,7 +40,7 @@ _DIRECTION_MAP = {
 }
 
 
-async def go2_sport(cmd: str) -> str:
+async def go2_sport(cmd: str) -> dict | str:
     if not go2.is_connected:
         return "Go2 未连接，请先建立连接"
     canonical = _normalize_sport_action(cmd)
@@ -51,16 +52,16 @@ async def go2_sport(cmd: str) -> str:
     if not isinstance(result, dict):
         return {"result": "error", "error": "invalid_device_result", "action": canonical}
     status = result.get("result", "error")
+    # Keep the runtime's request/completion scope and uncertainty intact.
+    payload = {**result, "action": canonical}
     if status == "ok":
-        return {"result": "ok", "action": canonical,
-                "message": f"设备已确认 {canonical} 指令" if result.get("confirmation") == "sport_rpc" else f"已执行 {canonical}",
-                "confirmation": result.get("confirmation"),
-                "request_status_code": result.get("request_status_code")}
+        payload["message"] = f"已执行 {canonical}"
+        return payload
     if status == "accepted":
-        return {"result": "accepted", "action": canonical, "message": f"指令已发送 {canonical}，尚未确认完成"}
-    return {"result": status, "action": canonical,
-            "error": result.get("error") or f"{canonical} 执行未完成",
-            "request_status_code": result.get("request_status_code")}
+        payload["message"] = f"指令已发送 {canonical}，尚未确认完成"
+        return payload
+    payload["error"] = result.get("error") or f"{canonical} 执行未完成"
+    return payload
 
 
 async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) -> str:

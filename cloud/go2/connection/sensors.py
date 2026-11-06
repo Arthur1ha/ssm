@@ -60,6 +60,8 @@ class Go2Sensors:
     def _on_state(self, msg: dict) -> None:
         data = msg.get("data", {})
         inner = data.get("data", data) if isinstance(data, dict) else {}
+        if not isinstance(inner, dict):
+            return
         if getattr(self, "_completion", None) is not None and getattr(self, "_state_probe_count", 0) < 3:
             self._state_probe_count = getattr(self, "_state_probe_count", 0) + 1
             logger.info("[Go2/Sensor] 动作状态样本 outer_keys=%s inner_keys=%s raw_progress=%r raw_mode=%r",
@@ -69,8 +71,10 @@ class Go2Sensors:
                         inner.get("mode") if isinstance(inner, dict) else None)
         self._last_state_received_at = time.monotonic()
         self._sport_state_observed_at = self._last_state_received_at
-        progress = float(inner.get("progress") or 0.0)
-        self._fsm_on_progress(progress)
+        raw_progress = inner.get("progress")
+        progress = raw_progress if type(raw_progress) in (int, float) and math.isfinite(raw_progress) else None
+        if progress is not None:
+            self._fsm_on_progress(progress)
         self._fsm_on_posture(inner.get("body_height"))
         self._robot_state = {
             "mode":        inner.get("mode"),
@@ -78,6 +82,8 @@ class Go2Sensors:
             "body_height": inner.get("body_height"),
             "velocity":    inner.get("velocity"),
             "fsm_state":   self.fsm_state,
+            "body_confirmation": self.body_confirmation,
+            "pending_action": self.pending_action.copy() if self.pending_action else None,
         }
         for q in self._state_queues:
             try:

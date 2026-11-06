@@ -5,16 +5,16 @@ import time
 import uuid
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
-from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD, OBSTACLES_AVOID_API
+from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API
 
-from cloud.go2.connection.fsm import Go2FSM, CommandBlocked, _TRANSIENT_STATES
+from cloud.go2.connection.fsm import Go2FSM, CommandBlocked
+from cloud.go2.actions import ACTIONS
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
 
 logger = logging.getLogger(__name__)
 
 _VALID_LED_COLORS = frozenset({"white", "red", "yellow", "blue", "green", "cyan", "purple"})
-_RPC_CONFIRMED_GESTURES = frozenset({"Hello"})
 _STATUS_INTERVAL  = 10.0
 _STATE_STALE_S = 20.0
 
@@ -39,6 +39,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
+        self._finish_pending("cancelled", "reconnecting")
+        self._motion_epoch += 1
+        self.pending_action = None
+        self.body_confirmation = "unknown"
         self._connected_serial = None
         self._latest_frame = None
         self._latest_frame_meta = None
@@ -115,6 +119,9 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if self._velocity_timer:
             self._velocity_timer.cancel()
         self._finish_pending("error", "disconnected")
+        self._motion_epoch += 1
+        self.pending_action = None
+        self.body_confirmation = "unknown"
         self.is_connected = False
         self.fsm_state = "offline"
         self._last_state_received_at = None
@@ -204,12 +211,21 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._completion_samples = 0
 
     def _validate_motion(self, cmd: str, params: dict | None = None) -> str:
+        spec = ACTIONS.get(cmd)
+        if spec is None:
+            raise ValueError(f"Unknown command: {cmd}")
+        if not isinstance(params, (dict, type(None))):
+            raise ValueError("command params must be an object")
+        if set(params or {}) - set(spec.parameter_keys):
+            raise ValueError(f"Unsupported parameters for {cmd}")
+        if self.pending_action is not None and cmd != "StopMove":
+            raise CommandBlocked("body_action_unconfirmed")
         target = self.fsm_next(cmd)
         # Continuous movement updates and emergency stop are idempotent.
         if cmd == "Move" and self.fsm_state == "moving":
             target = "moving"
         if cmd == "StopMove" and self.fsm_state not in ("offline", "connecting"):
-            target = "lying" if self.fsm_state == "lying" else "standing"
+            target = self.fsm_state if self.fsm_state in {"standing", "lying", "sitting"} else "unknown"
         if cmd == "BalanceStand" and self.fsm_state == "standing":
             target = "standing"
         if target is None:
@@ -224,52 +240,44 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     @staticmethod
     def _validate_velocity(x=0.0, y=0.0, z=0.0):
         for value, limit in ((x, 0.5), (y, 0.5), (z, 0.8)):
-            if not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > limit:
+            if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > limit:
                 raise ValueError("velocity outside supported range (0.5 m/s, 0.8 rad/s)")
 
-    async def send_command(self, cmd: str, params: dict | None = None, *, completion_timeout: float = 20.0) -> dict:
+    async def send_command(self, cmd: str, params: dict | None = None, *,
+                           completion_timeout: float | None = None) -> dict:
         async with self._command_lock:
             waiter, response = await self._send_command(cmd, params)
-        header = ((response or {}).get("data") or {}).get("header") or {}
-        status = header.get("status") or {}
-        request_status_code = status.get("code")
-        if cmd in _RPC_CONFIRMED_GESTURES and request_status_code is not None:
-            # Unitree's progress field reports dance activity, not Hello.
-            # Its matching Sport RPC response is the device result.
-            if self._completion is waiter:
-                self._completion = None
-                self._completion_target = None
-                self._completion_samples = 0
-            if waiter is not None and not waiter.done():
-                waiter.cancel()
-            if self.fsm_state in _TRANSIENT_STATES:
-                self.fsm_state = "standing"
-            if request_status_code != 0:
-                return {"result": "error", "error": "sport_rpc_rejected",
-                        "request_status_code": request_status_code, "fsm_state": self.fsm_state}
-            return {"result": "ok", "confirmation": "sport_rpc",
-                    "request_status_code": 0, "fsm_state": self.fsm_state}
+        spec = ACTIONS[cmd]
+        packet = response.get("data") if isinstance(response, dict) else None
+        header = packet.get("header") if isinstance(packet, dict) else None
+        status = header.get("status") if isinstance(header, dict) else None
+        code = status.get("code") if isinstance(status, dict) else None
         if waiter is None:
-            return {"result": "accepted", "confirmation": "transport", "fsm_state": self.fsm_state,
-                    "request_status_code": request_status_code}
+            if type(code) is int and code != 0:
+                return {"result": "error", "error": "sport_rpc_rejected",
+                        "request_status_code": code, "fsm_state": self.fsm_state,
+                        "confirmation_scope": "request"}
+            return {"result": "accepted", "confirmation": "sport_rpc" if code == 0 else "transport",
+                    "confirmation_scope": "request", "fsm_state": self.fsm_state,
+                    "target_state": spec.expected_state,
+                    "completion_supported": spec.completion == "body_height",
+                    "pending_action": self.pending_action.copy() if self.pending_action else None,
+                    "request_status_code": code}
         try:
-            return await asyncio.wait_for(asyncio.shield(waiter), timeout=completion_timeout)
+            return await asyncio.wait_for(asyncio.shield(waiter), timeout=(
+                spec.timeout_s if completion_timeout is None else completion_timeout))
         except asyncio.TimeoutError:
-            # Some firmware actions do not publish a complete progress cycle.
-            # Stop the action before leaving its transient state; do not claim completion.
-            age = (None if self._last_state_received_at is None else
-                   round(time.monotonic() - self._last_state_received_at, 2))
-            logger.warning("[Go2/Conn] 动作完成未确认 cmd=%s fsm=%s progress=%.3f telemetry_age_s=%s",
-                           cmd, self.fsm_state, self._last_progress, age)
-            if self._completion is waiter and self.fsm_state in _TRANSIENT_STATES and self.is_connected:
-                async with self._command_lock:
-                    if self._completion is waiter and self.fsm_state in _TRANSIENT_STATES:
-                        try:
-                            await self._send_command("StopMove", None)
-                        except Exception as exc:
-                            logger.warning("[Go2/Conn] 动作超时后停止失败: %s", exc)
-            return {"result": "timeout", "error": "completion_not_observed", "fsm_state": self.fsm_state,
-                    "request_status_code": request_status_code}
+            # A deadline only bounds waiting. It is never posture evidence and
+            # does not trigger retries or an unverified recovery command.
+            if self._completion is waiter and self.pending_action is not None:
+                self.pending_action["phase"] = "timeout"
+            return {"result": "timeout", "error": "completion_not_observed",
+                    "fsm_state": self.fsm_state, "target_state": spec.expected_state,
+                    "confirmation_scope": "request", "request_status_code": code}
+        except asyncio.CancelledError:
+            if self._completion is waiter and self.pending_action is not None:
+                self.pending_action["phase"] = "cancelled_unconfirmed"
+            raise
         finally:
             if self._completion is waiter:
                 self._completion = None
@@ -281,63 +289,85 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     async def _send_command(self, cmd: str, params: dict | None):
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
-        if cmd == "EnterMoveControl":
-            target = self._validate_motion(cmd, params)
-            self._move_control_active = True
-            self.fsm_state = target
-            return None, None
-        api_id = SPORT_CMD.get(cmd)
-        if api_id is None:
-            raise ValueError(f"Unknown command: {cmd}")
         next_state = self._validate_motion(cmd, params)
+        spec = ACTIONS[cmd]
+        if cmd == "EnterMoveControl":
+            self._move_control_active = True
+            self.fsm_state = next_state
+            return None, None
+        source = self.fsm_state
+        old_pending = self.pending_action
+        self._finish_pending("cancelled", "superseded")
+        self._completion = None
+        self._completion_target = None
+        self._completion_samples = 0
+        self._motion_epoch += 1
         epoch = self._motion_epoch
-        options: dict = {"api_id": api_id}
+        connection = self._conn
+        request_id = uuid.uuid4().hex
+        # Goals are stored separately. In particular, a sent Sit command is not
+        # a sitting observation and its high body height is not standing proof.
+        body_action = cmd not in {"StopMove", "Move", "BalanceStand"}
+        waiter = None
+        if body_action:
+            self.pending_action = {"command": cmd, "request_id": request_id,
+                                   "target_state": spec.expected_state,
+                                   "execution_state": spec.execution_state,
+                                   "phase": "sending"}
+            self.body_confirmation = "unknown"
+            self.fsm_state = "unknown"
+            self._move_control_active = False
+        options = {"api_id": spec.api_id}
         if params:
             options["parameter"] = params
-        # A gesture can finish before the request response arrives. Arm its
-        # progress waiter before publishing so the state callback sees the
-        # entire motion, including a fast rise/fall during that wait.
-        early_waiter = None
-        if next_state in _TRANSIENT_STATES:
-            self._finish_pending("cancelled", "superseded")
-            self._last_progress = 0.0
-            self._move_control_active = False
-            self.fsm_state = next_state
-            early_waiter = asyncio.get_running_loop().create_future()
-            self._completion = early_waiter
-            self._completion_target = None
-            self._completion_samples = 0
-            self._state_probe_count = 0
         try:
             response = await asyncio.wait_for(
-                self._conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options), timeout=5.0)
+                connection.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options),
+                timeout=min(spec.timeout_s, 5.0))
+        except asyncio.CancelledError:
+            if epoch == self._motion_epoch and connection is self._conn and body_action:
+                self.pending_action["phase"] = "cancelled_unconfirmed"
+            raise
         except Exception as exc:
+            if epoch != self._motion_epoch or connection is not self._conn:
+                cancelled = asyncio.get_running_loop().create_future()
+                cancelled.set_result({"result": "cancelled", "error": "superseded_during_send"})
+                return cancelled, None
             self.is_connected = False
             self.fsm_state = "offline"
+            self.body_confirmation = "unknown"
             self._finish_pending("error", "disconnected")
             raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
-        logger.info("[Go2/Conn] 发送命令: %s params=%s", cmd, params)
-        if next_state in _TRANSIENT_STATES:
-            logger.info("[Go2/Conn] 动作请求响应 cmd=%s response=%s", cmd, str(response)[:700])
-
-        if epoch != self._motion_epoch or not self.is_connected:
-            waiter = asyncio.get_running_loop().create_future()
-            waiter.set_result({"result": "cancelled", "error": "superseded_during_send"})
-            return waiter, response
-
-        if early_waiter is not None:
-            return early_waiter, response
-
-        self._finish_pending("cancelled", "superseded")
-        self._last_progress = 0.0
-        self._move_control_active = False
-        self.fsm_state = next_state
-        if next_state in _TRANSIENT_STATES or cmd in {"StandUp", "StandDown"}:
-            self._completion = asyncio.get_running_loop().create_future()
-            self._completion_target = next_state if cmd in {"StandUp", "StandDown"} else None
-            self._completion_samples = 0
-            return self._completion
-        return self._completion, response
+        if epoch != self._motion_epoch or connection is not self._conn or not self.is_connected:
+            cancelled = asyncio.get_running_loop().create_future()
+            cancelled.set_result({"result": "cancelled", "error": "superseded_during_send"})
+            return cancelled, response
+        packet = response.get("data") if isinstance(response, dict) else None
+        header = packet.get("header") if isinstance(packet, dict) else None
+        status = header.get("status") if isinstance(header, dict) else None
+        code = status.get("code") if isinstance(status, dict) else None
+        if type(code) is int and code != 0:
+            if body_action:
+                self.pending_action = old_pending
+                self.fsm_state = source
+                self.body_confirmation = "previous_observation"
+            return None, response
+        if body_action:
+            self.pending_action["phase"] = "accepted" if code == 0 else "sent"
+            if spec.completion == "body_height":
+                waiter = asyncio.get_running_loop().create_future()
+                self._completion = waiter
+                self._completion_target = spec.expected_state
+                self._completion_samples = 0
+        elif cmd == "StopMove":
+            self._move_control_active = False
+            if self.pending_action is not None:
+                self.pending_action["phase"] = "stop_requested_unconfirmed"
+            self.fsm_state = next_state
+        elif cmd == "Move":
+            self.fsm_state = next_state
+        logger.info("[Go2/Conn] 发送命令: %s request=%s code=%s", cmd, request_id, code)
+        return waiter, response
 
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
@@ -359,7 +389,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._validate_velocity(vx, vy, vyaw)
         active = any((vx, vy, vyaw))
         target = self._validate_motion(
-            "Move" if active else "StopMove", {"x": vx, "y": vy, "z": vyaw},
+            "Move" if active else "StopMove", {"x": vx, "y": vy, "z": vyaw} if active else None,
         )
         if not active and self._move_control_active and self.fsm_state == "moving":
             target = "moving"  # 摇杆归零只停运动；由 StopMove 退出控制状态。
@@ -386,7 +416,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
     def stop_velocity(self) -> dict:
         """紧急停止和会话清理同时退出遥控状态。"""
-        stopped_state = "lying" if self.fsm_state == "lying" else "standing"
+        stopped_state = self.fsm_state if self.fsm_state in {"standing", "lying", "sitting"} else "unknown"
         result = self.move_velocity(0, 0, 0)
         self._move_control_active = False
         self.fsm_state = stopped_state

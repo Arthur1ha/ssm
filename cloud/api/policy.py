@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
+from cloud.go2.actions import SPORT_COMMANDS
 
 _AUDIT_FILE = Path(__file__).parent.parent / "space" / "audit.jsonl"
 _audit_lock = threading.Lock()
@@ -23,7 +24,7 @@ PERSISTENT_ACTIONS = {
 
 GO2_IMMEDIATE_ACTIONS = {
     "SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "RECOGNIZE_PERSON", "VELOCITY", "STOP",
-    "StandUp", "StandDown", "Hello", "Stretch", "Dance1", "Dance2", "Move", "StopMove", "EnterMoveControl",
+    *SPORT_COMMANDS, "Move", "EnterMoveControl",
 }
 
 

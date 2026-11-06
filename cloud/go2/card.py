@@ -7,6 +7,7 @@ from copy import deepcopy
 from cloud.cards.validation import normalize_card
 
 from cloud.go2.connection import go2
+from cloud.go2.actions import ACTIONS, BODY_STATES
 
 GO2_CARD_TOPIC = "ssm/agents/go2/card"
 GO2_STATUS_TOPIC = "ssm/agents/go2/status"
@@ -159,10 +160,7 @@ def _publish_go2_state() -> None:
         logging.warning("[Go2] 发布 state 失败: %s", exc)
 
 
-_GO2_FSM_LABELS = {
-    "StandUp": "起立", "StandDown": "趴下", "EnterMoveControl": "进入遥控", "Move": "移动", "StopMove": "退出遥控",
-    "Hello": "挥手", "Stretch": "伸展", "Dance1": "舞蹈1", "Dance2": "舞蹈2",
-}
+_GO2_FSM_LABELS = {command: action.label for command, action in ACTIONS.items()}
 
 
 def _go2_state_machine() -> dict:
@@ -172,10 +170,15 @@ def _go2_state_machine() -> dict:
     """
     from cloud.go2.connection.fsm import _FSM_AVAILABLE, _FSM_NEXT, _TRANSIENT_STATES  # noqa: PLC0415
     transitions = []
+    interruptible_states = {
+        spec.execution_state for spec in ACTIONS.values() if spec.interruptible
+    }
     for src, edges in _FSM_NEXT.items():
         for trigger, dst in edges.items():
             if trigger == "Move":
                 continue  # 有速度的 Move 属于数据面；图上只显示控制状态入口。
+            if trigger == "StopMove" and src not in interruptible_states:
+                continue  # Safety STOP remains available without promising interruption.
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
                 "label": "停止" if src in _TRANSIENT_STATES else _GO2_FSM_LABELS.get(trigger, trigger),
@@ -186,11 +189,11 @@ def _go2_state_machine() -> dict:
         if src in {"offline", "connecting"}:
             continue
         transitions.append({
-            "src": src, "dst": "lying" if src == "lying" else "standing",
+            "src": src, "dst": src if src in {"lying", "sitting", "standing", "unknown"} else "unknown",
             "trigger": "EMERGENCY_STOP", "label": "紧急制停",
             "action": "STOP", "params": {}, "safety": True,
         })
-    return {
+    state_machine = {
         "state_field": "fsm_state",
         "connection_field": "connected",
         "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
@@ -217,6 +220,20 @@ def _go2_state_machine() -> dict:
             "dancing2": {"label": "舞蹈2", "description": "正在执行第二组节奏动作。", "type": "robot_pose", "pose": "dance-right"},
         },
     }
+    # New body nodes are capabilities. Their destination is a requested goal,
+    # not evidence that the hardware has reached it.
+    for action in ACTIONS.values():
+        state = action.execution_state or action.expected_state
+        if state in BODY_STATES and state not in state_machine["views"]:
+            state_machine["views"][state] = {
+                "label": action.label, "description": "动作或姿态以真实反馈为准；请求接受不表示完成。",
+                "type": "robot_pose", "pose": state,
+            }
+    state_machine["views"]["unknown"] = {
+        "label": "姿态待确认", "description": "尚无可靠身体反馈；普通动作暂不可用。",
+        "type": "robot_pose", "pose": "unknown",
+    }
+    return state_machine
 
 
 def _build_go2_card() -> dict:
@@ -293,7 +310,7 @@ def _build_go2_card() -> dict:
                 "auto_connect": True,
                 "visible": False,
             },
-            {"type": "video", "states": ["lying", "standing", "moving", "greeting", "stretching", "dancing1", "dancing2"], "placement": "media", "order": 10, "endpoint": "/api/go2/video", "requires_connection": True},
+            {"type": "video", "states": [*BODY_STATES, "unknown"], "placement": "media", "order": 10, "endpoint": "/api/go2/video", "requires_connection": True},
             {"type": "map", "states": [], "placement": "media", "order": 15, "endpoint": "/api/go2/map.png", "requires_connection": True},
             {"type": "joystick", "states": ["moving"], "placement": "controls", "order": 20, "action": "velocity"},
         ],

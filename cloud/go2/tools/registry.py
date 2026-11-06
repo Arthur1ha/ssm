@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from cloud.go2.actions import ACTIONS, SPORT_COMMANDS
+
 
 def _schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
     return {"type": "object", "properties": properties, "required": list(required),
@@ -28,12 +30,15 @@ class ToolSpec:
     result_rule: str = "text_ok"
 
 
-_SPORT = ["StandUp", "StandDown", "StopMove", "Hello", "Stretch", "Dance1", "Dance2"]
+_SPORT = list(SPORT_COMMANDS)
+_SPORT_DESCRIPTION = "执行预定义动作：" + "、".join(
+    f"{ACTIONS[cmd].label}({cmd})" for cmd in SPORT_COMMANDS
+) + "；accepted 仅表示请求已接受，只有完成证据确认后才可继续依赖动作"
 _DIRECTIONS = ["forward", "backward", "left", "right", "turn_left", "turn_right"]
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     s.name: s for s in (
-        ToolSpec("go2_sport", "执行站立、停止、招呼、伸展或跳舞动作", _schema({"cmd": _string(enum=_SPORT)}, ("cmd",)), motion=True, timeout_s=35, result_rule="device"),
+        ToolSpec("go2_sport", _SPORT_DESCRIPTION, _schema({"cmd": _string(enum=_SPORT)}, ("cmd",)), motion=True, timeout_s=max(ACTIONS[cmd].timeout_s for cmd in SPORT_COMMANDS) + 10, result_rule="device"),
         ToolSpec("go2_move", "按方向、速度和时长定时移动；实际位移未确认", _schema({"direction": _string(enum=_DIRECTIONS), "speed": _number(exclusiveMinimum=0, maximum=0.5, default=0.3), "duration": _number(exclusiveMinimum=0, maximum=10, default=1)}, ("direction",)), motion=True, timeout_s=35, result_rule="device"),
         ToolSpec("go2_observe", "用摄像头回答当前画面问题", _schema({"question": _string(default="描述你看到的场景")}), timeout_s=32),
         ToolSpec("go2_status", "查询设备连接和姿态", _schema({}), timeout_s=3),

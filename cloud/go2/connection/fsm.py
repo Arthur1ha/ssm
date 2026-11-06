@@ -1,41 +1,29 @@
 import logging
 import math
 
+from cloud.go2.actions import ACTIONS, TRANSIENT_STATES, fsm_transitions
+
 logger = logging.getLogger(__name__)
 
 
 class CommandBlocked(ValueError):
     """A valid command is not allowed in the current device state."""
 
-_GESTURE_NEXT = {"Hello": "greeting", "Stretch": "stretching",
-                 "Dance1": "dancing1", "Dance2": "dancing2"}
-
-# 站立是动作枢纽；移动须先停止，动作完成后回到站立。
-_FSM_NEXT: dict[str, dict[str, str]] = {
-    "lying":      {"StandUp": "standing"},
-    "standing":   {"StandDown": "lying", "EnterMoveControl": "moving", "Move": "moving", **_GESTURE_NEXT},
-    "moving":     {"StopMove": "standing"},
-    "greeting":   {"StopMove": "standing"},
-    "stretching": {"StopMove": "standing"},
-    "dancing1":   {"StopMove": "standing"},
-    "dancing2":   {"StopMove": "standing"},
-}
-_FSM_AVAILABLE: dict[str, list[str]] = {
-    "offline": [], "connecting": [],
-    **{state: list(edges) for state, edges in _FSM_NEXT.items()},
-}
-
-# 瞬时动作态：做完（进度事件）自动回 standing
-_TRANSIENT_STATES = {"greeting", "stretching", "dancing1", "dancing2"}
+_FSM_NEXT = fsm_transitions()
+_FSM_AVAILABLE = {"offline": [], "connecting": [],
+                  **{state: list(edges) for state, edges in _FSM_NEXT.items()}}
+_TRANSIENT_STATES = set(TRANSIENT_STATES)
 
 
 class Go2FSM:
-    """Go2 状态机契约：状态/可用动作/转移查询，以及进度事件触发的返回。"""
+    """Body transition rules; only supported observations confirm completion."""
 
     def __init__(self) -> None:
         super().__init__()
         self._fsm_state: str = "offline"
         self._last_progress: float = 0.0
+        self.pending_action: dict | None = None
+        self.body_confirmation = "unknown"
 
     @property
     def fsm_state(self) -> str:
@@ -55,6 +43,9 @@ class Go2FSM:
     @property
     def available_actions(self) -> list[str]:
         """当前状态下可执行的动作列表。"""
+        if self.pending_action is not None:
+            action = ACTIONS[self.pending_action["command"]]
+            return ["StopMove"] if action.interruptible and self._fsm_state not in {"offline", "connecting"} else []
         return _FSM_AVAILABLE.get(self._fsm_state, [])
 
     def fsm_next(self, cmd: str) -> str | None:
@@ -62,19 +53,14 @@ class Go2FSM:
         return _FSM_NEXT.get(self._fsm_state, {}).get(cmd)
 
     def _fsm_on_progress(self, progress: float) -> None:
-        """进度从'在动'(>0.05)落到'停了'(<0.05) → 瞬时动作态做完，自动回 standing。"""
-        if (self._fsm_state in _TRANSIENT_STATES
-                and self._last_progress <= 0.05 and progress > 0.05):
-            logger.info("[Go2/FSM] 动作进度开始 state=%s progress=%.3f", self._fsm_state, progress)
-        if (self._fsm_state in _TRANSIENT_STATES
-                and self._last_progress > 0.05
-                and progress < 0.05):
-            logger.info("[Go2/FSM] 动作进度结束 state=%s progress=%.3f", self._fsm_state, progress)
-            self.fsm_state = "standing"
-            waiter = getattr(self, "_completion", None)
-            if waiter is not None and not waiter.done():
-                waiter.set_result({"result": "ok", "confirmation": "progress", "fsm_state": "standing"})
-        self._last_progress = progress
+        """Record uncorrelated telemetry without completing a body command.
+
+        Sport state does not carry the command request ID. A falling sample may
+        belong to an earlier action; the probe records also show progress=0 for
+        visibly executed actions. It cannot authorize a dependent action.
+        """
+        if type(progress) in (int, float) and math.isfinite(progress):
+            self._last_progress = progress
 
     def _fsm_on_posture(self, body_height: object) -> None:
         """Confirm stand transitions only from fresh, stable robot telemetry."""
@@ -88,5 +74,8 @@ class Go2FSM:
         reached = body_height <= 0.12 if target == "lying" else body_height >= 0.25
         self._completion_samples = self._completion_samples + 1 if reached else 0
         if self._completion_samples >= 3:
+            self.pending_action = None
+            self.body_confirmation = "observed"
+            self.fsm_state = target
             waiter.set_result({"result": "ok", "confirmation": "body_height",
                                "fsm_state": target, "body_height": body_height})
