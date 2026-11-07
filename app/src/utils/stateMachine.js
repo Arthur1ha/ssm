@@ -63,16 +63,75 @@ function stateWidgetEnabled(widget, state) {
 /* Clicking a target requests one declared, currently available transition.
  * Observation-only edges and indirect routes never become commands. */
 function stateNodeControl(node, edges) {
-  const incoming = edges.filter(edge => edge.dst === node.id && edge.transition.action);
-  const active = incoming.filter(edge => edge.active);
+  const incoming = edges.filter(edge => edge.dst === node.id);
+  const automatic = incoming.filter(edge => edge.active && !edge.reason && !edge.transition.action);
+  // Multiple source states may declare the same telemetry-independent command.
+  const commands = new Map();
+  for (const edge of incoming.filter(edge => edge.transition.action && edge.active && (!node.current
+    || edge.transition.available_only || edge.transition.dispatch_only))) {
+    const key = JSON.stringify([edge.transition.action,
+      Object.entries(edge.transition.params || {}).sort(([a],[b]) => a.localeCompare(b))]);
+    if (!commands.has(key) || !edge.reason) commands.set(key,edge);
+  }
+  const active = [...commands.values()];
   const available = active.filter(edge => !edge.reason);
   return {
-    transition: !node.current && available.length === 1 ? available[0].transition : null,
+    transition: available.length === 1 ? available[0].transition : null,
+    reachable: available.length > 0 || automatic.length > 0,
+    automatic,
     choices: active,
-    reason: node.current ? '当前状态' : available.length > 1 ? '有多种转换方式，请选择下方动作'
+    reason: available.length > 1 ? '请选择动作'
       : available.length === 1 ? '' : active.find(edge => edge.reason)?.reason
         || '当前状态不能直接切换到' + node.label,
   };
+}
+/* One physical line per unordered pair; keep every rule in its direction. */
+function stateGraphLinks(edges) {
+  const links = new Map();
+  for (const edge of edges) {
+    if (edge.src === edge.dst) continue;
+    const [src,dst] = [edge.src,edge.dst].sort();
+    const id = JSON.stringify([src,dst]);
+    if (!links.has(id)) links.set(id,{id,src,dst,directions:[]});
+    const link = links.get(id), directionId = JSON.stringify([edge.src,edge.dst]);
+    let direction = link.directions.find(item => item.id === directionId);
+    if (!direction) { direction = {id:directionId,src:edge.src,dst:edge.dst,edges:[]}; link.directions.push(direction); }
+    direction.edges.push(edge);
+  }
+  return [...links.values()];
+}
+function stateLinkDirection(link, nodes, selectedDirection) {
+  return link.directions.find(direction => direction.id === selectedDirection)
+    || link.directions.find(direction => nodes.some(node => node.id === direction.src && node.current))
+    || link.directions.find(direction => direction.edges.some(edge => edge.active && !edge.reason))
+    || link.directions[0];
+}
+function stateTransitionLabel(transition) {
+  return ({action_completed:'动作执行完毕',motion_observed:'开始移动',motion_stationary:'停止移动',
+    BLINK_DONE:'闪烁结束'})[transition.trigger]
+    || (transition.label || '').replace(/^接纳/,'开始').replace(/ · 自动转换$/,'');
+}
+function stateTransitionDescription(transition) {
+  const description = transition.description || '';
+  if (transition.dispatch_only || description === stateTransitionLabel(transition)
+    || description.startsWith('以下条件会阻止请求：') || description.startsWith('仅在当前连接收到')) return '';
+  return description;
+}
+/* Match declared command/enum bindings, never the free-text teaching wording.
+ * Numeric defaults (e.g. blink count) are content, not different graph edges. */
+function stateTransitionTeachings(transition, teachings, card) {
+  if (!transition?.action) return [];
+  return teachings.filter(item => {
+    if (item.unit_id !== card?.unit_id || !item.binding) return false;
+    const {skill_id, params = {}} = item.binding;
+    const skill = card.skills?.find(entry => entry.id === skill_id);
+    const properties = skill?.params_schema?.properties || {};
+    const sameCommand = skill?.invoke?.action === transition.action
+      || Object.entries(properties).some(([key, field]) => field.enum?.includes(transition.action)
+        && params[key] === transition.action);
+    return sameCommand && Object.entries(transition.params || {}).every(([key, value]) =>
+      !properties[key]?.enum || params[key] === value);
+  });
 }
 /* Fold presentation-only parents into an observed child. Commands and gating
  * still belong to their original region; connection stays in the page header. */
@@ -106,4 +165,5 @@ function stateBoardTopology(machine, state = {}) {
   return {nodes,edges};
 }
 Object.assign(window, { stateMachineRegions, primaryStateRegion, stateRegionActive, stateRegionLabel,
-  stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology });
+  stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology, stateTransitionTeachings,
+  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateTransitionDescription });

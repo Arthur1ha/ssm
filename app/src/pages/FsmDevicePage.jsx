@@ -393,7 +393,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
         <div className="device-state-workspace device-state-workspace--shared">
-          <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current}
+          <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
             actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth} feedback={execution}
             onTransition={dispatchTransition} report={reportExecution}/>

@@ -97,18 +97,32 @@ def life_transitions(region):
         if spec.region != region:
             continue
         for source in spec.sources:
+            # Describe prerequisites positively; runtime rejection reasons stay
+            # in LIFE_GUARDS and are only reported for an actual request.
+            conditions = []
+            labels = {"connected": "已连接", "active": "已唤醒", "idle": "空闲",
+                      "stable": "姿态稳定", "standing": "站立", "no_body_action": "空闲",
+                      "no_motion": "空闲", "not_remote": "非遥控", "exploring": "探索中"}
+            for guard in spec.guards:
+                if guard == "stable" and "standing" in spec.guards:
+                    continue
+                label = labels[guard]
+                if label not in conditions:
+                    conditions.append(label)
+            if spec.required_actor == "admin":
+                conditions.append("管理员")
             transitions.append({
                 "src": source, "dst": spec.target, "trigger": spec.action,
                 "label": spec.label, "action": "LIFE", "params": {"action": spec.action},
                 "availability_key": spec.action,
-                "description": "以下条件会阻止请求：" + "；".join(LIFE_GUARDS[key] for key in spec.guards),
+                "description": " · ".join(conditions),
                 **({"required_actor": spec.required_actor} if spec.required_actor else {}),
                 **({"available_only": True} if source == spec.target else {}),
             })
     if region == "life":
         for target in LIFE_TASK_STATES:
             transitions.extend([
-                {"src": "idle", "dst": target, "trigger": "task_accepted", "label": "接纳" + LIFE_VIEWS["life"][target]["label"]},
+                {"src": "idle", "dst": target, "trigger": "task_accepted", "label": "接到" + LIFE_VIEWS["life"][target]["label"] + "任务"},
                 {"src": target, "dst": "idle", "trigger": "task_finished", "label": LIFE_VIEWS["life"][target]["label"] + "结束"},
             ])
     return transitions

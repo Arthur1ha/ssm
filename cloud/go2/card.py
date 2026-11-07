@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from copy import deepcopy
+from math import cos, pi, sin
 from cloud.cards.validation import normalize_card
 
 from cloud.go2.connection import go2
@@ -74,22 +75,21 @@ def _go2_state_machine() -> dict:
                 "action": trigger,
                 "params": {},
                 "completion": ACTIONS[trigger].completion,
-                **({"dispatch_only": True, "description": "手动发送动作指令，发送后即可继续操作。"}
+                **({"dispatch_only": True}
                    if trigger in SPORT_COMMANDS and trigger != 'StopMove' else {}),
             })
     # These edges explain observation-driven recovery and completion. They
     # carry no action and never authorize a button or a timed fake completion.
     def observed_transition(src, dst, trigger, label):
-        return {"src": src, "dst": dst, "trigger": trigger, "label": label,
-                "description": "仅在当前连接收到满足判据的设备反馈时发生。"}
+        return {"src": src, "dst": dst, "trigger": trigger, "label": label}
 
     for spec in ACTIONS.values():
         if spec.execution_state in TRANSIENT_STATES and spec.expected_state:
             transitions.append(observed_transition(spec.execution_state, spec.expected_state,
-                                                   "action_completed", "动作完成并确认姿态"))
+                                                   "action_completed", "动作执行完毕"))
     transitions.extend([
-        observed_transition("standing", "moving", "motion_observed", "检测到移动"),
-        observed_transition("moving", "standing", "motion_stationary", "确认停稳"),
+        observed_transition("standing", "moving", "motion_observed", "开始移动"),
+        observed_transition("moving", "standing", "motion_stationary", "停止移动"),
     ])
     for src in BODY_STATES:
         transitions.append({
@@ -129,15 +129,15 @@ def _go2_state_machine() -> dict:
                 manual_available_actions_field="available_manual_actions",
                 manual_blocked_actions_field="blocked_manual_actions",
                 diagram_group="姿态与动作", node_radius=34)
-    # Keep every capability inside the initial viewport. Standing anchors the
-    # posture row; all gestures fit below it without horizontal overflow.
-    body["layout"] = {value: {"x": .15 + index * .35, "y": 350 / 670}
-                      for index, value in enumerate(("lying", "standing", "sitting"))}
-    gestures = ("greeting", "stretching", "dancing1", "moving", "dancing2",
-                "content", "finger_heart", "pouncing", "jumping")
-    body["layout"].update({value: {"x": .15 + (index % 3) * .35,
-                                  "y": (445 + (index // 3) * 90) / 670}
-                           for index, value in enumerate(gestures)})
+    # Standing is the shared hub. Give each surrounding action its own radial
+    # corridor instead of routing multiple rows through the same grid lanes.
+    body["layout"] = {"standing": {"x": .5, "y": 475 / 670}}
+    ring = ("moving", "sitting", "stretching", "dancing1", "content", "dancing2",
+            "finger_heart", "pouncing", "jumping", "greeting", "lying")
+    for index, value in enumerate(ring):
+        angle = -pi / 2 + index * 2 * pi / len(ring)
+        body["layout"][value] = {"x": (300 + 220 * cos(angle)) / 600,
+                                 "y": (475 + 145 * sin(angle)) / 670}
 
     state_machine["regions"] = [
         {"id": "connection", "label": "连接", "state_field": "connection_state",
@@ -155,7 +155,7 @@ def _go2_state_machine() -> dict:
                        ("online", "在线", "控制连接可用；姿态另行确认。"))}},
         {"id": "activity", "label": "活动", "state_field": "activity_state",
          "diagram_group": "行为", "node_radius": 46,
-         "layout": {"rest": {"x": .15, "y": 100 / 670}},
+         "layout": {"rest": {"x": .30, "y": 85 / 670}},
          "available_actions_field": "available_life_actions", "blocked_actions_field": "life_blocked_reasons",
          "parent": {"region": "connection", "state": "online"},
          "states": list(LIFE_VIEWS["activity"]),
@@ -163,9 +163,9 @@ def _go2_state_machine() -> dict:
          "views": deepcopy(LIFE_VIEWS["activity"])},
         {"id": "life", "label": "生活", "state_field": "life_state",
          "diagram_group": "行为", "node_radius": 46,
-         "layout": {"idle": {"x": .50, "y": 100 / 670},
-                    "play": {"x": .50, "y": 210 / 670},
-                    "explore": {"x": .85, "y": 100 / 670}},
+         "layout": {"idle": {"x": .70, "y": 85 / 670},
+                    "play": {"x": .70, "y": 205 / 670},
+                    "explore": {"x": .30, "y": 205 / 670}},
          "available_actions_field": "available_life_actions", "blocked_actions_field": "life_blocked_reasons",
          "parent": {"region": "activity", "state": "active"},
          "states": list(LIFE_VIEWS["life"]),

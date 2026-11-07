@@ -57,7 +57,7 @@ ACTIONS = {spec.command: spec for spec in (
                "sitting", "joint_posture", timeout_s=20.0),
     ActionSpec("RiseSit", "坐姿起身", "sport", 1010, ("sitting",), None,
                "standing", "joint_posture", timeout_s=20.0),
-    _gesture("Content", "愉悦互动", 1020, "content"),
+    _gesture("Content", "开心", 1020, "content"),
     _gesture("FingerHeart", "比心", 1036, "finger_heart"),
     _gesture("FrontPounce", "前扑", 1032, "pouncing"),
     _gesture("FrontJump", "前跳", 1031, "jumping"),
@@ -133,8 +133,8 @@ def velocity_schema() -> dict:
 BODY_VIEWS = {
     "lying": {"label": "趴卧", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
     "standing": {"label": "站立", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
-    "sitting": {"label": "坐姿", "description": "已确认坐姿，等待坐姿起身指令。", "type": "robot_pose", "pose": "sitting"},
-    "moving": {"label": "移动中", "description": "身体正在移动；遥控入口与实际移动分别显示，停稳以真实反馈为准。", "type": "robot_pose", "pose": "moving"},
+    "sitting": {"label": "坐下", "description": "已确认坐姿，等待坐姿起身指令。", "type": "robot_pose", "pose": "sitting"},
+    "moving": {"label": "移动", "description": "身体正在移动；遥控入口与实际移动分别显示，停稳以真实反馈为准。", "type": "robot_pose", "pose": "moving"},
 }
 
 

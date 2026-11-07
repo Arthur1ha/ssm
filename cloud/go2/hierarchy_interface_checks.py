@@ -33,7 +33,7 @@ def test_regions_preserve_flat_body_and_rest_observations():
     assert regions["body"]["retain_when_inactive"] is True
     assert regions["life"]["parent"] == {"region": "activity", "state": "active"}
     assert regions["activity"]["parent"] == {"region": "connection", "state": "online"}
-    assert graph["views"]["moving"]["label"] == "移动中"
+    assert graph["views"]["moving"]["label"] == "移动"
     # No dynamic value is baked into capability metadata.
     assert card["state"] == {}
 

@@ -1,5 +1,5 @@
 /* RulesDrawer — 规则管理底部抽屉 */
-function RulesDrawer({ open, onClose }) {
+function RulesDrawer({ open, onClose, initialTeachingId }) {
   const [rules, setRules] = React.useState([]);
   return (
     <>
@@ -20,7 +20,7 @@ function RulesDrawer({ open, onClose }) {
 
         {/* RulesScreen 内容 */}
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 'max(16px, env(safe-area-inset-bottom))' }}>
-          <RulesScreen embedded={true} onRulesChange={setRules} open={open}/>
+          <RulesScreen embedded={true} onRulesChange={setRules} open={open} initialTeachingId={initialTeachingId}/>
         </div>
       </aside>
     </>

@@ -1,7 +1,7 @@
 const { useState: useStateR, useEffect: useEffectR } = React;
 
 const RULE_ACTION_NAMES = {
-  BRIGHT: '调亮', DIM: '调暗', OFF: '关灯',
+  ON: '开灯', BRIGHT: '调亮', DIM: '调暗', OFF: '关灯',
 };
 const RULE_OBSERVATION_NAMES = {
   'vision.person_presence': '画面中有人', 'vision.face_presence': '画面中有人脸',
@@ -47,7 +47,7 @@ function ruleValue(field, value) {
   return value;
 }
 
-function RulesScreen({ embedded = false, onRulesChange, open }) {
+function RulesScreen({ embedded = false, onRulesChange, open, initialTeachingId }) {
   const [teachings, setTeachings] = useStateR([]);
   const [editing, setEditing] = useStateR(null);
   const [error, setError] = useStateR('');
@@ -66,6 +66,22 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
   };
   useEffectR(() => { load(); }, []);
   useEffectR(() => { if (open) load(); }, [open]);
+  const initialOpened = React.useRef(null);
+  const screenRef = React.useRef(null);
+  useEffectR(() => {
+    const item = teachings.find(entry => entry.teaching_id === initialTeachingId);
+    if (!open || !item || initialOpened.current === initialTeachingId) return;
+    initialOpened.current = initialTeachingId;
+    setBindingEditor({ ...item.binding, teaching_id:item.teaching_id, teaching_unit_id:item.unit_id,
+      where:item.binding?.where || {}, params:item.binding?.params || {}, enabled:item.execution_status === 'enabled' });
+    const frame = requestAnimationFrame(() => {
+      const target = [...(screenRef.current?.querySelectorAll('[data-teaching-id]') || [])]
+        .find(node => node.dataset.teachingId === item.teaching_id);
+      target?.scrollIntoView({block:'nearest'});
+      target?.querySelector('.rule-binding select')?.focus({preventScroll:true});
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [teachings,open,initialTeachingId]);
   const remove = async (item) => {
     if (pendingDelete !== item.teaching_id) { setPendingDelete(item.teaching_id); return; }
     try {
@@ -115,7 +131,7 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
   const statusText = item => ({ unbound: '等待设置', ready: '等待启用',
     enabled: '已启用', capability_unavailable: '能力已变化' })[item.execution_status || 'unbound'] || '等待设置';
   return (
-    <div className="rules-screen">
+    <div ref={screenRef} className="rules-screen">
       {!embedded && <h2 className="rules-screen__title">教导与自动规则</h2>}
       <p className="rules-screen__intro">这里保存的是你教给设备的期望。设置可识别的条件和动作并启用后，设备在自主模式下按条件执行，仍会检查当前状态和安全条件。</p>
       {error && <p className="rules-screen__error" role="alert">{error}</p>}
@@ -126,7 +142,7 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
           <div className="rules-group__heading"><h3>{deviceName(unitId)}</h3><span>{items.length} 条教导</span></div>
           {items.map(item => {
             const card = cards.find(entry => entry.unit_id === item.unit_id) || {};
-            return <article key={item.teaching_id} className={`rule-card${item.execution_status === 'enabled' ? ' rule-card--enabled' : ''}`}>
+            return <article key={item.teaching_id} data-teaching-id={item.teaching_id} className={`rule-card${item.execution_status === 'enabled' ? ' rule-card--enabled' : ''}`}>
             {editing?.teaching_id === item.teaching_id ? <>
               <div className="rule-card__top"><span className="rule-card__eyebrow">修改教导</span></div>
               {['name', 'trigger', 'behavior'].map(key =>

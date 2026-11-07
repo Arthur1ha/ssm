@@ -229,22 +229,7 @@ body {
 .teaching-button:focus-visible, .teaching-link:focus-visible, .rule-action:focus-visible, .rule-field :focus-visible, .rule-binding__toggle :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 @media (max-width: 370px) { .rule-card__actions { gap: 6px; } .rule-action { font-size: 12px; padding-inline: 7px; } }
 
-/* 状态机连线图：仅当前状态的出边可操作。 */
-.fsm-graph {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-height: 280px;
-}
-.fsm-graph__edge:not(.is-automatic), .fsm-graph__node.is-reachable, .fsm-graph__node.is-previewable { cursor: pointer; }
-.fsm-graph__edge:not(.is-automatic):hover path:not(:first-of-type),
-.fsm-graph__edge:not(.is-automatic):focus-visible path:not(:first-of-type) { stroke-width: 3; }
-.fsm-graph__edge:not(.is-automatic):hover text, .fsm-graph__edge:not(.is-automatic):focus-visible text { opacity: 1; font-weight: 700; }
-.fsm-graph__edge.is-automatic { pointer-events: none; opacity: .55; }
-.fsm-graph__edge:focus-visible, .fsm-graph__node:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
-.fsm-graph-wrap { width: 100%; min-height: 0; display: flex; flex-direction: column; align-items: center; }
-
-/* Card 驱动的设备白板：状态图居中，视频与预览在上角，其余控件进入托盘。 */
+/* Card 驱动的共享设备白板。 */
 .device-state-workspace {
   flex-shrink: 0;
   height: clamp(360px, 46dvh, 430px);
@@ -252,8 +237,6 @@ body {
   background: var(--color-surface-1);
   overflow: hidden;
 }
-.device-state-workspace--expanded { height: clamp(440px, 62dvh, 560px); }
-.device-state-workspace.device-state-workspace--hierarchical { height: clamp(340px, 58dvh, 650px); }
 /* Device pages share a spatial whiteboard and the existing system palette. */
 .device-page { overflow: hidden; overscroll-behavior: contain; }
 .device-page__header { position: relative; z-index: 5; min-height: 52px; }
@@ -265,7 +248,6 @@ body {
 }
 .device-state-board { min-width: 0; color: var(--color-text); background: var(--color-bg); }
 .device-whiteboard { position: relative; height: 100%; display: flex; flex-direction: column; }
-.device-whiteboard.is-expanded { position: fixed; inset: 0; z-index: 90; padding-top: env(safe-area-inset-top,0px); padding-bottom: env(safe-area-inset-bottom,0px); }
 .device-whiteboard__media { display: flex; justify-content: center; flex: 0 0 auto; gap: 8px; padding: 8px 12px 4px; }
 .device-whiteboard__media-slot { flex: 1 1 0; min-width: 0; max-width: 190px; height: clamp(68px,10dvh,88px); }
 .device-whiteboard__media-tile { position: relative; width: 100%; height: 100%; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface-1); }
@@ -275,44 +257,45 @@ body {
 .fsm-whiteboard__viewport { display: block; width: 100%; flex: 1 1 auto; min-height: 0; touch-action: none; user-select: none; cursor: grab; }
 .fsm-whiteboard__viewport:active { cursor: grabbing; }
 .fsm-whiteboard__node { cursor: pointer; }
-.fsm-whiteboard__node.is-actionable .fsm-whiteboard__circle { stroke: var(--board-accent); }
-.fsm-whiteboard__node.is-actionable:hover .fsm-whiteboard__circle { stroke-width: 3; }
+.fsm-whiteboard__node.is-reachable .fsm-whiteboard__circle { fill: color-mix(in srgb, var(--board-accent) 16%, var(--color-bg)); stroke: color-mix(in srgb, var(--board-accent) 55%, var(--color-bg)); }
+.fsm-whiteboard__node.is-reachable .fsm-whiteboard__node-label { fill: var(--board-accent); }
 .fsm-whiteboard__circle { fill: var(--color-surface-1); stroke: var(--color-border-strong); stroke-width: 1.5; }
 .fsm-whiteboard__node-label { fill: var(--color-text-muted); font: 17px var(--font-sans); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
-.fsm-whiteboard__node.is-current .fsm-whiteboard__circle { stroke: var(--board-accent); stroke-width: 2.5; }
-.fsm-whiteboard__node.is-current .fsm-whiteboard__node-label { fill: var(--board-accent); font-weight: 600; }
-.fsm-whiteboard__current-dot { fill: var(--board-accent); pointer-events: none; }
-.fsm-whiteboard__halo { fill: none; stroke: var(--board-accent); opacity: .25; }
-.fsm-whiteboard__node.is-selected .fsm-whiteboard__halo { opacity: 1; stroke-dasharray: 4 4; }
+.fsm-whiteboard__node.is-current .fsm-whiteboard__circle { fill: var(--board-accent); stroke: var(--board-accent); stroke-width: 2; }
+.fsm-whiteboard__node.is-current .fsm-whiteboard__node-label { fill: var(--color-bg); font-weight: 600; }
+.fsm-whiteboard__halo { fill: none; stroke: var(--board-accent); opacity: .25; pointer-events: none; }
+.fsm-whiteboard__node.is-selected .fsm-whiteboard__halo { opacity: 1; stroke-width: 2; }
 .fsm-whiteboard__node.is-retained .fsm-whiteboard__circle { stroke-dasharray: 3 4; }
-.fsm-whiteboard__edge { color: var(--board-accent); cursor: pointer; }
-.fsm-whiteboard__edge.is-disabled { color: var(--color-text-dim); cursor: default; }
-.fsm-whiteboard__edge.is-automatic { opacity: .5; }
-.fsm-whiteboard__edge.is-context { opacity: .35; }
-.fsm-whiteboard__edge.is-context .fsm-whiteboard__hit { pointer-events: none; }
-.fsm-whiteboard__section { pointer-events: none; }
-.fsm-whiteboard__section text { fill: var(--color-text-muted); font: 19px var(--font-sans); }
-.fsm-whiteboard__section .fsm-whiteboard__hint { fill: var(--color-text-dim); font-size: 15px; }
-.fsm-whiteboard__section line { stroke: var(--color-border-strong); stroke-width: 1; }
-.fsm-whiteboard__line { fill: none; stroke: currentColor; stroke-width: 1.6; pointer-events: none; }
+.fsm-whiteboard__edge { color: var(--color-text-dim); opacity: .45; cursor: pointer; }
+.fsm-whiteboard__edge.is-emphasized { color: var(--board-accent); opacity: .65; }
+.fsm-whiteboard__edge.is-automatic .fsm-whiteboard__line { stroke-dasharray: 4 5; }
+.fsm-whiteboard__edge.is-selected, .fsm-whiteboard__edge.is-running, .fsm-whiteboard__edge:hover, .fsm-whiteboard__edge:focus-visible { color: var(--board-accent); opacity: 1; }
+.fsm-whiteboard__line { fill: none; stroke: currentColor; stroke-width: 1.2; pointer-events: none; }
 .fsm-whiteboard__hit { fill: none; stroke: transparent; stroke-width: 24; pointer-events: stroke; }
-.fsm-whiteboard__label-hit { fill: var(--color-bg); fill-opacity: .94; }
-.fsm-whiteboard__edge-label { fill: currentColor; font: 16px var(--font-sans); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
-.fsm-whiteboard__edge.is-available:hover .fsm-whiteboard__line, .fsm-whiteboard__edge.is-running .fsm-whiteboard__line { stroke-width: 2.8; }
-.fsm-whiteboard__edge:focus-visible, .fsm-whiteboard__node:focus-visible { outline: none; }
-.fsm-whiteboard__node:focus-visible .fsm-whiteboard__circle, .fsm-whiteboard__edge:focus-visible .fsm-whiteboard__label-hit { stroke: var(--board-accent); stroke-width: 3; }
-.fsm-whiteboard__toolbar { display: flex; flex: 0 0 44px; align-items: center; justify-content: space-between; gap: 8px; padding: 0 64px 0 8px; }
-.fsm-whiteboard__toolbar > div { display: flex; }
-.fsm-whiteboard__toolbar button, .device-whiteboard__expand { min-width: 44px; min-height: 44px; padding: 6px 8px; border: 0; background: transparent; color: var(--color-text-muted); font: 11px var(--font-sans); cursor: pointer; }
-.fsm-whiteboard__toolbar button[aria-pressed="true"] { color: var(--board-accent); }
-.device-whiteboard__expand { position: absolute; right: 8px; bottom: 0; }
-.device-whiteboard__preview { position: absolute; left: 12px; right: 12px; bottom: 48px; z-index: 2; display: flex; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface-1); }
-.device-whiteboard__preview .device-state-visual { flex: 0 0 84px; width: 84px; background: transparent; border: 0; }
-.device-whiteboard__preview .device-state-visual__eyebrow { display: none; }
-.device-whiteboard__preview > div { min-width: 0; }
-.device-whiteboard__preview strong { font-size: 12px; }
-.device-whiteboard__preview p, .device-whiteboard__preview small { margin: 4px 0 0; color: var(--color-text-muted); font-size: 10px; line-height: 1.6; }
-.device-whiteboard__preview > button { flex: 0 0 36px; min-height: 44px; margin-left: auto; align-self: flex-start; border: 0; background: transparent; color: var(--color-text-muted); font-size: 20px; cursor: pointer; }
+.fsm-whiteboard__edge.is-selected .fsm-whiteboard__line, .fsm-whiteboard__edge.is-running .fsm-whiteboard__line, .fsm-whiteboard__edge:focus-visible .fsm-whiteboard__line { stroke-width: 2.8; }
+.fsm-whiteboard.is-inspecting .fsm-whiteboard__edge:not(.is-selected),
+.fsm-whiteboard.is-inspecting .fsm-whiteboard__node:not(.is-related) { filter: blur(1.5px); opacity: .28; }
+/* SVG groups get a rectangular browser focus ring unless both focus modes are reset.
+   Keep keyboard focus visible on the actual circle/path instead. */
+.fsm-whiteboard__edge, .fsm-whiteboard__node, .fsm-whiteboard__edge:focus, .fsm-whiteboard__node:focus { outline: none; -webkit-tap-highlight-color: transparent; }
+.fsm-whiteboard__node:focus-visible .fsm-whiteboard__circle, .fsm-whiteboard__node:hover .fsm-whiteboard__circle { stroke: var(--board-accent); stroke-width: 3; }
+.device-whiteboard__popover { position: absolute; z-index: 3; display: flex; flex-direction: column; width: max-content; height: auto; max-width: min(248px,calc(100% - 16px)); max-height: min(240px,calc(100% - 16px)); overflow: hidden; padding: 8px 10px; border: 0; border-radius: 8px; background: rgba(28,28,42,.90); box-shadow: 0 4px 14px rgba(0,0,0,.16); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); outline: none; }
+.device-whiteboard__popover strong { display: block; flex-shrink: 0; min-height: 20px; font-size: 12px; font-weight: 500; }
+.device-whiteboard__popover p, .device-whiteboard__popover small { display: block; margin: 3px 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.device-whiteboard__popover-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.device-whiteboard__directions { display: flex; flex: 0 0 auto; gap: 4px; padding-bottom: 4px; margin-bottom: 2px; }
+.device-whiteboard__directions button { flex: 1 1 auto; min-width: 0; min-height: 32px; padding: 4px 6px; border: 0; border-radius: 0; background: transparent; color: var(--color-text-dim); font: 11px var(--font-sans); overflow-wrap: anywhere; cursor: pointer; }
+.device-whiteboard__directions button[aria-pressed="true"] { color: var(--board-accent); box-shadow: inset 0 -1px color-mix(in srgb, var(--board-accent) 55%, transparent); }
+.device-whiteboard__system-rule + .device-whiteboard__system-rule { border-top: 1px solid rgba(255,255,255,.06); margin-top: 5px; padding-top: 4px; }
+.device-whiteboard__rule-error { color: var(--color-text-muted); font-size: 11px; }
+.device-whiteboard__rule-error button { min-height: 32px; border: 0; background: transparent; color: var(--board-accent); cursor: pointer; }
+.device-whiteboard__rule { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,.06); }
+.device-whiteboard__rule footer { display: flex; gap: 6px; align-items: center; justify-content: space-between; }
+.device-whiteboard__rule footer small { font-size: 10px; color: var(--color-text-dim); }
+.device-whiteboard__rule button { min-height: 32px; border: 0; background: transparent; color: var(--color-text-muted); font-size: 10px; cursor: pointer; }
+.device-whiteboard__actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.device-whiteboard__actions .btn { min-height: 32px; margin-top: 0; padding: 3px 6px; color: var(--board-accent); border: 0; background: transparent; font-size: 11px; }
+.device-whiteboard__actions .btn:disabled { color: var(--color-text-dim); opacity: .6; cursor: default; }
 .device-whiteboard__feedback { padding: 5px 12px; flex: 0 0 auto; color: var(--color-text-muted); font-size: 10px; border-top: 1px solid var(--color-border); }
 .device-whiteboard__controls { flex: 0 1 auto; min-height: 0; max-height: 140px; overflow-y: auto; border-top: 1px solid var(--color-border); padding: 6px 12px; background: var(--color-surface-1); }
 .device-whiteboard__controls:has(.device-remote-controls) { flex: 0 0 150px; max-height: 150px; }

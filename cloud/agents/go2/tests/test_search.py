@@ -512,6 +512,32 @@ async def test_transit_miss_does_not_interrupt_navigation_or_mark_coverage(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('distance, expected', [(.0, 'blocked'), (.17, 'ok')])
+async def test_search_reposition_requires_actual_motion_and_fresh_next_view(monkeypatch, distance, expected):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    adapter, robot = transit_device(monkeypatch)
+    robot.odom = {**robot.odom, 'session_id': 'map'}
+    start = robot.odom.copy()
+    moved = {**start, 'x': start['x']+distance}
+    navigate = AsyncMock(return_value={'status': 'succeeded', 'last_trusted_pose': moved})
+    monkeypatch.setattr(navigator, 'go_to_coordinate', navigate)
+    before = time.monotonic()
+    receipt = await adapter.navigate(initial(mode='explore', candidate={
+        'x': start['x']+.30, 'y': start['y'], 'heading': start['heading'],
+        'source': 'observation_reposition', 'path_cost_m': .30}))
+    assert receipt['result'] == expected
+    assert navigate.call_args.kwargs['arrival_tolerance_m'] == .08
+    assert navigate.call_args.kwargs['minimum_command_speed'] == .25
+    assert navigate.call_args.kwargs['speed_limit'] == .30
+    assert adapter.after_time >= before
+    assert not adapter.coverage.records
+    if expected == 'blocked':
+        assert receipt['reason'] == 'observation_move_unconfirmed'
+        assert receipt['navigation_receipt']['status'] == 'succeeded'
+
+
+@pytest.mark.asyncio
 async def test_transit_cancel_joins_navigation_and_model_observer(monkeypatch):
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2.perception import visual_target

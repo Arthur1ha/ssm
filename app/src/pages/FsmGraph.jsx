@@ -1,9 +1,8 @@
-/* Card-owned spatial layout. Target states control; edges explain transitions. */
+/* Card-owned spatial layout. State clicks delegate actions; edges inspect rules. */
 function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', views = {},
-  selectedState, onSelectState, onInspectTransition, color = 'var(--color-accent)', pendingCommand, diagram }) {
+  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
-  const [allEdges, setAllEdges] = useState(true);
   const svgRef = useRef(null);
   const gesture = useRef({ points:new Map(), moved:false, blockClick:false });
   const marker = useRef('fsm-arrow-' + Math.random().toString(36).slice(2));
@@ -44,10 +43,10 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
-    const wheel = event => { event.preventDefault(); zoomAt(Math.exp(-event.deltaY * .002), localPoint(event)); };
+    const wheel = event => { event.preventDefault(); onDismiss?.(); zoomAt(Math.exp(-event.deltaY * .002), localPoint(event)); };
     svg.addEventListener('wheel', wheel, {passive:false});
     return () => svg.removeEventListener('wheel', wheel);
-  }, []);
+  }, [onDismiss]);
   const pointerDown = event => {
     if (event.button != null && event.button !== 0) return;
     const g = gesture.current;
@@ -62,6 +61,7 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
     const next = {x:event.clientX,y:event.clientY};
     const dx = next.x - previous.x, dy = next.y - previous.y;
     if (!g.moved && Math.hypot(dx,dy) < 4) return;
+    if (!g.moved) onDismiss?.();
     g.moved = true; g.blockClick = true;
     if (g.points.size === 2) {
       const other = [...g.points.entries()].find(([id]) => id !== event.pointerId)[1];
@@ -76,115 +76,97 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
     g.points.set(event.pointerId,next);
   };
   const pointerUp = event => { gesture.current.points.delete(event.pointerId); };
-  const isMain = edge => points[edge.src]?.node.group && points[edge.src].radius > 40
-    && points[edge.dst]?.radius > 40;
-  const visibleEdges = graphEdges.filter(edge => {
-    if (diagram && edge.src === edge.dst && !edge.active && selectedState !== edge.src) return false;
-    if (diagram && !edge.transition.action && graphEdges.some(other => other.transition.action
-      && other.src === edge.src && other.dst === edge.dst)) return false;
-    const returnObservation = diagram && !edge.transition.action && points[edge.dst]?.node.current
-      && points[edge.src]?.node.group === points[edge.dst]?.node.group;
-    return allEdges || diagram && isMain(edge) || edge.active || returnObservation
-      || selectedState && (edge.src === selectedState || edge.dst === selectedState);
-  });
-  const labelBounds = [];
-  const loopCounts = new Map();
+  const visibleEdges = stateGraphLinks(graphEdges);
+  // Geometry stays fixed when switching direction; only the arrow changes.
+  const routes = new Map(visibleEdges.map(edge => {
+    const source = points[edge.src], target = points[edge.dst];
+    if (!source || !target) return [edge.id,''];
+    const dx = target.x-source.x, dy = target.y-source.y, length = Math.hypot(dx,dy) || 1;
+    // Radial links keep separate corridors when straight. Bend only to avoid
+    // a node; a mandatory bend can make adjacent spokes cross near their hub.
+    const base = Math.min(28,length*.12);
+    const candidates = [0,base,-base,base+32,-base-32,base+64,-base-64,base+104,-base-104,base+152,-base-152];
+    const obstacles = bounds.filter(point => point !== source && point !== target);
+    const route = candidates.map(bend => {
+      const control = {x:(source.x+target.x)/2-dy/length*bend,
+        y:(source.y+target.y)/2+dx/length*bend};
+      const startLength = Math.hypot(control.x-source.x,control.y-source.y) || 1;
+      const endLength = Math.hypot(target.x-control.x,target.y-control.y) || 1;
+      const start = {x:source.x+(control.x-source.x)/startLength*(source.radius+2),
+        y:source.y+(control.y-source.y)/startLength*(source.radius+2)};
+      const end = {x:target.x-(target.x-control.x)/endLength*(target.radius+5),
+        y:target.y-(target.y-control.y)/endLength*(target.radius+5)};
+      let score = Math.abs(bend)*.04;
+      for (let step=1; step<16; step++) {
+        const t=step/16, u=1-t;
+        const x=u*u*start.x+2*u*t*control.x+t*t*end.x;
+        const y=u*u*start.y+2*u*t*control.y+t*t*end.y;
+        for (const point of obstacles) score += Math.max(0,point.radius+10-Math.hypot(x-point.x,y-point.y))**2;
+        if (x<8 || x>width-8 || y<8 || y>height-8) score += 1000;
+      }
+      return {bend,score,path:`M${start.x} ${start.y}Q${control.x} ${control.y} ${end.x} ${end.y}`};
+    }).reduce((best,candidate) => candidate.score < best.score ? candidate : best);
+    return [edge.id,route.path];
+  }));
   const activate = callback => event => {
     if (event.type === 'keydown' && !['Enter',' '].includes(event.key)) return;
     if (event.type === 'keydown') event.preventDefault();
-    if (!gesture.current.blockClick || event.type === 'keydown' || event.detail === 0) callback?.();
+    if (!gesture.current.blockClick || event.type === 'keydown' || event.detail === 0) callback?.(event);
   };
-  return <div className="fsm-whiteboard" style={{'--board-accent':color}}>
+  const anchorAt = event => {
+    const element = event.currentTarget;
+    if (!element?.getScreenCTM) return null;
+    const keyboard = event.type === 'keydown' || event.detail === 0;
+    const path = element.querySelector('.fsm-whiteboard__line');
+    let point = path ? path.getPointAtLength(path.getTotalLength()/2) : {x:0,y:0};
+    if (!keyboard) {
+      const screen = svgRef.current.createSVGPoint();
+      screen.x = event.clientX; screen.y = event.clientY;
+      point = screen.matrixTransform(element.getScreenCTM().inverse());
+    }
+    return {element, point:{x:point.x,y:point.y}, keyboard};
+  };
+  const inspectedLink = visibleEdges.find(edge => edge.id === selectedLink);
+  return <div className={`fsm-whiteboard${inspectedLink ? ' is-inspecting' : ''}`} style={{'--board-accent':color}}>
     <svg ref={svgRef} className="fsm-whiteboard__viewport" viewBox={`0 0 ${width} ${height}`}
       role="group" aria-label="设备状态机白板，可拖动和缩放"
+      onClick={event => { if (!event.target.closest('[role="button"]') && !gesture.current.blockClick) onDismiss?.(); }}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
       onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}>
       <defs><marker id={marker.current} markerWidth="8" markerHeight="8" refX="7" refY="4"
         orient="auto-start-reverse"><path d="M1 1L7 4L1 7" fill="none" stroke="currentColor" strokeWidth="1.3"/></marker></defs>
       <g transform={`translate(${cx+camera.x} ${cy+camera.y}) scale(${camera.zoom}) translate(${-cx} ${-cy})`}>
-        {(diagram?.sections || []).map((section,index) => <g key={section.label} className="fsm-whiteboard__section" aria-label={section.label}>
-          {index > 0 && <line x1="28" x2={width-28} y1={section.top-24} y2={section.top-24}/>}
-          <text x="30" y={section.top}>{section.label}</text>
-          {section.hint && <text x={width-30} y={section.top} textAnchor="end" className="fsm-whiteboard__hint">{section.hint}</text>}
-        </g>)}
-        {visibleEdges.map((edge,index) => {
+        {visibleEdges.map(edge => {
           const source = points[edge.src], target = points[edge.dst];
           if (!source || !target) return null;
-          const transition = edge.transition;
-          const actionable = !!transition.action && edge.active;
-          const disabled = !actionable || !!edge.reason;
-          const running = pendingCommand && [transition.trigger,transition.action].includes(pendingCommand);
-          const dx = target.x-source.x, dy = target.y-source.y, length = Math.hypot(dx,dy) || 1;
-          const self = edge.src === edge.dst;
-          const bend = diagram ? (Math.abs(dx)<20 ? 160 : 74) : (length < 190 ? 95 : 30) + (index % 3) * 12;
-          const control = {x:(source.x+target.x)/2 - dy/length*bend,
-            y:(source.y+target.y)/2 + dx/length*bend};
-          const sx = source.x+dx/length*(source.radius+1), sy = source.y+dy/length*(source.radius+1);
-          const endLength = Math.hypot(target.x-control.x,target.y-control.y) || 1;
-          const ex = target.x-(target.x-control.x)/endLength*(target.radius+3);
-          const ey = target.y-(target.y-control.y)/endLength*(target.radius+3);
-          const loopLane = loopCounts.get(edge.src) || 0;
-          if (self) loopCounts.set(edge.src,loopLane+1);
-          const inwardLength = Math.hypot(cx-source.x,cy-source.y) || 1;
-          const ux = (cx-source.x)/inwardLength;
-          const uy = inwardLength > 1 ? (cy-source.y)/inwardLength : 1;
-          const depth = 112 + loopLane*48;
-          let path = self ? `M${source.x+ux*26-uy*30} ${source.y+uy*26+ux*30} C${source.x+ux*depth-uy*86} ${source.y+uy*depth+ux*86} ${source.x+ux*depth+uy*86} ${source.y+uy*depth-ux*86} ${source.x+ux*26+uy*30} ${source.y+uy*26-ux*30}`
-            : `M${sx} ${sy}Q${control.x} ${control.y} ${ex} ${ey}`;
-          const caption = `${transition.label}${running ? ' · 执行中' : ''}`;
-          const labelWidth = Math.max(54,caption.length*16+16);
-          // Choose a clear spot along the real curve, avoiding nodes and other
-          // captions instead of stacking the whole fan of actions at its hub.
-          const candidates = self ? [{x:source.x+ux*depth*.8,y:source.y+uy*depth*.8}]
-            : [.74,.62,.50,.38,.86,.26].map(t => ({
-              x:(1-t)**2*sx+2*(1-t)*t*control.x+t*t*ex,
-              y:(1-t)**2*sy+2*(1-t)*t*control.y+t*t*ey}));
-          const scored = candidates.map(point => {
-            const box = {left:point.x-labelWidth/2,right:point.x+labelWidth/2,top:point.y-16,bottom:point.y+16};
-            const hits = Object.values(points).filter(p => Math.hypot(
-              p.x-Math.max(box.left,Math.min(p.x,box.right)),
-              p.y-Math.max(box.top,Math.min(p.y,box.bottom))) < 47).length;
-            const overlaps = labelBounds.filter(other => box.left<other.right+6 && box.right>other.left-6
-              && box.top<other.bottom+6 && box.bottom>other.top-6).length;
-            return {...point,box,score:hits*3+overlaps*2+(box.left<0 || box.right>width || box.top<0 || box.bottom>height ? 10 : 0)};
-          });
-          let spot = scored.reduce((best,item) => item.score<best.score ? item : best);
-          const detail = diagram && !isMain(edge);
+          const selected = selectedLink === edge.id;
+          const direction = stateLinkDirection(edge,graphNodes,selected ? selectedDirection : null);
+          const rules = direction.edges;
+          const representative = rules.find(rule => rule.transition.action) || rules[0];
+          const transition = representative.transition;
+          const disabled = !rules.some(rule => rule.active && !rule.reason);
+          const automatic = rules.every(rule => !rule.transition.action);
+          const running = pendingCommand && rules.some(rule => [rule.transition.trigger,rule.transition.action].includes(pendingCommand));
+          const path = routes.get(edge.id);
           const focused = selectedState && (edge.src === selectedState || edge.dst === selectedState);
-          const minor = detail && !self && (source.y > 390 || target.y > 390);
-          const captionVisible = !diagram || !minor || focused || running;
-          if (diagram && self) {
-            path = `M${source.x+source.radius*.7} ${source.y-23} C${source.x+source.radius+100} ${source.y-80} ${source.x+source.radius+100} ${source.y+80} ${source.x+source.radius*.7} ${source.y+23}`;
-            spot = {x:source.x+source.radius+62,y:source.y};
-          } else if (minor) {
-            // Route through gaps between columns, including return paths,
-            // so the lower rows never cut across another state circle.
-            const upper = source.y < target.y ? source : target;
-            const lower = source.y < target.y ? target : source;
-            const lane = (upper.x === lower.x ? upper.x+90 : (upper.x+lower.x)/2)
-              + (source.y < target.y ? -4 : 4);
-            const startSide = lane>source.x ? 1 : -1, endSide = lane>target.x ? 1 : -1;
-            path = `M${source.x+startSide*(source.radius+2)} ${source.y} H${lane} V${target.y} H${target.x+endSide*(target.radius+3)}`;
-            spot = {x:lane,y:(source.y+target.y)/2};
-          }
-          if (captionVisible) labelBounds.push({left:spot.x-labelWidth/2,right:spot.x+labelWidth/2,
-            top:spot.y-18,bottom:spot.y+18});
-          const lx = spot.x, ly = spot.y;
-          const title = edge.reason || (!edge.active && transition.action ? '当前状态不可执行' : transition.description || transition.label);
-          const inspect = activate(() => onInspectTransition?.(edge));
-          return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${!transition.action ? ' is-automatic' : ''}${running ? ' is-running' : ''}${minor && !focused && !running ? ' is-context' : ''}`}
+          const emphasized = selected || focused || (!selectedState && !selectedLink && points[direction.src]?.node.current && !disabled);
+          const title = edge.directions.length > 1 ? `${source.node.label} ↔ ${target.node.label}`
+            : `${points[direction.src].node.label} → ${points[direction.dst].node.label}`;
+          const inspect = activate(event => onInspectTransition?.(edge,direction,anchorAt(event)));
+          const reverse = direction.src !== edge.src;
+          return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${automatic ? ' is-automatic' : ''}${running ? ' is-running' : ''}${emphasized ? ' is-emphasized' : ''}${selected ? ' is-selected' : ''}`}
             data-action={transition.action || undefined} data-trigger={transition.trigger} data-label={transition.label}
-            role="button" tabIndex={captionVisible ? 0 : -1}
-            data-available={transition.action ? !disabled : undefined}
-            aria-label={`${transition.label}，查看转换说明${edge.reason ? '，'+edge.reason : ''}`}
+            data-source={direction.src} data-target={direction.dst} data-link={edge.id} data-direction={direction.id}
+            data-rule-count={rules.length}
+            role="button" tabIndex="0" aria-pressed={selected}
+            data-available={transition.action ? rules.some(rule => rule.transition.action && rule.active && !rule.reason) : !disabled}
+            aria-label={`${title}，查看转换规则`}
             onClick={inspect} onKeyDown={inspect}>
             <title>{title}</title>
             <path d={path} className="fsm-whiteboard__hit"/>
-            <path d={path} className="fsm-whiteboard__line" markerEnd={`url(#${marker.current})`}/>
-            {captionVisible && <>
-              <rect x={lx-labelWidth/2} y={ly-18} width={labelWidth} height="36" rx="12" className="fsm-whiteboard__label-hit"/>
-              <text x={lx} y={ly} className="fsm-whiteboard__edge-label">{caption}</text>
-            </>}
+            <path d={path} className="fsm-whiteboard__line"
+              markerStart={reverse ? `url(#${marker.current})` : undefined}
+              markerEnd={reverse ? undefined : `url(#${marker.current})`}/>
           </g>;
         })}
         {graphNodes.map(node => {
@@ -193,31 +175,27 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
           const nodeRadius = p.radius;
           const label = node.label;
           const targetAction = node.control?.transition;
-          const nodeHint = node.current ? '当前状态，查看说明' : targetAction
-            ? `点击${targetAction.label}` : node.control?.reason || '查看说明';
+          const actionable = !!targetAction || node.control?.choices?.some(edge => !edge.reason);
+          const reachable = node.control?.reachable || actionable;
+          const related = inspectedLink && [inspectedLink.src,inspectedLink.dst].includes(node.id);
+          const nodeHint = targetAction ? '点击执行' : node.current
+            ? '当前状态，查看说明' : reachable ? '查看转换条件' : node.control?.reason || '查看说明';
           const lines = label.length > 4 ? [label.slice(0,4),label.slice(4)] : [label];
-          const select = activate(() => onSelectState?.(node.id));
-          return <g key={node.id} className={`fsm-whiteboard__node${node.current ? ' is-current' : ''}${targetAction ? ' is-actionable' : ''}${node.retained ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}
+          const select = activate(event => onSelectState?.(node.id, anchorAt(event)));
+          return <g key={node.id} className={`fsm-whiteboard__node${node.current ? ' is-current' : ''}${actionable ? ' is-actionable' : ''}${reachable ? ' is-reachable' : ''}${related ? ' is-related' : ''}${node.retained ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}
             transform={`translate(${p.x} ${p.y})`} role="button" tabIndex="0"
             data-state={node.id} data-group={node.group} data-radius={nodeRadius}
-            data-executable={!!targetAction} aria-label={`${label}，${nodeHint}`} aria-pressed={selected}
+            data-executable={!!targetAction} data-reachable={!!reachable} aria-label={`${label}，${nodeHint}`} aria-pressed={selected}
             onClick={select} onKeyDown={select}>
-            <title>{`${label}：${nodeHint}`}</title>
+            <title>{label}</title>
             <circle r={nodeRadius+7} fill="transparent"/>
             {(node.current || selected) && <circle r={nodeRadius+7} className="fsm-whiteboard__halo"/>}
             <circle r={nodeRadius} className="fsm-whiteboard__circle"/>
             {lines.map((line,index) => <text key={index} y={(index-(lines.length-1)/2)*21} className="fsm-whiteboard__node-label">{line}</text>)}
-            {node.current && <circle cx="0" cy={nodeRadius-11} r="2.5" className="fsm-whiteboard__current-dot"/>}
           </g>;
         })}
       </g>
     </svg>
-    <div className="fsm-whiteboard__toolbar">
-      <button type="button" aria-pressed={allEdges} onClick={() => setAllEdges(value => !value)}>{allEdges ? '聚焦当前' : '全部连线'}</button>
-      <div><button type="button" aria-label="缩小白板" onClick={() => zoomAt(1/1.2)}>−</button>
-        <button type="button" onClick={() => setCamera(fit)}>适应</button>
-        <button type="button" aria-label="放大白板" onClick={() => zoomAt(1.2)}>＋</button></div>
-    </div>
   </div>;
 }
 window.FsmGraph = FsmGraph;

@@ -41,12 +41,11 @@ def test_lamp_board_shows_only_lighting_and_keeps_autonomy_in_settings(version):
     primary = regions[machine["primary_region"]]
     assert primary["state_field"] == "ism"
     assert set(regions) == {"device"}
-    assert primary["states"] == [state for state in machine["states"] if state != "ERROR"]
+    assert primary["states"] == machine["states"]
     if version == 2:
-        assert primary["states"] == ["OFF", "ON", "BLINKING"]
-    assert "ERROR" not in primary["views"]
-    assert primary["transitions"] == [edge for edge in machine["transitions"]
-                                      if edge["src"] != "ERROR" and edge["dst"] != "ERROR"]
+        assert primary["states"] == ["OFF", "ON", "BLINKING", "ERROR"]
+    assert "ERROR" in primary["views"]
+    assert primary["transitions"] == machine["transitions"]
     normalize_card(card)
     assert card["modes"][0]["state_field"] == "autonomy_mode"
     assert card["state"] == {}  # No physical or cloud runtime values in retained Card.
@@ -159,9 +158,16 @@ def test_go2_all_actions_fit_and_contextual_joystick_contract():
     body = next(region for region in machine['regions'] if region['id'] == 'body')
     layout = body['layout']
     assert len({point['y'] for point in layout.values()}) > 2
-    assert layout['lying']['y'] == layout['standing']['y'] == layout['sitting']['y']
-    assert layout['greeting']['y'] > layout['standing']['y']
-    assert layout['moving']['y'] > layout['standing']['y']
+    assert layout['standing'] == {'x': .5, 'y': 475 / 670}
+    assert any(point['x'] < .5 for point in layout.values())
+    assert any(point['x'] > .5 for point in layout.values())
+    assert any(point['y'] < layout['standing']['y'] for point in layout.values())
+    assert any(point['y'] > layout['standing']['y'] for point in layout.values())
+    regions = {region['id']: region for region in machine['regions']}
+    rest = regions['activity']['layout']['rest']
+    idle, explore, play = (regions['life']['layout'][key] for key in ('idle', 'explore', 'play'))
+    assert rest['y'] == idle['y'] < explore['y'] == play['y']
+    assert rest['x'] == explore['x'] < idle['x'] == play['x']
     for point in layout.values():
         assert 0 <= point['x'] <= 1 and 0 <= point['y'] <= 1
         radius = body['node_radius'] + 7

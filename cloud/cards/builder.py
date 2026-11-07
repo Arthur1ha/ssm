@@ -127,7 +127,7 @@ def _current_led_transitions():
                             "graph_hidden": trigger == "CMD_COLOR"})
     for target in BLINK_DONE_TARGETS:
         transitions.append({"src": "BLINKING", "dst": target, "trigger": "BLINK_DONE",
-                            "label": "自动熄灭" if target == "OFF" else "自动常亮",
+                            "label": "闪烁结束",
                             "action": "", "params": {}, "graph_hidden": False})
     return transitions
 
@@ -290,15 +290,8 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
             **{key: deepcopy(machine[key]) for key in
                ("state_field", "states", "transitions", "views") if key in machine},
         }]
-        if fsm_key == "led":
-            # Show only lighting states. Keep the complete execution contract
-            # above (including error recovery); autonomy remains in modes.
-            lighting = machine["regions"][0]
-            lighting["states"] = [state for state in lighting["states"] if state != "ERROR"]
-            lighting["transitions"] = [edge for edge in lighting["transitions"]
-                                       if edge["src"] in lighting["states"]
-                                       and edge["dst"] in lighting["states"]]
-            lighting["views"].pop("ERROR", None)
+        # Keep every physical state and recovery edge in the board projection;
+        # in particular, ERROR must remain visible when the device reports it.
         card["state_machine"] = machine
         modes = MODE_DEFS.get(fsm_key)
         if modes:

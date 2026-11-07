@@ -116,3 +116,45 @@ def test_scope_too_narrow_for_body_has_no_observation_destination():
                                        bounds=bounds)
     assert result.target is None
     assert result.reason == 'no_reachable_observation_point'
+
+
+def test_start_filter_uses_planned_lookahead_not_direct_goal_bearing(monkeypatch):
+    from types import SimpleNamespace
+    from cloud.go2.navigation.frontier import ObservationTarget, _can_start_observation
+    from cloud.go2.navigation.navigator import Navigator
+    grid = room()
+    # The target is straight ahead, but its route initially goes left.
+    route = SimpleNamespace(grid_to_odom=lambda x, y: (y*.1, y*.7))
+    monkeypatch.setattr(Navigator, '_plan_path', lambda *args:
+                        ([(0, 0), (0, 1), (1, 1)], route, (1., 0., False)))
+    monkeypatch.setattr(grid, 'turn_sweep_details', lambda *args: {'clear': False})
+    target = ObservationTarget(1., 0., 0., 'visual_coverage', 1., 1., 'a')
+    assert not _can_start_observation(grid, POSE, target, BOUNDS, {})
+
+
+def test_unexecutable_views_get_measured_forward_reposition(monkeypatch):
+    from types import SimpleNamespace
+    grid = room()
+    grid.cells[:] = FREE
+    grid.known_floor[:] = True
+    grid.grid[:] = False
+    original = grid.turn_sweep_details
+    def sweep(x, y, first, last):
+        if math.hypot(x, y) < .01 and abs(last-first) > .02:
+            return {'clear': False, 'blockers': ['unmeasured_floor']}
+        return original(x, y, first, last)
+    monkeypatch.setattr(grid, 'turn_sweep_details', sweep)
+    # Only views to the left have unobserved content; every route starts turning.
+    coverage = SimpleNamespace(map_session='a', records=[{}],
+        gain=lambda grid, pose: 100 if pose['y'] > 1 and abs(pose['x']) < .5 else 0,
+        visits=lambda pose: 0, failures=lambda target: 0)
+    selected = select_observation_target(grid, POSE, coverage, bounds=BOUNDS)
+    assert selected.reason == 'observation_reposition_selected'
+    assert selected.target.source == 'observation_reposition'
+    assert (selected.target.x, selected.target.y, selected.target.heading) == (.30, 0., 0.)
+    # Forward unknown ground must prevent the fallback too.
+    ix, iy = grid.odom_to_grid(.6, 0.)
+    grid.known_floor[iy, ix] = False
+    blocked = select_observation_target(grid, POSE, coverage, bounds=BOUNDS)
+    assert blocked.target is None
+    assert blocked.reason == 'observation_start_unconfirmed'

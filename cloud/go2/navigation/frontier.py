@@ -72,6 +72,64 @@ class Selection:
     reason: str
 
 
+def _can_start_observation(grid, odom, target, bounds, plans):
+    """Preview Navigator's first action without acquiring control or moving."""
+    from cloud.go2.navigation.navigator import (
+        Navigator, _find_lookahead_on_path, _normalize_angle,
+        ARRIVAL_THRESHOLD, HEADING_THRESHOLD, PATH_HEADING_INHIBIT,
+        WALK_SPEED, MIN_LINEAR_VEL, TURN_SPEED, KP_YAW,
+    )
+    key = (target.x, target.y, target.heading)
+    if key not in plans:
+        plans[key] = Navigator()._plan_path(
+            {'x': target.x, 'y': target.y, 'heading': target.heading, 'bounds': bounds}, grid, odom)
+    planned = plans[key]
+    if planned is None:
+        return False
+    path, route_grid, goal = planned
+    distance = math.hypot(goal[0]-odom['x'], goal[1]-odom['y'])
+    if distance < ARRIVAL_THRESHOLD:
+        error = _normalize_angle(target.heading-odom['heading'])
+        return (abs(error) <= HEADING_THRESHOLD
+                or Navigator._turn_details(grid, odom, target.heading)['clear'])
+    x, y = _find_lookahead_on_path(path, route_grid, odom['x'], odom['y'],
+                                  odom['heading'], {'x': goal[0], 'y': goal[1]},
+                                  front_only=True)
+    error = _normalize_angle(math.atan2(y-odom['y'], x-odom['x'])-odom['heading'])
+    if abs(error) > PATH_HEADING_INHIBIT:
+        return Navigator._turn_details(grid, odom, odom['heading']+error)['clear']
+    speed = min(WALK_SPEED, max(MIN_LINEAR_VEL, distance*.8))
+    yaw = max(-TURN_SPEED, min(TURN_SPEED, KP_YAW*error))
+    body_clear = getattr(grid, 'is_body_clear', None)
+    return bool(callable(body_clear)
+                and body_clear(odom['x'], odom['y'], odom['heading'])
+                and body_clear(odom['x']+speed*math.cos(odom['heading'])*.3,
+                               odom['y']+speed*math.sin(odom['heading'])*.3,
+                               odom['heading']+yaw*.3))
+
+
+def _forward_observation_target(grid, odom, coverage, bounds, session):
+    """A measured forward step may expose floor needed for a later turn."""
+    body_clear = getattr(grid, 'is_body_clear', None)
+    sweep = getattr(grid, 'turn_sweep_details', None)
+    if not callable(body_clear) or not callable(sweep):
+        return None
+    heading = odom['heading']
+    # Include clearance beyond the endpoint; absent returns never grant passage.
+    for distance in np.linspace(0., .60, 13):
+        x = odom['x'] + distance*math.cos(heading)
+        y = odom['y'] + distance*math.sin(heading)
+        if not (bounds[0]+TURN_CLEARANCE_M <= x <= bounds[2]-TURN_CLEARANCE_M
+                and bounds[1]+TURN_CLEARANCE_M <= y <= bounds[3]-TURN_CLEARANCE_M
+                and body_clear(x, y, heading)
+                and sweep(x, y, heading, heading)['clear']):
+            return None
+    target = ObservationTarget(odom['x']+.30*math.cos(heading),
+                               odom['y']+.30*math.sin(heading), heading,
+                               'observation_reposition', 0., .30, session)
+    return target if coverage.failures(target) < 2 else None
+
+
 def _reachable(grid, odom, bounds, *, clearance=0.0):
     try:
         start = grid.odom_to_grid(odom['x'], odom['y'])
@@ -293,7 +351,14 @@ def select_observation_target(grid, odom, coverage, *, bounds, current=None):
             candidates.append(target)
     if not candidates:
         return Selection(None, 'coverage_exhausted' if coverage.records else 'observation_geometry_unconfirmed')
-    best = max(candidates, key=lambda c: (c.score, -c.path_cost_m, -c.x, -c.y, -c.heading))
+    plans = {}
+    best = next((target for target in sorted(
+        candidates, key=lambda c: (c.score, -c.path_cost_m, -c.x, -c.y, -c.heading), reverse=True)
+        if _can_start_observation(grid, odom, target, bounds, plans)), None)
+    if best is None:
+        forward = _forward_observation_target(grid, odom, coverage, bounds, session)
+        return Selection(forward, 'observation_reposition_selected' if forward else
+                         'observation_start_unconfirmed')
     if current is not None and current.map_session == session and coverage.failures(current) < 2:
         try:
             cell = grid.odom_to_grid(current.x, current.y)
@@ -305,7 +370,8 @@ def select_observation_target(grid, odom, coverage, *, bounds, current=None):
             retained_clear = (not callable(sweep) or sweep(
                 current.x, current.y, odom['heading'] if cell == start else current.heading,
                 current.heading)['clear'])
-            if retained and retained_clear and best.score <= retained.score * 1.25 + .25:
+            if (retained and retained_clear and best.score <= retained.score * 1.25 + .25
+                    and _can_start_observation(grid, odom, retained, bounds, plans)):
                 return Selection(retained, 'target_retained')
     return Selection(best, {'frontier': 'frontier_selected', 'pending_recheck': 'recheck_selected'}.get(best.source, 'unobserved_view_selected'))
 

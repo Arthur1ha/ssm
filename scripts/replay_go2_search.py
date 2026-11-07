@@ -1,4 +1,4 @@
-"""Replay saved paired Go2 samples; this module never imports a robot connection.
+"""Replay saved paired Go2 samples; never connect to a robot or dispatch motion.
 
 uv run python scripts/replay_go2_search.py logs/vision/codex_turn_*.npz
 Samples are the existing private NPZ/JPEG pairs produced by capture diagnostics.

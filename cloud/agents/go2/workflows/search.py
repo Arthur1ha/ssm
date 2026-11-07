@@ -370,11 +370,14 @@ class DeviceSearch:
         from cloud.go2.navigation.navigator import navigator
         from cloud.go2.connection import go2
         candidate = state["candidate"]
-        start = go2.odom.copy()
         async def invoke():
+            start = go2.odom.copy()
+            reposition = candidate.get('source') == 'observation_reposition'
+            options = ({'arrival_tolerance_m': .08, 'minimum_command_speed': .25,
+                        'speed_limit': .30} if reposition else {})
             navigation = asyncio.create_task(navigator.go_to_coordinate(
                 candidate["x"], candidate["y"], heading=candidate["heading"],
-                owner_session_id=self.context.session_id, bounds=self.bounds))
+                owner_session_id=self.context.session_id, bounds=self.bounds, **options))
             # This observer belongs to the same effect and HTTP task. It can
             # request a stop, never dispatch motion or establish target arrival.
             observer = (asyncio.create_task(self._observe_transit(state, navigation))
@@ -415,10 +418,18 @@ class DeviceSearch:
             status = result.get("status")
             self.after_time = time.monotonic()
             end = result.get("last_trusted_pose") or start
+            displacement = math.hypot(end["x"] - start["x"], end["y"] - start["y"])
+            if (reposition and status == 'succeeded' and not result.get('transit_candidate')
+                    and (end.get('session_id') != start.get('session_id')
+                         or not start.get('session_id') or not math.isfinite(displacement)
+                         or displacement < .10)):
+                result = {'status': 'blocked', 'reason': 'observation_move_unconfirmed',
+                          'last_trusted_pose': end, 'navigation_receipt': result}
+                status = 'blocked'
             return {**result, "result": "ok" if status == "succeeded" else
                     "error" if status == "failed" else status,
                     "distance_m": (result.get("diagnostics") or {}).get("path_length_m",
-                        math.hypot(end["x"] - start["x"], end["y"] - start["y"]))}
+                        displacement)}
         return await self.effect(state, "navigate", candidate, invoke)
 
     async def _observe_transit(self, state, navigation):
