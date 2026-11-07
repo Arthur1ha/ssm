@@ -107,15 +107,15 @@ function SpacePeopleDrawer({ open, onClose }) {
 
   const roleLabel = value => ({ owner: '主人', family: '家人', friend: '朋友', stranger: '陌生人', known: '熟人' }[value] || value || '未知');
   const feedback = key => message?.key === key && <small className={`action-feedback action-feedback--${message.tone}`}
-    role="status" title={message.text}>{message.text}</small>;
+    role={message.tone === 'error' ? 'alert' : 'status'} title={message.text}>{message.text}</small>;
 
   return <>
     <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-    <aside className={`space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}
+    <aside className={`space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
       role="dialog" aria-modal="true" aria-labelledby="space-people-title">
-      <div className="space-drawer__handle"/>
+      <div className="space-drawer__handle" aria-hidden="true"/>
       <header className="space-drawer__header">
-        <div><small>SPACE PEOPLE</small><h2 id="space-people-title">空间人员库</h2></div>
+        <div><h2 id="space-people-title">空间人员库</h2></div>
         <div className="space-drawer__header-actions">
           <div className="feedback-button"><button className="btn" onClick={loadPeople} disabled={busy}>刷新</button>{feedback('refresh')}</div>
           <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭人员库"><Icon name="x" size={16}/></button>
@@ -123,7 +123,7 @@ function SpacePeopleDrawer({ open, onClose }) {
       </header>
       <div className="space-drawer__body">
         <section className="asset-section">
-          <div className="asset-section__heading"><div><small>KNOWN PEOPLE</small><h3>已登记人员</h3></div><span>{people.length} 人</span></div>
+          <div className="asset-section__heading"><div><h3>已登记人员</h3></div><span>{people.length} 人</span></div>
           <div className="people-list">
             {people.length ? people.map(person => <article className="person-row" key={person.person_id}>
               <div className="person-row__avatar">{(person.name || '?').slice(0, 1)}</div>

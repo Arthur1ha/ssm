@@ -58,7 +58,7 @@ function AgentPersonalitySettings({ agentId, active = true }) {
     {!profile && !loading && <button type="button" className="btn" onClick={load}>重试加载</button>}
     {profile && <form className="personality-editor" onSubmit={save}>
       <label className="agent-personality__prompt-label" htmlFor={`personality-name-${agentId}`}>
-        名字 <small>保存后自动加入后续决策与回复提示词，无需写进人格文案</small>
+        名字 <small>保存后会使用这个名字，无需在人格文案中重复填写</small>
       </label>
       <input id={`personality-name-${agentId}`} type="text" value={name} maxLength="24"
         onChange={event => setName(event.target.value)} placeholder="给智能体起个名字"/>

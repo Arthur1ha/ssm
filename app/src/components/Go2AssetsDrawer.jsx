@@ -82,16 +82,16 @@ function Go2AssetsDrawer({ open, onClose }) {
     return '未命名习惯';
   };
   const feedback = key => message?.key === key && <small className={`action-feedback action-feedback--${message.tone}`}
-    role="status" title={message.text}>{message.text}</small>;
+    role={message.tone === 'error' ? 'alert' : 'status'} title={message.text}>{message.text}</small>;
 
   return (
     <>
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-      <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}
+      <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
         role="dialog" aria-modal="true" aria-labelledby="go2-assets-title">
-        <div className="space-drawer__handle"/>
+        <div className="space-drawer__handle" aria-hidden="true"/>
         <header className="space-drawer__header">
-          <div><small>GO2 MANAGEMENT</small><h2 id="go2-assets-title">{getAgentDisplayName('go2')}设置</h2></div>
+          <div><h2 id="go2-assets-title">{getAgentDisplayName('go2')}设置</h2></div>
           <div className="space-drawer__header-actions">
             <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
               {loading ? '同步中…' : '刷新资产'}
@@ -104,7 +104,7 @@ function Go2AssetsDrawer({ open, onClose }) {
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section">
             <div className="asset-section__heading">
-              <div><small>SPATIAL LEDGER</small><h3>命名地点</h3></div>
+              <div><h3>命名地点</h3></div>
               <span>{locations.length} 个坐标</span>
             </div>
             <div className="location-ledger">
@@ -141,7 +141,7 @@ function Go2AssetsDrawer({ open, onClose }) {
 
           <section className="asset-section">
             <div className="asset-section__heading">
-              <div><small>PERSONALITY</small><h3>{getAgentDisplayName('go2')}的人格与特质</h3></div>
+              <div><h3>{getAgentDisplayName('go2')}的人格与特质</h3></div>
               <span>长期生效</span>
             </div>
             <AgentPersonalitySettings agentId="go2" active={open}/>
@@ -149,7 +149,7 @@ function Go2AssetsDrawer({ open, onClose }) {
 
           <section className="asset-section asset-section--memory">
             <div className="asset-section__heading">
-              <div><small>LONG MEMORY</small><h3>长期记忆摘要</h3></div>
+              <div><h3>长期记忆摘要</h3></div>
               <span>{memory.taught.length} 条习惯</span>
             </div>
             <div className="memory-block">

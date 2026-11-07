@@ -3,6 +3,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   offline, actor, color, busy, onSelectState, onTransition, report, streamHealth }) {
   const { useState, useRef, useEffect } = React;
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
   const [expanded, setExpanded] = useState(false);
   const [videoExpanded, setVideoExpanded] = useState(false);
   const [joystickExiting, setJoystickExiting] = useState(false);
@@ -12,7 +13,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const primary = primaryStateRegion(sm);
   const stale = streamHealth === 'reconnecting';
   const topology = stateBoardTopology(sm, liveState);
-  const selected = topology.nodes.find(node => node.id === selectedId);
   const execution = liveState[sm?.execution_field];
   const awaitingFeedback = connected && sm?.freshness_field && liveState[primary?.state_field] == null;
   const remoteActive = widget => Object.keys(widget.enabled_when || {}).length > 0
@@ -27,13 +27,37 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       ? stateActionReason(sm,edge.region,edge.transition,liveState,{offline,busy,actor,stale})
       : '当前状态不可执行'};
   });
+  const nodes = topology.nodes.map(node => {
+    const control = stateNodeControl(node,edges);
+    if (!node.current && !control.transition && !control.choices.length) {
+      const incoming = edges.find(edge => edge.dst === node.id && edge.transition.action);
+      const reason = incoming && stateActionReason(sm,incoming.region,incoming.transition,
+        liveState,{offline,busy,actor,stale});
+      if (reason) control.reason = reason;
+    }
+    return {...node,control};
+  });
+  const selected = nodes.find(node => node.id === selectedId);
+  const selectedEdge = edges.find(edge => edge.id === selectedEdgeId);
   const select = id => {
     const node = topology.nodes.find(item => item.id === id);
     const next = id === selectedId ? null : id;
     setSelectedId(next);
+    setSelectedEdgeId(null);
     onSelectState?.(next && node?.region.id === primary?.id ? node.value : null);
   };
-  useEffect(() => { setSelectedId(null); setExpanded(false); setVideoExpanded(false); }, [unitId,liveState.epoch]);
+  const activateState = id => {
+    const node = nodes.find(item => item.id === id);
+    if (!node) return;
+    select(id);
+    if (node.control.transition) onTransition?.(node.control.transition);
+  };
+  const inspectEdge = edge => {
+    setSelectedEdgeId(edge.id === selectedEdgeId ? null : edge.id);
+    setSelectedId(null);
+    onSelectState?.(null);
+  };
+  useEffect(() => { setSelectedId(null); setSelectedEdgeId(null); setExpanded(false); setVideoExpanded(false); }, [unitId,liveState.epoch]);
   useEffect(() => {
     if (!videoExpanded && !expanded) return;
     const restoreFocus = document.activeElement;
@@ -99,20 +123,33 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       </div></div>)}
     </div>}
     <div className="device-whiteboard__canvas">
-      {topology.nodes.length ? <FsmGraph nodes={topology.nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
-        onSelectState={select} onTransition={onTransition} onBlocked={reason => report?.({result:'error',error:reason})}
+      {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
+        onSelectState={activateState} onInspectTransition={inspectEdge}
         color={color} pendingCommand={execution?.command}/>
         : <p className="device-state-note">等待设备状态机</p>}
       <button type="button" className="device-whiteboard__expand" aria-label={expanded ? '退出白板全屏' : '白板全屏'}
         onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '全屏'}</button>
-      {selected && !remoteControls.some(widget => selected.value === widget.node_state) && <section className="device-whiteboard__preview" aria-label="状态预览">
+      {selected && !remoteControls.some(widget => selected.value === widget.node_state) && <section className="device-whiteboard__preview" aria-label="状态说明">
         <StateVisual state={selected.value} view={selected.view} color={color}/>
-        <div><strong>{selected.label} · 预览</strong>
-          <p>{selected.view?.description || '选择节点查看说明，点击连线上的动作执行。'}</p>
+        <div><strong>{selected.label}{selected.current ? ' · 当前状态' : ''}</strong>
+          <p>{selected.control.reason || selected.view?.description || '点击目标状态，执行当前允许的转换。'}</p>
+          {!selected.current && selected.control.choices.length > 1 && selected.control.choices.map(edge =>
+            <button key={edge.id} type="button" disabled={!!edge.reason} title={edge.reason || ''}
+              onClick={() => onTransition?.(edge.transition)}>{edge.transition.label}</button>)}
+          {selected.current && selected.control.choices.filter(edge => edge.transition.available_only).map(edge =>
+            <button key={`current:${edge.id}`} type="button" disabled={!!edge.reason} title={edge.reason || ''}
+              onClick={() => onTransition?.(edge.transition)}>{edge.transition.label}</button>)}
           {selected.region.until_field && liveState[selected.region.until_field] && selected.current
             && <small>至 {new Date(liveState[selected.region.until_field]*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</small>}
         </div>
-        <button type="button" aria-label="关闭状态预览" onClick={() => select(selected.id)}>×</button>
+        <button type="button" aria-label="关闭状态说明" onClick={() => select(selected.id)}>×</button>
+      </section>}
+      {selectedEdge && <section className="device-whiteboard__preview" aria-label="转换说明">
+        <div><strong>{nodes.find(node => node.id === selectedEdge.src)?.label} → {nodes.find(node => node.id === selectedEdge.dst)?.label}</strong>
+          <p>{selectedEdge.transition.label}{selectedEdge.transition.description ? `：${selectedEdge.transition.description}` : ''}</p>
+          <small>{selectedEdge.transition.action ? selectedEdge.reason || '当前可转换，点击目标状态执行。' : '根据设备反馈或任务结果自动转换。'}</small>
+        </div>
+        <button type="button" aria-label="关闭转换说明" onClick={() => setSelectedEdgeId(null)}>×</button>
       </section>}
     </div>
     {(stale || execution || awaitingFeedback) && <div className="device-whiteboard__feedback" role="status">

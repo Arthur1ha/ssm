@@ -85,15 +85,13 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
         <span style={{
           width: 7, height: 7, borderRadius: '50%',
           background: connected ? 'var(--color-online)' : 'var(--color-offline)',
-          boxShadow: connected ? '0 0 6px var(--color-online-glow)' : 'none',
           flexShrink: 0,
         }}/>
         <div style={{
           flex: 1,
           color: 'var(--color-text-muted)',
-          fontSize: 11,
-          letterSpacing: '0.08em',
-          fontFamily: 'var(--font-mono)',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
         }}>
           {({ connecting: '连接中', connected: '已连接', online: '已连接',
             disconnected: '未连接', offline: '未连接', error: '连接异常' })[state]
@@ -113,7 +111,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
         >
           {connecting ? '连接中...' : (connected ? (actor === 'admin' ? '断开' : '已连接') : '连接')}
         </button>
-        {status.error && <small className="action-feedback action-feedback--error" role="status" title={status.error}>{status.error}</small>}
+        {status.error && <small className="action-feedback action-feedback--error" role="alert" title={status.error}>{status.error}</small>}
         </div>
       </div>
     </div>

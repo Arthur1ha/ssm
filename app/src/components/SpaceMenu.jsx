@@ -57,7 +57,6 @@ function SpaceMenu({ onShareSpace, onRules, onSpaceSettings, onOrchestratorSetti
             <div className="space-menu__handle" aria-hidden="true"/>
             <header className="space-menu__header">
               <div>
-                <small>SPACE ACTIONS</small>
                 <h2 id="space-menu-title">管理空间</h2>
               </div>
               <button type="button" className="btn space-menu__close" onClick={() => setOpen(false)} aria-label="关闭菜单">

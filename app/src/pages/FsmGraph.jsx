@@ -1,6 +1,6 @@
-/* Card-owned spatial layout. Node selection previews; transition labels execute. */
+/* Card-owned spatial layout. Target states control; edges explain transitions. */
 function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', views = {},
-  selectedState, onSelectState, onTransition, onBlocked, color = 'var(--color-accent)', pendingCommand, diagram }) {
+  selectedState, onSelectState, onInspectTransition, color = 'var(--color-accent)', pendingCommand, diagram }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
   const [allEdges, setAllEdges] = useState(true);
@@ -171,16 +171,13 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
             top:spot.y-18,bottom:spot.y+18});
           const lx = spot.x, ly = spot.y;
           const title = edge.reason || (!edge.active && transition.action ? '当前状态不可执行' : transition.description || transition.label);
-          const fire = () => {
-            if (!disabled) onTransition?.(transition);
-            else if (transition.action && edge.reason) onBlocked?.(edge.reason);
-          };
+          const inspect = activate(() => onInspectTransition?.(edge));
           return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${!transition.action ? ' is-automatic' : ''}${running ? ' is-running' : ''}${minor && !focused && !running ? ' is-context' : ''}`}
             data-action={transition.action || undefined} data-trigger={transition.trigger} data-label={transition.label}
-            role={transition.action ? 'button' : undefined} tabIndex={actionable && captionVisible ? 0 : undefined}
-            aria-disabled={transition.action ? disabled : undefined}
-            aria-label={`${transition.label}${edge.reason ? '，'+edge.reason : ''}`}
-            onClick={activate(fire)} onKeyDown={activate(fire)}>
+            role="button" tabIndex={captionVisible ? 0 : -1}
+            data-available={transition.action ? !disabled : undefined}
+            aria-label={`${transition.label}，查看转换说明${edge.reason ? '，'+edge.reason : ''}`}
+            onClick={inspect} onKeyDown={inspect}>
             <title>{title}</title>
             <path d={path} className="fsm-whiteboard__hit"/>
             <path d={path} className="fsm-whiteboard__line" markerEnd={`url(#${marker.current})`}/>
@@ -195,13 +192,17 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
           const selected = selectedState === node.id;
           const nodeRadius = p.radius;
           const label = node.label;
+          const targetAction = node.control?.transition;
+          const nodeHint = node.current ? '当前状态，查看说明' : targetAction
+            ? `点击${targetAction.label}` : node.control?.reason || '查看说明';
           const lines = label.length > 4 ? [label.slice(0,4),label.slice(4)] : [label];
           const select = activate(() => onSelectState?.(node.id));
-          return <g key={node.id} className={`fsm-whiteboard__node${node.current ? ' is-current' : ''}${node.retained ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}
+          return <g key={node.id} className={`fsm-whiteboard__node${node.current ? ' is-current' : ''}${targetAction ? ' is-actionable' : ''}${node.retained ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}
             transform={`translate(${p.x} ${p.y})`} role="button" tabIndex="0"
-            data-state={node.id} data-group={node.group} data-radius={nodeRadius} aria-label={`${label}，查看预览`} aria-pressed={selected}
+            data-state={node.id} data-group={node.group} data-radius={nodeRadius}
+            data-executable={!!targetAction} aria-label={`${label}，${nodeHint}`} aria-pressed={selected}
             onClick={select} onKeyDown={select}>
-            <title>{`${label}${node.current ? '（当前）' : node.retained ? '（最近观测）' : ''}`}</title>
+            <title>{`${label}：${nodeHint}`}</title>
             <circle r={nodeRadius+7} fill="transparent"/>
             {(node.current || selected) && <circle r={nodeRadius+7} className="fsm-whiteboard__halo"/>}
             <circle r={nodeRadius} className="fsm-whiteboard__circle"/>

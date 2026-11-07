@@ -234,17 +234,14 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
 
   const pad = {
     width: R * 2, height: R * 2, borderRadius: "50%",
-    border: `1.5px solid ${disabled ? "#181818" : "rgba(200,255,62,0.2)"}`,
-    background: disabled
-      ? "rgba(0,0,0,0.15)"
-      : "radial-gradient(circle at 50% 50%, rgba(200,255,62,0.06) 0%, rgba(200,255,62,0.02) 60%, transparent 100%)",
+    border: `1px solid ${disabled ? "var(--color-border)" : "var(--color-accent-border)"}`,
+    background: "var(--color-surface-1)",
     position: "relative", userSelect: "none", touchAction: "none",
-    boxShadow: disabled ? "none" : "0 0 0 1px rgba(200,255,62,0.05) inset",
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 7 }}>
-      <div ref={padRef} style={pad} role="group" tabIndex={disabled ? -1 : 0}
+      <div ref={padRef} className="device-joystick-pad" style={pad} role="group" tabIndex={disabled ? -1 : 0}
         aria-disabled={disabled} aria-label={`${label}摇杆，方向键控制，松开停止`}
         onKeyDown={event => {
           if (disabled) return;
@@ -276,10 +273,10 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
       >
         {/* crosshairs */}
         <div style={{ position: "absolute", left: R - 0.5, top: 10, width: 1,
-          height: R * 2 - 20, background: disabled ? "#0f0f0f" : "rgba(200,255,62,0.07)",
+          height: R * 2 - 20, background: "var(--color-border-strong)",
           pointerEvents: "none" }} />
         <div style={{ position: "absolute", top: R - 0.5, left: 10, height: 1,
-          width: R * 2 - 20, background: disabled ? "#0f0f0f" : "rgba(200,255,62,0.07)",
+          width: R * 2 - 20, background: "var(--color-border-strong)",
           pointerEvents: "none" }} />
         {/* knob */}
         <div style={{
@@ -287,16 +284,15 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
           width: KR * 2, height: KR * 2, borderRadius: "50%",
           left: R - KR + knob.x, top: R - KR + knob.y,
           background: disabled
-            ? "#1c1c1c"
-            : `radial-gradient(circle at 35% 35%, var(--color-accent), rgba(140,210,20,0.85))`,
-          border: `1px solid ${disabled ? "#242424" : "rgba(200,255,62,0.55)"}`,
-          boxShadow: disabled ? "none" : "0 0 18px rgba(200,255,62,0.45), 0 2px 6px rgba(0,0,0,0.6)",
+            ? "var(--color-surface-3)"
+            : "var(--color-accent)",
+          border: `1px solid ${disabled ? "var(--color-border-strong)" : "var(--color-accent)"}`,
           transition: drag ? "none" : "left 0.12s cubic-bezier(.2,.8,.4,1), top 0.12s cubic-bezier(.2,.8,.4,1)",
           pointerEvents: "none",
         }} />
       </div>
-      <div style={{ fontSize: 9, color: "var(--color-text-dim)", letterSpacing: "0.22em",
-        fontFamily: 'var(--font-mono)' }}>{label}</div>
+      <div style={{ fontSize: 12, color: "var(--color-text-muted)",
+        fontFamily: 'var(--font-sans)' }}>{label}</div>
     </div>
   );
 }

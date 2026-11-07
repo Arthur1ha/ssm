@@ -3,62 +3,26 @@ function RulesDrawer({ open, onClose }) {
   const [rules, setRules] = React.useState([]);
   return (
     <>
-      {/* 背景遮罩 */}
-      <div onClick={onClose} style={{
-        position: 'fixed', inset: 0, zIndex: 200,
-        background: 'rgba(0,0,0,0.6)',
-        opacity: open ? 1 : 0,
-        transition: 'opacity 0.3s',
-        pointerEvents: open ? 'auto' : 'none',
-      }}/>
-
-      {/* 抽屉主体 */}
-      <div style={{
-        position: 'fixed', left: 0, right: 0, bottom: 0,
-        height: '75vh',
-        zIndex: 201,
-        background: 'var(--color-surface-1)',
-        borderRadius: '16px 16px 0 0',
-        borderTop: '1px solid var(--color-border-strong)',
-        boxShadow: '0 -24px 60px rgba(0,0,0,0.6)',
-        transform: open ? 'translateY(0)' : 'translateY(100%)',
-        transition: 'transform 0.38s cubic-bezier(0.32, 0.72, 0, 1)',
-        display: 'flex', flexDirection: 'column', overflow: 'hidden',
-      }}>
-        {/* 拖动条 */}
-        <div style={{ padding: '10px 0 2px', display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
-          <div style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--color-border-strong)' }}/>
-        </div>
-
-        {/* 头部 */}
-        <div style={{
-          padding: '6px 20px 10px', display: 'flex', alignItems: 'center',
-          justifyContent: 'space-between', flexShrink: 0,
-          borderBottom: '1px solid var(--color-border)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-            <span style={{ fontSize: 16, fontWeight: 400, color: 'var(--color-text)' }}>教导与自动规则</span>
-            {rules.length > 0 && (
-              <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
-                {rules.length} 条已记住
-              </span>
-            )}
+      <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
+      <aside className={`space-drawer rules-drawer ${open ? 'is-open' : ''}`}
+        style={{ visibility: open ? 'visible' : 'hidden' }} inert={open ? undefined : ''}
+        role="dialog" aria-modal="true" aria-hidden={!open} aria-labelledby="rules-drawer-title">
+        <div className="space-drawer__handle" aria-hidden="true"/>
+        <header className="space-drawer__header">
+          <div>
+            <h2 id="rules-drawer-title">教导与自动规则</h2>
+            {rules.length > 0 && <small>{rules.length} 条已记住</small>}
           </div>
-          <button onClick={onClose} style={{
-            width: 30, height: 30, borderRadius: '50%',
-            border: '1px solid var(--color-border)',
-            background: 'var(--color-surface-2)', color: 'var(--color-text-muted)',
-            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
-          }}>
-            <Icon name="x" size={14}/>
+          <button type="button" className="btn space-drawer__close" onClick={onClose} aria-label="关闭自动化规则">
+            <Icon name="x" size={16}/>
           </button>
-        </div>
+        </header>
 
         {/* RulesScreen 内容 */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 'max(16px, env(safe-area-inset-bottom))' }}>
           <RulesScreen embedded={true} onRulesChange={setRules} open={open}/>
         </div>
-      </div>
+      </aside>
     </>
   );
 }

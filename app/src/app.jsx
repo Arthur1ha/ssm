@@ -54,6 +54,12 @@ function App({ session, logout, refreshSession }) {
   const [, setAgentNamesRevision] = useState(0);
 
   useEffect(() => {
+    if (!deviceNotice) return;
+    const timeout = setTimeout(() => setDeviceNotice(''), 5000);
+    return () => clearTimeout(timeout);
+  }, [deviceNotice]);
+
+  useEffect(() => {
     const onNamesChanged = () => setAgentNamesRevision(value => value + 1);
     window.addEventListener('agent-names-changed', onNamesChanged);
     apiClient.request('/api/agents/names').then(setAgentDisplayNames).catch(() => {});
@@ -251,7 +257,7 @@ function App({ session, logout, refreshSession }) {
       {/* ── 主屏（始终挂载，不受路由影响） ── */}
       <div style={{
         position: 'fixed', inset: 0,
-        background: 'var(--bg-gradient)', color: '#fff',
+        background: 'var(--color-bg)', color: 'var(--color-text)',
         fontFamily: 'var(--font-sans)', paddingTop: 'env(safe-area-inset-top,0px)',
         display: 'flex', flexDirection: 'column',
       }}>
@@ -298,11 +304,11 @@ function App({ session, logout, refreshSession }) {
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {agentsError && (
             <div style={{ padding: '14px 16px 0' }}>
-              <div className="feedback-button" style={{ alignItems: 'flex-start' }}>
+              <div className="inline-notice inline-notice--error" role="alert">
+                <span>{agentsError}</span>
                 <button className="btn" onClick={refreshAgents} disabled={loadingAgents}>
                   {loadingAgents ? '重试中…' : '重试'}
                 </button>
-                <small className="action-feedback action-feedback--error" role="alert" title={agentsError}>{agentsError}</small>
               </div>
             </div>
           )}
@@ -473,15 +479,15 @@ function DeviceScanDialog({ onClose, onBound }) {
 
   return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
     <section className="device-scan-dialog" role="dialog" aria-modal="true" aria-labelledby="device-scan-title" onClick={event => event.stopPropagation()}>
-      <header><div><small>DEVICE ONBOARDING</small><h2 id="device-scan-title">扫码添加设备</h2></div>
+      <header><div><h2 id="device-scan-title">扫码添加设备</h2></div>
         <button className="btn header-icon-btn" onClick={onClose} aria-label="关闭扫码"><Icon name="x" size={16}/></button></header>
       <p>扫描设备上的二维码标签，识别后自动加入当前空间。</p>
       {!busy && !pasteOpen && <QrScanner key={attempt} onScan={submit} hint="将设备二维码放入框内"/>}
       {pasteOpen && !busy && <form className="session-entry__form" onSubmit={event => { event.preventDefault(); submit(code); }}>
         <label htmlFor="device-code">设备码</label>
         <input id="device-code" value={code} onChange={event => setCode(event.target.value)} autoComplete="off" placeholder="粘贴设备标签中的内容"/>
-        <button className="btn btn--accent" disabled={!code.trim()}>识别并添加设备</button>
         {error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}
+        <button className="btn btn--accent" disabled={!code.trim()}>识别并添加设备</button>
       </form>}
       <div className="device-scan-actions">
         <button className="btn" onClick={() => { setError(''); setPasteOpen(false); setAttempt(value => value + 1); }} disabled={busy}>重新扫码</button>

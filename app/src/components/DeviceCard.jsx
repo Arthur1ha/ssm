@@ -12,7 +12,7 @@ function HomeDeviceRow({ agent, unitData, connected }) {
   return <button type="button" className="home-device-row"
     onClick={() => navigate('#/devices/' + encodeURIComponent(uid))}
     aria-label={`查看${getAgentDisplayName(agent)}，${detail}`}>
-    <span className="home-device-row__icon" style={{ color: meta.color, background: `${meta.color}16` }}>
+    <span className="home-device-row__icon" style={{ color: meta.color, background: 'var(--color-surface-2)' }}>
       <Icon name={meta.icon} size={18}/>
     </span>
     <span className="home-device-row__text">

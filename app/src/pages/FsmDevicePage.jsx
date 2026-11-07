@@ -377,7 +377,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           <i className={offline ? 'is-offline' : ''}/>
           <span>{statusLabel}</span>
         </div>
-        {safetyAction && <button type="button" className="device-header__stop btn btn--danger"
+        {!isGo2 && safetyAction && <button type="button" className="device-header__stop btn btn--danger"
           disabled={offline || !connected} onClick={() => dispatchTransition(safetyAction)}>{safetyAction.label}</button>}
         <button type="button" className="device-header__settings"
           onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>
@@ -481,23 +481,24 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
   return <>
     <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
     <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`}
-      role="dialog" aria-modal="true" aria-hidden={!open} aria-labelledby="lamp-assets-title">
+      role="dialog" aria-modal="true" aria-hidden={!open} inert={open ? undefined : ''}
+      style={{ visibility: open ? 'visible' : 'hidden' }} aria-labelledby="lamp-assets-title">
       <div className="space-drawer__handle"/>
       <header className="space-drawer__header">
-        <div><small>LAMP AGENT</small><h2 id="lamp-assets-title">{getAgentDisplayName(unitId)}设置</h2></div>
+        <div><h2 id="lamp-assets-title">{getAgentDisplayName(unitId)}设置</h2></div>
         <div className="space-drawer__header-actions">
           <button className="btn" onClick={load} disabled={busy}>刷新</button>
           <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭灯设置"><Icon name="x" size={14}/></button>
         </div>
       </header>
       <div className="space-drawer__body" aria-busy={busy}>
-        {feedback && <p role="status" className="action-feedback">{feedback}</p>}
+        {feedback && <p role="alert" className="action-feedback action-feedback--error">{feedback}</p>}
         <section className="asset-section">
-          <div className="asset-section__heading"><div><small>PERSONALITY</small><h3>灯的人格与特质</h3></div><span>长期生效</span></div>
+          <div className="asset-section__heading"><div><h3>灯的人格与特质</h3></div><span>长期生效</span></div>
           <AgentPersonalitySettings agentId={unitId} active={open}/>
         </section>
         <section className="asset-section asset-section--memory">
-          <div className="asset-section__heading"><div><small>LONG MEMORY</small><h3>灯的记忆</h3></div><span>{memory.taught?.length || 0} 条调教</span></div>
+          <div className="asset-section__heading"><div><h3>灯的记忆</h3></div><span>{memory.taught?.length || 0} 条调教</span></div>
           <div className="memory-block"><h4>今日记录</h4><pre>{memory.daily_summary || '（今天暂无记录）'}</pre></div>
           <div className="memory-block"><h4>近期经历</h4>
             {memory.episodes?.length ? <ul>{memory.episodes.map((entry, index) =>

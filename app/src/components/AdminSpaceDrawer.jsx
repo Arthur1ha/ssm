@@ -80,17 +80,16 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
   };
 
   const feedback = key => message?.key === key && <small className={`action-feedback action-feedback--${message.tone}`}
-    role="status" title={message.text}>{message.text}</small>;
+    role={message.tone === 'error' ? 'alert' : 'status'} title={message.text}>{message.text}</small>;
 
   return (
     <>
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-      <aside className={`space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}
+      <aside className={`space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
         role="dialog" aria-modal="true" aria-labelledby="space-drawer-title">
-        <div className="space-drawer__handle"/>
+        <div className="space-drawer__handle" aria-hidden="true"/>
         <header className="space-drawer__header">
           <div>
-            <small>SPACE MANAGEMENT</small>
             <h2 id="space-drawer-title">空间设置</h2>
           </div>
           <div className="space-drawer__header-actions">

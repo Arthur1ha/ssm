@@ -59,6 +59,20 @@ function stateWidgetEnabled(widget, state) {
   const available = state?.[widget.available_actions_field];
   return !Array.isArray(available) || available.includes(widget.availability_key || widget.action);
 }
+/* Clicking a target requests one declared, currently available transition.
+ * Observation-only edges and indirect routes never become commands. */
+function stateNodeControl(node, edges) {
+  const incoming = edges.filter(edge => edge.dst === node.id && edge.transition.action);
+  const active = incoming.filter(edge => edge.active);
+  const available = active.filter(edge => !edge.reason);
+  return {
+    transition: !node.current && available.length === 1 ? available[0].transition : null,
+    choices: active,
+    reason: node.current ? '当前状态' : available.length > 1 ? '有多种转换方式，请选择下方动作'
+      : available.length === 1 ? '' : active.find(edge => edge.reason)?.reason
+        || '当前状态不能直接切换到' + node.label,
+  };
+}
 /* Fold presentation-only parents into an observed child. Commands and gating
  * still belong to their original region; connection stays in the page header. */
 function stateBoardTopology(machine, state = {}) {
@@ -91,4 +105,4 @@ function stateBoardTopology(machine, state = {}) {
   return {nodes,edges};
 }
 Object.assign(window, { stateMachineRegions, primaryStateRegion, stateRegionActive, stateRegionLabel,
-  stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateBoardTopology });
+  stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology });

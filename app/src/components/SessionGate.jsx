@@ -28,6 +28,7 @@ function SessionGate({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [sessionNotice, setSessionNotice] = useState('');
   const [bootError, setBootError] = useState('');
   const [bootAttempt, setBootAttempt] = useState(0);
   const inviteTokenRef = useRef(null);
@@ -38,6 +39,7 @@ function SessionGate({ children }) {
     apiClient.setCsrfToken(data?.csrf_token || data?.session?.csrf_token || next.csrf_token || '');
     setSession(next);
     setError('');
+    setSessionNotice('');
     apiClient.openEvents();
     return next;
   }, []);
@@ -80,7 +82,7 @@ function SessionGate({ children }) {
           if (!exchangeError.status || exchangeError.status >= 500) {
             setBootError('暂时连不上空间，请稍后重试');
           } else {
-            setError(apiErrorText(exchangeError, '邀请无效或已过期'));
+            setError(exchangeError.status === 401 ? '邀请无效或已停用，请向空间主人获取新的分享链接。' : apiErrorText(exchangeError, '邀请无效或已过期'));
           }
         }
       } finally {
@@ -92,7 +94,8 @@ function SessionGate({ children }) {
       apiClient.closeEvents();
       apiClient.setCsrfToken('');
       setSession(null);
-      setError('会话已结束，请重新进入');
+      setError('');
+      setSessionNotice('会话已结束');
     };
     apiClient.addEventListener('unauthorized', unauthorized);
     return () => {
@@ -108,7 +111,8 @@ function SessionGate({ children }) {
       apiClient.closeEvents();
       apiClient.setCsrfToken('');
       setSession(null);
-      setError('会话已过期，请重新进入');
+      setError('');
+      setSessionNotice('会话已过期');
     }, delay);
     return () => clearTimeout(timer);
   }, [session?.expires_at]);
@@ -136,12 +140,14 @@ function SessionGate({ children }) {
       apiClient.closeEvents();
       apiClient.setCsrfToken('');
       setSession(null);
+      setError('');
+      setSessionNotice('');
     }
   };
 
   if (loading) return <SessionLoading/>;
   if (bootError) return <SessionLoading error={bootError} onRetry={() => setBootAttempt(value => value + 1)}/>;
-  if (!session) return <SessionEntry error={error} onAdminLogin={adminLogin} onVisitorJoin={visitorJoin}/>;
+  if (!session) return <SessionEntry error={error} sessionNotice={sessionNotice} onAdminLogin={adminLogin} onVisitorJoin={visitorJoin}/>;
   return children({
     session, logout, refreshSession: loadMe,
   });
@@ -170,7 +176,21 @@ function SessionLoading({ error, onRetry }) {
   );
 }
 
-function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
+function EntryNotice({ title, children, isError = false }) {
+  return (
+    <div className={`entry-notice${isError ? ' entry-notice--error' : ''}`} role={isError ? 'alert' : 'status'} aria-atomic="true">
+      <span className="entry-notice__icon" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="9"/>
+          {isError ? <path d="M12 7v6m0 4h.01"/> : <path d="M12 7v5l3 2"/>}
+        </svg>
+      </span>
+      <div className="entry-notice__copy"><h2>{title}</h2><p>{children}</p></div>
+    </div>
+  );
+}
+
+function SessionEntry({ error, sessionNotice, onAdminLogin, onVisitorJoin }) {
   const [showJoin, setShowJoin] = React.useState(false);
   const [showPaste, setShowPaste] = React.useState(false);
   const [inviteValue, setInviteValue] = React.useState('');
@@ -194,7 +214,7 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
     setBusy(true);
     setMessage('');
     try { await onVisitorJoin(inviteValue); }
-    catch (joinError) { setMessage(apiErrorText(joinError, '邀请无效或已过期')); }
+    catch (joinError) { setMessage(joinError.status === 401 ? '邀请无效或已停用，请向空间主人获取新的分享链接。' : apiErrorText(joinError, '邀请无效或已过期')); }
     finally { setBusy(false); }
   };
 
@@ -213,7 +233,7 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
     setBusy(true);
     setMessage('');
     try { await onVisitorJoin(value); }
-    catch (joinError) { setMessage(apiErrorText(joinError, '邀请无效或已过期')); }
+    catch (joinError) { setMessage(joinError.status === 401 ? '邀请无效或已停用，请向空间主人获取新的分享链接。' : apiErrorText(joinError, '邀请无效或已过期')); }
     finally { setBusy(false); }
   };
 
@@ -230,15 +250,21 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
           <span>SSM</span>
         </div>
 
+        {!showJoin && (message ? (
+          <EntryNotice title="暂时无法进入" isError>{message}</EntryNotice>
+        ) : sessionNotice && (
+          <EntryNotice title={sessionNotice}>请选择下方入口重新进入；通过邀请加入的访客，请重新扫码。</EntryNotice>
+        ))}
+
         {showJoin ? (
           <section className="entry-subflow">
-            <div className="entry-subflow__heading"><span className="entry-flow-mark entry-flow-mark--join"><Icon name="scan" size={16}/></span><div><small>JOIN A SPACE</small><h2>扫码加入</h2></div></div>
+            <div className="entry-subflow__heading"><span className="entry-flow-mark entry-flow-mark--join"><Icon name="scan" size={16}/></span><h2>扫码加入</h2></div>
             <p>扫描空间分享二维码即可加入。</p>
+            {message && <EntryNotice title="未能加入空间" isError>{message}</EntryNotice>}
             {!showPaste && <QrScanner onScan={joinFromScan} hint="将空间二维码放入框内，识别后自动加入"/>}
             <button type="button" className="entry-subflow__paste" onClick={() => setShowPaste(value => !value)}>
               {showPaste ? '收起链接输入' : '粘贴分享链接或邀请码'}
             </button>
-            {!showPaste && message && <small className="action-feedback action-feedback--error" role="alert" title={message}>{message}</small>}
             {showPaste && <form className="session-entry__form" onSubmit={join}>
               <label htmlFor="invite-link">空间分享链接或邀请码</label>
               <input id="invite-link" type="text" inputMode="url" autoComplete="off"
@@ -247,7 +273,6 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
               <button type="submit" className="btn btn--accent" disabled={busy || !inviteValue.trim()}>
                 {busy ? '正在验证…' : '进入体验空间'}
               </button>
-              {message && <small className="action-feedback action-feedback--error" role="alert" title={message}>{message}</small>}
             </form>}
             <button type="button" className="btn entry-subflow__back" onClick={backToChoices}>返回</button>
           </section>
@@ -255,10 +280,9 @@ function SessionEntry({ error, onAdminLogin, onVisitorJoin }) {
           <div className="session-entry__choices">
             <button className="entry-choice entry-choice--create" onClick={enterSpace} disabled={busy}>
               <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
-              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : sessionNotice ? '重新进入空间' : '创建空间'}</strong></span>
               <Icon name="arrow" size={17}/>
             </button>
-            {message && <small className="action-feedback action-feedback--error" role="alert" title={message}>{message}</small>}
             <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>
               <span className="entry-choice__icon"><Icon name="scan" size={20}/></span>
               <span className="entry-choice__copy"><strong>扫码加入</strong></span>
@@ -345,9 +369,11 @@ function AdminInviteDrawer({ open, onClose }) {
   return (
     <>
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-      <aside className={`invite-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
+      <aside className={`invite-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}
+        inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
+        role="dialog" aria-modal="true" aria-labelledby="invite-drawer-title">
         <div className="invite-drawer__handle"/>
-        <header><div><small>SPACE SHARE</small><h2>分享空间</h2></div>
+        <header><h2 id="invite-drawer-title">分享空间</h2>
           <button className="btn" onClick={onClose} aria-label="关闭"><Icon name="x" size={14}/></button></header>
         <div className="invite-drawer__body">
           <div className={`invite-state ${invite?.enabled ? 'is-enabled' : ''}`}>
