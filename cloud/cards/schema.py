@@ -64,11 +64,12 @@ class StateMachine(TypedDict):
     primary_region: NotRequired[str]  # 默认主区，控件/动作预览不依赖固定设备区域名
     execution_field: NotRequired[str]  # 当前请求，值为 {command,label,phase,...}
     last_execution_field: NotRequired[str]  # 最近终态结果，值为 {command,label,result,...}
+    reason_labels: NotRequired[dict[str, str]]  # 设备声明的不可用原因文案
     freshness_field: NotRequired[str]  # state 中的布尔新鲜度字段；false 时禁止普通动作
     transitions: list[FsmTransition]
     initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
     views: NotRequired[dict[str, StateView]]  # 状态语义与预览；前端不按设备类型硬编码
-    layout: NotRequired[dict[str, dict[str, float]]]  # 相对初始画布的比例；大于 1 可延伸到平移区域
+    layout: NotRequired[dict[str, dict[str, float]]]  # 相对初始画布的比例，默认布局应完整显示全部节点
     diagram: NotRequired[dict]  # {width,height,sections:[{label,top}]}，仅影响白板布局
 
 
@@ -156,6 +157,7 @@ class Widget(TypedDict):
     auto_connect: NotRequired[bool]
     visible: NotRequired[bool]
     action: NotRequired[str]
+    params_schema: NotRequired[dict]  # 控件参数及范围，由设备动作声明生成
     connect_action: NotRequired[str]
     disconnect_action: NotRequired[str]
     requires_connection: NotRequired[bool]

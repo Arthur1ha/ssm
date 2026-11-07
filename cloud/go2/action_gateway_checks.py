@@ -27,6 +27,7 @@ def robot(monkeypatch, tmp_path):
     # Resolve the active module rather than the package's stale cached attribute.
     router = import_module("cloud.go2.router")
     from cloud.go2.tools import executor, tools
+    from cloud.go2 import service
     from cloud.api import policy
 
     owner = control_lease.snapshot()
@@ -42,6 +43,8 @@ def robot(monkeypatch, tmp_path):
         "pending_action": {"command": "Sit", "phase": "accepted"},
     })
     monkeypatch.setattr(router, "go2", connection)
+    monkeypatch.setattr(service, "go2", connection)
+    monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
     monkeypatch.setattr(executor, "go2", connection)
     monkeypatch.setattr(tools, "go2", connection)
     monkeypatch.setattr(policy, "_AUDIT_FILE", tmp_path / "audit.jsonl")
@@ -116,7 +119,7 @@ async def test_direct_http_command_accepts_only_catalog_params(robot, command):
     robot.send_command.assert_not_called()
     result = await go2_command(CommandRequest(cmd=command), context=VISITOR)
     assert result["confirmation_scope"] == "request"
-    robot.send_command.assert_awaited_once_with(command, None)
+    robot.send_command.assert_awaited_once_with(command)
 
 
 @pytest.mark.asyncio
@@ -156,8 +159,6 @@ async def test_emergency_stop_remains_reachable_with_uninterruptible_pending_act
     robot.stop_velocity = MagicMock()
     monkeypatch.setattr(navigator, "stop", MagicMock())
     monkeypatch.setattr(router, "_configure_vision_consumers", MagicMock())
-    monkeypatch.setattr(router, "_autonomy_mode", "manual")
-    monkeypatch.setattr(router, "_activity_mode_owner", None)
     result = await router.emergency_stop(context=VISITOR)
     assert result["ok"] is True
     robot.stop_velocity.assert_called_once_with()

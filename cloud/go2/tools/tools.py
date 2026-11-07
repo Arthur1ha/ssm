@@ -8,7 +8,9 @@ from dataclasses import asdict, is_dataclass
 from langchain_core.messages import HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.actions import SPORT_COMMANDS
+from cloud.go2.actions import (SPORT_COMMANDS, VELOCITY_LIMITS, move_tool_schema,
+                               MOVE_MAX_DURATION, MOVE_DIRECTIONS,
+                               LED_DEFAULT_COLOR, LED_DEFAULT_DURATION)
 from cloud.go2.control import control_lease
 from cloud.go2.execution import current_context, require_admin, require_persist
 
@@ -38,6 +40,7 @@ _DIRECTION_MAP = {
     "turn_left":  lambda s: {"x":  0, "y":  0, "z":  s},
     "turn_right": lambda s: {"x":  0, "y":  0, "z": -s},
 }
+assert tuple(_DIRECTION_MAP) == MOVE_DIRECTIONS
 
 
 async def go2_sport(cmd: str) -> dict | str:
@@ -46,9 +49,8 @@ async def go2_sport(cmd: str) -> dict | str:
     canonical = _normalize_sport_action(cmd)
     if canonical is None:
         return f"未知动作 {cmd}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
-    if canonical != "StopMove":
-        control_lease.acquire(current_context())
-    result = await go2.send_command(canonical)
+    from cloud.go2.tools.executor import execute_action
+    result = await execute_action(canonical, context=current_context())
     if not isinstance(result, dict):
         return {"result": "error", "error": "invalid_device_result", "action": canonical}
     status = result.get("result", "error")
@@ -64,19 +66,22 @@ async def go2_sport(cmd: str) -> dict | str:
     return payload
 
 
-async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) -> str:
+async def go2_move(direction: str, speed: float | None = None, duration: float | None = None) -> str:
+    declared = move_tool_schema()["properties"]
+    speed = declared["speed"]["default"] if speed is None else speed
+    duration = declared["duration"]["default"] if duration is None else duration
     if not go2.is_connected:
         return "Go2 未连接，请先建立连接"
     if direction not in _DIRECTION_MAP:
         return f"未知方向 {direction}，支持: {', '.join(_DIRECTION_MAP)}"
-    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not math.isfinite(speed) or not 0 < speed <= 0.5:
-        raise ValueError("speed must be in (0, 0.5]")
-    if not math.isfinite(duration) or not 0 < duration <= 10:
-        raise ValueError("duration must be in (0, 10] seconds")
-    control_lease.acquire(current_context())
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not math.isfinite(speed) or not 0 < speed <= min(VELOCITY_LIMITS.values()):
+        raise ValueError(f"speed must be in (0, {min(VELOCITY_LIMITS.values())}]")
+    if not math.isfinite(duration) or not 0 < duration <= MOVE_MAX_DURATION:
+        raise ValueError(f"duration must be in (0, {MOVE_MAX_DURATION}] seconds")
+    from cloud.go2.tools.executor import execute_action
     task_id = uuid.uuid4().hex
     params = _DIRECTION_MAP[direction](speed)
-    started = await go2.send_command("Move", params)
+    started = await execute_action("Move", params, context=current_context())
     if not isinstance(started, dict) or started.get("result") not in ("ok", "accepted"):
         return {"result": "error", "task_id": task_id, "action": "Move", "start": started,
                 "error": "move_not_accepted"}
@@ -88,7 +93,7 @@ async def go2_move(direction: str, speed: float = 0.3, duration: float = 1.0) ->
             stopped = {"result": "error", "error": "lease_transferred"}
         else:
             try:
-                stopped = await go2.send_command("StopMove")
+                stopped = await execute_action("StopMove", context=current_context())
             except Exception as exc:
                 stopped = {"result": "error", "error": type(exc).__name__}
     stop_status = stopped.get("result") if isinstance(stopped, dict) else None
@@ -125,7 +130,7 @@ async def go2_observe(question: str = "描述你看到的场景") -> str:
 
 
 async def go2_life(action: str) -> dict:
-    from cloud.go2.router import perform_life_control
+    from cloud.go2.service import perform_life_control
     return await perform_life_control(action, current_context())
 
 
@@ -302,7 +307,7 @@ def go2_list_locations() -> str:
     )
 
 
-async def go2_set_led(color: str = "white", duration: int = 60) -> str:
+async def go2_set_led(color: str = LED_DEFAULT_COLOR, duration: int = LED_DEFAULT_DURATION) -> str:
     if not go2.is_connected:
         raise RuntimeError("Go2 未连接")
     await go2.set_led(color, duration)

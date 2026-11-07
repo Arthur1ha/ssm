@@ -4,6 +4,7 @@
 from clock import unix_time
 from ism import State, Trigger
 from config import DEVICE_ID, UNIT_LIGHT, UNIT_IR, UNIT_SOUND, UNIT_LED
+from lamp_contract import BLINK_DEFAULT, valid_params
 
 _LED_STATE_TRIG = {
     "OFF":    Trigger.CMD_OFF,
@@ -43,13 +44,8 @@ class TriggerMap:
     #  LED execution — ISM validates first, then BSM acts
     # ─────────────────────────────────────────────────────────
     def _exec_led(self, action, params):
-        if not isinstance(params, dict):
-            raise ValueError("params must be an object")
-        for key in ("r", "g", "b", "brightness"):
-            if key in params and (type(params[key]) is not int or not 0 <= params[key] <= 255):
-                raise ValueError("{} must be an integer in 0..255".format(key))
-        if action == "BLINK" and (type(params.get("count", 3)) is not int or not 1 <= params.get("count", 3) <= 20):
-            raise ValueError("count must be an integer in 1..20")
+        if not valid_params(action, params, allow_legacy=True, allow_defaults=True):
+            raise ValueError("invalid lamp action parameters")
         trigger = {"SET_COLOR": Trigger.CMD_COLOR, "BLINK": Trigger.CMD_BLINK}.get(action)
         if action == "SET_STATE":
             trigger = _LED_STATE_TRIG.get(params.get("state"))
@@ -77,7 +73,7 @@ class TriggerMap:
                 self._bsm.led_set_color(*self._last_on)
         elif action == "BLINK":
             blink = (params.get("r", 255), params.get("g", 255),
-                     params.get("b", 255), params.get("count", 3))
+                     params.get("b", 255), params.get("count", BLINK_DEFAULT))
             blink_id = self._bsm.led_blink(*blink)
 
         else:
@@ -86,7 +82,10 @@ class TriggerMap:
         was_blinking = self._ism_led.state == State.BLINKING
         if action == "BLINK":
             if not was_blinking:
-                self._blink_restore = self._ism_led.state
+                # ERROR is not a restorable physical lighting state. A retry
+                # from ERROR finishes with a confirmed off state.
+                self._blink_restore = (State.ON if self._ism_led.state == State.ON
+                                       else State.OFF)
             self._blink_id = blink_id
             self._blink_config = blink
         elif was_blinking:
@@ -154,12 +153,13 @@ class TriggerMap:
             self._blink_restore = None
             self._blink_id = None
             self._blink_config = None
-            self._ism_led.transition(Trigger.BLINK_DONE, target)
+            restored = self._ism_led.transition(Trigger.BLINK_DONE, target)
             self._publish_led_state()
             if self._pending_blink:
                 tid, sid = self._pending_blink
                 self._pending_blink = None
-                self._publish_result(tid, sid, "ok")
+                self._publish_result(tid, sid, "ok" if restored else "error",
+                                     "" if restored else "restore_state_unconfirmed")
 
     # ─────────────────────────────────────────────────────────
     #  Orchestrator task handler

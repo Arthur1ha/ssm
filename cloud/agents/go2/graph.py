@@ -79,6 +79,29 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                trace_id: str | None, parent_run_id: str | None,
                                allowed_tools: frozenset[str] | None,
                                tool_guard, task_context, publish_reply: bool) -> dict:
+    # Resolve public requests before registering a run or claiming device work.
+    # CHAT is an explicit conversation entry, not a missing hardware tool.
+    initial_tool = None
+    if skill_id:
+        from cloud.go2.tools.registry import get_card_skill
+        from cloud.go2.tools.executor import validate_params
+        skill = get_card_skill(skill_id)
+        if skill is None:
+            return {"result": "rejected", "error": "unknown_public_skill"}
+        try:
+            public_params = validate_params(skill["params_schema"], params if params is not None else {})
+        except ValueError as exc:
+            return {"result": "rejected", "error": "invalid_skill_parameters", "message": str(exc)}
+        tool_name = skill.get("tool_name")
+        if tool_name is None and (skill.get("invoke") or {}).get("action") == "CHAT":
+            message = public_params["message"]
+        elif tool_name in TOOL_REGISTRY:
+            initial_tool = (tool_name, public_params)
+            if allowed_tools is not None and tool_name not in allowed_tools:
+                return {"result": "rejected", "error": "tool_not_allowed_for_task"}
+        else:
+            return {"result": "rejected", "error": "unknown_public_skill"}
+
     previous = view.get(run_id, session_id, require_head=resume) if run_id else None
     if previous and not resume:
         return _result(previous)
@@ -115,15 +138,6 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                          origin_kind=run.origin_kind, input=message,
                          entry="/api/go2/chat")
 
-    initial_tool = None
-    if skill_id:
-        from cloud.go2.card import get_card_skill
-        skill = get_card_skill(skill_id)
-        if not skill or skill.get("tool_name") not in TOOL_REGISTRY:
-            return {"result": "rejected", "error": "unknown_public_skill"}
-        initial_tool = (skill["tool_name"], params or {})
-        if allowed_tools is not None and initial_tool[0] not in allowed_tools:
-            return {"result": "rejected", "error": "tool_not_allowed_for_task"}
 
     def build_messages(current: GraphRun):
         from cloud.agents.go2.personality.profile import get_profile
@@ -148,10 +162,10 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
     # Explicit read/life skills keep status lookup and wake reachable without
     # claiming an interaction. Other accepted Graph tasks own play until their
     # true terminal or clarification event, including time spent waiting on LLM.
-    read_or_life = initial_tool is not None and (initial_tool[0] in READ_ONLY_TOOLS or initial_tool[0] == 'go2_life')
+    read_or_life = initial_tool is not None and (initial_tool[0] in READ_ONLY_TOOLS or initial_tool[0] == 'go2_life' or TOOL_REGISTRY[initial_tool[0]].motion)
     if runtime is not None and not runtime.active_reason() and not read_or_life:
         if context.origin_kind != 'agent_autonomous':
-            from cloud.go2.router import prepare_user_interaction
+            from cloud.go2.service import prepare_user_interaction
             try:
                 await prepare_user_interaction(context)
             except ValueError as exc:
@@ -177,13 +191,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                              action=name, params=arguments, transport="webrtc",
                              status="pending_execution")
         runtime = runtime_for(go2)
-        if name not in READ_ONLY_TOOLS and name != 'go2_life' and runtime is not None:
-            if context.origin_kind != 'agent_autonomous':
-                from cloud.go2.router import prepare_user_interaction
-                try:
-                    await prepare_user_interaction(context)
-                except ValueError as exc:
-                    return {'result': 'blocked', 'error': str(exc)}
+        if (name not in READ_ONLY_TOOLS and name != 'go2_life' and runtime is not None
+                and not TOOL_REGISTRY[name].motion):
             if not runtime.active_reason() and runtime.data['life_state'] == 'idle':
                 interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
         # A life command is itself the requested task, so release this Graph's

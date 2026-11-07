@@ -39,13 +39,23 @@ _lamp_task_results: dict[str, dict[str, Any]] = {}
 _lamp_task_owners_lock = threading.Lock()
 
 
-def record_lamp_task_result(task_id: str, result: dict[str, Any]) -> None:
-    """Keep owned browser results available even if the state ring is trimmed."""
+def record_lamp_task_result(task_id: str, result: dict[str, Any]) -> bool:
+    """Validate ownership before an observation can enter any result cache."""
     from cloud.esp32.physical_tasks import record_result
-    record_result(task_id, os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"), result)
+    unit_id = os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+    durable = record_result(task_id, unit_id, result)
+    if durable is False:
+        return False
     with _lamp_task_owners_lock:
-        if task_id in _lamp_task_owners:
+        owner = _lamp_task_owners.get(task_id)
+        if durable is None and (owner is None or owner[0] != unit_id or
+                                result.get("session_id") not in (None, owner[1])):
+            return False
+        if owner is not None and (_lamp_task_results.get(task_id) or {}).get("result") not in {
+            "ok", "blocked", "rejected", "cancelled", "error",
+        }:
             _lamp_task_results[task_id] = dict(result)
+    return True
 
 
 def init_mqtt(client) -> None:
@@ -163,6 +173,9 @@ class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: str = Field(..., min_length=1, max_length=80)
     params: dict[str, Any] = Field(default_factory=dict)
+    request_id: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,100}$")
+    trace_id: str | None = Field(None, max_length=128)
+    deadline: float | None = None
 
 
 class _EventBroker:
@@ -538,15 +551,7 @@ def _dispatch_mqtt_task(
     if not re.fullmatch(r"task_[A-Fa-f0-9]{32}", task_id):
         raise ValueError("invalid_physical_task_id")
     owned_lamp_task = unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
-    if owned_lamp_task:
-        from cloud.esp32.physical_tasks import reserve
-        # Reserve before publishing. A retry with the same ID must only query
-        # the original result, including after an API process restart.
-        first_dispatch = reserve(task_id, unit_id=unit_id,
-                                 session_id=session["session_id"],
-                                 action=action, params=params)
-        if not first_dispatch:
-            return task_id
+    # execute_physical owns the durable reservation for every entry point.
     payload = {
         "task_id": task_id,
         "session_id": session["session_id"],
@@ -639,7 +644,12 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
     return result
 
 
-async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, Any]) -> Any:
+async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, Any],
+                        *, request_id: str | None = None, trace_id: str | None = None,
+                        deadline: float | None = None) -> Any:
+    correlation = {key: value for key, value in {"request_id": request_id,
+                   "trace_id": trace_id, "deadline": deadline}.items() if value is not None}
+    from cloud.go2.state import LIFE_ACTIONS
     normalized = action.lower()
     admin_routes = {
         "tag_location": ("/api/go2/navigation/locations", "POST", {"name": str(params.get("name") or "").strip()}),
@@ -666,9 +676,9 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail=f"{normalized} requires {key}")
         encoded = urllib.parse.quote(value, safe="")
         return await _internal_request(f"/api/go2/navigation/locations/{encoded}", "DELETE", session)
-    if normalized in {"life", "request_rest", "wake", "start_explore", "stop_explore"}:
+    if normalized in {"life", *LIFE_ACTIONS}:
         operation = params.get("action") if normalized == "life" else normalized
-        if not isinstance(operation, str) or operation not in {"request_rest", "wake", "start_explore", "stop_explore"}:
+        if not isinstance(operation, str) or operation not in LIFE_ACTIONS:
             raise HTTPException(status_code=400, detail="unsupported Go2 life action")
         allowed = {"action"} if normalized == "life" else set()
         if set(params) - allowed:
@@ -707,7 +717,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
     canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "RECOGNIZE_PERSON", "STOP"} else action
     ensure_go2_action(canonical)
     if canonical == "SPORT":
-        return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {})})
+        return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {}), **correlation})
     if canonical == "NAVIGATE":
         return await _internal_request("/api/go2/navigation/go", "POST", session, {"name": params.get("name", "")})
     if canonical == "VISUAL_NAVIGATE":
@@ -726,7 +736,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         return await _internal_request("/api/go2/identity/recognize", "POST", session, {})
     if canonical == "STOP":
         return await _internal_request("/api/go2/stop", "POST", session, {})
-    return await _internal_request("/api/go2/commands", "POST", session, {"action": action, "params": params})
+    return await _internal_request("/api/go2/commands", "POST", session, {"action": action, "params": params, **correlation})
 
 
 @router.post("/api/commands/{unit_id}")
@@ -738,20 +748,17 @@ async def create_command(
 ):
     if "/" in unit_id or not unit_id.strip():
         raise HTTPException(status_code=400, detail="invalid unit id")
-    go2_life_control = unit_id == "go2" and req.action.lower() in {
-        "life", "request_rest", "wake", "start_explore", "stop_explore",
-    }
-    # Life controls validate busy state and ownership before affecting tasks.
-    # Cancelling the global activity first would turn a refused rest request
-    # into a silent exploration stop, and could cancel another session's work.
-    if not go2_life_control and not (unit_id == "go2" and req.action.lower() == "set_personality"):
+    async def take_over():
         from cloud.api.activity import user_intervention
         await user_intervention()
         from cloud.peers.gateway import cancel_pending
         cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     if unit_id == "go2":
         try:
-            result = await _dispatch_go2(req.action, req.params, session)
+            result = await _dispatch_go2(req.action, req.params, session,
+                                         **{key: value for key, value in {
+                                             "request_id": req.request_id, "trace_id": req.trace_id,
+                                             "deadline": req.deadline}.items() if value is not None})
         except HTTPException as exc:
             if exc.status_code in {400, 403, 409}:
                 audit_event("command_rejected", session, unit_id=unit_id, action=req.action, status=exc.status_code)
@@ -779,6 +786,9 @@ async def create_command(
         agent = get_agent()
         if agent is None:
             raise HTTPException(status_code=503, detail="ESP32 agent is unavailable")
+        if str(req.params["value"]) not in {"manual", "reactive"}:
+            raise HTTPException(status_code=400, detail="invalid lamp autonomy mode")
+        await take_over()
         try:
             agent.set_autonomy_mode(str(req.params["value"]))
         except ValueError as exc:
@@ -792,9 +802,38 @@ async def create_command(
                                          resume=req.params.get("resume") is True)
         return {"ok": True, "result": result}
 
-    task_id = _dispatch_mqtt_task(unit_id, req.action, req.params, session)
-    response.status_code = status.HTTP_202_ACCEPTED
-    return {"accepted": True, "status": "dispatched", "task_id": task_id}
+    from cloud.api.main import _esp32_state
+    from cloud.esp32.tool_executor import execute_physical
+    from cloud.esp32.physical_tasks import stable_task_id
+    from cloud.space.execution import ExecutionContext
+    card = _configured_card(unit_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="unit is not available in the current space")
+    context = ExecutionContext(session["session_id"], session["actor"],
+                               session["actor"] == "admin", DEFAULT_SPACE_ID,
+                               "user_delegated", session["expires_at"])
+    loop = asyncio.get_running_loop()
+    def dispatch(uid, action, params, _context, source, *, task_id):
+        # execute_physical has validated and reserved this first dispatch.
+        # The worker yields to the API loop for activity cancellation; a retry
+        # returns its record before entering this callback.
+        asyncio.run_coroutine_threadsafe(take_over(), loop).result()
+        if _context.expires_at <= time.time():
+            raise ValueError("expired_context")
+        return _dispatch_mqtt_task(uid, action, params, session, source=source, task_id=task_id)
+    task_id = (stable_task_id(unit_id, session["session_id"], req.request_id)
+               if req.request_id else None)
+    result = await run_in_threadpool(
+        execute_physical, state=_esp32_state, unit_id=unit_id, action=req.action,
+        params=req.params, context=context, dispatch=dispatch, wait=False,
+        source="device_page", task_id=task_id, card=card)
+    if result.get("result") in {"blocked", "rejected", "error"}:
+        raise HTTPException(status_code=409 if result["result"] == "blocked" else 400, detail=result)
+    response.status_code = (status.HTTP_202_ACCEPTED if result["result"] in {"accepted", "executing", "unknown"}
+                            else status.HTTP_200_OK)
+    return {"accepted": result["result"] == "accepted", "status": "dispatched" if result["result"] == "accepted" else result["result"],
+            "task_id": result.get("task_id"), "result": result["result"]}
+
 
 
 @router.get("/api/commands/{unit_id}/runs/{run_id}")
@@ -820,6 +859,13 @@ async def get_lamp_chat_run(unit_id: str, run_id: str,
             "result": run.status, "reply": run.response,
             "event_id": event_id,
             "question": run.question or None, "steps": run.steps}
+
+@router.get("/api/commands/go2/requests/{request_id}")
+async def get_go2_direct_command(request_id: str, session: dict[str, Any] = Depends(require_session)):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", request_id):
+        raise HTTPException(status_code=400, detail="invalid request_id")
+    return await _internal_request(f"/api/go2/commands/{request_id}", "GET", session)
+
 
 @router.get("/api/commands/go2/tasks/{task_id}")
 async def get_go2_command_task(task_id: str, session: dict[str, Any] = Depends(require_session)):

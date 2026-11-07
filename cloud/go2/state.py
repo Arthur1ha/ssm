@@ -1,11 +1,12 @@
 """Go2 facts and constrained life transitions. No planning or hardware I/O here."""
 from copy import deepcopy
+from dataclasses import dataclass
 import time
 import uuid
 import threading
 from functools import wraps
 
-from cloud.go2.actions import BODY_STATES
+from cloud.go2.actions import BODY_STATES, STABLE_BODY_STATES
 
 
 def synchronized(fn):
@@ -27,8 +28,90 @@ def synchronized(fn):
     return run
 
 
-STABLE_BODY_STATES = frozenset({'standing', 'lying', 'sitting'})
-LIFE_ACTIONS = ('request_rest', 'wake', 'start_explore', 'stop_explore')
+@dataclass(frozen=True)
+class LifeActionSpec:
+    action: str
+    label: str
+    region: str
+    sources: tuple[str, ...]
+    target: str
+    guards: tuple[str, ...]
+    required_actor: str | None = None
+
+
+# Guard order is also the rejection priority. Card explains these same guards;
+# runtime evaluates them against current facts immediately before execution.
+LIFE_GUARDS = {
+    "connected": "Go2 未连接",
+    "active": "机器狗正在休息，请先唤醒",
+    "idle": "生活状态忙碌",
+    "stable": "等待有效设备反馈",
+    "standing": "需要已确认站立",
+    "no_body_action": "身体动作待确认",
+    "no_motion": "运动任务未结束",
+    "not_remote": "请先退出遥控",
+    "exploring": "当前未探索",
+}
+STATE_REASON_LABELS = {
+    "body_telemetry_stale": "设备反馈已过期，等待最新状态",
+    "body_action_unconfirmed": "上个动作的结果尚未确认",
+    "body_action_pending_confirmation": "上个动作的结果尚未确认",
+    "exploration_owned_by_another_session": "探索由另一位用户控制",
+    "unknown_posture": "等待有效设备反馈",
+    "navigation_unavailable": "当前定位或地图不可用",
+}
+LIFE_ACTION_SPECS = {spec.action: spec for spec in (
+    LifeActionSpec("request_rest", "休息", "activity", ("active",), "rest",
+                   ("connected", "active", "idle", "stable", "no_body_action", "no_motion", "not_remote")),
+    LifeActionSpec("wake", "唤醒", "activity", ("rest",), "active", ("connected",)),
+    LifeActionSpec("start_explore", "开启探索", "life", ("idle",), "explore",
+                   ("connected", "active", "stable", "standing", "no_body_action", "idle"), "admin"),
+    LifeActionSpec("stop_explore", "停止探索", "life", ("explore", "idle"), "idle",
+                   ("connected", "exploring")),
+)}
+LIFE_ACTIONS = tuple(LIFE_ACTION_SPECS)
+LIFE_VIEWS = {
+    "activity": {
+        "active": {"label": "可活动", "description": "生活与身体区域同时有效。", "type": "generic"},
+        "rest": {"label": "休息", "description": "保持连接与当前稳定姿态，暂停自主活动。", "type": "generic"},
+    },
+    "life": {
+        "idle": {"label": "待命", "description": "等待用户或现有自主策略接纳任务。", "type": "generic"},
+        "play": {"label": "互动", "description": "已接纳的互动任务正在进行。", "type": "generic"},
+        "explore": {"label": "探索", "description": "已接纳探索任务，停下观察时也可保持探索。", "type": "generic"},
+    },
+}
+LIFE_TASK_STATES = ("play", "explore")
+
+
+def life_tool_schema():
+    return {"type": "object", "properties": {"action": {
+        "type": "string", "enum": list(LIFE_ACTION_SPECS),
+        "x-enum-labels": {key: spec.label for key, spec in LIFE_ACTION_SPECS.items()},
+    }}, "required": ["action"], "additionalProperties": False}
+
+
+def life_transitions(region):
+    transitions = []
+    for spec in LIFE_ACTION_SPECS.values():
+        if spec.region != region:
+            continue
+        for source in spec.sources:
+            transitions.append({
+                "src": source, "dst": spec.target, "trigger": spec.action,
+                "label": spec.label, "action": "LIFE", "params": {"action": spec.action},
+                "availability_key": spec.action,
+                "description": "以下条件会阻止请求：" + "；".join(LIFE_GUARDS[key] for key in spec.guards),
+                **({"required_actor": spec.required_actor} if spec.required_actor else {}),
+                **({"available_only": True} if source == spec.target else {}),
+            })
+    if region == "life":
+        for target in LIFE_TASK_STATES:
+            transitions.extend([
+                {"src": "idle", "dst": target, "trigger": "task_accepted", "label": "接纳" + LIFE_VIEWS["life"][target]["label"]},
+                {"src": target, "dst": "idle", "trigger": "task_finished", "label": LIFE_VIEWS["life"][target]["label"] + "结束"},
+            ])
+    return transitions
 
 
 class Go2State:
@@ -72,7 +155,7 @@ class Go2State:
                        body_state=None, body_confirmation='unknown', body_observation_source=None,
                        pending_action=None, life_finish_requested=False,
                        body_observed_at=None, body_telemetry_fresh=False, navigation_active=False, velocity_requested=False, control_mode='normal', life_owner=None, life_task_id=None,
-                       exploration_enabled=False, activity_state='active' if value == 'online' else None,
+                       autonomy_mode='manual', exploration_enabled=False, activity_state='active' if value == 'online' else None,
                        life_state='idle' if value == 'online' else None)
         if value == 'connecting':
             changes.update(epoch=uuid.uuid4().hex, revision=-1)
@@ -105,27 +188,29 @@ class Go2State:
         d = self.data
         active_reason = self.active_reason()
         stable = d['body_state'] in STABLE_BODY_STATES and d['body_confirmation'] in {'observed', 'previous_observation'}
-        return {
-            'request_rest': active_reason or ('生活状态忙碌' if d['life_state'] != 'idle' else
-                            '等待有效设备反馈' if not stable else
-                            '身体动作待确认' if d['pending_action'] else
-                            '运动任务未结束' if navigation_busy or d['navigation_active'] or d['velocity_requested'] else
-                            '请先退出遥控' if d['control_mode'] == 'remote' else None),
-            'wake': 'Go2 未连接' if not d['connected'] else None if d['activity_state'] == 'rest' else '当前未休息',
-            'start_explore': active_reason or ('等待有效设备反馈' if not stable else
-                             '需要已确认站立' if d['body_state'] != 'standing' else
-                             '身体动作待确认' if d['pending_action'] else
-                             '已有生活任务' if d['life_state'] != 'idle' else None),
-            'stop_explore': 'Go2 未连接' if not d['connected'] else
-                            None if d['life_state'] == 'explore' or (self.exploration_enabled and d['life_state'] == 'idle') else '当前未探索',
+        conditions = {
+            "connected": d["connected"], "active": not active_reason,
+            "idle": d["life_state"] == "idle", "stable": stable,
+            "standing": d["body_state"] == "standing",
+            "no_body_action": not d["pending_action"],
+            "no_motion": not (navigation_busy or d["navigation_active"] or d["velocity_requested"]),
+            "not_remote": d["control_mode"] != "remote",
+            "exploring": d["life_state"] == "explore" or (self.exploration_enabled and d["life_state"] == "idle"),
         }
+        reasons = {}
+        for action, spec in LIFE_ACTION_SPECS.items():
+            reason = next((LIFE_GUARDS[key] for key in spec.guards if not conditions[key]), None)
+            if not reason and d[spec.region + "_state"] not in spec.sources:
+                reason = "当前未休息" if action == "wake" else "当前行为不允许此请求"
+            reasons[action] = reason
+        return reasons
 
     @synchronized
     def request_rest(self, *, navigation_busy=False):
         reason = self.life_reasons(navigation_busy=navigation_busy)['request_rest']
         if reason:
             raise ValueError(reason)
-        self.commit('request_rest', exploration_enabled=False, activity_state='rest', life_state=None,
+        self.commit('request_rest', exploration_enabled=False, activity_state=LIFE_ACTION_SPECS['request_rest'].target, life_state=None,
                     life_owner=None, life_task_id=None)
 
     @synchronized
@@ -133,14 +218,14 @@ class Go2State:
         reason = self.life_reasons()['wake']
         if reason:
             raise ValueError(reason)
-        self.commit('wake', exploration_enabled=False, activity_state='active', life_state='idle', life_owner=None, life_task_id=None)
+        self.commit('wake', exploration_enabled=False, activity_state=LIFE_ACTION_SPECS['wake'].target, life_state='idle', life_owner=None, life_task_id=None)
 
     @synchronized
     def begin_life(self, state, owner, task_id):
         reason = self.active_reason()
         if reason:
             raise ValueError(reason)
-        if state not in {'play', 'explore'}:
+        if state not in LIFE_TASK_STATES:
             raise ValueError('invalid life state')
         self.commit('task_accepted', life_state=state, life_owner=owner, life_task_id=task_id,
                     life_finish_requested=False)

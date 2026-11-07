@@ -149,8 +149,7 @@ function MapWidget({ connected, endpoint }) {
             <li><span className="map-viewer__swatch map-viewer__swatch--place" aria-hidden="true"/>已保存地点</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--target" aria-hidden="true"/>目的地</li>
           </ul>
-        </section>
-      , document.body,
+        </section>, document.body,
     )}
   </>;
 }

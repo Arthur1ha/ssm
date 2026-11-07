@@ -1,0 +1,43 @@
+{
+  "simulated": true,
+  "published": [
+    {
+      "task_id": "peer-blink",
+      "request_id": "peer-blink",
+      "session_id": "peer-session",
+      "action": "BLINK",
+      "params": {
+        "count": 2
+      },
+      "actor": "visitor",
+      "persist": false,
+      "space_id": "main",
+      "source": "peer_request",
+      "ts": 1793975031
+    }
+  ],
+  "first": {
+    "result": "ok",
+    "task_id": "peer-blink",
+    "action": "BLINK",
+    "error": null,
+    "request_id": "peer-blink",
+    "target_unit_id": "esp32_desk_led"
+  },
+  "retry": {
+    "task_id": "peer-blink",
+    "result": "ok",
+    "unit_id": "esp32_desk_led",
+    "ism": "ON",
+    "action": "BLINK",
+    "request_id": "peer-blink",
+    "target_unit_id": "esp32_desk_led"
+  },
+  "conflict": {
+    "result": "rejected",
+    "error": "physical_task_id_conflict",
+    "task_id": "peer-blink",
+    "request_id": "peer-blink",
+    "target_unit_id": "esp32_desk_led"
+  }
+}

@@ -31,42 +31,57 @@ def _fingerprint(unit_id: str, session_id: str, action: str, params: dict) -> st
 
 
 def reserve(task_id: str, *, unit_id: str, session_id: str, action: str,
-            params: dict) -> bool:
+            params: dict, request_params: dict | None = None,
+            origin_kind: str | None = None) -> bool:
     """Return True only to the first publisher of this exact task ID.
 
     The caller must hold no other cross-process lock while publishing.
     An occupied corrupt record raises rather than risking a second dispatch.
     """
     fingerprint = _fingerprint(unit_id, session_id, action, params)
+    request_fingerprint = _fingerprint(unit_id, session_id, action,
+                                       request_params if request_params is not None else params)
     with locked_directory(PHYSICAL_TASKS_DIR):
         path = record_path(PHYSICAL_TASKS_DIR, task_id)
         old = read_record(path)
         if old is not None:
-            if old.get("fingerprint") != fingerprint:
+            same_request = old.get("request_fingerprint", old.get("fingerprint")) == request_fingerprint
+            if not same_request or (origin_kind is not None and
+                                    old.get("origin_kind") not in (None, origin_kind)):
                 raise ValueError("physical_task_id_conflict")
             return False
         return write_record(path, {
             "schema_version": 1, "task_id": task_id, "unit_id": unit_id,
             "session_id": session_id, "action": action,
             "fingerprint": fingerprint, "status": "reserved",
+            "request_fingerprint": request_fingerprint, "origin_kind": origin_kind,
             "result": None, "created_at": time.time(),
         }, exclusive=True)
 
 
-def record_result(task_id: str, unit_id: str, result: dict) -> bool:
-    """Persist a real edge result; ignore unrelated or already final records."""
-    if result.get("task_id") not in (None, task_id):
+def record_result(task_id: str, unit_id: str, result: dict) -> bool | None:
+    """Persist an owned observation; None means no durable reservation exists.
+
+    Legacy callers may then consult their existing in-memory registration.
+    False means invalid identity/result and must never use that fallback.
+    """
+    if (result.get("task_id") not in (None, task_id)
+            or result.get("unit_id") not in (None, unit_id)
+            or result.get("result") not in {"accepted", "executing", "ok", "blocked",
+                                            "rejected", "cancelled", "error", "timeout"}):
         return False
     with locked_directory(PHYSICAL_TASKS_DIR):
         path = record_path(PHYSICAL_TASKS_DIR, task_id)
         old = read_record(path)
-        if old is None or old.get("unit_id") != unit_id:
+        if old is None:
+            return None
+        if old.get("unit_id") != unit_id:
             return False
         if result.get("session_id") not in (None, old.get("session_id")):
             return False
         previous = old.get("result") or {}
         if previous.get("result") in {"ok", "blocked", "rejected", "cancelled", "error"}:
-            return True
+            return previous["result"] == result.get("result")
         old["result"] = dict(result)
         old["status"] = "observed"
         old["updated_at"] = time.time()
@@ -74,12 +89,23 @@ def record_result(task_id: str, unit_id: str, result: dict) -> bool:
         return True
 
 
-def get(task_id: str, *, unit_id: str, session_id: str) -> dict | None:
+def get(task_id: str, *, unit_id: str, session_id: str,
+        action: str | None = None, request_params: dict | None = None,
+        origin_kind: str | None = None) -> dict | None:
     """Read a session-owned result without causing another MQTT publish."""
     with locked_directory(PHYSICAL_TASKS_DIR):
         old = read_record(record_path(PHYSICAL_TASKS_DIR, task_id))
-    if old is None or old.get("unit_id") != unit_id or old.get("session_id") != session_id:
+    if old is None:
         return None
+    if old.get("unit_id") != unit_id or old.get("session_id") != session_id:
+        if action is not None:
+            raise ValueError("physical_task_id_conflict")
+        return None
+    if action is not None:
+        fingerprint = _fingerprint(unit_id, session_id, action, request_params or {})
+        if (old.get("request_fingerprint", old.get("fingerprint")) != fingerprint
+                or (origin_kind is not None and old.get("origin_kind") not in (None, origin_kind))):
+            raise ValueError("physical_task_id_conflict")
     result = old.get("result")
     return {"task_id": task_id, **result} if isinstance(result, dict) else {
         "task_id": task_id, "result": "unknown", "error": "edge_result_unconfirmed",

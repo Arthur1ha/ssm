@@ -2,9 +2,10 @@
 
 import threading
 import time
+import uuid
 
 from cloud.esp32.tool_registry import (
-    PHYSICAL_ACTIONS, normalize_brightness, valid_auxiliary_params, valid_lamp_params,
+    PHYSICAL_ACTIONS, fsm_allows, normalize_brightness, valid_auxiliary_params, valid_lamp_params,
 )
 from cloud.space.execution import ExecutionContext
 from cloud.observability import emit_agent_event
@@ -15,13 +16,19 @@ _physical_lock = threading.Lock()
 def execute_physical(*, state, unit_id: str, action: str, params: dict,
                      context: ExecutionContext, dispatch, wait: bool = True,
                      source: str = "lamp_chat", preflight=None,
-                     task_id: str | None = None) -> dict:
-    """Validate, serialize and track one physical task by its original ID.
+                     task_id: str | None = None, card: dict | None = None,
+                     timeout: float | None = None) -> dict:
+    """One physical boundary for buttons, Graphs, steward and peers.
 
-    ``dispatch`` is the existing API MQTT publisher; it must return a task ID.
-    A publish is only acceptance. The edge result is required for ``ok``.
+    Reserve before invoking the transport callback. The callback accepts the
+    original ``task_id`` keyword and never owns another dispatch ledger.
+    A retry reads the reservation, including after an uncertain publish.
     """
-    if action not in PHYSICAL_ACTIONS or not valid_lamp_params(action, params):
+    from cloud.esp32.physical_tasks import get, reserve, record_result
+
+    legacy = bool(card and {"BRIGHT", "DIM"} <= set(
+        (card.get("state_machine") or {}).get("states", [])))
+    if action not in PHYSICAL_ACTIONS or not valid_lamp_params(action, params, allow_legacy=legacy):
         return {"result": "rejected", "error": "invalid_lamp_action"}
     if (context.space_id != "main" or context.actor not in {"admin", "visitor", "agent"}
             or context.origin_kind not in {"user_delegated", "agent_autonomous"}):
@@ -30,46 +37,68 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
         return {"result": "rejected", "error": "expired_context"}
     if context.origin_kind == "agent_autonomous" and context.persist:
         return {"result": "rejected", "error": "autonomous_persistence_forbidden"}
+    task_id = task_id or "task_" + uuid.uuid4().hex
+    request_params = dict(params)
     with _physical_lock:
-        if task_id is not None:
-            from cloud.esp32.physical_tasks import get as get_physical_task
-            previous = get_physical_task(task_id, unit_id=unit_id,
-                                         session_id=context.session_id)
-            if previous is not None:
-                # A reserved/published task has an uncertain outcome until an
-                # edge result arrives. Never republish it on Graph recovery.
-                return {**previous, "action": action}
+        reserved_here = False
         try:
+            previous = get(task_id, unit_id=unit_id, session_id=context.session_id,
+                           action=action, request_params=request_params,
+                           origin_kind=context.origin_kind)
+            if previous is not None:
+                return {**previous, "action": action}
             current = (state.actuator_snapshot().get(unit_id, {}).get("state") or {})
             params = normalize_brightness(action, params, current)
+            if card is not None:
+                if card.get("unit_id") != unit_id or not card.get("online"):
+                    return {"result": "blocked", "error": "lamp_unavailable"}
+                if (card.get("transport") or {}).get("kind") != "mqtt":
+                    return {"result": "rejected", "error": "unsupported_device_transport"}
+                if not any((skill.get("invoke") or {}).get("action") == action
+                           for skill in card.get("skills", [])):
+                    return {"result": "rejected", "error": "undeclared_lamp_action"}
+                current_ism = str(current.get("ism") or (card.get("state") or {}).get("ism") or "")
+                if not fsm_allows(card, current_ism, action, params):
+                    return {"result": "blocked", "error": "lamp_action_unavailable"}
             if preflight is not None:
                 block = preflight(current, params)
                 if block:
                     return {"result": "blocked", "error": block}
-            if task_id is None:
-                task_id = dispatch(unit_id, action, params, context, source)
-            else:
-                task_id = dispatch(unit_id, action, params, context, source,
-                                   task_id=task_id)
+            first = reserve(task_id, unit_id=unit_id, session_id=context.session_id,
+                            action=action, params=params, request_params=request_params,
+                            origin_kind=context.origin_kind)
+            if not first:
+                return {**get(task_id, unit_id=unit_id, session_id=context.session_id), "action": action}
+            reserved_here = True
+            dispatched = dispatch(unit_id, action, params, context, source, task_id=task_id)
+            if dispatched != task_id:
+                raise ValueError("physical_dispatch_id_mismatch")
         except ValueError as exc:
-            return {"result": "rejected", "error": str(exc)}
+            if reserved_here:
+                return {**get(task_id, unit_id=unit_id, session_id=context.session_id), "action": action}
+            return {"result": "rejected", "error": str(exc), "task_id": task_id}
         except Exception as exc:
-            if task_id is not None:
-                from cloud.esp32.physical_tasks import get as get_physical_task
-                reserved = get_physical_task(task_id, unit_id=unit_id,
-                                             session_id=context.session_id)
-                if reserved is not None:
-                    # The broker may have accepted the publish before raising.
-                    return {**reserved, "action": action}
-            return {"result": "error", "error": str(exc)}
-        if not wait:
-            return {"result": "accepted", "task_id": task_id, "action": action}
-        outcome = state.wait_task_result(task_id, timeout=PHYSICAL_ACTIONS[action]["timeout"])
-        emit_agent_event("device.result", task_id=task_id, target_unit_id=unit_id,
-                         action=action, status=outcome.get("result", "error"),
-                         result=outcome, completion_basis="edge_result")
-        return {"result": outcome.get("result", "error"), "task_id": task_id,
-                "action": action, "error": outcome.get("error") or outcome.get("reason")}
+            reserved = get(task_id, unit_id=unit_id, session_id=context.session_id)
+            if reserved is not None:
+                # A transport failure cannot prove the broker rejected a publish.
+                return {**reserved, "action": action}
+            return {"result": "error", "error": str(exc), "task_id": task_id}
+    if not wait:
+        return {"result": "accepted", "task_id": task_id, "action": action}
+    # Waiting holds no dispatch lock: a new user command may cancel a blink.
+    outcome = state.wait_task_result(task_id, timeout=(PHYSICAL_ACTIONS[action]["timeout"]
+                                                     if timeout is None else timeout))
+    if (outcome.get("task_id") not in (None, task_id)
+            or outcome.get("unit_id") not in (None, unit_id)
+            or outcome.get("session_id") not in (None, context.session_id)):
+        outcome = {"result": "unknown", "error": "edge_result_identity_mismatch"}
+    if outcome.get("result") != "timeout":
+        record_result(task_id, unit_id, outcome)
+    emit_agent_event("device.result", task_id=task_id, target_unit_id=unit_id,
+                     action=action, status=outcome.get("result", "error"),
+                     result=outcome, completion_basis="edge_result")
+    return {"result": outcome.get("result", "error"), "task_id": task_id,
+            "action": action, "error": outcome.get("error") or outcome.get("reason")}
 
 
 def execute_peer_skill(*, initiator_unit_id: str, target_unit_id: str,

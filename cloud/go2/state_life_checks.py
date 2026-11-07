@@ -267,7 +267,7 @@ async def test_clarification_releases_play_and_resume_reacquires_same_run(tmp_pa
 @pytest.mark.asyncio
 async def test_explore_handoff_waits_old_navigation_cleanup_and_fresh_stop(monkeypatch):
     import importlib
-    router = importlib.import_module('cloud.go2.router')
+    router = importlib.import_module('cloud.go2.service')
     nav_module = importlib.import_module('cloud.go2.navigation.navigator')
     robot = robot_at()
     owner = 'handoff-user'
@@ -316,7 +316,7 @@ async def test_explore_handoff_waits_old_navigation_cleanup_and_fresh_stop(monke
 @pytest.mark.asyncio
 async def test_other_session_cannot_handoff_exploration(monkeypatch):
     import importlib
-    router = importlib.import_module('cloud.go2.router')
+    router = importlib.import_module('cloud.go2.service')
     robot = robot_at()
     robot.runtime.begin_life('explore', 'original-owner', 'explore-old')
     drive = SimpleNamespace(stop=MagicMock())
@@ -331,7 +331,7 @@ async def test_other_session_cannot_handoff_exploration(monkeypatch):
 @pytest.mark.asyncio
 async def test_start_exploration_requires_navigation_before_lease_or_mode_change(monkeypatch):
     import importlib
-    router = importlib.import_module('cloud.go2.router')
+    router = importlib.import_module('cloud.go2.service')
     nav_module = importlib.import_module('cloud.go2.navigation.navigator')
     robot = robot_at()
     lease = ControlLease()

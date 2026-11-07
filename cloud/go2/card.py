@@ -7,7 +7,8 @@ from copy import deepcopy
 from cloud.cards.validation import normalize_card
 
 from cloud.go2.connection import go2
-from cloud.go2.actions import ACTIONS, BODY_STATES
+from cloud.go2.actions import ACTIONS, BODY_STATES, TRANSIENT_STATES, fsm_transitions, body_views, velocity_schema
+from cloud.go2.state import LIFE_VIEWS, STATE_REASON_LABELS, life_transitions
 
 GO2_CARD_TOPIC = "ssm/agents/go2/card"
 GO2_STATUS_TOPIC = "ssm/agents/go2/status"
@@ -15,130 +16,8 @@ GO2_STATE_TOPIC = "ssm/agents/go2/state"
 _mqtt_client = None
 _last_status_online: bool | None = None
 
-# Only these externally meaningful goals are advertised to the orchestrator.
-# Internal tools and autonomous modes remain private to the Go2 agent.
-CARD_SKILLS = {
-    "go2_chat": {
-        "tool_name": None,
-        "name": "对话 / 自然语言控制",
-        "description": "通过自然语言与机器狗对话或下达任务",
-        "tags": ["conversation", "robot"],
-        "invoke": {"action": "CHAT"},
-    },
-    "go2_sport": {
-        "tool_name": "go2_sport",
-        "name": "预定义动作",
-        "description": "执行机器狗预定义动作",
-        "tags": ["motion", "robot"],
-        "invoke": {"action": "SPORT"},
-    },
-    "go2_life": {
-        "tool_name": "go2_life",
-        "name": "休息、唤醒与探索",
-        "description": "待命稳定时休息，保持当前姿态；唤醒回待命，不重放探索。开启探索沿用管理员权限。",
-        "tags": ["activity", "robot"],
-        "invoke": {"action": "LIFE"},
-    },
-    "go2_navigate": {
-        "tool_name": "go2_navigate_to",
-        "name": "导航到命名地点",
-        "description": "仅在当前会话拥有可信定位与已知安全路线时导航；条件不足会拒绝移动",
-        "tags": ["navigation", "robot"],
-        "invoke": {"action": "NAVIGATE"},
-    },
-    "go2_visual_navigate": {
-        "tool_name": "go2_navigate_to_visible_target",
-        "name": "视觉目标导航",
-        "description": "用相机与雷达定位可见物体，沿实时地图导航到附近停靠点并重新观察确认",
-        "tags": ["navigation", "vision", "motion", "robot"],
-        "invoke": {"action": "VISUAL_NAVIGATE"},
-    },
-    "go2_recognize_person": {
-        "tool_name": "go2_recognize_person",
-        "name": "识别面前的人",
-        "description": "识别摄像头视野中的人物",
-        "tags": ["vision", "identity", "robot"],
-        "invoke": {"action": "RECOGNIZE_PERSON"},
-    },
-    "go2_move": {
-        "tool_name": "go2_move",
-        "name": "短距离定时移动",
-        "description": "按方向与时长移动一段距离",
-        "tags": ["motion", "robot"],
-        "invoke": {"action": "MOVE"},
-    },
-    "go2_observe": {
-        "tool_name": "go2_observe",
-        "name": "观察当前画面",
-        "description": "通过摄像头描述当前看到的场景",
-        "tags": ["vision", "robot"],
-        "invoke": {"action": "OBSERVE"},
-    },
-    "go2_status": {
-        "tool_name": "go2_status",
-        "name": "查看机器狗状态",
-        "description": "读取连接、姿态与运动状态",
-        "tags": ["status", "robot"],
-        "invoke": {"action": "STATUS"},
-    },
-    "go2_set_led": {
-        "tool_name": "go2_set_led",
-        "name": "设置机身灯",
-        "description": "设置机器狗机身灯的颜色和时长",
-        "tags": ["light", "robot"],
-        "invoke": {"action": "SET_LED"},
-    },
-    "go2_list_locations": {
-        "tool_name": "go2_list_locations",
-        "name": "查看已保存地点",
-        "description": "列出机器狗可导航的命名地点",
-        "tags": ["navigation", "robot"],
-        "invoke": {"action": "LIST_LOCATIONS"},
-    },
-    "go2_tag_location": {
-        "tool_name": "go2_tag_location",
-        "name": "保存当前地点",
-        "description": "管理员将当前定位保存为可导航的命名地点",
-        "tags": ["navigation", "persistent", "robot"],
-        "invoke": {"action": "TAG_LOCATION"},
-    },
-    "go2_list_teachings": {
-        "tool_name": "go2_list_teachings",
-        "name": "查看已保存教导",
-        "description": "查看机器狗的教导和自动执行状态",
-        "tags": ["memory", "robot"],
-        "invoke": {"action": "LIST_TEACHINGS"},
-    },
-}
-
-
-def get_card_skill(skill_id: str) -> dict | None:
-    """Return one public entry, including the matching tool's live schema."""
-    entry = CARD_SKILLS.get(skill_id)
-    if entry is None:
-        return None
-    result = deepcopy(entry)
-    result["id"] = skill_id
-    tool_name = result["tool_name"]
-    if tool_name is None:
-        result["params_schema"] = {
-            "type": "object", "required": ["message"],
-            "properties": {"message": {"type": "string"}},
-        }
-    else:
-        from cloud.go2.tools.registry import get_tool_spec
-        spec = get_tool_spec(tool_name)
-        if spec is None:
-            raise RuntimeError(f"Card skill {skill_id} references missing tool {tool_name}")
-        result["params_schema"] = deepcopy(spec.params_schema)
-    return result
-
-
-def card_skills() -> list[dict]:
-    return [
-        {key: value for key, value in get_card_skill(skill_id).items() if key != "tool_name"}
-        for skill_id in CARD_SKILLS
-    ]
+# Compatibility imports; the public subset is maintained with the tools.
+from cloud.go2.tools.registry import CARD_SKILLS, get_card_skill, card_skills
 
 
 def init_mqtt(client) -> None:
@@ -175,20 +54,14 @@ def _publish_go2_state() -> None:
         logging.warning("[Go2] 发布 state 失败: %s", exc)
 
 
-_GO2_FSM_LABELS = {command: action.label for command, action in ACTIONS.items()}
-
-
 def _go2_state_machine() -> dict:
-    """依据 connection/fsm.py 的 _FSM_NEXT 生成静态状态机拓扑（单一真相）。
-
-    延迟导入以避免在测试 stub 环境中与 cloud.go2.connection 补丁冲突。
-    """
-    from cloud.go2.connection.fsm import _FSM_AVAILABLE, _FSM_NEXT, _TRANSIENT_STATES  # noqa: PLC0415
+    """Project declared goals and observation edges without inspecting a live adapter."""
+    topology = fsm_transitions()
     transitions = []
     interruptible_states = {
         spec.execution_state for spec in ACTIONS.values() if spec.interruptible
     }
-    for src, edges in _FSM_NEXT.items():
+    for src, edges in topology.items():
         for trigger, dst in edges.items():
             if trigger == "Move":
                 continue  # 有速度的 Move 属于数据面；图上只显示控制状态入口。
@@ -196,7 +69,7 @@ def _go2_state_machine() -> dict:
                 continue  # Safety STOP remains available without promising interruption.
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
-                "label": "停止" if src in _TRANSIENT_STATES else _GO2_FSM_LABELS.get(trigger, trigger),
+                "label": ACTIONS[trigger].label,
                 "action": trigger,
                 "params": {},
                 "completion": ACTIONS[trigger].completion,
@@ -208,16 +81,14 @@ def _go2_state_machine() -> dict:
                 "description": "仅在当前连接收到满足判据的设备反馈时发生。"}
 
     for spec in ACTIONS.values():
-        if spec.execution_state in _TRANSIENT_STATES and spec.expected_state:
+        if spec.execution_state in TRANSIENT_STATES and spec.expected_state:
             transitions.append(observed_transition(spec.execution_state, spec.expected_state,
                                                    "action_completed", "动作完成并确认姿态"))
     transitions.extend([
         observed_transition("standing", "moving", "motion_observed", "检测到移动"),
         observed_transition("moving", "standing", "motion_stationary", "确认停稳"),
     ])
-    for src in _FSM_AVAILABLE:
-        if src in {"offline", "connecting"}:
-            continue
+    for src in BODY_STATES:
         transitions.append({
             "src": src, "dst": src,
             "trigger": "EMERGENCY_STOP", "label": "紧急制停",
@@ -230,7 +101,8 @@ def _go2_state_machine() -> dict:
         "execution_field": "pending_action",
         "last_execution_field": "last_action",
         "freshness_field": "body_telemetry_fresh",
-        "states": [s for s in _FSM_AVAILABLE if s not in {"offline", "connecting"}],
+        "reason_labels": deepcopy(STATE_REASON_LABELS),
+        "states": list(BODY_STATES),
         "diagram": {"width": 600, "height": 670, "sections": [
             {"label": "行为", "top": 28},
             {"label": "姿态与动作", "top": 295},
@@ -240,31 +112,12 @@ def _go2_state_machine() -> dict:
         # with circular defaults for newly added states.
         "layout": {state: {"x": .14 + (index % 4) * .24,
                             "y": .14 + (index // 4) * .24}
-                   for index, state in enumerate(_FSM_NEXT)},
-        "views": {
-            "offline": {"label": "未连接", "description": "机器狗尚未建立控制连接。", "type": "robot_pose", "pose": "offline"},
-            "connecting": {"label": "正在连接", "description": "正在与机器狗建立实时控制通道。", "type": "robot_pose", "pose": "offline"},
-            "lying": {"label": "趴卧", "description": "身体降低并保持稳定，等待起立指令。", "type": "robot_pose", "pose": "lying"},
-            "standing": {"label": "站立", "description": "四足稳定站立，可以移动或执行动作。", "type": "robot_pose", "pose": "standing"},
-            "moving": {"label": "移动中", "description": "身体正在移动；遥控入口与实际移动分别显示，停稳以真实反馈为准。", "type": "robot_pose", "pose": "moving"},
-            "greeting": {"label": "挥手", "description": "抬起前腿执行问候动作。", "type": "robot_pose", "pose": "greeting"},
-            "stretching": {"label": "伸展", "description": "降低身体前部并完成伸展动作。", "type": "robot_pose", "pose": "stretching"},
-            "dancing1": {"label": "舞蹈1", "description": "正在执行第一组节奏动作。", "type": "robot_pose", "pose": "dance-left"},
-            "dancing2": {"label": "舞蹈2", "description": "正在执行第二组节奏动作。", "type": "robot_pose", "pose": "dance-right"},
-        },
+                   for index, state in enumerate(topology)},
+        "views": body_views(),
     }
     # Preserve the established movement anchor for flat consumers; the last
     # grid row has enough space for it without intersecting another node.
     state_machine["layout"]["moving"] = {"x": .50, "y": .82}
-    # New body nodes are capabilities. Their destination is a requested goal,
-    # not evidence that the hardware has reached it.
-    for action in ACTIONS.values():
-        state = action.execution_state or action.expected_state
-        if state in BODY_STATES and state not in state_machine["views"]:
-            state_machine["views"][state] = {
-                "label": action.label, "description": "动作或姿态以真实反馈为准；请求接受不表示完成。",
-                "type": "robot_pose", "pose": state,
-            }
     body = {key: deepcopy(state_machine[key]) for key in
             ("states", "transitions", "views", "layout")}
     body.update(id="body", label="身体", state_field="body_state",
@@ -280,12 +133,6 @@ def _go2_state_machine() -> dict:
     body["layout"].update({value: {"x": .15 + (index % 3) * .35,
                                   "y": (445 + (index // 3) * 90) / 670}
                            for index, value in enumerate(gestures)})
-
-    def life_transition(src, dst, operation, label):
-        return {"src": src, "dst": dst, "trigger": operation, "label": label,
-                "action": "LIFE", "params": {"action": operation},
-                "availability_key": operation,
-                **({"required_actor": "admin"} if operation == "start_explore" else {})}
 
     state_machine["regions"] = [
         {"id": "connection", "label": "连接", "state_field": "connection_state",
@@ -306,11 +153,9 @@ def _go2_state_machine() -> dict:
          "layout": {"rest": {"x": .15, "y": 100 / 670}},
          "available_actions_field": "available_life_actions", "blocked_actions_field": "life_blocked_reasons",
          "parent": {"region": "connection", "state": "online"},
-         "states": ["active", "rest"],
-         "transitions": [life_transition("active", "rest", "request_rest", "休息"),
-                         life_transition("rest", "active", "wake", "唤醒")],
-         "views": {"active": {"label": "可活动", "description": "生活与身体区域同时有效。", "type": "generic"},
-                   "rest": {"label": "休息", "description": "保持连接与当前稳定姿态，暂停自主活动。", "type": "generic"}}},
+         "states": list(LIFE_VIEWS["activity"]),
+         "transitions": life_transitions("activity"),
+         "views": deepcopy(LIFE_VIEWS["activity"])},
         {"id": "life", "label": "生活", "state_field": "life_state",
          "diagram_group": "行为", "node_radius": 46,
          "layout": {"idle": {"x": .50, "y": 100 / 670},
@@ -318,17 +163,9 @@ def _go2_state_machine() -> dict:
                     "explore": {"x": .85, "y": 100 / 670}},
          "available_actions_field": "available_life_actions", "blocked_actions_field": "life_blocked_reasons",
          "parent": {"region": "activity", "state": "active"},
-         "states": ["idle", "play", "explore"],
-         "transitions": [life_transition("idle", "explore", "start_explore", "开启探索"),
-                         life_transition("explore", "idle", "stop_explore", "停止探索"),
-                         {**life_transition("idle", "idle", "stop_explore", "停止探索"), "available_only": True},
-                         {"src": "idle", "dst": "play", "trigger": "task_accepted", "label": "接纳任务"},
-                         {"src": "play", "dst": "idle", "trigger": "task_finished", "label": "互动结束"},
-                         {"src": "idle", "dst": "explore", "trigger": "task_accepted", "label": "接纳探索"},
-                         {"src": "explore", "dst": "idle", "trigger": "task_finished", "label": "探索结束"}],
-         "views": {"idle": {"label": "待命", "description": "等待用户或现有自主策略接纳任务。", "type": "generic"},
-                   "play": {"label": "互动", "description": "已接纳的互动任务正在进行。", "type": "generic"},
-                   "explore": {"label": "探索", "description": "已接纳探索任务，停下观察时也可保持探索。", "type": "generic"}}},
+         "states": list(LIFE_VIEWS["life"]),
+         "transitions": life_transitions("life"),
+         "views": deepcopy(LIFE_VIEWS["life"])},
         body,
     ]
     return state_machine
@@ -416,7 +253,7 @@ def _build_go2_card() -> dict:
             {"type": "joystick", "states": ["standing", "moving"], "placement": "controls", "order": 20, "action": "velocity",
              "state_field": "body_state", "enabled_when": {"control_mode": "remote"},
              "node_state": "moving", "enter_action": "EnterMoveControl", "exit_action": "StopMove",
-             "available_actions_field": "available_actions", "blocked_actions_field": "blocked_actions", "availability_key": "Move"},
+             "available_actions_field": "available_actions", "blocked_actions_field": "blocked_actions", "availability_key": "Move", "params_schema": velocity_schema()},
         ],
     }
     return normalize_card(card)

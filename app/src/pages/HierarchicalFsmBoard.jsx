@@ -39,6 +39,9 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     const restoreFocus = document.activeElement;
     if (videoExpanded) closeVideoRef.current?.focus();
     const onKey = event => {
+      if (videoExpanded && event.key === 'Escape') {
+        event.stopPropagation(); setVideoExpanded(false); return;
+      }
       // Map's portal owns its own Escape handling and focus trap.
       if (!boardRef.current?.contains(event.target)) return;
       if (event.key === 'Escape') {
@@ -84,7 +87,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     style={{'--board-accent':color}} aria-busy={busy} role={expanded ? 'dialog' : undefined}
     aria-modal={expanded || undefined} aria-label={expanded ? '设备白板' : undefined}>
     {media.length > 0 && <div className="device-whiteboard__media" aria-label="实时画面与地图">
-      {media.map(widget => <div key={`${widget.type}:${widget._index}`}
+      {media.map(widget => <div key={`${widget.type}:${widget._index}`} className="device-whiteboard__media-slot"><div
         className={`device-whiteboard__media-tile${widget.type === 'video' && videoExpanded ? ' is-expanded' : ''}`}
         role={widget.type === 'video' && videoExpanded ? 'dialog' : undefined}
         aria-modal={widget.type === 'video' && videoExpanded ? false : undefined}
@@ -93,7 +96,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         {widget.type === 'video' && <button ref={videoExpanded ? closeVideoRef : videoTriggerRef}
           type="button" className="device-whiteboard__video-toggle" aria-label={videoExpanded ? '关闭视频' : '放大视频'}
           onClick={() => setVideoExpanded(value => !value)}><span>视频</span><span>{videoExpanded ? '×' : '↗'}</span></button>}
-      </div>)}
+      </div></div>)}
     </div>}
     <div className="device-whiteboard__canvas">
       {topology.nodes.length ? <FsmGraph nodes={topology.nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}

@@ -20,6 +20,9 @@ class Trigger:
     BLINK_DONE       = "BLINK_DONE"
     LED_FAIL         = "LED_FAIL"
 
+LED_STATES = (State.OFF, State.ON, State.BLINKING, State.ERROR)
+BLINK_DONE_TARGETS = (State.OFF, State.ON)
+
 SENSOR_TABLE = {
     (State.SAMPLING,   Trigger.SENSOR_FAIL):      State.ERROR,
     (State.MONITORING, Trigger.SENSOR_FAIL):      State.ERROR,
@@ -56,7 +59,7 @@ class ISM:
 
     def transition(self, trigger, target=None):
         if trigger == Trigger.BLINK_DONE and self._table is LED_TABLE:
-            if self.state != State.BLINKING or target not in (State.OFF, State.ON):
+            if self.state != State.BLINKING or target not in BLINK_DONE_TARGETS:
                 return False
             old = self.state
             self.state = target

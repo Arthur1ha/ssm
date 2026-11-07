@@ -8,13 +8,13 @@ from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMeth
 from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API
 
 from cloud.go2.connection.fsm import Go2FSM, CommandBlocked
-from cloud.go2.actions import ACTIONS
+from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, LED_COLORS, LED_DEFAULT_COLOR,
+                               LED_DEFAULT_DURATION, LED_MAX_DURATION)
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
 
 logger = logging.getLogger(__name__)
 
-_VALID_LED_COLORS = frozenset({"white", "red", "yellow", "blue", "green", "cyan", "purple"})
 _STATUS_INTERVAL  = 10.0
 _STATE_STALE_S = 20.0
 
@@ -296,9 +296,10 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
     @staticmethod
     def _validate_velocity(x=0.0, y=0.0, z=0.0):
-        for value, limit in ((x, 0.5), (y, 0.5), (z, 0.8)):
+        for axis, value in (("x", x), ("y", y), ("z", z)):
+            limit = VELOCITY_LIMITS[axis]
             if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > limit:
-                raise ValueError("velocity outside supported range (0.5 m/s, 0.8 rad/s)")
+                raise ValueError(f"{axis} velocity outside supported range (+/-{limit})")
 
     async def send_command(self, cmd: str, params: dict | None = None, *,
                            completion_timeout: float | None = None) -> dict:
@@ -520,10 +521,12 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     async def balance_stand(self) -> None:
         return await self.send_command("BalanceStand")
 
-    async def set_led(self, color: str = "white", duration: int = 60) -> None:
-        if color not in _VALID_LED_COLORS:
+    async def set_led(self, color: str = LED_DEFAULT_COLOR, duration: int = LED_DEFAULT_DURATION) -> None:
+        if type(duration) is not int or not 1 <= duration <= LED_MAX_DURATION:
+            raise ValueError(f"duration must be in [1, {LED_MAX_DURATION}]")
+        if color not in LED_COLORS:
             raise ValueError(
-                f"Unknown color {color!r}, choose from: {', '.join(sorted(_VALID_LED_COLORS))}"
+                f"Unknown color {color!r}, choose from: {', '.join(sorted(LED_COLORS))}"
             )
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")

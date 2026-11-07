@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.common.replies import factual_fallback
-from cloud.agents.lamp.tools.schemas import SCHEMAS
+from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.observability import emit_agent_event
 
 PHYSICAL = {"set_led_state", "set_led_color", "blink_led"}
@@ -105,9 +105,14 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
     """Compile one sensor-event graph; all device work stays in `_dispatch_tool`."""
     model = model or (agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm)
     from langchain_core.utils.function_calling import convert_to_openai_tool
+    from cloud.cards.registry import get_registry
+    schemas = visible_schemas(lighting_only=False,
+                              card=get_registry().get_card(agent._find_led_unit()))
     declarations = []
     for name in VISIBLE:
-        schema = convert_to_openai_tool(SCHEMAS[name])
+        if name not in schemas:
+            continue
+        schema = convert_to_openai_tool(schemas[name])
         schema["function"]["name"] = name
         declarations.append(schema)
     bound = model.bind_tools(declarations, parallel_tool_calls=False)

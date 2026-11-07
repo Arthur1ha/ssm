@@ -40,6 +40,27 @@ for (const name of files) compile(name);
 compile('app/src/hooks/useSsmCore.js');
 console.log('PASS: snapshot revision/epoch, independent lamp physical/control cursors, and modified JSX syntax.');
 
+async function checkCommandResults() {
+  let payload;
+  const sandbox = vm.createContext({
+    apiClient: {request: async () => payload}, AbortController, setTimeout, clearTimeout,
+  });
+  vm.runInContext(read('app/src/CommandBus.js') + '\nthis.bus=commandBus;', sandbox);
+  for (const outcome of ['unknown', 'error', 'cancelled', 'rejected', 'blocked', 'ok', 'timeout', 'executing']) {
+    payload = {accepted:true,status:'dispatched',result:outcome,task_id:'task_cached'};
+    const result = await sandbox.bus.command('esp32_desk_led','BLINK',{count:2});
+    assert.equal(result.result,outcome,`Compatibility accepted flag replaced ${outcome}`);
+  }
+  let waits=0;
+  sandbox.bus.waitForLampTask = async () => { waits++; return {result:'ok'}; };
+  payload = {accepted:true,status:'dispatched',result:'accepted',task_id:'task_new'};
+  assert.equal((await sandbox.bus.command('esp32_desk_led','BLINK',{count:2})).result,'ok');
+  assert.equal(waits,1,'New lamp dispatch stopped waiting for physical completion');
+  payload = {accepted:true};
+  assert.equal((await sandbox.bus.command('esp32_desk_led','OFF')).result,'accepted');
+  console.log('PASS: explicit command outcomes survive legacy accepted flags; new lamp dispatch still waits for its result.');
+}
+
 async function checkInteractions() {
   const hooks = [];
   let index = 0;
@@ -122,6 +143,7 @@ async function checkInteractions() {
 }
 
 (async () => {
+  await checkCommandResults();
   await checkInteractions();
   if (!process.argv.includes('--browser') && !process.argv.includes('--preview')) return;
   const sm = JSON.parse(process.env.GO2_STATE_MACHINE_JSON ? fs.readFileSync(process.env.GO2_STATE_MACHINE_JSON, 'utf8') : (await promisify(execFile)('uv', ['run', 'python', '-c',
@@ -129,6 +151,9 @@ async function checkInteractions() {
   { cwd: root, env: { ...process.env, UV_CACHE_DIR: process.env.UV_CACHE_DIR || '/tmp/ssm-uv' }, encoding: 'utf8' })).stdout);
   const lampCard = JSON.parse((await promisify(execFile)('uv', ['run','python','-c',
     'import json; from cloud.cards.builder import build_card_from_manifest; print(json.dumps(build_card_from_manifest({"unit_id":"esp32_desk_led","name":"ws2812_ring","agent_type":"actuator","fsm_version":2,"capabilities":[{"action":"SET_COLOR"},{"action":"SET_STATE"},{"action":"BLINK"}]})))'],
+    {cwd:root,env:{...process.env,UV_CACHE_DIR:process.env.UV_CACHE_DIR || '/tmp/ssm-uv-cache'},encoding:'utf8'})).stdout);
+  const velocitySchema = JSON.parse((await promisify(execFile)('uv', ['run','python','-c',
+    'import json; from cloud.go2.actions import velocity_schema; print(json.dumps(velocity_schema()))'],
     {cwd:root,env:{...process.env,UV_CACHE_DIR:process.env.UV_CACHE_DIR || '/tmp/ssm-uv-cache'},encoding:'utf8'})).stdout);
   const React = require('react');
   const ReactDOMServer = require('react-dom/server');
@@ -208,7 +233,7 @@ async function checkInteractions() {
         React.createElement('p',null,'浏览器验证 · 模拟状态，不连接真机'),
         React.createElement('textarea',{placeholder:props.placeholder,disabled:props.disabled,'aria-label':'设备对话',style:{marginTop:18,width:'100%',height:60,background:'#17171b',color:'#ccc',border:'1px solid #333',borderRadius:10,padding:12}}));` });
     for (const name of files) await page.addScriptTag({ content: compile(name) });
-    await page.addScriptTag({ content: `window.__lampCard=${JSON.stringify(lampCard)};window.__sm=${JSON.stringify(sm)};
+    await page.addScriptTag({ content: `window.__velocitySchema=${JSON.stringify(velocitySchema)};window.__lampCard=${JSON.stringify(lampCard)};window.__sm=${JSON.stringify(sm)};
       window.__state={state_schema_version:2,epoch:'a',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',body_confirmation:'observed',control_mode:'normal',autonomy_mode:'manual',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore']};
       window.__card={unit_id:'go2',device_id:'go2',name:'Go2 机器狗',agent_type:'robot',_online:true,state_machine:__sm,transport:{state_stream:'/api/go2/connection/stream'},widgets:[],modes:[],skills:[]};
       const appRoot=ReactDOM.createRoot(document.getElementById('root'));
@@ -238,7 +263,7 @@ async function checkInteractions() {
     await page.evaluate(()=>{
       __card.widgets=[{type:'video',endpoint:'/api/go2/video',states:['standing','unknown','lying','moving'],requires_connection:true},
         {type:'map',endpoint:'/api/go2/map.png',states:[],requires_connection:true},
-        {type:'joystick',action:'velocity',states:['standing','moving'],state_field:'body_state',
+        {type:'joystick',action:'velocity',params_schema:__velocitySchema,states:['standing','moving'],state_field:'body_state',
           node_state:'moving',enter_action:'EnterMoveControl',exit_action:'StopMove',
           enabled_when:{control_mode:'remote'},available_actions_field:'available_actions',availability_key:'Move'}];
       __renderState(__state);
@@ -267,15 +292,20 @@ async function checkInteractions() {
     assert.equal(await page.$$('.device-whiteboard__media-tile').then(nodes=>nodes.length),2);
     assert.equal(await page.$$eval('.device-whiteboard__media-tile',nodes=>nodes.every(node=>node.getBoundingClientRect().height<=90)),true,'Media too tall on a phone');
     await page.waitForSelector('.map-widget__thumb img');
+    const mapThumbnailLeft=await page.$eval('.map-widget__thumb',node=>node.getBoundingClientRect().left);
     await page.tap('.map-widget__thumb');
     await page.waitForSelector('[role="dialog"][aria-label="导航地图"]');
     await assertMediaWindow('.map-viewer');
+    await page.focus('[aria-label="设备对话"]');
+    assert.equal(await page.$eval('[aria-label="设备对话"]',node=>document.activeElement===node),true,'Map window blocked the conversation');
     await page.screenshot({path:'/tmp/ssm-map-window.png'});
     await page.keyboard.press('Escape');
     await page.waitForFunction(()=>!document.querySelector('[role="dialog"][aria-label="导航地图"]'));
     await page.tap('[aria-label="放大视频"]');
     await page.waitForSelector('[role="dialog"][aria-label="实时视频"]');
     await assertMediaWindow('.device-whiteboard__media-tile.is-expanded');
+    assert.equal(await page.$eval('.map-widget__thumb',node=>node.getBoundingClientRect().left),mapThumbnailLeft,'Expanding video moved the map thumbnail');
+    await page.focus('[aria-label="设备对话"]');
     await page.screenshot({path:'/tmp/ssm-video-window.png'});
     await page.keyboard.press('Escape');
     await page.waitForFunction(()=>!document.querySelector('[role="dialog"][aria-label="实时视频"]'));
@@ -295,6 +325,23 @@ async function checkInteractions() {
     assert.equal(await page.evaluate(()=>__calls.length),0,'Gesture selection executed a command');
     await page.tap('[aria-label="关闭状态预览"]');
     const originalTransform=await page.$eval('.fsm-whiteboard__viewport > g',node=>node.getAttribute('transform'));
+    // The renderer must also fit previously retained layouts, even if their
+    // coordinates still contain an old horizontally overflowing action.
+    await page.evaluate(()=>{
+      const layout=__card.state_machine.regions.find(region=>region.id==='body').layout;
+      window.__originalJumpX=layout.jumping.x;layout.jumping.x=2.1;__renderState(__state);
+    });
+    await page.waitForFunction(()=>{
+      const node=document.querySelector('[data-state="body:jumping"]').getBoundingClientRect();
+      const bounds=document.querySelector('.fsm-whiteboard__viewport').getBoundingClientRect();
+      return node.right<=bounds.right+1;
+    });
+    await assertAllStatesVisible();
+    await page.evaluate(()=>{
+      __card.state_machine.regions.find(region=>region.id==='body').layout.jumping.x=__originalJumpX;
+      __renderState(__state);
+    });
+    await page.waitForFunction(expected=>document.querySelector('.fsm-whiteboard__viewport > g').getAttribute('transform')===expected,{},originalTransform);
     await page.tap('[aria-label="放大白板"]');
     assert.notEqual(await page.$eval('.fsm-whiteboard__viewport > g',node=>node.getAttribute('transform')),originalTransform);
     await page.$$eval('.fsm-whiteboard__toolbar button',nodes=>nodes.find(node=>node.textContent==='适应').click());
@@ -351,6 +398,16 @@ async function checkInteractions() {
     await page.waitForFunction(()=>document.querySelector('.device-state-board').getAttribute('aria-busy')==='false');
     await page.evaluate(()=>__renderState({...__state,revision:2,control_mode:'remote',available_actions:['Move','StopMove']}));
     await page.waitForFunction(()=>document.querySelector('[aria-label="移动摇杆，方向键控制，松开停止"]').getAttribute('aria-disabled')==='false');
+    // A Card limit change must affect the actual control without editing JSX.
+    await page.evaluate(()=>{
+      __card.widgets.find(widget=>widget.type==='joystick').params_schema.properties.x.maximum=.2;
+      __renderState({...__state,revision:__state.revision+1});
+    });
+    await page.focus('[aria-label="移动摇杆，方向键控制，松开停止"]');
+    await page.keyboard.down('ArrowUp');
+    await page.waitForFunction(()=>__velocities.at(-1)?.params.vx===.2);
+    await page.keyboard.up('ArrowUp');
+    await page.waitForFunction(()=>__velocities.at(-1)?.params.vx===0);
     const pads=await page.$$eval('.device-joysticks [role="group"]',nodes=>nodes.map(node=>{
       const r=node.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
     }));
@@ -405,7 +462,9 @@ async function checkInteractions() {
     await clickAction('关灯');
     assert.equal(await page.evaluate(()=>__calls.at(-1).params.state),'OFF');
     await page.evaluate(()=>__renderState({ism:'ON',ts:100,r:255,g:200,b:80,brightness:180,autonomy_mode:'reactive',control_state:'holding',control_hold_until:2000000000,control_ts:101},{...__lampCard,_online:true}));
-    await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="control:holding"]');
+    await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="device:ON"]');
+    assert.deepEqual(await page.$$eval('.fsm-whiteboard__node', nodes => nodes.map(node => node.dataset.state).sort()),
+      ['device:BLINKING','device:OFF','device:ON']);
     assert.equal(await page.$('[aria-label="选择灯光颜色"]')!==null,true,'Lamp color controls lost');
     await page.focus('[aria-label="选择灯光颜色"]');
     const beforeColor=await page.evaluate(()=>__calls.length);

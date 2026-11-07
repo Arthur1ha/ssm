@@ -1,0 +1,67 @@
+# Pure MicroPython-compatible lamp wire contract. No hardware or cloud imports.
+# Version 2 is the current firmware contract; historical cloud tables stay frozen.
+
+FSM_VERSION = 2
+BYTE_MIN = 0
+BYTE_MAX = 255
+BLINK_MIN = 1
+BLINK_MAX = 20
+BLINK_DEFAULT = 3
+
+ACTION_SCHEMAS = {
+    "SET_STATE": {
+        "type": "object", "required": ["state"],
+        "properties": {"state": {"type": "string", "enum": ["ON", "OFF"]}},
+        "additionalProperties": False,
+    },
+    "SET_COLOR": {
+        "type": "object", "required": ["r", "g", "b"],
+        "properties": {}, "additionalProperties": False,
+    },
+    "BLINK": {
+        "type": "object", "required": ["count"],
+        "properties": {"count": {"type": "integer", "minimum": BLINK_MIN,
+                                  "maximum": BLINK_MAX}},
+        "additionalProperties": False,
+    },
+}
+for _action, _keys in (("SET_COLOR", ("r", "g", "b", "brightness")),
+                       ("BLINK", ("r", "g", "b"))):
+    for _key in _keys:
+        ACTION_SCHEMAS[_action]["properties"][_key] = {
+            "type": "integer", "minimum": BYTE_MIN, "maximum": BYTE_MAX,
+        }
+
+
+def capabilities():
+    result = []
+    for action in ("SET_COLOR", "SET_STATE", "BLINK"):
+        schema = ACTION_SCHEMAS[action]
+        capability = {"action": action, "params": list(schema["properties"]),
+                      "params_schema": schema}
+        if action == "SET_STATE":
+            capability["values"] = schema["properties"]["state"]["enum"]
+        result.append(capability)
+    return result
+
+
+def valid_params(action, params, allow_legacy=False, allow_defaults=False, schemas=None):
+    """Check the same limits on cloud and edge; edge retains wire defaults."""
+    schema = (ACTION_SCHEMAS if schemas is None else schemas).get(action)
+    if schema is None or not isinstance(params, dict):
+        return False
+    for key in schema.get("required", ()):
+        if key not in params and not (allow_defaults and action != "SET_STATE"):
+            return False
+    for key, value in params.items():
+        definition = schema["properties"].get(key)
+        if definition is None:
+            return False
+        if allow_legacy and action == "SET_STATE" and value in ("BRIGHT", "DIM"):
+            continue
+        if definition["type"] == "integer":
+            if type(value) is not int or not definition["minimum"] <= value <= definition["maximum"]:
+                return False
+        elif not isinstance(value, str) or value not in definition["enum"]:
+            return False
+    return True

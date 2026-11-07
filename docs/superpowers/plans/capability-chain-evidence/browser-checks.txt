@@ -1,0 +1,7 @@
+PASS: snapshot revision/epoch, independent lamp physical/control cursors, and modified JSX syntax.
+PASS: explicit command outcomes survive legacy accepted flags; new lamp dispatch still waits for its result.
+PASS: command duplicate guard and errors, SSE old epoch rejection, device switch isolation, flat lamp fallback, graph preview without execution.
+Rendered actual components with simulated states: /tmp/go2-hierarchical-preview.html
+Browser React runtime: 18.3.1
+PASS: all state nodes inside the viewport, bounded video/map windows, contextual dual joystick entry/exit and combined touch axes, current/retained facts, compact default media, video/fullscreen dismissal, preview without commands, pan/pinch/zoom/reset, duplicate guard, original LIFE/command payloads, permissions, stale/offline gating and safety, keyboard joystick, lamp color/settings, generic Cards, SSE ordering, responsive phone/tablet/desktop.
+Screenshots: /tmp/go2-whiteboard-{mobile,rest-mobile,desktop}.png, /tmp/ssm-whiteboard-lamp-mobile.png

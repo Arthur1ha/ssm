@@ -7,7 +7,9 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
-PHYSICAL_TOOLS = {"set_led_state", "set_led_color", "blink_led"}
+from cloud.esp32.tool_registry import PHYSICAL_ACTIONS
+
+PHYSICAL_TOOLS = {spec["tool"] for spec in PHYSICAL_ACTIONS.values()}
 READ_ONLY_TOOLS = {"list_peers", "get_space_context"}
 
 

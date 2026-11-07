@@ -34,17 +34,20 @@ def test_lamp_card_matches_actual_edge_error_and_recovery_contract():
 
 
 @pytest.mark.parametrize("version", [1, 2])
-def test_lamp_lighting_and_cloud_control_are_independent_regions(version):
+def test_lamp_board_shows_only_lighting_and_keeps_autonomy_in_settings(version):
     card = lamp(version)
     machine = card["state_machine"]
     regions = {region["id"]: region for region in machine["regions"]}
     primary = regions[machine["primary_region"]]
     assert primary["state_field"] == "ism"
-    assert primary["states"] == machine["states"]
-    assert primary["transitions"] == machine["transitions"]
-    assert regions["control"]["state_field"] == "control_state"
-    assert "parent" not in regions["control"]
-    assert not any(edge.get("action") for edge in regions["control"]["transitions"])
+    assert set(regions) == {"device"}
+    assert primary["states"] == [state for state in machine["states"] if state != "ERROR"]
+    if version == 2:
+        assert primary["states"] == ["OFF", "ON", "BLINKING"]
+    assert "ERROR" not in primary["views"]
+    assert primary["transitions"] == [edge for edge in machine["transitions"]
+                                      if edge["src"] != "ERROR" and edge["dst"] != "ERROR"]
+    normalize_card(card)
     assert card["modes"][0]["state_field"] == "autonomy_mode"
     assert card["state"] == {}  # No physical or cloud runtime values in retained Card.
     primary["states"].append("TEST_ONLY")
@@ -69,7 +72,7 @@ def test_current_lamp_error_support_preserves_legacy_alias_normalization():
     lambda machine: machine.update(execution_field=""),
     lambda machine: machine["regions"][0].update(available_actions_field=[]),
     lambda machine: machine["regions"][0]["transitions"][0].update(required_actor="root"),
-    lambda machine: machine["regions"][1]["transitions"][0].update(availability_key="not-a-command"),
+    lambda machine: machine["regions"][0]["transitions"][0].update(action="", availability_key="not-a-command"),
 ])
 def test_invalid_shared_presentation_metadata_rejects_card(mutation):
     card = lamp()
@@ -80,8 +83,8 @@ def test_invalid_shared_presentation_metadata_rejects_card(mutation):
 
 def test_widget_binding_uses_declared_region_and_simple_value_conditions():
     card = lamp()
-    widget = {"type": "joystick", "action": "velocity", "state_field": "control_state",
-              "states": ["ready"], "enabled_when": {"control_state": ["ready", "holding"]},
+    widget = {"type": "joystick", "action": "velocity", "state_field": "ism",
+              "states": ["ON"], "enabled_when": {"ism": ["ON", "BLINKING"]},
               "available_actions_field": "available_actions", "availability_key": "Move"}
     card["widgets"] = [widget]
     assert normalize_card(card)["widgets"] == [widget]

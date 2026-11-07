@@ -4,7 +4,7 @@ The registry is the sole source for names, descriptions, parameter schemas and
 permissions. The Graph never calls a robot primitive directly.
 """
 
-from cloud.go2.tools.registry import TOOL_REGISTRY
+from cloud.go2.tools.registry import TOOL_REGISTRY, get_tool_spec
 from cloud.go2.execution import ExecutionContext
 
 
@@ -16,7 +16,8 @@ def tool_schemas(context: ExecutionContext | None = None) -> dict[str, dict]:
             "description": spec.description,
             "parameters": spec.params_schema,
         }
-        for name, spec in TOOL_REGISTRY.items()
+        for name in TOOL_REGISTRY
+        for spec in (get_tool_spec(name),)
         if context is None or (context.actor in spec.roles and
                                (not spec.persists or context.persist))
     }

@@ -136,3 +136,112 @@ class ChatTaskRegistry:
 
 
 chat_tasks = ChatTaskRegistry()
+
+
+def command_identity(context, request_id: str) -> tuple[str, str, str, str]:
+    """Namespace client retries by the server-verified origin and session."""
+    import json
+    import re
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", request_id):
+        raise ValueError("invalid_request_id")
+    scope = json.dumps([context.space_id, context.origin_kind, context.session_id], separators=(",", ":"))
+    return "go2", scope, "direct-command", request_id
+
+
+def _completion_identity(identity, phase="completion"):
+    return (*identity[:3], identity[3] + ":" + phase)
+
+
+def command_result(record: dict, request_id: str) -> dict:
+    """Project the dispatch receipt without inventing physical completion."""
+    result = dict(record.get("result") or {
+        "result": "accepted", "error": "command_result_unconfirmed",
+        "confirmation_scope": "request", "replayed": False,
+    })
+    result["command_request_id"] = request_id
+    return result
+
+
+def observe_command_results(robot) -> None:
+    """Capture terminal device facts before a later action replaces last_action.
+
+    This is an index into the existing effect ledger, not a second task queue.
+    The dispatch receipt stays immutable; completion is a separate immutable
+    observation under the same request identity.
+    """
+    import logging
+    from cloud.go2.state import runtime_for
+    runtime = runtime_for(robot)
+    if runtime is None:
+        return
+    snapshot = runtime.snapshot()
+    records = getattr(robot, "_command_result_records", {})
+    last = snapshot.get("last_action") or {}
+    key = (snapshot["epoch"], last.get("request_id"))
+    entry = records.get(key)
+    phase = "timeout" if last.get("result") == "timeout" else "completion"
+    if (entry is not None and last.get("result") in {"ok", "error", "rejected", "cancelled", "timeout"}
+            and phase not in entry[3]):
+        ledger, identity, dispatched, observed = entry
+        result = {**dispatched, "result": last["result"], "last_action": last,
+                  "confirmation": last.get("confirmation"),
+                  "confirmation_scope": "completion" if last["result"] == "ok" else "request"}
+        result.pop("error", None)
+        if last.get("error"):
+            result["error"] = last["error"]
+        try:
+            completion_id = _completion_identity(identity, phase)
+            ledger.reserve(*completion_id, "go2_completion", {
+                "device_request_id": key[1], "device_epoch": key[0]})
+            ledger.mark_result(*completion_id, result)
+        except Exception:
+            # Persistence failure cannot stop telemetry processing. Retain the
+            # index so a later state notification or query can retry the write.
+            logging.exception("[Go2/Command] failed to persist physical receipt")
+        else:
+            observed.add(phase)
+            from cloud.observability import emit_agent_event
+            import json
+            _space, origin, session = json.loads(identity[1])
+            emit_agent_event("device.result", trace_id=result.get("trace_id"), agent_id="go2",
+                             session_id=session, origin_kind=origin, task_id=identity[3],
+                             request_id=key[1], transport="webrtc", result=result,
+                             status=result["result"], confirmation_scope=result["confirmation_scope"])
+            if phase == "completion":
+                records.pop(key, None)
+    # An old connection can never complete a new connection's action. Its
+    # durable reservation remains queryable as unconfirmed, without replay.
+    for old_key in tuple(records):
+        if old_key[0] != snapshot["epoch"]:
+            records.pop(old_key, None)
+
+
+def track_command_result(robot, ledger, identity, result) -> None:
+    if result.get("result") not in {"accepted", "executing", "timeout"}:
+        return
+    physical_id = result.get("request_id") or (result.get("pending_action") or {}).get("request_id")
+    epoch = result.get("device_epoch")
+    if not physical_id or not epoch:
+        return
+    records = getattr(robot, "_command_result_records", None)
+    if records is None:
+        records = robot._command_result_records = {}
+    records[(epoch, physical_id)] = (ledger, identity, dict(result), set())
+    robot._command_result_callback = lambda: observe_command_results(robot)
+    observe_command_results(robot)
+
+
+def read_command_result(context, request_id: str, *, robot=None) -> dict | None:
+    from cloud.agents.common.effects import FileEffectLedger
+    ledger = FileEffectLedger()
+    identity = command_identity(context, request_id)
+    record = ledger.read(*identity)
+    if record is None:
+        return None
+    if robot is not None:
+        observe_command_results(robot)
+    for phase in ("completion", "timeout"):
+        completed = ledger.read(*_completion_identity(identity, phase))
+        if completed is not None and completed.get("result") is not None:
+            return command_result(completed, request_id)
+    return command_result(record, request_id)

@@ -15,8 +15,7 @@ function RobotPoseVisual({ pose, label }) {
     pouncing:    { y: 46, angle: 18, feet: [[43, 93], [73, 101], [183, 100], [218, 107]] },
     jumping:     { y: 29, angle: -7, feet: [[57, 82], [101, 80], [143, 82], [185, 79]] },
   };
-  const poseId = ({ dancing1: 'dance-left', dancing2: 'dance-right', 'finger-heart': 'finger_heart',
-    'front-pounce': 'pouncing', 'front-jump': 'jumping' })[pose] || pose;
+  const poseId = pose;
   const cfg = variants[poseId];
   if (!cfg) return <svg className="device-pose" viewBox="0 0 240 140" role="img" aria-label="暂无姿态示意">
     <rect x="55" y="45" width="130" height="52" rx="12" fill="none" stroke="currentColor" strokeDasharray="5 5" opacity=".35"/>

@@ -20,10 +20,17 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
       y:diagram && node.layout ? node.layout.y*height : cy + radius*Math.sin(angle),
       radius:node.radius || 39, node}];
   }));
-  const signature = graphNodes.map(node => node.id).join('|');
-  useEffect(() => { setCamera({x:0,y:0,zoom:1}); }, [signature]);
+  const bounds = Object.values(points);
+  const left = Math.min(0,...bounds.map(p => p.x-p.radius-8));
+  const right = Math.max(width,...bounds.map(p => p.x+p.radius+8));
+  const top = Math.min(0,...bounds.map(p => p.y-p.radius-8));
+  const bottom = Math.max(height,...bounds.map(p => p.y+p.radius+8));
+  const fitZoom = Math.min(1,width/(right-left),height/(bottom-top));
+  const fit = {zoom:fitZoom,x:(cx-(left+right)/2)*fitZoom,y:(cy-(top+bottom)/2)*fitZoom};
+  const signature = JSON.stringify([width,height,...graphNodes.map(node => [node.id,points[node.id].x,points[node.id].y,points[node.id].radius])]);
+  useEffect(() => { setCamera(fit); }, [signature]);
   const zoomAt = (factor, point = {x:cx,y:cy}) => setCamera(old => {
-    const zoom = Math.max(.65, Math.min(3.5, old.zoom * factor));
+    const zoom = Math.max(.25, Math.min(3.5, old.zoom * factor));
     const ratio = zoom / old.zoom;
     return { zoom, x:point.x - cx - (point.x - cx - old.x) * ratio,
       y:point.y - cy - (point.y - cy - old.y) * ratio };
@@ -207,7 +214,7 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
     <div className="fsm-whiteboard__toolbar">
       <button type="button" aria-pressed={allEdges} onClick={() => setAllEdges(value => !value)}>{allEdges ? '聚焦当前' : '全部连线'}</button>
       <div><button type="button" aria-label="缩小白板" onClick={() => zoomAt(1/1.2)}>−</button>
-        <button type="button" onClick={() => setCamera({x:0,y:0,zoom:1})}>适应</button>
+        <button type="button" onClick={() => setCamera(fit)}>适应</button>
         <button type="button" aria-label="放大白板" onClick={() => zoomAt(1.2)}>＋</button></div>
     </div>
   </div>;

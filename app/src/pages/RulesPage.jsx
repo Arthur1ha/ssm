@@ -1,8 +1,6 @@
 const { useState: useStateR, useEffect: useEffectR } = React;
 
 const RULE_ACTION_NAMES = {
-  Hello: '挥手打招呼', StandUp: '起立', StandDown: '趴下', StopMove: '停止移动',
-  Stretch: '伸展', Dance1: '跳第一支舞', Dance2: '跳第二支舞',
   BRIGHT: '调亮', DIM: '调暗', OFF: '关灯',
 };
 const RULE_OBSERVATION_NAMES = {
@@ -28,7 +26,10 @@ function ruleObservationCopy(id, where) {
 function ruleActionCopy(skillId, params, card) {
   if (!skillId) return '未选择动作';
   const values = params || {};
-  if (skillId === 'go2_sport') return RULE_ACTION_NAMES[values.cmd] || '请选择动作';
+  const skill = card?.skills?.find(item => item.id === skillId);
+  const parameterLabels = Object.entries(values).map(([key, value]) =>
+    skill?.params_schema?.properties?.[key]?.['x-enum-labels']?.[value]).filter(Boolean);
+  if (parameterLabels.length) return parameterLabels.join(' · ');
   if (skillId === 'set_light_state') return RULE_ACTION_NAMES[values.state] || '请选择灯光状态';
   if (skillId === 'blink_light') return values.count ? `让灯闪烁 ${values.count} 次` : '让灯闪烁';
   if (skillId === 'set_light_color') return `设置灯光颜色${['r', 'g', 'b'].every(key => values[key] !== undefined) ? `（红 ${values.r}、绿 ${values.g}、蓝 ${values.b}）` : ''}`;
@@ -197,7 +198,7 @@ function RulesScreen({ embedded = false, onRulesChange, open }) {
                     {key === 'cmd' ? '具体动作' : key === 'state' ? '灯光状态' : field.description || ({count:'闪烁次数',r:'红色',g:'绿色',b:'蓝色',brightness:'亮度'})[key] || key}
                     {field.enum ? <select value={bindingEditor.params[key] ?? ''} onChange={e => setBindingEditor({...bindingEditor,
                       params:{...bindingEditor.params, [key]:ruleValue(field, e.target.value)}})}>
-                      <option value="">请选择</option>{field.enum.map(value => <option key={value} value={value}>{RULE_ACTION_NAMES[value] || value}</option>)}
+                      <option value="">请选择</option>{field.enum.map(value => <option key={value} value={value}>{field['x-enum-labels']?.[value] || RULE_ACTION_NAMES[value] || value}</option>)}
                     </select> : <input type={['integer','number'].includes(field.type) ? 'number' : 'text'}
                       min={field.minimum} max={field.maximum} value={bindingEditor.params[key] ?? ''}
                       onChange={e => setBindingEditor({...bindingEditor,

@@ -46,6 +46,9 @@ class Go2FSM:
         self._action_observation = None
 
     def _state_changed(self):
+        receipt_callback = getattr(self, "_command_result_callback", None)
+        if receipt_callback is not None:
+            receipt_callback()
         publisher = getattr(self, "_peer_state_callback", None)
         if publisher is not None:
             publisher()

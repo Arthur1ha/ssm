@@ -116,8 +116,8 @@ def _trusted_origin(context: ExecutionContext, claimed: str) -> tuple[str, str]:
 
 def _authorize_autonomous(initiator: str) -> None:
     if initiator == "go2":
-        from cloud.go2 import router
-        if router._autonomy_mode == "manual":
+        from cloud.go2.service import get_autonomy_mode
+        if get_autonomy_mode() == "manual":
             raise PermissionError("Go2 autonomy is manual")
     else:
         from cloud.esp32.service import get_agent
@@ -127,48 +127,19 @@ def _authorize_autonomous(initiator: str) -> None:
 
 
 def _skill_policy(initiator: str, target: str, skill_id: str, params: dict, origin: str) -> None:
-    if target == "cloud_orchestrator":
-        if skill_id != "coordinate_request":
-            raise PermissionError("unsupported coordination skill")
-        return
-    if target == "go2":
-        if skill_id == "go2_observe":
-            return
-        if skill_id == "go2_visual_navigate":
-            if origin == "user_delegated" and isinstance(params.get("target"), str) and params["target"].strip():
-                return
-            raise PermissionError("visual navigation requires a delegated user target")
-        if skill_id == "go2_move" and origin == "user_delegated":
-            duration = params.get("duration")
-            speed = params.get("speed", 0.3)
-            if (params.get("direction") in {"forward", "backward", "left", "right", "turn_left", "turn_right"}
-                    and type(duration) in {int, float} and 0 < duration <= 10
-                    and type(speed) in {int, float} and 0 < speed <= 0.5):
-                return
-            raise PermissionError("Go2 peer movement requires bounded direction, duration and speed")
-        allowed = {"Hello"} if origin == "agent_autonomous" else {"Hello", "Dance1", "Dance2"}
-        if origin == "agent_autonomous":
-            from cloud.space.activity import get_activity_store
-            from cloud.go2.router import get_activity_mode_owner as go2_owner
-            from cloud.esp32.router import get_activity_mode_owner as lamp_owner
-            activity = get_activity_store().current()
-            activity_id = activity.get("activity_id") if activity else None
-            if activity_id and go2_owner() == activity_id and (
-                    initiator == "go2" or lamp_owner() == activity_id):
-                allowed |= {"Dance1", "Dance2"}
-        if skill_id != "go2_sport" or params.get("cmd") not in allowed:
-            raise PermissionError("Go2 peer motion is outside the permitted skill set")
-        return
-    if skill_id == "adjust_lighting":
-        if origin != "user_delegated" or not str(params.get("goal") or "").strip():
-            raise PermissionError("semantic lamp request requires user delegation")
-        return
-    if skill_id == "blink_light":
-        if origin != "user_delegated":
-            raise PermissionError("autonomous lamp blink is not permitted")
-        return
-    if skill_id != "set_light_state" or params.get("state") not in {"ON", "OFF"}:
-        raise PermissionError("lamp peer request is outside the permitted skill set")
+    from cloud.peers.policy import permits_skill
+    activity_authorized = False
+    if target == "go2" and origin == "agent_autonomous":
+        from cloud.space.activity import get_activity_store
+        from cloud.go2.service import get_activity_mode_owner as go2_owner
+        from cloud.esp32.router import get_activity_mode_owner as lamp_owner
+        activity = get_activity_store().current()
+        activity_id = activity.get("activity_id") if activity else None
+        activity_authorized = bool(activity_id and go2_owner() == activity_id and (
+            initiator == "go2" or lamp_owner() == activity_id))
+    if not permits_skill(target, skill_id, params, origin, audience="peer",
+                         activity_authorized=activity_authorized):
+        raise PermissionError("peer request is outside the permitted skill set")
 
 
 def _find_skill(card: dict, skill_id: str) -> dict | None:
@@ -197,13 +168,34 @@ def get_request_result(request_id: str) -> dict[str, Any] | None:
             return None
         result = dict(entry.result)
         context = entry.context
-        if (result.get("result") == "timeout" and not result.get("semantic") and result.get("target_unit_id") not in
-                {None, "go2", "cloud_orchestrator"} and _esp32_state is not None):
-            physical = _esp32_state.get_task_result(request_id)
-            if physical and physical.get("result") in _TERMINAL - {"timeout"}:
-                result = {**result, "result": physical["result"],
-                          "error": physical.get("error") or physical.get("reason")}
-                entry.result = result
+    unresolved = {"unknown", "accepted", "executing", "timeout"}
+    target = result.get("target_unit_id")
+    if (result.get("result") in unresolved and not result.get("semantic")
+            and target not in {None, "go2", "cloud_orchestrator"} and context is not None):
+        from cloud.esp32.physical_tasks import get as get_physical_result
+        # The durable record retains the original owner across API restarts.
+        # Query outside the gateway lock; no transport or replay is involved.
+        try:
+            durable = get_physical_result(request_id, unit_id=target,
+                                          session_id=context.session_id)
+        except (OSError, ValueError):
+            durable = None
+        observed = _esp32_state.get_task_result(request_id) if _esp32_state is not None else None
+        physical = next((candidate for candidate in (durable, observed)
+                         if isinstance(candidate, dict)
+                         and candidate.get("result") in _TERMINAL - {"timeout"}
+                         and candidate.get("task_id") in (None, request_id)
+                         and candidate.get("unit_id") in (None, target)
+                         and candidate.get("session_id") in (None, context.session_id)), None)
+        if physical is not None:
+            with _lock:
+                current = _requests.get(request_id)
+                if current is entry:
+                    if current.result.get("result") in unresolved:
+                        current.result = {**current.result, "result": physical["result"],
+                                          "error": physical.get("error") or physical.get("reason")}
+                        current.ready.set()
+                    result = dict(current.result)
     if result.get("result") == "timeout" and result.get("semantic") and context is not None:
         endpoint = result.get("endpoint")
         if endpoint:
@@ -429,27 +421,31 @@ def _dispatch_lamp(request_id: str, target: str, action: str, params: dict,
                    context: ExecutionContext, actor: str, origin: str, timeout: float) -> dict:
     if _mqtt is None or _esp32_state is None:
         return _failure("error", "mqtt_unavailable", request_id)
-    payload = {"task_id": request_id, "request_id": request_id,
-               "session_id": context.session_id if origin == "user_delegated" else "agent_auto",
-               "action": action, "params": params, "actor": actor, "persist": False,
-               "space_id": "main", "source": "peer_request", "ts": int(time.time())}
-    correlation = current_event_context()
-    payload.update({key: correlation[key] for key in ("trace_id", "run_id") if key in correlation})
-    info = _mqtt.publish(f"ssm/task/{target}/{request_id}", json.dumps(payload), qos=1)
-    emit_agent_event("device.command", request_id=request_id, task_id=request_id,
-                     target_unit_id=target, action=action, params=params,
-                     transport="mqtt", status="published" if getattr(info, "rc", 0) == 0 else "publish_failed")
-    if getattr(info, "rc", 0) != 0:
-        return _failure("error", "mqtt_publish_failed", request_id)
-    logger.info("[PeerGateway] request=%s dispatched transport=mqtt target=%s task=%s",
-                request_id, target, request_id)
-    result = _esp32_state.wait_task_result(request_id, timeout=timeout)
-    emit_agent_event("device.result", request_id=request_id, task_id=request_id,
-                     target_unit_id=target, status=result.get("result", "error"),
-                     result=result, completion_basis="edge_result")
-    return {"request_id": request_id, "target_unit_id": target, "task_id": request_id,
-            "result": result.get("result", "error"),
-            "error": result.get("error") or result.get("reason")}
+    from cloud.esp32.tool_executor import execute_physical
+    execution = ExecutionContext(context.session_id, actor, False, context.space_id,
+                                 origin, context.expires_at)
+
+    def dispatch(unit_id, physical_action, physical_params, trusted, source, *, task_id):
+        payload = {"task_id": task_id, "request_id": request_id,
+                   "session_id": trusted.session_id, "action": physical_action,
+                   "params": physical_params, "actor": trusted.actor, "persist": False,
+                   "space_id": trusted.space_id, "source": source, "ts": int(time.time())}
+        correlation = current_event_context()
+        payload.update({key: correlation[key] for key in ("trace_id", "run_id") if key in correlation})
+        info = _mqtt.publish(f"ssm/task/{unit_id}/{task_id}", json.dumps(payload), qos=1)
+        emit_agent_event("device.command", request_id=request_id, task_id=task_id,
+                         target_unit_id=unit_id, action=physical_action, params=physical_params,
+                         transport="mqtt", status="published" if getattr(info, "rc", 0) == 0 else "publish_failed")
+        if getattr(info, "rc", 0) != 0:
+            raise RuntimeError("mqtt_publish_failed")
+        return task_id
+
+    result = execute_physical(
+        state=_esp32_state, unit_id=target, action=action, params=params,
+        context=execution, dispatch=dispatch, task_id=request_id,
+        source="peer_autonomous" if origin == "agent_autonomous" else "peer_request",
+        card=get_registry().get_card(target), timeout=timeout)
+    return {**result, "request_id": request_id, "target_unit_id": target}
 
 
 def _dispatch_lamp_semantic(request_id: str, target: str, endpoint: str, params: dict,

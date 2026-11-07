@@ -36,7 +36,7 @@ class ESP32State:
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:
             previous = self._task_results.get(task_id, {})
-            if previous.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+            if previous.get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout"):
                 return
             self._task_results[task_id] = result
             if len(self._task_results) > 256:
@@ -48,7 +48,7 @@ class ESP32State:
         with self._result_ready:
             while True:
                 result = self._task_results.get(task_id, {})
-                if result.get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+                if result.get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout"):
                     return result
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -77,4 +77,7 @@ class ESP32State:
             return json.loads(json.dumps(self._actuators))
 
     def _is_actuator(self, unit_id: str) -> bool:
+        manifest = self._manifests.get(unit_id)
+        if manifest is not None:
+            return manifest.get("agent_type") == "actuator"
         return unit_id.split("_")[-1] == "led"

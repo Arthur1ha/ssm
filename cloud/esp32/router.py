@@ -169,9 +169,13 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
         raise HTTPException(status_code=400, detail="invalid trace_id")
     if req.parent_run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", req.parent_run_id):
         raise HTTPException(status_code=400, detail="invalid parent_run_id")
-    goal = str(req.goal or req.params.get("goal") or "").strip()
-    if not goal or len(goal) > 1000:
-        raise HTTPException(status_code=400, detail="invalid lighting goal")
+    from cloud.esp32.card import lighting_goal
+    try:
+        if req.goal is not None and req.params and req.params != {"goal": req.goal}:
+            raise ValueError("conflicting lighting parameters")
+        goal = lighting_goal({"goal": req.goal} if req.goal is not None else req.params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if context.origin_kind != "user_delegated" or context.expires_at <= time.time():
         raise HTTPException(status_code=403, detail="a live delegated session is required")
     from cloud.cards.registry import get_registry

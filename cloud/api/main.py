@@ -162,10 +162,12 @@ def _on_esp32_message(client, userdata, msg):
 
     elif len(parts) == 4 and parts[1] == "result":
         task_id = parts[3]
-        if isinstance(payload, dict):
+        if (isinstance(payload, dict)
+                and payload.get("task_id") in (None, task_id)
+                and payload.get("unit_id") in (None, parts[2])
+                and parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+                and intents_module.record_lamp_task_result(task_id, payload)):
             _esp32_state.store_task_result(task_id, payload)
-            if parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
-                intents_module.record_lamp_task_result(task_id, payload)
 
     elif len(parts) == 4 and parts[1] == "task":
         # 识别用户/编排器命令；灯自身的游戏设色与变色不能触发用户让位，

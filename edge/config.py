@@ -1,5 +1,7 @@
 # config.py — All constants for SSM ESP32 agent
 # Copy local_config.example.py to local_config.py before uploading.
+from lamp_contract import FSM_VERSION, capabilities
+from ism import LED_STATES
 
 # ── WiFi ─────────────────────────────────────────────────────
 try:
@@ -84,15 +86,11 @@ UNIT_CONFIGS = {
         'name': '智能灯',
         'probe': {'type': 'flag', 'enabled': True},
         'manifest': {
-            'fsm_version': 2,
+            'fsm_version': FSM_VERSION,
             'num_pixels': WS2812_NUM,
-            'commands': ['SET_COLOR', 'SET_STATE', 'BLINK'],
-            'ism_states': ['OFF', 'ON', 'BLINKING', 'ERROR'],
-            'capabilities': [
-                {'action': 'SET_COLOR', 'params': ['r', 'g', 'b', 'brightness']},
-                {'action': 'SET_STATE', 'params': ['state'], 'values': ['OFF', 'ON']},
-                {'action': 'BLINK',     'params': ['r', 'g', 'b', 'count']},
-            ],
+            'commands': [cap['action'] for cap in capabilities()],
+            'ism_states': list(LED_STATES),
+            'capabilities': capabilities(),
             'tags': ['lighting', 'ambiance'],
         },
     },

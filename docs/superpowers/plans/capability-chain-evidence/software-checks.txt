@@ -1,0 +1,9 @@
+SIMULATED SOFTWARE ACCEPTANCE — no hardware actions
+Command: UV_CACHE_DIR=/tmp/ssm-uv-cache uv run python -m pytest cloud/agents/common/autonomous_visibility_checks.py cloud/agents/go2/daily_memory_checks.py cloud/agents/lamp/prompts_checks.py cloud/cards/region_contract_checks.py cloud/esp32/capability_chain_checks.py cloud/esp32/presentation_checks.py cloud/go2/action_gateway_checks.py cloud/go2/actions_checks.py cloud/go2/actions_graph_checks.py cloud/go2/activity_mode_checks.py cloud/go2/body_observation_checks.py cloud/go2/command_request_checks.py cloud/go2/definition_contract_checks.py cloud/go2/hierarchy_integration_checks.py cloud/go2/hierarchy_interface_checks.py cloud/go2/perception/rgb_lidar_checks.py cloud/go2/perception/visual_approach_checks.py cloud/go2/perception/visual_lidar_navigate_checks.py cloud/go2/perception/visual_target_checks.py cloud/go2/state_life_checks.py cloud/peers/capability_chain_checks.py cloud/peers/games_checks.py cloud/peers/result_recovery_checks.py cloud/space/freshness_checks.py -q
+
+........................................................................ [ 21%]
+........................................................................ [ 42%]
+........................................................................ [ 63%]
+........................................................................ [ 84%]
+.....................................................                    [100%]
+341 passed in 9.16s

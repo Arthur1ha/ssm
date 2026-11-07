@@ -157,11 +157,11 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
         session = {"session_id": context.session_id, "actor": "visitor",
                    "persist": False, "expires_at": context.expires_at}
 
-        def dispatch(unit_id, action, params, _context, _source):
+        def dispatch(unit_id, action, params, _context, _source, *, task_id=None):
             if agent.get_autonomy_mode() != "reactive":
                 raise PermissionError("lamp_autonomy_manual")
             task_id = _dispatch_mqtt_task(unit_id, action, params, session,
-                                          source="peer_autonomous")
+                                          source="peer_autonomous", task_id=task_id)
             agent.mark_peer_command(unit_id)
             messenger.send_progress(message["message_id"], task_id)
             return task_id

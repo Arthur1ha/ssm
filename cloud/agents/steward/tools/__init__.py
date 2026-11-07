@@ -44,9 +44,15 @@ def _public_view(cards: dict) -> list:
                         for skill in card.get("skills", [])]}
             for uid, card in cards.items()]
 
-def _wait_mqtt_result(task_id: str, session_id: str, deadline: float) -> dict:
+def _wait_mqtt_result(task_id: str, session_id: str, deadline: float,
+                      *, unit_id: str | None = None) -> dict:
     while time.time() < deadline:
-        result = transport._state.get_task_result(task_id, session_id) if transport._state else None
+        result = None
+        if unit_id is not None:
+            from cloud.esp32.physical_tasks import get as get_physical_result
+            result = get_physical_result(task_id, unit_id=unit_id, session_id=session_id)
+        if not result or result.get("result") in {"accepted", "executing", "unknown", "timeout"}:
+            result = transport._state.get_task_result(task_id, session_id) if transport._state else result
         if isinstance(result, dict):
             status = result.get("result")
             if status in {"ok", "blocked", "rejected", "error", "cancelled", "timeout"}:
@@ -74,11 +80,34 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
     except (ValueError, PermissionError) as exc:
         return {"result": "rejected", "error": str(exc)[:120]}
     if kind == "mqtt":
-        transport.do_publish_task(unit_id, step_id, (skill.get("invoke") or {}).get("action", ""),
-                                  params, context["session_id"], context={
-                                      "actor": context.get("actor"), "persist": context.get("persist"),
-                                      "space_id": context.get("space_id"), "source": "orchestrator"})
-        result = _wait_mqtt_result(step_id, context["session_id"], min(deadline, time.time() + 20))
+        from cloud.esp32.tool_executor import execute_physical
+        from cloud.esp32.tool_registry import PHYSICAL_ACTIONS
+        from cloud.esp32.physical_tasks import record_result
+        from cloud.space.execution import ExecutionContext
+        execution = ExecutionContext(
+            context["session_id"], context.get("actor", "visitor"), bool(context.get("persist")),
+            context.get("space_id", "main"), context.get("origin_kind", "user_delegated"),
+            context.get("expires_at") or 0)
+
+        def dispatch(uid, action, physical_params, trusted, source, *, task_id):
+            transport.do_publish_task(uid, task_id, action, physical_params,
+                                      trusted.session_id, context={
+                                          "actor": trusted.actor, "persist": trusted.persist,
+                                          "space_id": trusted.space_id, "source": source})
+            return task_id
+
+        result = execute_physical(
+            state=transport._state, unit_id=unit_id,
+            action=(skill.get("invoke") or {}).get("action", ""), params=params,
+            context=execution, dispatch=dispatch, task_id=step_id,
+            card=card, source="orchestrator", wait=False)
+        if result.get("result") in {"accepted", "executing", "unknown"}:
+            action = (skill.get("invoke") or {}).get("action", "")
+            result = _wait_mqtt_result(step_id, context["session_id"],
+                                       min(deadline, time.time() + PHYSICAL_ACTIONS[action]["timeout"]),
+                                       unit_id=unit_id)
+            if result.get("result") != "timeout":
+                record_result(step_id, unit_id, result)
         emit_agent_event("device.result", task_id=step_id, target_unit_id=unit_id,
                          status=result.get("result"), result=result,
                          completion_basis="edge_result" if result.get("result") != "timeout" else "unconfirmed")

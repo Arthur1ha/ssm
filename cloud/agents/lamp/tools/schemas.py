@@ -4,31 +4,32 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model
+
+from cloud.esp32.tool_registry import TOOL_DECLARATIONS
 
 
-class SetLedState(BaseModel):
-    """开关灯。"""
-    state: Literal["ON", "OFF"]
-    taught_id: str | None = None
+def _physical_schema(name: str, tool: str, params_schema: dict | None = None):
+    declaration = TOOL_DECLARATIONS[tool]
+    schema = declaration["params_schema"] if params_schema is None else params_schema
+    fields = {}
+    for key, definition in schema["properties"].items():
+        annotation = (Literal[tuple(definition["enum"])] if "enum" in definition else
+                      int if definition.get("type") == "integer" else str)
+        required = key in schema.get("required", ())
+        if not required:
+            annotation = annotation | None
+        limits = {field: definition[source] for source, field in
+                  (("minimum", "ge"), ("maximum", "le")) if source in definition}
+        fields[key] = (annotation, Field(default=... if required else None, **limits))
+    fields["taught_id"] = (str | None, None)
+    return create_model(name, __doc__=declaration["description"],
+                        __config__=ConfigDict(extra="forbid", strict=True), **fields)
 
 
-class SetLedColor(BaseModel):
-    """设置 RGB 和亮度；省略亮度时保留当前值。"""
-    r: int = Field(ge=0, le=255)
-    g: int = Field(ge=0, le=255)
-    b: int = Field(ge=0, le=255)
-    brightness: int | None = Field(default=None, ge=0, le=255)
-    taught_id: str | None = None
-
-
-class BlinkLed(BaseModel):
-    """闪烁灯环。"""
-    count: int = Field(ge=1, le=20)
-    r: int | None = Field(default=None, ge=0, le=255)
-    g: int | None = Field(default=None, ge=0, le=255)
-    b: int | None = Field(default=None, ge=0, le=255)
-    taught_id: str | None = None
+SetLedState = _physical_schema("SetLedState", "set_led_state")
+SetLedColor = _physical_schema("SetLedColor", "set_led_color")
+BlinkLed = _physical_schema("BlinkLed", "blink_led")
 
 
 class ListPeers(BaseModel):
@@ -71,8 +72,19 @@ SCHEMAS = {
 }
 
 
-def visible_schemas(*, lighting_only: bool) -> dict:
+def visible_schemas(*, lighting_only: bool, card: dict | None = None) -> dict:
     from cloud.agents.lamp.state import PHYSICAL_TOOLS
 
     allowed = PHYSICAL_TOOLS | {"ask_user"} if lighting_only else SCHEMAS.keys()
-    return {name: schema for name, schema in SCHEMAS.items() if name in allowed}
+    schemas = {name: schema for name, schema in SCHEMAS.items() if name in allowed}
+    if card is not None:
+        declared = {(skill.get("invoke") or {}).get("action"): skill
+                    for skill in card.get("skills", [])}
+        for name in PHYSICAL_TOOLS & schemas.keys():
+            action = TOOL_DECLARATIONS[name]["action"]
+            if action not in declared:
+                schemas.pop(name)
+            else:
+                schemas[name] = _physical_schema(SCHEMAS[name].__name__, name,
+                                                 declared[action]["params_schema"])
+    return schemas

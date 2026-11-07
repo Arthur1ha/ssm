@@ -111,7 +111,7 @@ class SharedState:
             result_session = result.get("session_id")
             if result_session is not None and result_session != owner:
                 return False
-            if self._task_results.get(task_id, {}).get("result") in ("ok", "blocked", "error", "cancelled", "timeout"):
+            if self._task_results.get(task_id, {}).get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout"):
                 return False
             self._task_results[task_id] = {**result, "session_id": owner}
             if len(self._task_results) > 256:

@@ -38,9 +38,7 @@ function stateActionReason(machine, region, transition, state, { offline, busy, 
   const blocked = state?.[region.blocked_actions_field]?.[key];
   if (blocked) {
     const message = typeof blocked === 'object' ? blocked.message || blocked.reason || '当前不可用' : blocked;
-    return ({body_telemetry_stale:'设备反馈已过期，等待最新状态', body_action_unconfirmed:'上个动作的结果尚未确认',
-      body_action_pending_confirmation:'上个动作的结果尚未确认', exploration_owned_by_another_session:'探索由另一位用户控制',
-      unknown_posture:'等待有效设备反馈', navigation_unavailable:'当前定位或地图不可用'})[message] || message;
+    return machine?.reason_labels?.[message] || message;
   }
   const available = state?.[region.available_actions_field];
   if (Array.isArray(available) && !available.includes(key)) return '当前状态暂不可用';

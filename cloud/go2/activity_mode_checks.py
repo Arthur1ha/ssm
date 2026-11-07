@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud.go2 import router
+from cloud.go2 import service as router
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,6 @@ async def test_end_activity_releases_accepted_stop_lease(
         return stop_result
 
     monkeypatch.setattr(router, "_activity_mode_owner", "act_previous")
-    monkeypatch.setattr(router, "_autonomy_mode", "free_explore")
     monkeypatch.setattr(router, "_configure_vision_consumers",
                         lambda mode: calls.append(("mode", mode)))
     monkeypatch.setattr(router, "go2", SimpleNamespace(

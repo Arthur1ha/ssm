@@ -24,9 +24,12 @@ const commandBus = {
         }
         return data.result;
       }
-      if (unitId !== 'go2' && data?.task_id && data?.status === 'dispatched') {
+      if (unitId !== 'go2' && data?.task_id && data?.status === 'dispatched'
+          && (!data.result || data.result === 'accepted')) {
         return this.waitForLampTask(unitId, data.task_id);
       }
+      // Explicit device outcomes outrank compatibility acceptance flags.
+      if (typeof data?.result === 'string') return data;
       if (data?.status === 'dispatched' || data?.accepted === true || data?.ok === true && !data?.result) {
         return { ...data, result: 'accepted' };
       }

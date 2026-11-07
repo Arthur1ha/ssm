@@ -370,8 +370,16 @@ def on_message(client, userdata, msg):
     if len(parts) == 4 and parts[1] == "result":
         task_id = parts[3]
         if isinstance(payload, dict):
+            from cloud.esp32.physical_tasks import record_result
+            # Persist and validate before touching a terminal in-memory slot.
+            # A restarted coordinator may lack its old registration; the
+            # durable reservation still owns that task and receives feedback.
+            durable = record_result(task_id, parts[2], payload)
+            if durable is False:
+                logger.warning("[Result] rejected mismatched task=%s", task_id)
+                return
             accepted = state.store_task_result(task_id, payload)
-            if not accepted:
+            if not accepted and durable is None:
                 logger.warning("[Result] rejected unowned/mismatched task=%s", task_id)
                 return
             extra = f" error={payload['error']}" if payload.get("error") else ""

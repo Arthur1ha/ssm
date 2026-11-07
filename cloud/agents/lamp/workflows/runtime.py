@@ -98,9 +98,14 @@ class ReactiveMind:
                 return False
 
         action = TOOL_DECLARATIONS[tool_name].get("action")
-        if action and not valid_lamp_params(action, params):
-            logger.warning("invalid reactive tool arguments: %s %s", tool_name, params)
-            return False
+        if action:
+            from cloud.cards.registry import get_registry
+            card = get_registry().get_card(led_unit)
+            legacy = bool(card and {"BRIGHT", "DIM"} <= set(
+                (card.get("state_machine") or {}).get("states", [])))
+            if not valid_lamp_params(action, params, allow_legacy=legacy):
+                logger.warning("invalid reactive tool arguments: %s %s", tool_name, params)
+                return False
 
         if tool_name in ("set_led_state", "set_led_color", "blink_led"):
             params["unit_id"] = led_unit
@@ -139,20 +144,15 @@ class ReactiveMind:
             if tool_name in ("set_led_state", "set_led_color", "blink_led"):
                 from cloud.cards.registry import get_registry
                 from cloud.esp32.tool_executor import execute_physical
-                from cloud.esp32.tool_registry import fsm_allows
                 from cloud.space.execution import ExecutionContext
+                card = get_registry().get_card(led_unit)
                 def preflight(current, arguments):
                     if not self._should_act():
                         return "autonomy_unavailable"
-                    card = get_registry().get_card(led_unit)
-                    if not card or not card.get("online"):
-                        return "target_offline"
-                    if not fsm_allows(card, str(current.get("ism") or "").upper(), action, arguments):
-                        return "invalid_fsm_transition"
+                    if not card:
+                        return "lamp_unavailable"
                     return None
                 def dispatch(_uid, _action, arguments, _ctx, _src, *, task_id=None):
-                    if task_id is None:
-                        return fn(unit_id=_uid, **arguments)
                     from cloud.api.intents import _dispatch_mqtt_task
                     return _dispatch_mqtt_task(
                         _uid, _action, arguments,
@@ -162,10 +162,11 @@ class ReactiveMind:
                 result = execute_physical(
                     state=self._state, unit_id=led_unit, action=action,
                     params={k: v for k, v in params.items() if k != "unit_id"},
-                    context=ExecutionContext("agent_auto" if task_id else "lamp-autonomous", "agent", False,
+                    context=ExecutionContext("agent_auto", "agent", False,
                                              "main", "agent_autonomous", 0),
                     dispatch=dispatch, task_id=task_id,
                     source="lamp_reactive", preflight=preflight,
+                    card=card,
                 )
                 self._last_reactive_tool_result = result
                 if result.get("result") != "ok":

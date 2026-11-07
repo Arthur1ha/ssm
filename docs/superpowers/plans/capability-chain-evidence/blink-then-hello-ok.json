@@ -1,0 +1,55 @@
+{
+  "simulated": true,
+  "sequence": [
+    "blink_dispatched",
+    "blink_ok",
+    "hello_completed"
+  ],
+  "result": "ok",
+  "steps": [
+    {
+      "step_id": "call-1",
+      "tool_call_id": "call-1",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "esp32_desk_led",
+        "skill_id": "blink_light",
+        "params": {
+          "count": 2
+        }
+      },
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "task_id": "call-1",
+        "result": "ok",
+        "ism": "ON",
+        "query_endpoint": null,
+        "unit_id": "esp32_desk_led",
+        "skill_id": "blink_light"
+      }
+    },
+    {
+      "step_id": "call-0",
+      "tool_call_id": "call-0",
+      "tool": "invoke_skill",
+      "params": {
+        "unit_id": "go2",
+        "skill_id": "go2_sport",
+        "params": {
+          "cmd": "Hello"
+        }
+      },
+      "effectful": true,
+      "dispatch_status": "observed",
+      "result": {
+        "result": "ok",
+        "task_id": "call-0",
+        "confirmation": "simulated_joint_posture",
+        "query_endpoint": "/api/go2/chat",
+        "unit_id": "go2",
+        "skill_id": "go2_sport"
+      }
+    }
+  ]
+}

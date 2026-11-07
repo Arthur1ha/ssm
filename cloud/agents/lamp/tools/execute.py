@@ -36,11 +36,15 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
             social.sent(target, topic)
         return result
     if declaration.get("action"):
+        from cloud.cards.registry import get_registry
+        card = get_registry().get_card(unit_id)
+        if not card:
+            return {"result": "blocked", "error": "lamp_unavailable"}
         return execute_physical(
             state=agent._state, unit_id=unit_id,
             action=declaration["action"], params=params,
             context=context, dispatch=dispatch,
             source="lamp_semantic" if lighting_only else "lamp_chat",
-            task_id=stable_task_id(unit_id, run_id, step_id),
+            task_id=stable_task_id(unit_id, run_id, step_id), card=card,
         )
     return execute_auxiliary(unit_id=unit_id, tool=name, params=params, context=context)

@@ -56,6 +56,7 @@
 | `probe.py` | 启动时自动探测各引脚是否有传感器接线 |
 | `bsm.py` | 行为状态机——GPIO/PWM/ADC 驱动，事件回调 |
 | `ism.py` | 接口状态机——仅处理状态转换，不涉及硬件 |
+| `lamp_contract.py` | 当前灯固件参数和能力契约，与云端工具及 Card 共用 |
 | `trigger_map.py` | BSM ↔ ISM ↔ MQTT 接线（唯一耦合点） |
 | `agent_manifest.py` | 启动时为已探测到的 unit 发布 retained manifest |
 | `local_rules.py` | 云端智能体离线时的本地自动规则 |
@@ -183,7 +184,7 @@ make ps / logs     # 查看进程 / 日志
 
 ```bash
 cd edge
-mpremote connect <端口> cp boot.py clock.py config.py local_config.py probe.py ism.py bsm.py \
+mpremote connect <端口> cp boot.py clock.py lamp_contract.py config.py local_config.py probe.py ism.py bsm.py \
   mqtt_client.py trigger_map.py local_rules.py agent_manifest.py main.py :
 mpremote connect <端口> reset
 ```

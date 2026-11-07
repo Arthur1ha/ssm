@@ -17,6 +17,7 @@ from cloud.go2.execution import ExecutionContext
 @pytest.fixture
 def runtime(monkeypatch):
     router = importlib.import_module('cloud.go2.router')
+    service = importlib.import_module('cloud.go2.service')
     tools = importlib.import_module('cloud.go2.tools.tools')
     executor = importlib.import_module('cloud.go2.tools.executor')
     card = importlib.import_module('cloud.go2.card')
@@ -30,11 +31,11 @@ def runtime(monkeypatch):
     physical = AsyncMock(side_effect=AssertionError('life control must not send body commands'))
     monkeypatch.setattr(robot, 'send_command', physical)
     lease = ControlLease()
-    for module in (router, tools, executor, card):
+    for module in (router, tools, executor, card, service):
         monkeypatch.setattr(module, 'go2', robot)
-    for module in (router, tools, executor):
+    for module in (router, tools, executor, service):
         monkeypatch.setattr(module, 'control_lease', lease)
-    monkeypatch.setattr(router, 'drive', SimpleNamespace(stop=MagicMock(), owner_session_id=None))
+    monkeypatch.setattr(service, 'drive', SimpleNamespace(stop=MagicMock(), owner_session_id=None))
     monkeypatch.setattr(navigation, 'navigator', SimpleNamespace(mode=SimpleNamespace(value='idle')))
     monkeypatch.setattr(executor, '_audit', lambda _name, _context, result, *args: result)
     mqtt = MagicMock()

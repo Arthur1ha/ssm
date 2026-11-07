@@ -57,6 +57,13 @@ docs/superpowers/plans/*
 !docs/superpowers/plans/2026-11-06-go2-hierarchical-state-and-actions.md
 !docs/superpowers/plans/2026-11-06-go2-actions-ab-review.md
 !docs/superpowers/plans/2026-11-06-go2-hierarchy-cg-review.md
+!docs/superpowers/plans/2026-11-06-agent-capability-card-execution-chain.md
+!docs/superpowers/plans/2026-11-06-agent-capability-card-execution-chain-implementation.md
+!docs/superpowers/plans/capability-chain-evidence/
+docs/superpowers/plans/capability-chain-evidence/*
+!docs/superpowers/plans/capability-chain-evidence/*.png
+!docs/superpowers/plans/capability-chain-evidence/*.json
+!docs/superpowers/plans/capability-chain-evidence/*.txt
 !docs/superpowers/plans/go2-hierarchy-cg/
 docs/superpowers/plans/go2-hierarchy-cg/*
 !docs/superpowers/plans/go2-hierarchy-cg/mobile.png

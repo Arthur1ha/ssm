@@ -27,6 +27,7 @@ from cloud.agents.common.replies import factual_fallback, needs_persona_reply
 from cloud.agents.lamp.personality.profile import get_profile
 from cloud.agents.lamp.personality.soul import load_personality
 from cloud.esp32.physical_tasks import get as get_physical_task, stable_task_id
+from cloud.cards import registry as cards
 from cloud.observability import bind_context, emit_agent_event
 from cloud.space.execution import ExecutionContext
 
@@ -255,7 +256,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                       session_id=context.session_id, origin_kind=run.origin_kind):
         run = asyncio.run(run_role_graph(
             run, model=run_model,
-            tool_schemas=visible_schemas(lighting_only=lighting_only),
+            tool_schemas=visible_schemas(lighting_only=lighting_only,
+                                        card=cards.get_registry().get_card(unit_id)),
             build_messages=lambda current: decision_messages(
                 current, agent=agent, unit_id=unit_id, supplement=text if resume else ""),
             execute=execute, reconcile_effect=reconcile,

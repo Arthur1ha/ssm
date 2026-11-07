@@ -330,15 +330,21 @@ function JoystickControls({ unitId, widget, report, liveState, connected }) {
   const feedback = React.useRef(report);
   feedback.current = report;
   const action = widget.action;
+  // Old retained cards lacked axis declarations; this is their wire-version
+  // fallback. Current cards provide the adapter's shared physical limits.
+  const limits = widget.params_schema?.properties;
+  const maxX = limits?.x?.maximum ?? .5;
+  const maxY = limits?.y?.maximum ?? .5;
+  const maxYaw = limits?.z?.maximum ?? .8;
   const emit = React.useCallback(() => commandBus.velocity(unitId,action,{...velocity.current},result => {
     if (!['accepted','ok'].includes(result?.result)) feedback.current?.(result);
   }), [unitId,action]);
   const move = React.useCallback((dx,dy) => {
-    velocity.current.vx = +(-dy*.5).toFixed(2);
-    velocity.current.vy = +(-dx*.5).toFixed(2);
+    velocity.current.vx = +(-dy*maxX).toFixed(2);
+    velocity.current.vy = +(-dx*maxY).toFixed(2);
     emit();
-  }, [emit]);
-  const turn = React.useCallback(dx => { velocity.current.vyaw = +(-dx*.8).toFixed(2); emit(); }, [emit]);
+  }, [emit,maxX,maxY]);
+  const turn = React.useCallback(dx => { velocity.current.vyaw = +(-dx*maxYaw).toFixed(2); emit(); }, [emit,maxYaw]);
   const stopMove = React.useCallback(() => { velocity.current.vx=0; velocity.current.vy=0; emit(); }, [emit]);
   const stopTurn = React.useCallback(() => { velocity.current.vyaw=0; emit(); }, [emit]);
   const disabled = !connected || !stateWidgetEnabled(widget,liveState);

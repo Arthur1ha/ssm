@@ -11,14 +11,39 @@ def init(mqtt_client):
 
 
 def publish_task(unit_id: str, task_id: str, action: str, params: dict, session_id: str = "auto"):
-    _mqtt.publish(
-        f"ssm/task/{unit_id}/{task_id}",
-        json.dumps({"task_id": task_id, "session_id": session_id,
-                    "action": action, "params": params,
-                    "actor": "agent", "persist": False, "space_id": "main",
-                    "ts": int(time.time())}),
-        qos=1,
+    """Compatibility helper for autonomous callers, through the common boundary."""
+    from cloud.cards.registry import get_registry
+    from cloud.esp32.service import get_agent
+    from cloud.esp32.tool_executor import execute_physical
+    from cloud.space.execution import ExecutionContext
+
+    agent = get_agent()
+    card = get_registry().get_card(unit_id)
+    if agent is None or not card:
+        raise ValueError("lamp_unavailable")
+
+    def dispatch(uid, command, arguments, context, source, *, task_id):
+        info = _mqtt.publish(
+            f"ssm/task/{uid}/{task_id}",
+            json.dumps({"task_id": task_id, "session_id": context.session_id,
+                        "action": command, "params": arguments,
+                        "actor": context.actor, "persist": False, "space_id": context.space_id,
+                        "source": source, "ts": int(time.time())}), qos=1,
+        )
+        if getattr(info, "rc", 0) != 0:
+            raise RuntimeError("mqtt_publish_failed")
+        return task_id
+
+    result = execute_physical(
+        state=agent._state, unit_id=unit_id, action=action, params=params,
+        context=ExecutionContext(session_id, "agent", False, origin_kind="agent_autonomous"),
+        dispatch=dispatch, wait=False, task_id=task_id, card=card,
+        source="lamp_reactive",
+        preflight=lambda *_args: None if agent._should_act() else "autonomy_unavailable",
     )
+    if result.get("result") not in {"accepted", "executing", "ok", "unknown"}:
+        raise ValueError(result.get("error") or "lamp_action_rejected")
+    return task_id
 
 
 from cloud.esp32.tool_registry import TOOL_DESCRIPTIONS
