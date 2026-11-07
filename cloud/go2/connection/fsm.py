@@ -2,7 +2,7 @@ import logging
 import math
 import time
 
-from cloud.go2.actions import ACTIONS, TRANSIENT_STATES, fsm_transitions
+from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, TRANSIENT_STATES, fsm_transitions
 from cloud.go2.state import Go2State, STABLE_BODY_STATES
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,11 @@ class Go2FSM:
             result = self.runtime.snapshot()
             available = self._available_actions()
             result['available_actions'] = available
+            manual_reason = self.runtime.active_reason()
+            manual_commands = [cmd for cmd in SPORT_COMMANDS if cmd != 'StopMove']
+            result['available_manual_actions'] = [] if manual_reason else manual_commands
+            result['blocked_manual_actions'] = ({cmd: manual_reason for cmd in manual_commands}
+                                                if manual_reason else {})
             reason = self.runtime.active_reason() or self.body_ready_reason(refresh=False)
             result['blocked_actions'] = {cmd: reason or
                                           ('身体动作待确认' if self.pending_action else '当前身体姿态不允许此动作')

@@ -47,6 +47,7 @@ class OccupancyGrid:
             raise ValueError("invalid voxel dimensions")
         cells = np.full((ny, nx), UNKNOWN, dtype=np.uint8)
         obstacles = np.zeros((ny, nx), dtype=bool)
+        self.measured_floor = np.zeros((ny, nx), dtype=bool)
         if points is not None:
             pts = np.asarray(points)
             if pts.ndim == 2 and pts.shape[1] >= 3 and len(pts):
@@ -62,6 +63,7 @@ class OccupancyGrid:
                 if floor_z is not None:
                     floor_hits = inside & (np.abs(pts[:, 2] - floor_z) <= 0.08)
                     cells[iy[floor_hits], ix[floor_hits]] = FREE
+                    self.measured_floor[iy[floor_hits], ix[floor_hits]] = True
                     self._bridge_nearby_floor(cells, pts[floor_hits], robot_pose)
                     obstacle_hits = inside & (pts[:, 2] > floor_z + Z_FLOOR_M)
                     obstacle_hits &= pts[:, 2] < floor_z + Z_CEIL_M
@@ -158,7 +160,7 @@ class OccupancyGrid:
         if (len(patch) < 30 or np.ptp(patch[:, 0]) < 0.5
                 or np.ptp(patch[:, 1]) < 0.5):
             return None
-        return floor_z
+        return float(floor_z)
 
     def odom_to_grid(self, x: float, y: float) -> tuple[int, int]:
         ix = math.floor((x - self.origin[0]) / self.resolution)
@@ -170,11 +172,14 @@ class OccupancyGrid:
     def grid_to_odom(self, ix: int, iy: int) -> tuple[float, float]:
         if not (0 <= ix < self.width[0] and 0 <= iy < self.width[1]):
             raise ValueError("cell outside voxel grid")
-        return (self.origin[0] + (ix + 0.5) * self.resolution,
-                self.origin[1] + (iy + 0.5) * self.resolution)
+        # Session grids have NumPy origins and selectors may supply NumPy
+        # indices. Public coordinates also enter task receipts/checkpoints,
+        # whose serializer only accepts native Python scalar types.
+        return (float(self.origin[0] + (ix + 0.5) * self.resolution),
+                float(self.origin[1] + (iy + 0.5) * self.resolution))
 
     def is_free(self, ix: int, iy: int) -> bool:
-        return 0 <= ix < self.width[0] and 0 <= iy < self.width[1] and self.cells[iy, ix] == FREE
+        return bool(0 <= ix < self.width[0] and 0 <= iy < self.width[1] and self.cells[iy, ix] == FREE)
 
     def is_body_clear(self, x: float, y: float, heading: float) -> bool:
         """Check the oriented body against measured obstacles before motion."""
@@ -249,3 +254,45 @@ class OccupancyGrid:
                 "obstacle_cells": obstacle_count,
                 "nearest_obstacle_m": round(float(np.min(obstacle_distances)), 3)
                 if obstacle_distances.size else None}
+
+
+    def turn_sweep_details(self, x: float, y: float, heading: float,
+                           target_heading: float) -> dict:
+        """Check the actual shortest-angle rectangular body sweep, in radians.
+
+        Cells intersecting the rectangle are included conservatively by a half
+        cell diagonal. Unknown ground remains a distinct failure from obstacles.
+        """
+        delta = (target_heading - heading + math.pi) % (2 * math.pi) - math.pi
+        radius = TURN_CLEARANCE_M + self.resolution
+        try:
+            ix, iy = self.odom_to_grid(x, y)
+        except ValueError:
+            return {"clear": False, "blockers": ["center_outside_map"]}
+        reach = math.ceil(radius / self.resolution)
+        left, right = max(0, ix - reach), min(self.width[0], ix + reach + 1)
+        bottom, top = max(0, iy - reach), min(self.width[1], iy + reach + 1)
+        yy, xx = np.indices((top - bottom, right - left))
+        dx = self.origin[0] + (xx + left + .5) * self.resolution - x
+        dy = self.origin[1] + (yy + bottom + .5) * self.resolution - y
+        sweep = np.zeros_like(dx, bool)
+        padding = self.resolution / math.sqrt(2)
+        steps = max(1, math.ceil(abs(delta) / .05))
+        for angle in np.linspace(heading, heading + delta, steps + 1):
+            c, s = math.cos(angle), math.sin(angle)
+            for forward in (-ROBOT_HALF_LENGTH_M - SAFETY_MARGIN_M,
+                            ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M):
+                for lateral in (-PATH_CLEARANCE_M, PATH_CLEARANCE_M):
+                    try:
+                        self.odom_to_grid(x + forward * c - lateral * s,
+                                          y + forward * s + lateral * c)
+                    except ValueError:
+                        return {"clear": False, "blockers": ["turn_sweep_outside_map"]}
+            sweep |= ((np.abs(dx * c + dy * s) <= ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M + padding)
+                      & (np.abs(-dx * s + dy * c) <= PATH_CLEARANCE_M + padding))
+        unknown = int(np.count_nonzero(sweep & ~self.known_floor[bottom:top, left:right]))
+        obstacles = int(np.count_nonzero(sweep & self.obstacles[bottom:top, left:right]))
+        blockers = (["unmeasured_floor"] if unknown else []) + (["measured_obstacle"] if obstacles else [])
+        return {"clear": not blockers, "blockers": blockers,
+                "unknown_floor_cells": unknown, "obstacle_cells": obstacles,
+                "sweep_angle_rad": float(delta)}

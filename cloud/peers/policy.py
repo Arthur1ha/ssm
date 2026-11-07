@@ -39,6 +39,9 @@ def permits_skill(target: str, skill_id: str, params: dict, origin: str, *,
             return True
         if skill_id == "go2_visual_navigate":
             return delegated and isinstance(params.get("target"), str) and bool(params["target"].strip())
+        if skill_id == "go2_find_object":
+            return (delegated and audience == "steward"
+                    and isinstance(params.get("target"), str) and bool(params["target"].strip()))
         return False
     if skill_id == "adjust_lighting":
         return delegated and isinstance(params.get("goal"), str) and bool(params["goal"].strip())

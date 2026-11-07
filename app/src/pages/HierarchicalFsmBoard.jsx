@@ -1,20 +1,18 @@
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
 function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, connected,
-  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth }) {
+  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, feedback }) {
   const { useState, useRef, useEffect } = React;
   const [selectedId, setSelectedId] = useState(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState(null);
   const [expanded, setExpanded] = useState(false);
-  const [videoExpanded, setVideoExpanded] = useState(false);
   const [joystickExiting, setJoystickExiting] = useState(false);
   const boardRef = useRef(null);
-  const closeVideoRef = useRef(null);
-  const videoTriggerRef = useRef(null);
   const primary = primaryStateRegion(sm);
   const stale = streamHealth === 'reconnecting';
   const topology = stateBoardTopology(sm, liveState);
-  const execution = liveState[sm?.execution_field];
-  const awaitingFeedback = connected && sm?.freshness_field && liveState[primary?.state_field] == null;
+  const pendingExecution = liveState[sm?.execution_field];
+  const execution = pendingExecution || liveState[sm?.last_execution_field];
+  const awaitingFeedback = connected && primary?.state_field && liveState[primary.state_field] == null;
   const remoteActive = widget => Object.keys(widget.enabled_when || {}).length > 0
     && Object.entries(widget.enabled_when).every(([key,value]) =>
       Array.isArray(value) ? value.includes(liveState[key]) : liveState[key] === value);
@@ -57,23 +55,19 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     setSelectedId(null);
     onSelectState?.(null);
   };
-  useEffect(() => { setSelectedId(null); setSelectedEdgeId(null); setExpanded(false); setVideoExpanded(false); }, [unitId,liveState.epoch]);
+  useEffect(() => { setSelectedId(null); setSelectedEdgeId(null); setExpanded(false); }, [unitId,liveState.epoch]);
   useEffect(() => {
-    if (!videoExpanded && !expanded) return;
+    if (!expanded) return;
     const restoreFocus = document.activeElement;
-    if (videoExpanded) closeVideoRef.current?.focus();
     const onKey = event => {
-      if (videoExpanded && event.key === 'Escape') {
-        event.stopPropagation(); setVideoExpanded(false); return;
-      }
-      // Map's portal owns its own Escape handling and focus trap.
+      // Media dialogs live outside the board and own their keyboard handling.
       if (!boardRef.current?.contains(event.target)) return;
       if (event.key === 'Escape') {
         event.stopPropagation();
-        if (videoExpanded) setVideoExpanded(false); else setExpanded(false);
+        setExpanded(false);
       }
-      if (event.key === 'Tab' && expanded && !videoExpanded) {
-        const root = videoExpanded ? closeVideoRef.current?.parentElement : boardRef.current;
+      if (event.key === 'Tab') {
+        const root = boardRef.current;
         const controls = [...(root?.querySelectorAll('button:not(:disabled),[tabindex="0"]') || [])];
         const first = controls[0], last = controls[controls.length-1];
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
@@ -82,7 +76,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     };
     document.addEventListener('keydown',onKey);
     return () => { document.removeEventListener('keydown',onKey); restoreFocus?.focus?.(); };
-  }, [videoExpanded,expanded]);
+  }, [expanded]);
   const ordered = widgets.map((widget,index) => ({...widget,_index:index}))
     .sort((a,b) => (a.order ?? a._index)-(b.order ?? b._index));
   const active = ordered.filter(widget => !widget.states?.length
@@ -102,7 +96,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       _disabled:offline || stale || (widget.type === 'joystick' && (busy || joystickExiting
         || sm?.freshness_field && liveState[sm.freshness_field] === false))}],report,actor,liveState,
     widget.state_field || primary?.state_field,sm?.connection_field || '',connected);
-  const phase = ({sending:'正在发送',sent:'等待设备确认',accepted:'已接收，完成待确认',executing:'正在执行',
+  const phase = ({sending:'正在发送',dispatched:'已发送',sent:'等待设备确认',accepted:'已接收，完成待确认',executing:'正在执行',
     timeout:'完成反馈超时',cancelled_unconfirmed:'已请求取消，结果待确认',stop_requested_unconfirmed:'已请求停止，结果待确认',
     recovered:'姿态已恢复',completed:'已完成',ok:'已完成',rejected:'设备拒绝请求',failed:'执行失败',error:'执行失败',cancelled:'已取消'})[execution?.phase || execution?.result] || '等待设备反馈';
   const executionLabel = execution?.label || topology.edges.find(edge => [edge.transition.trigger,edge.transition.action]
@@ -112,20 +106,14 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     aria-modal={expanded || undefined} aria-label={expanded ? '设备白板' : undefined}>
     {media.length > 0 && <div className="device-whiteboard__media" aria-label="实时画面与地图">
       {media.map(widget => <div key={`${widget.type}:${widget._index}`} className="device-whiteboard__media-slot"><div
-        className={`device-whiteboard__media-tile${widget.type === 'video' && videoExpanded ? ' is-expanded' : ''}`}
-        role={widget.type === 'video' && videoExpanded ? 'dialog' : undefined}
-        aria-modal={widget.type === 'video' && videoExpanded ? false : undefined}
-        aria-label={widget.type === 'video' && videoExpanded ? '实时视频' : undefined}>
+        className="device-whiteboard__media-tile">
         {connected ? renderWidget(widget) : <span className="device-whiteboard__media-empty">{widget.type === 'video' ? '视频 · 等待连接' : '地图 · 等待连接'}</span>}
-        {widget.type === 'video' && <button ref={videoExpanded ? closeVideoRef : videoTriggerRef}
-          type="button" className="device-whiteboard__video-toggle" aria-label={videoExpanded ? '关闭视频' : '放大视频'}
-          onClick={() => setVideoExpanded(value => !value)}><span>视频</span><span>{videoExpanded ? '×' : '↗'}</span></button>}
       </div></div>)}
     </div>}
     <div className="device-whiteboard__canvas">
       {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
         onSelectState={activateState} onInspectTransition={inspectEdge}
-        color={color} pendingCommand={execution?.command}/>
+        color={color} pendingCommand={pendingExecution?.command}/>
         : <p className="device-state-note">等待设备状态机</p>}
       <button type="button" className="device-whiteboard__expand" aria-label={expanded ? '退出白板全屏' : '白板全屏'}
         onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '全屏'}</button>
@@ -136,7 +124,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
           {!selected.current && selected.control.choices.length > 1 && selected.control.choices.map(edge =>
             <button key={edge.id} type="button" disabled={!!edge.reason} title={edge.reason || ''}
               onClick={() => onTransition?.(edge.transition)}>{edge.transition.label}</button>)}
-          {selected.current && selected.control.choices.filter(edge => edge.transition.available_only).map(edge =>
+          {selected.current && selected.control.choices.filter(edge => edge.transition.available_only || edge.transition.dispatch_only).map(edge =>
             <button key={`current:${edge.id}`} type="button" disabled={!!edge.reason} title={edge.reason || ''}
               onClick={() => onTransition?.(edge.transition)}>{edge.transition.label}</button>)}
           {selected.region.until_field && liveState[selected.region.until_field] && selected.current
@@ -148,12 +136,24 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         <div><strong>{nodes.find(node => node.id === selectedEdge.src)?.label} → {nodes.find(node => node.id === selectedEdge.dst)?.label}</strong>
           <p>{selectedEdge.transition.label}{selectedEdge.transition.description ? `：${selectedEdge.transition.description}` : ''}</p>
           <small>{selectedEdge.transition.action ? selectedEdge.reason || '当前可转换，点击目标状态执行。' : '根据设备反馈或任务结果自动转换。'}</small>
+          {selectedEdge.transition.action && <button type="button" className="btn"
+            disabled={!!selectedEdge.reason} onClick={() => onTransition?.(selectedEdge.transition)}>
+            {selectedEdge.transition.label}
+          </button>}
         </div>
         <button type="button" aria-label="关闭转换说明" onClick={() => setSelectedEdgeId(null)}>×</button>
       </section>}
     </div>
-    {(stale || execution || awaitingFeedback) && <div className="device-whiteboard__feedback" role="status">
-      {stale ? '状态同步中，普通操作等待同步' : execution ? `${executionLabel} · ${phase}` : '等待设备反馈'}
+    {(feedback || offline || stale || execution || awaitingFeedback) && <div className="device-whiteboard__feedback" role="status" aria-live="polite">
+      {feedback && <div>{feedback}</div>}
+      {offline ? <div>设备未连接，暂不能执行动作</div>
+        : stale ? <div>状态同步中，普通操作等待同步</div>
+        : <>
+          {execution && <div>{executionLabel} · {phase}</div>}
+          {awaitingFeedback && <div>{primary?.manual_available_actions_field
+            ? '姿态暂未确认，手动动作仍可发送'
+            : '设备已连接，等待有效设备反馈；当前状态尚未确认，暂不能切换'}</div>}
+        </>}
     </div>}
     {(controls.length > 0 || remoteControls.length > 0) && <div className="device-whiteboard__controls">
       {remoteControls.map(widget => {

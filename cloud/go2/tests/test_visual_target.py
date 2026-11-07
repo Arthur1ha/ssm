@@ -19,6 +19,7 @@ class Map:
 
     def __init__(self):
         self.grid = np.zeros((60, 60), dtype=bool)
+        self.measured_floor = np.ones((60, 60), dtype=bool)
 
     def odom_to_grid(self, x, y):
         gx, gy = round((x + 3) * 10), round((y + 3) * 10)
@@ -160,9 +161,11 @@ async def test_invalid_vision_json_logs_preview_and_blocks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_missing_calibration_reports_cause_without_moving(monkeypatch):
+async def test_missing_calibration_uses_lidar_without_claiming_a_target(monkeypatch):
+    from unittest.mock import AsyncMock
     from cloud.go2.tools import tools
     from cloud.go2.perception import visual_target
+    from cloud.go2.navigation import target_approach
 
     monkeypatch.setattr(tools.go2, 'is_connected', True)
     monkeypatch.setattr(tools.go2, 'fsm_state', 'standing')
@@ -172,10 +175,13 @@ async def test_missing_calibration_reports_cause_without_moving(monkeypatch):
         raise TargetUnlocalized('calibration_unavailable')
 
     monkeypatch.setattr(visual_target, 'load_calibration', missing_calibration)
-    result = await tools._go2_precise_navigate_to_visible_target('白色猫头鹰')
+    locate = AsyncMock(side_effect=TargetUnlocalized('object_returns_unavailable'))
+    monkeypatch.setattr(visual_target, 'locate_lidar_target', locate)
+    monkeypatch.setattr(target_approach, 'REOBSERVE_MAX_STEPS', 0)
+    result = await tools.go2_navigate_to_visible_target('白色猫头鹰')
     assert result['result'] == 'blocked'
-    assert result['reason'] == 'calibration_unavailable'
-    assert '相机标定' in result['message']
+    assert result['reason'] == 'object_returns_unavailable'
+    locate.assert_awaited_once()
     assert result['last_trusted_pose'] is None
 
 
@@ -224,6 +230,7 @@ def test_unknown_contact_and_out_of_map_fail_closed():
     for y in range(gy - 2, gy + 3):
         for x in range(gx - 2, gx + 3):
             grid.grid[y, x] = True
+            grid.measured_floor[y, x] = False
     with pytest.raises(TargetUnlocalized, match='target_ground_unverified'):
         select_standoff(grid, pose, location)
     with pytest.raises(TargetUnlocalized, match='target_outside_local_map'):
@@ -326,3 +333,136 @@ async def test_visual_result_preserves_arrival_boundary_in_user_reply(tmp_path, 
         assert '尚未确认到达' in result['response']
     assert result['actions_taken'] == (['go2_navigate_to_visible_target']
                                        if tool_result['result'] == 'ok' else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('persist', [True, False])
+async def test_observation_keeps_authorized_frame_before_pose_rejection(monkeypatch, persist):
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import visual_target
+    calls = []
+    frame = {'frame_id': 849, 'odom_session_id': 'map',
+             'pose_at_capture': {'x': 0., 'y': 0., 'heading': 0.}}
+    monkeypatch.setattr(visual_target, '_capture_still', AsyncMock(return_value=(b'jpeg', frame, 1.)))
+    monkeypatch.setattr(visual_target, 'current_context', lambda: SimpleNamespace(persist=persist))
+    monkeypatch.setattr(visual_target, 'save_diagnostic_frame', lambda *args: calls.append('save'))
+    async def detect(*args):
+        calls.append('model')
+        return {'found': False}
+    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
+    monkeypatch.setattr(visual_target, '_live_pose', lambda _: {'x': 1., 'y': 0., 'heading': 0.})
+    with pytest.raises(TargetUnlocalized, match='pose_changed_during_detection'):
+        await visual_target.observe_target('owl')
+    assert calls == (['save', 'model'] if persist else ['model'])
+
+
+@pytest.fixture
+def lidar_localizer(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import visual_target, rgb_lidar
+    from cloud.go2.navigation import occupancy_grid
+    now = time.monotonic()
+    pose = {'x': 0., 'y': 0., 'z': .4, 'heading': 0.,
+            'orientation': [0, 0, 0, 1], 'session_id': 's'}
+    frame = {'width': 640, 'height': 360, 'frame_id': 3, 'received_at': now,
+             'pose_received_at': now, 'odom_session_id': 's', 'pose_at_capture': pose}
+    voxel = {'data': {'resolution': .05, 'data': {'points': [[2., 0., .2]]}}}
+    robot = SimpleNamespace(fsm_state='standing', _sport_state_observed_at=now,
+                            voxel_raw=voxel, voxel_received_at=now,
+                            odom_frame_id='odom', voxel_frame_id='odom')
+    calls = []
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    monkeypatch.setattr(visual_target, '_capture_still', AsyncMock(return_value=(b'jpeg', frame, 1.)))
+    monkeypatch.setattr(visual_target, '_live_pose', lambda _: pose)
+    monkeypatch.setattr(visual_target, 'current_context', lambda: SimpleNamespace(persist=True))
+    def save(*args):
+        calls.append('image')
+        return tmp_path / 'frame.jpg'
+    monkeypatch.setattr(visual_target, 'save_diagnostic_frame', save)
+    monkeypatch.setattr(rgb_lidar, 'save_paired_sample', lambda *a: calls.append('pair'))
+    monkeypatch.setattr(occupancy_grid, 'OccupancyGrid', lambda *a, **k: SimpleNamespace(measured_floor_z=0.))
+    async def detect(*args):
+        calls.append('model')
+        robot.voxel_raw = {'replacement': True}
+        robot.voxel_received_at = now + 10
+        return {'found': True, 'bbox_1000': [450, 450, 550, 850]}
+    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
+    def associate(paired, *args, **kwargs):
+        assert paired is voxel
+        calls.append('cluster')
+        return {'x': 2., 'y': 0., 'uncertainty_m': .25, 'lidar_points': 4}
+    monkeypatch.setattr(rgb_lidar, 'associate_lidar_target', associate)
+    return visual_target, robot, pose, frame, calls
+
+
+@pytest.mark.asyncio
+async def test_lidar_localization_preserves_pre_model_pair_and_source(lidar_localizer):
+    module, robot, pose, frame, calls = lidar_localizer
+    location, current, grid = await module.locate_lidar_target('owl')
+    assert calls == ['image', 'pair', 'model', 'cluster']
+    assert location['source'] == 'lidar_foreground_cluster'
+    assert location['source_frame_id'] == frame['frame_id']
+    assert location['source_received_at'] == frame['received_at']
+    assert location['odom_session_id'] == 's'
+    assert location['lidar_points'] == 4
+    assert location['camera_width'] == 640
+    assert 'image_bearing_rad' in location
+    assert location['camera_measurement_status'] == 'upstream_model_not_per_robot_calibration'
+
+
+@pytest.mark.asyncio
+async def test_lidar_rejects_skew_before_model(lidar_localizer):
+    module, robot, pose, frame, calls = lidar_localizer
+    robot.voxel_received_at -= 1.
+    with pytest.raises(TargetUnlocalized, match='sensor_frame_skew'):
+        await module.locate_lidar_target('owl')
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['translation', 'pitch', 'session'])
+async def test_lidar_rejects_pose_changed_during_model(lidar_localizer, monkeypatch, change):
+    module, robot, pose, frame, calls = lidar_localizer
+    changed = dict(pose)
+    if change == 'translation':
+        changed['x'] = .1
+    elif change == 'pitch':
+        changed['orientation'] = [0, math.sin(.1), 0, math.cos(.1)]
+    else:
+        # Real _live_pose performs the session gate independently of position.
+        def mismatch(_):
+            raise TargetUnlocalized('odom_session_mismatch')
+        monkeypatch.setattr(module, '_live_pose', mismatch)
+    if change != 'session':
+        monkeypatch.setattr(module, '_live_pose', lambda _: changed)
+    with pytest.raises(TargetUnlocalized, match='pose_changed|session_mismatch'):
+        await module.locate_lidar_target('owl')
+    assert calls == ['image', 'pair', 'model']
+
+
+@pytest.mark.asyncio
+async def test_no_lidar_cluster_never_returns_nominal_ray_location(lidar_localizer, monkeypatch):
+    from cloud.go2.perception import rgb_lidar
+    module, robot, pose, frame, calls = lidar_localizer
+    monkeypatch.setattr(rgb_lidar, 'associate_lidar_target', lambda *a, **k: None)
+    with pytest.raises(TargetUnlocalized, match='object_returns_unavailable'):
+        await module.locate_lidar_target('owl')
+
+
+def test_real_lidar_target_has_floor_evidence_inside_inflated_keepout():
+    from cloud.go2.navigation.occupancy_grid import OccupancyGrid
+    floor = [[float(x), float(y), 0.] for x in np.arange(-1., 4.01, .05)
+             for y in np.arange(-2., 2.01, .05)]
+    toy = [[2. + dx, dy, .25] for dx in (-.05, 0., .05) for dy in (-.05, 0., .05)]
+    pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
+    grid = OccupancyGrid({'data': {'frame_id': 'odom', 'resolution': .05,
+        'origin': [-1., -2., -.5], 'width': [105, 85, 30],
+        'data': {'points': floor + toy}}}, robot_pose=pose)
+    location = {'frame_id': 'odom', 'x': 2., 'y': 0., 'uncertainty_m': .15, 'odom_session_id': 's'}
+    assert not grid.is_free(*grid.odom_to_grid(2., 0.))
+    stop = select_standoff(grid, pose, location)
+    assert grid.is_body_clear(stop['x'], stop['y'], stop['heading'])
+    assert stop['distance_to_target_m'] >= 1.4
+    grid.measured_floor[:] = False
+    with pytest.raises(TargetUnlocalized, match='target_ground_unverified'):
+        select_standoff(grid, pose, location)

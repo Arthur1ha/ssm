@@ -71,7 +71,7 @@ def _validate_state_machine(sm: dict) -> None:
             raise ValueError("transition.action must be a string")
         if "params" in transition and not isinstance(transition["params"], dict):
             raise ValueError("transition.params must be an object")
-        for field in ("graph_hidden", "safety", "available_only"):
+        for field in ("graph_hidden", "safety", "available_only", "dispatch_only"):
             if field in transition and type(transition[field]) is not bool:
                 raise ValueError(f"transition.{field} must be a boolean")
         for field in ("availability_key", "completion", "description"):
@@ -79,9 +79,10 @@ def _validate_state_machine(sm: dict) -> None:
                 _required_string(transition[field], f"transition.{field}")
         if "required_actor" in transition and transition["required_actor"] not in ("admin", "visitor"):
             raise ValueError("transition.required_actor must be admin or visitor")
-        if not transition.get("action") and any(field in transition for field in ("required_actor", "availability_key", "available_only")):
+        if not transition.get("action") and any(field in transition for field in ("required_actor", "availability_key", "available_only", "dispatch_only")):
             raise ValueError("automatic transitions cannot declare action controls")
-    for field in ("available_actions_field", "blocked_actions_field", "execution_field", "last_execution_field", "freshness_field", "until_field"):
+    for field in ("available_actions_field", "blocked_actions_field", "manual_available_actions_field",
+                  "manual_blocked_actions_field", "execution_field", "last_execution_field", "freshness_field", "until_field"):
         if field in sm:
             _required_string(sm[field], f"state_machine.{field}")
     if not isinstance(sm.get("views", {}), dict):

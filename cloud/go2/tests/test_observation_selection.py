@@ -1,0 +1,118 @@
+"""Full-room coverage, explicit scope, sweep geometry and stable decisions."""
+import math
+import numpy as np
+
+from cloud.go2.navigation.occupancy_grid import OccupancyGrid, FREE, UNKNOWN
+from cloud.go2.navigation.frontier import select_observation_target
+from cloud.go2.navigation.observation_coverage import ObservationCoverage, visible_cells
+
+
+def room():
+    grid = OccupancyGrid({'data': {'frame_id': 'odom', 'resolution': .1,
+        'origin': [-4., -3., 0.], 'width': [80, 60, 1], 'data': {'points': []}}})
+    grid.cells[2:-2, 2:-2] = FREE
+    grid.known_floor = grid.cells == FREE
+    grid.grid = grid.cells != FREE
+    grid.map_session = 'a'
+    return grid
+
+
+BOUNDS = (-3.9, -2.9, 3.9, 2.9)
+POSE = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'a'}
+
+
+def test_frontier_beyond_old_distance_limit_can_be_selected():
+    grid = room()
+    coverage = ObservationCoverage('a', bounds=BOUNDS)
+    # Mark the whole interior observed; only geometric frontier utility remains.
+    for iy, ix in zip(*np.nonzero(grid.cells == FREE)):
+        x, y = grid.grid_to_odom(int(ix), int(iy))
+        coverage._seen[(math.floor(x/grid.resolution + 1e-6), math.floor(y/grid.resolution + 1e-6))] = 1.
+    selection = select_observation_target(grid, POSE, coverage, bounds=BOUNDS)
+    assert selection.target is not None
+    assert math.hypot(selection.target.x, selection.target.y) > 1.5
+    assert selection.target.source == 'frontier'
+
+
+def test_known_room_still_selects_unseen_camera_view_and_keeps_target_stable():
+    grid = room()
+    grid.cells[:] = FREE
+    grid.known_floor[:] = True
+    grid.grid[:] = False
+    coverage = ObservationCoverage('a', bounds=BOUNDS)
+    assert coverage.record(grid, POSE, 1., .9)
+    first = select_observation_target(grid, POSE, coverage, bounds=BOUNDS)
+    assert first.target is not None
+    second = select_observation_target(grid, {**POSE, 'heading': .01}, coverage,
+                                       bounds=BOUNDS, current=first.target)
+    assert second.reason == 'target_retained'
+    assert (second.target.x, second.target.y, second.target.heading) == (first.target.x, first.target.y, first.target.heading)
+
+
+def test_same_frame_or_wrong_session_never_adds_coverage_and_walls_occlude():
+    grid = room()
+    grid.cells[:, 45] = 2
+    coverage = ObservationCoverage('a', bounds=BOUNDS)
+    assert coverage.record(grid, POSE, 1., .9)
+    assert not coverage.record(grid, POSE, 1., .9)
+    assert not coverage.record(grid, POSE, 2., .1)
+    assert not coverage.record(grid, {**POSE, 'session_id': 'old'}, 2., .9)
+    visible = visible_cells(grid, POSE, bounds=BOUNDS)
+    assert all(x * grid.resolution < .6 for x, _ in visible)
+
+
+def test_scope_is_required_and_turn_sweep_still_rejects_real_obstacles():
+    grid = room()
+    coverage = ObservationCoverage('a')
+    assert select_observation_target(grid, POSE, coverage, bounds=None).reason == 'search_scope_required'
+    ix, iy = grid.odom_to_grid(.3, .2)
+    grid.obstacles[iy, ix] = True
+    result = grid.turn_sweep_details(0., 0., 0., math.pi/2)
+    assert not result['clear'] and 'measured_obstacle' in result['blockers']
+
+
+def test_small_turn_does_not_require_unvisited_full_circle():
+    grid = room()
+    # The cell centered at y=.35 is inside the full turn disk but outside the
+    # conservatively padded body rectangle for this three-hundredths turn.
+    ix, iy = grid.odom_to_grid(0., .36)
+    grid.known_floor[iy, ix] = False
+    assert not grid.is_turn_clear(0., 0.)
+    assert grid.turn_sweep_details(0., 0., 0., .03)['clear']
+
+
+def test_site_scope_selection_uses_same_body_margin_as_navigator():
+    from cloud.go2.navigation.navigator import Navigator
+    from cloud.go2.navigation.occupancy_grid import TURN_CLEARANCE_M
+
+    grid = room()
+    grid.cells[:] = FREE
+    grid.known_floor[:] = True
+    grid.grid[:] = False
+    bounds = (-.490957, -.681815, 1.509043, .718185)
+    pose = {**POSE, 'x': .009, 'y': .018, 'heading': .31}
+    coverage = ObservationCoverage('a', bounds=bounds)
+    assert coverage.record(grid, pose, 1., .9)
+    navigator = Navigator()
+    # This is the real rejected first candidate: its centre is in scope, but
+    # its body would cross the permitted boundary.
+    assert navigator._plan_path({'x': 1.3, 'y': -.15, 'bounds': bounds}, grid, pose) is None
+    selected = select_observation_target(grid, pose, coverage, bounds=bounds)
+    assert selected.target is not None
+    target = selected.target
+    plan = navigator._plan_path({'x': target.x, 'y': target.y, 'bounds': bounds}, grid, pose)
+    assert plan is not None
+    path = plan[0]
+    for cell in path:
+        x, y = grid.grid_to_odom(*cell)
+        assert bounds[0] + TURN_CLEARANCE_M <= x <= bounds[2] - TURN_CLEARANCE_M
+        assert bounds[1] + TURN_CLEARANCE_M <= y <= bounds[3] - TURN_CLEARANCE_M
+
+
+def test_scope_too_narrow_for_body_has_no_observation_destination():
+    grid = room()
+    bounds = (-.3, -1., .3, 1.)
+    result = select_observation_target(grid, POSE, ObservationCoverage('a', bounds=bounds),
+                                       bounds=bounds)
+    assert result.target is None
+    assert result.reason == 'no_reachable_observation_point'

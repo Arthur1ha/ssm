@@ -24,7 +24,7 @@ PERSISTENT_ACTIONS = {
 
 GO2_IMMEDIATE_ACTIONS = {
     "LIFE", "request_rest", "wake", "start_explore", "stop_explore",
-    "SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "RECOGNIZE_PERSON", "VELOCITY", "STOP",
+    "SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "FIND_OBJECT", "RECOGNIZE_PERSON", "VELOCITY", "STOP",
     *SPORT_COMMANDS, "Move", "EnterMoveControl",
 }
 

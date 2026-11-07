@@ -217,6 +217,8 @@ def observe_command_results(robot) -> None:
 
 
 def track_command_result(robot, ledger, identity, result) -> None:
+    if result.get('dispatch_only'):
+        return
     if result.get("result") not in {"accepted", "executing", "timeout"}:
         return
     physical_id = result.get("request_id") or (result.get("pending_action") or {}).get("request_id")

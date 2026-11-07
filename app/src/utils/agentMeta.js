@@ -78,6 +78,27 @@ function getAgentOpeningLine(agent) {
 }
 
 function describeRunProgress(event, compact = false) {
+  const searchStage = {
+    search_observe: '正在搜索，观察当前位置', search_candidate: '发现疑似目标，正在复核',
+    search_confirmed: '已确认目标', search_navigate: '正在前往下一观察点',
+    search_approach: '正在靠近目标', search_finished: event.status === 'ok'
+      ? event.mode === 'explore' ? '本轮探索已完成' : '已到目标附近并复核' : '搜索已结束，任务未完成',
+  }[event.stage];
+  if (searchStage) {
+    const reason = {
+      budget_exhausted: '搜索预算已用完', time_budget_exhausted: '搜索时间已用完',
+      distance_budget_exhausted: '搜索路程预算已用完', step_budget_exhausted: '观察次数已达上限',
+      coverage_complete: '可观察区域已检查，遮挡区域仍未确认', no_reachable_observation: '没有可达的观察点',
+      calibration_unavailable: '已发现目标，尚缺相机实测标定，无法确认接近位置',
+      search_scope_required: '请先设置允许搜索的范围', stop_unconfirmed: '停止指令尚未得到设备确认',
+      search_scope_session_mismatch: '定位会话已变化，请重新确认搜索范围',
+      no_reachable_observation_point: '没有可达的观察点，部分区域尚未检查',
+      coverage_exhausted: '可观察区域已检查，遮挡区域仍未确认',
+      cancelled: '用户已中断', authorization_expired: '本次操作授权已到期',
+      disconnected: '机器狗连接已断开', map_session_changed: '定位会话已变化，需要重新观察',
+    }[event.reason];
+    return `${searchStage}${reason ? `：${reason}` : ''}`;
+  }
   if (['planning', 'executing', 'summarizing', 'finished'].includes(event.stage)) {
     if (event.stage === 'planning') return compact ? '正在核对可用设备与当前状态'
       : `正在核对可用设备与当前状态，处理：${event.goal || '当前请求'}`;
@@ -97,7 +118,7 @@ function describeRunProgress(event, compact = false) {
   const action = ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
     set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
     go2_sport: '完成姿态动作', go2_move: '移动', go2_observe: '观察前方',
-    go2_navigate_to_visible_target: '视觉定位并导航到目标附近',
+    go2_navigate_to_visible_target: '视觉定位并导航到目标附近', go2_find_object: '在指定范围内找物',
     go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
     get_space_context: '查看空间信息', read_state: '查看传感器状态',
     await_result: '核对执行结果', request_peer_skill: '协同处理请求',

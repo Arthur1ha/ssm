@@ -378,8 +378,6 @@ async def check_graph_handoff(fail_stage: str | None = None) -> None:
              "messenger": messenger}
 
     async def graph(_session_id, _goal, **kwargs):
-        from cloud.go2.perception.visual_lidar_navigate import _arrival_by_navigation
-        assert _arrival_by_navigation.get() is True
         assert kwargs["publish_reply"] is False
         assert kwargs["allowed_tools"] == frozenset({
             "go2_observe", "go2_navigate_to_visible_target", "get_space_context"})

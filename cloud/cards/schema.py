@@ -22,6 +22,7 @@ class FsmTransition(TypedDict):
     required_actor: NotRequired[Literal["admin", "visitor"]]  # UI 提示，权限仍由服务端校验
     available_only: NotRequired[bool]  # 不可用时不展示次要入口（例如待命时关闭探索许可）
     completion: NotRequired[str]  # 真实完成依据；unavailable 不得承诺可串联执行
+    dispatch_only: NotRequired[bool]  # 手动请求只等发送结果，不依赖姿态观察
     description: NotRequired[str]
 
 
@@ -49,6 +50,8 @@ class StateRegion(TypedDict):
     retain_when_inactive: NotRequired[bool]  # Show observed body facts in rest.
     available_actions_field: NotRequired[str]  # state 中的动作键列表；缺少时只依拓扑展示
     blocked_actions_field: NotRequired[str]  # state 中的 {动作键: 阻止原因}
+    manual_available_actions_field: NotRequired[str]
+    manual_blocked_actions_field: NotRequired[str]
     until_field: NotRequired[str]  # 可选 Unix 秒截止时间；到期仍等服务端状态同步
     diagram_group: NotRequired[str]  # 白板中的空间分组，不改变区域的运行语义
     node_radius: NotRequired[int]  # 白板坐标中的圆形节点半径

@@ -8,7 +8,7 @@ from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMeth
 from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API
 
 from cloud.go2.connection.fsm import Go2FSM, CommandBlocked
-from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, LED_COLORS, LED_DEFAULT_COLOR,
+from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, SPORT_COMMANDS, LED_COLORS, LED_DEFAULT_COLOR,
                                LED_DEFAULT_DURATION, LED_MAX_DURATION)
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
@@ -263,7 +263,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             self.runtime.commit('body_action_timeout', pending_action={**pending, 'phase': 'timeout'},
                                 last_action=terminal)
 
-    def _validate_motion(self, cmd: str, params: dict | None = None) -> str | None:
+    def _validate_motion(self, cmd: str, params: dict | None = None, *, dispatch_only=False) -> str | None:
         spec = ACTIONS.get(cmd)
         if spec is None:
             raise ValueError(f"Unknown command: {cmd}")
@@ -271,6 +271,13 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             raise ValueError("command params must be an object")
         if set(params or {}) - set(spec.parameter_keys):
             raise ValueError(f"Unsupported parameters for {cmd}")
+        if dispatch_only:
+            if cmd not in SPORT_COMMANDS or cmd == 'StopMove':
+                raise ValueError('dispatch_only requires a discrete body action')
+            reason = self.runtime.active_reason()
+            if reason:
+                raise CommandBlocked(reason)
+            return spec.execution_state or spec.expected_state
         if self.pending_action is not None and cmd != "StopMove":
             raise CommandBlocked("body_action_unconfirmed")
         if cmd != "StopMove":
@@ -302,9 +309,9 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
                 raise ValueError(f"{axis} velocity outside supported range (+/-{limit})")
 
     async def send_command(self, cmd: str, params: dict | None = None, *,
-                           completion_timeout: float | None = None) -> dict:
+                           completion_timeout: float | None = None, dispatch_only=False) -> dict:
         async with self._command_lock:
-            waiter, response = await self._send_command(cmd, params)
+            waiter, response = await self._send_command(cmd, params, dispatch_only=dispatch_only)
         spec = ACTIONS[cmd]
         packet = response.get("data") if isinstance(response, dict) else None
         header = packet.get("header") if isinstance(packet, dict) else None
@@ -317,8 +324,9 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
                         "confirmation_scope": "request"}
             return {"result": "accepted", "confirmation": "sport_rpc" if code == 0 else "transport",
                     "confirmation_scope": "request", "fsm_state": self.fsm_state,
+                    **({'dispatch_only': True} if dispatch_only else {}),
                     "target_state": spec.expected_state,
-                    "completion_supported": spec.completion == "joint_posture" and self._joint_observation_available,
+                    "completion_supported": not dispatch_only and spec.completion == "joint_posture" and self._joint_observation_available,
                     "pending_action": self.pending_action.copy() if self.pending_action else None,
                     "request_status_code": code}
         try:
@@ -344,16 +352,17 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             if not waiter.done():
                 waiter.cancel()
 
-    async def _send_command(self, cmd: str, params: dict | None):
+    async def _send_command(self, cmd: str, params: dict | None, *, dispatch_only=False):
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
-        next_state = self._validate_motion(cmd, params)
+        next_state = self._validate_motion(cmd, params, dispatch_only=dispatch_only)
         spec = ACTIONS[cmd]
         if cmd == "EnterMoveControl":
             self._move_control_active = True
             self.runtime.commit("remote_enter", control_mode="remote")
             return None, None
         source = self.fsm_state
+        source_confirmation = self.body_confirmation
         old_pending = self.pending_action
         self._finish_pending("cancelled", "superseded")
         self._completion = None
@@ -425,9 +434,17 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
                 self._action_observation = None
                 self.pending_action = old_pending
                 self.fsm_state = source
-                self.body_confirmation = "previous_observation"
+                self.body_confirmation = source_confirmation
             return None, response
         if body_action:
+            if dispatch_only:
+                # A manual button requests a device-native action. Receipt of
+                # the request ends this call; it does not prove a posture.
+                self._action_observation = None
+                self.runtime.finish_body_action(request_id, 'accepted', phase='dispatched',
+                                                confirmation='sport_rpc' if code == 0 else 'transport')
+                logger.info('[Go2/Conn] 手动命令已发送: %s request=%s code=%s', cmd, request_id, code)
+                return None, response
             observation = self._action_observation
             observation['acknowledged'] = True
             self.pending_action = {**self.pending_action,

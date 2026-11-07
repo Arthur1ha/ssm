@@ -96,13 +96,15 @@ function App({ session, logout, refreshSession }) {
     }
     return [...entries, row];
   };
-  const appendProcess = (requestId, agent, text, eventId) => {
+  const appendProcess = (requestId, agent, text, eventId, event = {}) => {
     if (!text) return;
     setActivityLog(prev => {
       if (prev.some(entry => entry.type === 'process' && entry.requestId === requestId
-        && entry.agent === agent && (eventId && entry.eventId === eventId || entry.text === text))) return prev;
+        && entry.agent === agent && (eventId && entry.eventId === eventId
+          || entry.text === text && entry.media_ref === event.media_ref))) return prev;
       return insertBeforeRequestEnd(prev, requestId,
-        { type: 'process', requestId, agent, text, eventId });
+        { type: 'process', requestId, agent, text, eventId,
+          media_ref: event.media_ref, taskId: event.task_id, stage: event.stage });
     });
   };
   const finishRequest = (requestId, text, eventId) => {
@@ -140,6 +142,12 @@ function App({ session, logout, refreshSession }) {
   useEffect(() => {
     const onEvent = event => {
       const item = event.detail || {};
+      if (item.type === 'agent_progress' && item.scope === 'space'
+          && item.source === 'object_search' && item.run_id) {
+        appendProcess(`search-${item.run_id}`, 'go2', processEventText(item), item.event_id,
+          { ...item, task_id: null });
+        return;
+      }
       if (item.type === 'peer_message' && item.message_id && item.text) {
         if (seenPeerMessages.current.has(item.message_id)) return;
         seenPeerMessages.current.add(item.message_id);
@@ -155,7 +163,7 @@ function App({ session, logout, refreshSession }) {
         const requestId = traceRequests.current.get(item.trace_id);
         if (requestId && completedRequests.current.has(requestId)) {
           appendProcess(requestId, item.target_unit_id || item.agent_id || 'cloud_orchestrator',
-            processEventText(item), item.event_id);
+            processEventText(item), item.event_id, item);
         }
         return;
       }
@@ -191,7 +199,7 @@ function App({ session, logout, refreshSession }) {
         if (event.stage === 'finished') return;
         appendProcess(requestId,
           event.target_unit_id || event.agent_id || 'cloud_orchestrator',
-          processEventText(event), event.event_id);
+          processEventText(event), event.event_id, event);
       },
       onStatus: msg => finishRequest(requestId, msg),
       onTraceId: (traceId, eventId) => {

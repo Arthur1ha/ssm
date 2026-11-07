@@ -151,7 +151,6 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
     from cloud.agents.common.runner import invoke_blocking
     from cloud.go2.connection import go2
     from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.perception.visual_lidar_navigate import accept_navigation_arrival
 
     message, messenger = event["message"], event["messenger"]
     source = str(event.get("source") or "")
@@ -257,18 +256,17 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         "视觉观察只能确认候选物可见，不能证明地图可达；"
         "无候选就如实结束；不要凭邀请、文字观察或模型回答宣称找到，"
         "不要使用盲走或坐标导航代替视觉目标导航。"
-        "本局以导航确认停稳到达地图停靠点为找到，不再要求到点后的视觉复检。"
+        "本局须导航确认停稳并重新观察同一目标，才算完成；缺少标定时如实报告发现但未到达。"
     )
     context = replace(drive._context,
                       expires_at=int(event["deadline"]))
-    with accept_navigation_arrival():
-        graph_task = asyncio.create_task(run_go2_loop(
-            "peer_" + event["message_id"], goal, context=context,
-            run_id=event["message_id"], deadline=event["deadline"],
-            allowed_tools=frozenset({"go2_observe", "go2_navigate_to_visible_target",
-                                     "get_space_context"}),
-            tool_guard=tool_guard, task_context=task_context, on_step=on_step,
-            publish_reply=False))
+    graph_task = asyncio.create_task(run_go2_loop(
+        "peer_" + event["message_id"], goal, context=context,
+        run_id=event["message_id"], deadline=event["deadline"],
+        allowed_tools=frozenset({"go2_observe", "go2_navigate_to_visible_target",
+                                 "get_space_context"}),
+        tool_guard=tool_guard, task_context=task_context, on_step=on_step,
+        publish_reply=False))
     graph_result = None
     stop_reason = None
     try:

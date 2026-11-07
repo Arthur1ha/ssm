@@ -102,6 +102,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         else:
             return {"result": "rejected", "error": "unknown_public_skill"}
 
+    await view.reconcile_interrupted(session_id)
     previous = view.get(run_id, session_id, require_head=resume) if run_id else None
     if previous and not resume:
         return _result(previous)
@@ -158,6 +159,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         return messages
 
     interaction_token = None
+    motion_unconfirmed = False
     runtime = runtime_for(go2)
     # Explicit read/life skills keep status lookup and wake reachable without
     # claiming an interaction. Other accepted Graph tasks own play until their
@@ -174,7 +176,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
 
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
-        nonlocal interaction_token
+        nonlocal interaction_token, motion_unconfirmed
         if name not in TOOL_REGISTRY:
             return {"result": "rejected", "error": "unknown_tool"}
         if allowed_tools is not None and name not in allowed_tools:
@@ -200,7 +202,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         if name == 'go2_life' and interaction_token is not None:
             runtime.finish_life(interaction_token)
             interaction_token = None
-        result = await execute_tool(name, arguments, context=context)
+        from cloud.agents.go2.workflows.search import search_request
+        with search_request(run.run_id, run.deadline):
+            result = await execute_tool(name, arguments, context=context)
+        if TOOL_REGISTRY[name].motion:
+            motion_unconfirmed = (result.get("result") in {"accepted", "executing", "unknown", "timeout"}
+                                  or result.get("reason") == "stop_unconfirmed")
         if name in {"go2_sport", "go2_move", "go2_set_led", "go2_observe"}:
             result = {**result, "device_connected": bool(go2.is_connected),
                       "device_fsm": getattr(go2, "fsm_state", None)}
@@ -340,12 +347,17 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 on_step=on_step, on_progress=progress,
                 effectful=lambda name: name not in READ_ONLY_TOOLS,
                 initial_tool=initial_tool, resume=resume,
-                terminal_tools=frozenset({"go2_navigate_to_visible_target"}),
+                terminal_tools=frozenset({"go2_navigate_to_visible_target", "go2_find_object"}),
                 resume_value=message if resume else None, checkpointer=view.checkpointer)
+        except asyncio.CancelledError:
+            progress_closed.set()
+            await view.reconcile_interrupted(session_id, cancelled=run)
+            raise
         finally:
             if interaction_token is not None:
                 go2.runtime.finish_life(interaction_token)
-            if context.origin_kind != 'agent_autonomous':
+            if (context.origin_kind != 'agent_autonomous' and not motion_unconfirmed
+                    and not asyncio.current_task().cancelling()):
                 from cloud.go2.mode.free_explore import drive
                 drive.resume_after_user()
 

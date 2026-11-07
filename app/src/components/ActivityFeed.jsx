@@ -90,7 +90,8 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
           const finished = entries.some(item => item.requestId === e.requestId
             && item.type === 'ai' && item.final);
           const latest = e.items[e.items.length - 1];
-          return <details key={`process-${e.requestId}-${i}`} className="run-process-summary">
+          return <details key={`process-${e.requestId}-${i}`} className="run-process-summary"
+            open={!finished && latest.stage?.startsWith('search_') ? true : undefined}>
             <summary>
               <span className="run-process-summary__marker" aria-hidden="true"/>
               <span className="run-process-summary__text">{finished
@@ -102,7 +103,11 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
                 className="run-process-summary__item">
                 <span>{getName(item.agent || 'cloud_orchestrator')}</span>
                 <p>{item.text}</p>
+                {activityMediaUrl(item) && <img src={activityMediaUrl(item)} alt="搜索观察照片"
+                  loading="lazy" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8 }}/>}
               </div>)}
+              {!finished && latest.taskId && latest.stage?.startsWith('search_')
+                && latest.stage !== 'search_finished' && <SearchTaskStop taskId={latest.taskId}/>}
             </div>
           </details>;
         }
@@ -210,6 +215,27 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
 }
 
 window.ActivityFeed = ActivityFeed;
+
+function SearchTaskStop({ taskId }) {
+  const [pending, setPending] = React.useState(false);
+  const [message, setMessage] = React.useState('');
+  const stop = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const result = await apiClient.request(`/api/commands/go2/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+      setMessage(result.result === 'cancelled' ? '搜索已取消，设备已确认停止'
+        : '已请求停止，尚未确认设备停稳');
+    } catch (error) {
+      setMessage(apiErrorText(error, '停止请求未确认，请使用设备急停'));
+    } finally {
+      setPending(false);
+    }
+  };
+  return <div><button type="button" disabled={pending} onClick={stop}>
+    {pending ? '正在请求停止…' : '停止搜索'}</button>
+    {message && <p role="status">{message}</p>}</div>;
+}
 
 function activityMediaUrl(event) {
   const candidate = event.media_ref || event.media_url;

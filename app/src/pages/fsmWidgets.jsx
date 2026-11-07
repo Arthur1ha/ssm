@@ -359,6 +359,7 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
   const VirtualJoystick = window.VirtualJoystick;
   const VideoCanvas = window.VideoCanvas;
   const MapWidget = window.MapWidget;
+  const MediaWidget = window.MediaWidget;
 
   // 只渲染当前状态匹配的 widget（states 为空=全程显示）
   const active = widgets.filter(w => !w.states || !w.states.length || w.states.includes(state));
@@ -376,13 +377,11 @@ function fsmWidget(unitId, state, widgets, report = () => {}, actor = 'visitor',
       return <JoystickControls key={'joy' + idx} unitId={unitId} widget={w} report={report}
         liveState={liveState} connected={onlineConnection}/>;
     }
-    if (w.type === 'video' && VideoCanvas && w.endpoint?.startsWith('/api/')) {
+    if (w.type === 'video' && VideoCanvas && MediaWidget && w.endpoint?.startsWith('/api/')) {
       return (
-        <div key={'cam' + idx} className="device-state-video" style={{ aspectRatio: '16/9', background: '#0a0c14',
-          border: '1px solid var(--color-accent-border)', borderRadius: 'var(--radius-sm)',
-          overflow: 'hidden' }}>
+        <MediaWidget key={'cam' + idx} label="视频" title="实时视频" ready={onlineConnection} emptyText="等待视频连接">
           <VideoCanvas connected={onlineConnection} endpoint={w.endpoint}/>
-        </div>
+        </MediaWidget>
       );
     }
     if (w.type === 'map' && MapWidget && w.endpoint?.startsWith('/api/')) {

@@ -185,6 +185,34 @@ async def go2_avoidance_switch(context=Depends(require_admin_read)):
         raise HTTPException(status_code=503, detail="avoidance switch status unavailable") from exc
 
 
+class NavigationRecordingRequest(BaseModel):
+    duration_s: float = 10.0
+
+
+_navigation_recording_active = False
+
+
+@router.post("/diagnostics/navigation-recording")
+async def navigation_recording(req: NavigationRecordingRequest,
+                               context: ExecutionContext = Depends(require_service_context)):
+    """Record observations only; this endpoint never starts or stops movement."""
+    from cloud.go2.connection.recording import record_navigation
+    global _navigation_recording_active
+    if context.actor != "admin" or not context.persist:
+        raise HTTPException(status_code=403, detail="administrator persistence required")
+    if not 0 < req.duration_s <= 60 or context.expires_at < time.time() + req.duration_s:
+        raise HTTPException(status_code=400, detail="invalid recording duration or expiry")
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail="Go2 not connected")
+    if _navigation_recording_active:
+        raise HTTPException(status_code=409, detail="recording already active")
+    _navigation_recording_active = True
+    try:
+        return await record_navigation(go2, req.duration_s)
+    finally:
+        _navigation_recording_active = False
+
+
 @router.get("/video")
 async def go2_video(context=Depends(require_authenticated_read)):
     if not go2.is_connected:
@@ -268,6 +296,7 @@ class VelocityRequest(BaseModel):
 @router.post("/commands")
 async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.tools.executor import execute_command_request
+    from cloud.go2.actions import SPORT_COMMANDS
     cmd = req.action or req.cmd
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
@@ -275,7 +304,9 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     try:
         result = await execute_command_request(cmd, req.params, context=context,
                                               request_id=req.request_id, trace_id=req.trace_id,
-                                              deadline=req.deadline)
+                                              deadline=req.deadline,
+                                              dispatch_only=(context.origin_kind == 'user_delegated'
+                                                             and cmd in SPORT_COMMANDS and cmd != 'StopMove'))
     except ValueError as exc:
         raise HTTPException(status_code=409 if str(exc) == "effect_call_id_conflict" else 400,
                             detail=str(exc)) from exc
@@ -342,22 +373,15 @@ class ChatRequest(BaseModel):
 async def _stop_task_motion(context: ExecutionContext) -> dict:
     """Stop only motion still owned by this task's trusted session."""
     lease = control_lease.snapshot()
-    if lease is None:
-        return {"result": "ok", "message": "no_active_motion_lease"}
-    if lease.owner_session_id != context.session_id:
+    if lease is not None and lease.owner_session_id != context.session_id:
         return {"result": "accepted", "error": "control_lease_transferred",
                 "owner_session_id": lease.owner_session_id}
     from cloud.go2.navigation.navigator import navigator
     try:
-        navigator.stop(owner_session_id=context.session_id)
+        result = await navigator.stop_and_confirm(owner_session_id=context.session_id)
     except Exception as exc:
-        logging.warning("[Go2/Task] navigator stop failed: %s", exc)
-    if not go2.is_connected:
-        return {"result": "accepted", "error": "device_disconnected"}
-    try:
-        result = await go2.send_command("StopMove")
-    except Exception as exc:
-        return {"result": "accepted", "error": str(exc)}
+        logging.warning("[Go2/Task] stop confirmation failed: %s", type(exc).__name__)
+        return {"result": "accepted", "error": "stop_unconfirmed"}
     return result if isinstance(result, dict) else {"result": "accepted", "error": "stop_unconfirmed"}
 
 
@@ -374,7 +398,9 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         from cloud.go2.tasks import chat_tasks
         if not req.task_id or len(req.task_id) > 128:
             raise HTTPException(status_code=400, detail="invalid task_id")
-        deadline = req.deadline if req.deadline is not None else time.time() + (180 if req.skill_id == "go2_visual_navigate" else 45)
+        from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
+        default_timeout = SEARCH_SERVER_TIMEOUT_S if req.skill_id == "go2_find_object" else 180 if req.skill_id == "go2_visual_navigate" else 45
+        deadline = req.deadline if req.deadline is not None else time.time() + default_timeout
         if not isinstance(deadline, (int, float)) or not time.time() < deadline <= time.time() + 300:
             raise HTTPException(status_code=400, detail="invalid deadline")
         if not 0 <= req.sync_window_s <= 30:
@@ -444,7 +470,21 @@ async def go2_task_cancel(task_id: str, context: ExecutionContext = Depends(requ
     context = _normalize_context(context)
     record = chat_tasks.get(task_id, context.session_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        from cloud.agents.go2.graph import get_store, _result
+
+        view = get_store()
+        async with view.index.async_session_lock("go2", context.session_id):
+            run = view.get(task_id, context.session_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="task not found")
+            if run.status in {"executing", "needs_clarification"}:
+                recovered = await view.reconcile_interrupted(context.session_id, cancelled=run)
+                if recovered is None:
+                    # An older non-head checkpoint cannot cancel a newer run.
+                    return {**_result(run), "result": "unknown", "task_id": task_id,
+                            "error": "historical_run_unconfirmed"}
+                run = recovered
+            return {**_result(run), "task_id": task_id}
 
     return await chat_tasks.cancel(record, lambda: _stop_task_motion(context))
 
@@ -700,6 +740,44 @@ async def nav_state(context=Depends(require_authenticated_read)):
     from cloud.go2.navigation.navigator import navigator
     s = navigator.state
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
+
+
+class SearchScopeRequest(BaseModel):
+    session_id: str
+    bounds: tuple[float, float, float, float] | None = None
+    mode: str = "bounded"
+
+
+@router.get("/navigation/search-scope")
+async def search_scope_state(context=Depends(require_admin_read)):
+    from cloud.agents.go2.workflows.search import configured_search_scope
+    scope = configured_search_scope()
+    session = getattr(go2, "_odom_session_id", None)
+    return {"scope": scope, "session_id": session, "pose": go2.odom,
+            "valid": bool(go2.is_connected and scope and scope.get("session_id") == session)}
+
+
+@router.put("/navigation/search-scope")
+async def set_search_scope(req: SearchScopeRequest,
+                           context: ExecutionContext = Depends(require_service_context)):
+    from cloud.agents.go2.workflows.search import configure_search_scope
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.state import runtime_for
+    if context.actor != "admin" or context.origin_kind != "user_delegated":
+        raise HTTPException(status_code=403, detail="administrator permission required")
+    if context.expires_at <= time.time():
+        raise HTTPException(status_code=403, detail="session expired")
+    if not go2.is_connected or req.session_id != getattr(go2, "_odom_session_id", None):
+        raise HTTPException(status_code=409, detail="search_scope_session_mismatch")
+    runtime = runtime_for(go2)
+    if (navigator.owner_session_id or go2.fsm_state == "moving"
+            or runtime and runtime.data["life_state"] not in {"idle", "rest"}):
+        raise HTTPException(status_code=409, detail="stop_active_task_before_configuring_scope")
+    try:
+        configure_search_scope(req.bounds, req.session_id, mode=req.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"result": "ok", "session_id": req.session_id, "bounds": req.bounds, "mode": req.mode}
 
 
 @router.get("/navigation/tasks/{task_id}")
@@ -960,34 +1038,41 @@ async def go2_map_debug(context=Depends(require_admin_read)):
             return obj.item()
         return obj
 
-    try:
-        grid_obj = getattr(go2, "occupancy_grid", None)
-        from cloud.go2.navigation.occupancy_grid import PATH_CLEARANCE_M, TURN_CLEARANCE_M
-        grid_summary = ({"floor_z": grid_obj.measured_floor_z,
-                         "has_free_space_evidence": grid_obj.has_free_space_evidence,
-                         "free_cells": int(np.count_nonzero(grid_obj.cells == 1)),
-                         "unknown_cells": int(np.count_nonzero(grid_obj.cells == 0)),
-                         "occupied_cells": int(np.count_nonzero(grid_obj.cells == 2)),
-                         "raw_obstacle_cells": int(np.count_nonzero(grid_obj.obstacles)),
-                         "inflated_only_cells": int(np.count_nonzero(
-                             (grid_obj.cells == 2) & ~grid_obj.obstacles)),
-                         "path_clearance_m": PATH_CLEARANCE_M,
-                         "turn_clearance_m": TURN_CLEARANCE_M}
-                        if grid_obj is not None else None)
-        odom = getattr(go2, "odom", None)
-        if grid_summary is not None and odom and grid_obj.has_free_space_evidence:
-            from cloud.go2.navigation.frontier import (
-                find_frontier_target, raycast_directions, reachable_summary,
-            )
-            grid_summary["reachable_directions_m"] = raycast_directions(grid_obj, odom)
-            grid_summary.update(reachable_summary(grid_obj, odom))
-            grid_summary["frontier_target"] = find_frontier_target(grid_obj, odom)
-            grid_summary["body_clear"] = grid_obj.is_body_clear(
-                odom["x"], odom["y"], odom.get("heading", 0.0))
-    except (ValueError, TypeError):
-        grid_summary = None
-    return {"diagnostics": _summarize(go2.sensor_diagnostics),
-            "voxel": _summarize(raw), "grid": grid_summary}
+    # Capture immutable map/pose and freshness together, before expensive work.
+    grid_obj = go2.occupancy_grid
+    odom = go2.odom
+    diagnostics = _summarize(go2.sensor_diagnostics)
+
+    def build_grid_summary():
+        try:
+            from cloud.go2.navigation.occupancy_grid import PATH_CLEARANCE_M, TURN_CLEARANCE_M
+            grid_summary = ({"floor_z": grid_obj.measured_floor_z,
+                             "has_free_space_evidence": grid_obj.has_free_space_evidence,
+                             "free_cells": int(np.count_nonzero(grid_obj.cells == 1)),
+                             "unknown_cells": int(np.count_nonzero(grid_obj.cells == 0)),
+                             "occupied_cells": int(np.count_nonzero(grid_obj.cells == 2)),
+                             "raw_obstacle_cells": int(np.count_nonzero(grid_obj.obstacles)),
+                             "inflated_only_cells": int(np.count_nonzero(
+                                 (grid_obj.cells == 2) & ~grid_obj.obstacles)),
+                             "path_clearance_m": PATH_CLEARANCE_M,
+                             "turn_clearance_m": TURN_CLEARANCE_M}
+                            if grid_obj is not None else None)
+            if grid_summary is not None and odom and grid_obj.has_free_space_evidence:
+                from cloud.go2.navigation.frontier import (
+                    find_frontier_target, raycast_directions, reachable_summary,
+                )
+                grid_summary["reachable_directions_m"] = raycast_directions(grid_obj, odom)
+                grid_summary.update(reachable_summary(grid_obj, odom))
+                grid_summary["frontier_target"] = find_frontier_target(grid_obj, odom)
+                grid_summary["body_clear"] = grid_obj.is_body_clear(
+                    odom["x"], odom["y"], odom.get("heading", 0.0))
+        except (ValueError, TypeError):
+            grid_summary = None
+        return grid_summary
+
+    from cloud.agents.common.runner import invoke_blocking
+    grid_summary = await invoke_blocking(build_grid_summary)
+    return {"diagnostics": diagnostics, "voxel": _summarize(raw), "grid": grid_summary}
 
 
 @router.get("/diagnostics/rgb-lidar/capture")
@@ -995,7 +1080,7 @@ async def capture_rgb_lidar_target(target: str, context=Depends(require_admin_re
     """Capture a named target and its paired 3D voxel sample without moving Go2."""
     from cloud.observability import bind_context
     from cloud.go2.perception.rgb_lidar import save_paired_sample
-    from cloud.go2.perception.visual_approach import _save_diagnostic_frame
+    from cloud.go2.perception.visual_target import save_diagnostic_frame
     from cloud.go2.perception.visual_target import detect_visible_target
 
     if not target.strip() or len(target) > 100:
@@ -1011,7 +1096,7 @@ async def capture_rgb_lidar_target(target: str, context=Depends(require_admin_re
     session_id = (context.session_id if isinstance(context, ExecutionContext)
                   else context.get("session_id") if isinstance(context, dict) else None)
     with bind_context(session_id=session_id):
-        image_path = _save_diagnostic_frame(jpeg, frame)
+        image_path = save_diagnostic_frame(jpeg, frame)
         observation = await detect_visible_target(jpeg, target, frame)
         sample_path = save_paired_sample(image_path, frame, voxel, voxel_received_at,
                                          observation.get("bbox_1000"))

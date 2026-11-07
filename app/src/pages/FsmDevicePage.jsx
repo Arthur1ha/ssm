@@ -261,13 +261,19 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
 
   /* ── 派发 FSM 转移 ── */
   const dispatchTransition = async t => {
-    if (offline || (stateHealth === 'reconnecting' || controlPending.current) && !t?.safety) return;
+    if (offline) { setExecution('设备未连接，暂不能执行动作'); return; }
+    if (!t?.safety && stateHealth === 'reconnecting') {
+      setExecution('状态连接正在恢复，等待最新状态'); return;
+    }
+    if (!t?.safety && controlPending.current) {
+      setExecution('正在等待本次执行结果，请勿重复操作'); return;
+    }
     if (!t?.action) {
       setExecution(t?.hint || '当前状态不允许这个动作');
       return;
     }
     if (!t.safety) { controlPending.current = true; setControlBusy(true); }
-    setExecution('正在等待设备执行反馈…');
+    setExecution(t.dispatch_only ? '正在发送指令…' : '正在等待设备执行反馈…');
     try {
       const result = await commandBus.command(unitId, t.action, t.params || {});
       reportExecution(result);
@@ -383,13 +389,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>
       </div>
 
-      {execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
+      {!cardLoaded && execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
         <div className="device-state-workspace device-state-workspace--shared">
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
-            actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth}
+            actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth} feedback={execution}
             onTransition={dispatchTransition} report={reportExecution}/>
         </div>
       )}

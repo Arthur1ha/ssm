@@ -61,12 +61,21 @@ async function checkCommandResults() {
     assert.equal(result.result,outcome,`Compatibility accepted flag replaced ${outcome}`);
   }
   let waits=0;
+  const waitForLampTask = sandbox.bus.waitForLampTask.bind(sandbox.bus);
+  assert.equal((await waitForLampTask('esp32_desk_led','missing-receipt',0)).result,'timeout',
+    'Missing physical receipt must not be reported as still executing after the deadline');
+  sandbox.apiClient.request = (_path, {signal}) => new Promise((_resolve, reject) =>
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name:'AbortError'}))));
+  assert.equal((await waitForLampTask('esp32_desk_led','stalled-query',20)).result,'timeout',
+    'A stalled receipt query must have a bounded wait');
+  sandbox.apiClient.request = async () => payload;
   sandbox.bus.waitForLampTask = async () => { waits++; return {result:'ok'}; };
   payload = {accepted:true,status:'dispatched',result:'accepted',task_id:'task_new'};
   assert.equal((await sandbox.bus.command('esp32_desk_led','BLINK',{count:2})).result,'ok');
   assert.equal(waits,1,'New lamp dispatch stopped waiting for physical completion');
   payload = {accepted:true};
   assert.equal((await sandbox.bus.command('esp32_desk_led','OFF')).result,'accepted');
+  assert.equal(sandbox.bus.describe({result:'accepted',dispatch_only:true}), '指令已发送');
   console.log('PASS: explicit command outcomes survive legacy accepted flags; new lamp dispatch still waits for its result.');
 }
 
@@ -246,6 +255,8 @@ async function checkInteractions() {
     for (const name of files) await page.addScriptTag({ content: compile(name) });
     await page.addScriptTag({ content: `window.__velocitySchema=${JSON.stringify(velocitySchema)};window.__lampCard=${JSON.stringify(lampCard)};window.__sm=${JSON.stringify(sm)};
       window.__state={state_schema_version:2,epoch:'a',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',body_confirmation:'observed',control_mode:'normal',autonomy_mode:'manual',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore']};
+      window.__manualCommands=__sm.regions.find(region=>region.id==='body').transitions.filter(t=>t.dispatch_only).map(t=>t.action);
+      __state.available_manual_actions=__manualCommands;
       window.__card={unit_id:'go2',device_id:'go2',name:'Go2 机器狗',agent_type:'robot',_online:true,state_machine:__sm,transport:{state_stream:'/api/go2/connection/stream'},widgets:[],modes:[],skills:[]};
       const appRoot=ReactDOM.createRoot(document.getElementById('root'));
       window.__renderState=(next,card=__card,actor='admin')=>{__state=next;appRoot.render(React.createElement(FsmDevicePage,{unitId:card.unit_id,device:card,liveState:{state:next},actor,onBack(){}}));};
@@ -302,31 +313,55 @@ async function checkInteractions() {
     const assertMediaWindow = async selector => {
       assert.equal(await page.$eval(selector,node=>{
         const r=node.getBoundingClientRect();
-        return r.left>=8 && r.right<=innerWidth-8 && r.top>=52 && r.height<innerHeight*.6
-          && r.width>200 && node.getAttribute('aria-modal')==='false' && !document.fullscreenElement;
-      }),true,'Media enlargement should be a bounded non-modal window');
-      assert.equal(await page.$$('.map-viewer__backdrop').then(nodes=>nodes.length),0);
+        return r.left>=8 && r.right<=innerWidth-8 && r.top>=8 && r.bottom<=innerHeight-8
+          && Math.abs(r.left+r.width/2-innerWidth/2)<2 && Math.abs(r.top+r.height/2-innerHeight/2)<2
+          && r.width>200 && node.getAttribute('aria-modal')==='true' && node.matches(':modal');
+      }),true,'Both media viewers must be centered and contained in the viewport');
+      assert.equal(await page.$eval(`${selector} .device-media-viewer__image`,node=>{
+        const media=node.querySelector('img,canvas');
+        return media && getComputedStyle(media).objectFit==='contain';
+      }),true,'Expanded media must keep its aspect ratio');
     };
     assert.equal(await page.$$('.device-whiteboard__media-tile').then(nodes=>nodes.length),2);
     assert.equal(await page.$$eval('.device-whiteboard__media-tile',nodes=>nodes.every(node=>node.getBoundingClientRect().height<=90)),true,'Media too tall on a phone');
-    await page.waitForSelector('.map-widget__thumb img');
-    const mapThumbnailLeft=await page.$eval('.map-widget__thumb',node=>node.getBoundingClientRect().left);
-    await page.tap('.map-widget__thumb');
-    await page.waitForSelector('[role="dialog"][aria-label="导航地图"]');
-    await assertMediaWindow('.map-viewer');
-    await page.focus('[aria-label="设备对话"]');
-    assert.equal(await page.$eval('[aria-label="设备对话"]',node=>document.activeElement===node),true,'Map window blocked the conversation');
-    await page.screenshot({path:'/tmp/ssm-map-window.png'});
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(()=>!document.querySelector('[role="dialog"][aria-label="导航地图"]'));
-    await page.tap('[aria-label="放大视频"]');
-    await page.waitForSelector('[role="dialog"][aria-label="实时视频"]');
-    await assertMediaWindow('.device-whiteboard__media-tile.is-expanded');
-    assert.equal(await page.$eval('.map-widget__thumb',node=>node.getBoundingClientRect().left),mapThumbnailLeft,'Expanding video moved the map thumbnail');
-    await page.focus('[aria-label="设备对话"]');
-    await page.screenshot({path:'/tmp/ssm-video-window.png'});
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(()=>!document.querySelector('[role="dialog"][aria-label="实时视频"]'));
+    await page.waitForSelector('[aria-label="放大地图"] img');
+    for (const [width,height] of [[390,844],[1440,1000],[844,390]]) {
+      await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+      const thumbnailBounds=await page.$$eval('.device-whiteboard__media-tile',nodes=>nodes.map(node=>{
+        const r=node.getBoundingClientRect();return [r.x,r.y,r.width,r.height];
+      }));
+      let viewerWidth;
+      for (const [label,title,file] of [['地图','导航地图','map'],['视频','实时视频','video']]) {
+        const trigger=`[aria-label="放大${label}"]`;
+        const dialog=`.device-media-viewer[aria-label="${title}"]`;
+        await page.tap(trigger);
+        await page.waitForSelector(dialog);
+        await assertMediaWindow(dialog);
+        const actualWidth=await page.$eval(dialog,node=>node.getBoundingClientRect().width);
+        if (viewerWidth) assert.equal(actualWidth,viewerWidth,'Video and map use different viewer widths');
+        viewerWidth=actualWidth;
+        await page.focus('[aria-label="设备对话"]');
+        assert.equal(await page.$eval(dialog,node=>node.contains(document.activeElement)),true,'Media dialog lost focus to background');
+        await page.click(`${dialog} .device-media-viewer__image`);
+        assert.equal(await page.$(dialog)!==null,true,'Clicking media closed the viewer');
+        if(width===390) await page.screenshot({path:`/tmp/ssm-${file}-centered.png`});
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(()=>!document.querySelector('.device-media-viewer'));
+        assert.equal(await page.$eval(trigger,node=>document.activeElement===node),true,'Closing did not restore thumbnail focus');
+        await page.tap(trigger);
+        await page.waitForSelector(dialog);
+        await page.tap(`[aria-label="关闭${label}"]`);
+        await page.waitForFunction(()=>!document.querySelector('.device-media-viewer'));
+        await page.tap(trigger);
+        await page.waitForSelector(dialog);
+        await page.touchscreen.tap(4,4);
+        await page.waitForFunction(()=>!document.querySelector('.device-media-viewer'));
+      }
+      assert.deepEqual(await page.$$eval('.device-whiteboard__media-tile',nodes=>nodes.map(node=>{
+        const r=node.getBoundingClientRect();return [r.x,r.y,r.width,r.height];
+      })),thumbnailBounds,'Opening media changed thumbnail layout');
+    }
+    await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
     const connectorPoint=await page.$eval('.fsm-whiteboard__viewport',svg=>{
       const point=svg.createSVGPoint();point.x=195;point.y=398;
       const screen=point.matrixTransform(svg.getScreenCTM());return {x:screen.x,y:screen.y};
@@ -351,9 +386,13 @@ async function checkInteractions() {
     await page.keyboard.press('Enter');
     await page.waitForSelector('[aria-label="转换说明"]');
     assert.equal(await page.evaluate(()=>__calls.length),beforeInspect,'Edge inspection sent a command');
+    await page.click('[aria-label="转换说明"] .btn');
+    await page.waitForFunction(before => __calls.length === before + 1, {}, beforeInspect);
+    assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Sit','Explicit edge action lost its declared command');
+    await page.waitForFunction(()=>document.querySelector('.device-state-board').getAttribute('aria-busy')==='false');
     await closeExplanation();
     await page.tap('.fsm-whiteboard__node[data-state="body:standing"]');
-    assert.equal(await page.evaluate(()=>__calls.length),beforeInspect,'Current state click repeated a command');
+    assert.equal(await page.evaluate(()=>__calls.length),beforeInspect+1,'Current state click repeated a command');
     await closeExplanation();
     await page.evaluate(()=>{__calls=[];});
     const originalTransform=await page.$eval('.fsm-whiteboard__viewport > g',node=>node.getAttribute('transform'));
@@ -471,6 +510,13 @@ async function checkInteractions() {
     assert.equal(await page.evaluate(()=>__velocities.at(-1).params.vx),0);
     await page.tap('[aria-label="白板全屏"]');
     await page.waitForSelector('.device-whiteboard.is-expanded');
+    await page.tap('[aria-label="放大视频"]');
+    await page.waitForSelector('.device-media-viewer');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>!document.querySelector('.device-media-viewer'));
+    assert.equal(await page.$('.device-whiteboard.is-expanded')!==null,true,'Closing video also closed the board');
+    assert.equal(await page.$eval('.device-whiteboard.is-expanded .device-whiteboard__feedback',
+      node=>node.textContent.includes('指令已发送')),true,'Fullscreen hid command feedback');
     await page.keyboard.press('Escape');
     await page.waitForFunction(()=>!document.querySelector('.device-whiteboard.is-expanded'));
     for(const [width,height] of [[1440,1000],[768,1024],[360,740]]){
@@ -524,6 +570,21 @@ async function checkInteractions() {
       }
     }
     await closeExplanation();
+    await page.evaluate(()=>__renderState({epoch:'receipt-check',revision:1,connected:true,
+      connection_state:'online',activity_state:'active',life_state:'idle',body_state:null,
+      body_telemetry_fresh:false,available_manual_actions:__manualCommands,
+      pending_action:null,last_action:null,available_actions:['StopMove']}));
+    await page.waitForFunction(()=>document.querySelector('.device-whiteboard__feedback')?.textContent.includes('手动动作仍可发送'));
+    await clickNode('body:sitting');
+    assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Sit','Missing posture blocked manual dispatch');
+    await clickNode('body:greeting');
+    assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Hello','Next manual action waited for posture feedback');
+    await closeExplanation();
+    await page.evaluate(()=>__renderState({...__state,revision:2,body_state:'standing',pending_action:null,
+      last_action:{command:'Hello',phase:'completed',result:'ok'}}));
+    await page.waitForFunction(()=>document.querySelector('.device-whiteboard__feedback')?.textContent.includes('挥手 · 已完成'));
+    assert.equal(await page.$$('.fsm-whiteboard__edge.is-running').then(nodes=>nodes.length),0,
+      'A completed receipt must not animate as a running command');
     await page.evaluate(()=>{
       const machine={state_field:'position',connection_field:'attached',primary_region:'mechanism',regions:[{id:'mechanism',label:'位置',state_field:'position',states:['open','closed'],views:{open:{label:'打开'},closed:{label:'关闭'}},available_actions_field:'allowed',blocked_actions_field:'reasons',transitions:[{src:'open',dst:'closed',trigger:'close',action:'SET_POSITION',availability_key:'close',label:'关闭'}]}]};
       __renderState({position:'open',attached:true,allowed:['close'],ts:2},{unit_id:'generic',name:'设备',_online:true,state_machine:machine,transport:{},widgets:[],modes:[],skills:[]});
@@ -548,7 +609,7 @@ async function checkInteractions() {
       if(height===844) await page.screenshot({path:'/tmp/go2-whiteboard-mobile.png',fullPage:true});
     }
     assert.deepEqual(errors,[]);
-    console.log('PASS: all state nodes inside the viewport, bounded video/map windows, contextual dual joystick entry/exit and combined touch axes, current/retained facts, compact default media, video/fullscreen dismissal, target state commands and edge explanations, pan/pinch/zoom/reset, duplicate guard, original LIFE/command payloads, permissions, stale/offline gating and safety, keyboard joystick, lamp color/settings, generic Cards, SSE ordering, responsive phone/tablet/desktop.');
+    console.log('PASS: centered shared video/map dialogs, matching close/backdrop/Escape behavior and focus restoration, portrait/landscape/desktop media sizing, all state nodes inside the viewport, contextual dual joystick, target state commands, edge explanations, pan/pinch/zoom/reset, duplicate guard, permissions, stale/offline gating and safety, lamp controls, SSE ordering, responsive layouts.');
     console.log('Screenshots: /tmp/go2-whiteboard-{mobile,rest-mobile,desktop}.png, /tmp/ssm-whiteboard-lamp-mobile.png');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

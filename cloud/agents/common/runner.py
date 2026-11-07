@@ -71,14 +71,14 @@ async def _await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-async def invoke_blocking(callback, *args):
+async def invoke_blocking(callback, *args, **kwargs):
     """Run a synchronous adapter without blocking the graph or losing trace context."""
     outcome: Future = Future()
     context = contextvars.copy_context()
 
     def run():
         try:
-            outcome.set_result(context.run(callback, *args))
+            outcome.set_result(context.run(callback, *args, **kwargs))
         except BaseException as exc:
             outcome.set_exception(exc)
 

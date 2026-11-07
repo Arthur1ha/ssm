@@ -24,6 +24,27 @@ tests/
 test_*.py
 *_test.py
 
+# Go2 exploration/search regression suites and migrated visual evidence tests
+!cloud/go2/tests/
+!cloud/go2/tests/test_session_map.py
+!cloud/go2/tests/test_observation_selection.py
+!cloud/go2/tests/test_rgb_lidar.py
+!cloud/go2/tests/test_visual_target.py
+!cloud/go2/tests/test_visual_evidence.py
+!cloud/go2/tests/test_target_navigation_regressions.py
+!cloud/go2/tests/test_search_interfaces.py
+!cloud/go2/tests/test_target_approach.py
+!cloud/go2/tests/test_frontier.py
+!cloud/go2/tests/test_navigation_safety.py
+!cloud/go2/tests/test_recording.py
+!cloud/go2/tests/test_access_control.py
+!cloud/go2/tests/test_task_recovery.py
+!cloud/agents/go2/tests/
+!cloud/agents/go2/tests/test_search.py
+!cloud/agents/go2/tests/test_interrupted_run.py
+!cloud/agents/go2/tests/test_graph_entry.py
+!cloud/agents/go2/tests/test_run_view.py
+
 # 运行时数据，不纳入版本控制
 *.db
 *.sqlite
@@ -49,6 +70,8 @@ docs/superpowers/specs/*
 !docs/superpowers/plans/
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-11-07-trainable-device-state-machines.md
+!docs/superpowers/plans/2026-11-07-go2-minimal-exploration-object-search.md
+!docs/superpowers/plans/2026-11-07-go2-search-implementation.md
 !docs/superpowers/plans/2026-10-27-space-activity-lifecycle.md
 !docs/superpowers/plans/2026-10-27-personality-driven-peer-interaction.md
 !docs/superpowers/plans/2026-10-28-go2-navigation-closed-loop.md

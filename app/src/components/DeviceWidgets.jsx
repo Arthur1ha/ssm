@@ -1,3 +1,51 @@
+/* One viewer for both live media types; the native dialog owns focus and Escape. */
+function MediaWidget({ label, title, ready = true, emptyText, children, footer }) {
+  const { useState, useRef, useEffect } = React;
+  const [expanded, setExpanded] = useState(false);
+  const triggerRef = useRef(null);
+  const dialogRef = useRef(null);
+  const closeRef = useRef(null);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const dialog = dialogRef.current;
+    dialog.showModal();
+    closeRef.current?.focus();
+    return () => {
+      dialog.close();
+      if (triggerRef.current?.isConnected) triggerRef.current.focus();
+    };
+  }, [expanded]);
+
+  return <>
+    <button ref={triggerRef} type="button" className="device-media__thumb"
+      onClick={() => setExpanded(true)} disabled={!ready}
+      aria-label={ready ? `放大${label}` : emptyText} aria-haspopup="dialog" aria-expanded={expanded}>
+      {!expanded && children}
+      <span className="device-media__label">{label}</span>
+      {ready && <span className="device-media__expand" aria-hidden="true">↗</span>}
+    </button>
+    {expanded && ReactDOM.createPortal(
+      <dialog ref={dialogRef} className="device-media-viewer" role="dialog" aria-label={title} aria-modal="true"
+        onCancel={event => { event.preventDefault(); setExpanded(false); }}
+        onClose={() => setExpanded(false)}
+        onClick={event => {
+          if (event.target !== event.currentTarget) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          if (event.clientX < rect.left || event.clientX > rect.right
+              || event.clientY < rect.top || event.clientY > rect.bottom) setExpanded(false);
+        }}>
+        <header className="device-media-viewer__header">
+          <strong>{title}</strong>
+          <button ref={closeRef} type="button" aria-label={`关闭${label}`} onClick={() => setExpanded(false)}>×</button>
+        </header>
+        <div className="device-media-viewer__image">{children}</div>
+        {footer}
+      </dialog>, document.body,
+    )}
+  </>;
+}
+
 function VideoCanvas({ connected, endpoint = '/api/go2/video' }) {
   const { useRef, useEffect } = React;
   const canvasRef  = useRef(null);
@@ -35,16 +83,13 @@ function VideoCanvas({ connected, endpoint = '/api/go2/video' }) {
 
   return React.createElement("canvas", {
     ref: canvasRef, width: 640, height: 360,
-    style: { width: "100%", height: "100%", display: "block" },
+    style: { width: "100%", height: "100%", display: "block", objectFit: "contain" },
   });
 }
 
 function MapWidget({ connected, endpoint }) {
-  const { useEffect, useRef, useState } = React;
+  const { useEffect, useState } = React;
   const [imageUrl, setImageUrl] = useState('');
-  const [expanded, setExpanded] = useState(false);
-  const triggerRef = useRef(null);
-  const closeRef = useRef(null);
 
   useEffect(() => {
     if (!connected || !endpoint?.startsWith('/api/')) {
@@ -108,38 +153,8 @@ function MapWidget({ connected, endpoint }) {
     };
   }, [connected, endpoint]);
 
-  useEffect(() => {
-    if (!expanded) return;
-    closeRef.current?.focus();
-    const onKeyDown = event => {
-      if (event.key === 'Escape') { event.stopPropagation(); setExpanded(false); }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      triggerRef.current?.focus();
-    };
-  }, [expanded]);
-
-  return <>
-    <button ref={triggerRef} type="button" className="map-widget__thumb"
-      onClick={() => setExpanded(true)} disabled={!imageUrl}
-      aria-label={imageUrl ? '展开导航地图' : '等待地图数据'}>
-      {imageUrl ? <img src={imageUrl} alt=""/> : <span className="map-widget__empty">等待地图</span>}
-      <span className="map-widget__label">局部地图</span>
-      {imageUrl && <span className="map-widget__expand" aria-hidden="true">↗</span>}
-    </button>
-    {expanded && ReactDOM.createPortal(
-        <section className="map-viewer" role="dialog" aria-modal="false" aria-label="导航地图">
-          <header className="map-viewer__header">
-            <strong>局部导航地图 · 机器狗居中</strong>
-            <button ref={closeRef} type="button" onClick={() => setExpanded(false)} aria-label="关闭地图">×</button>
-          </header>
-          <div className="map-viewer__image">
-            {imageUrl ? <img src={imageUrl} alt="机器狗周围的导航地图"/>
-              : <span>等待地图数据</span>}
-          </div>
-          <ul className="map-viewer__legend" aria-label="地图颜色说明">
+  return <MediaWidget label="地图" title="导航地图" ready={!!imageUrl} emptyText="等待地图数据"
+    footer={<ul className="map-viewer__legend" aria-label="地图颜色说明">
             <li><span className="map-viewer__swatch map-viewer__swatch--robot" aria-hidden="true"/>机器狗</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--free" aria-hidden="true"/>可通行</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--obstacle" aria-hidden="true"/>障碍物</li>
@@ -148,10 +163,10 @@ function MapWidget({ connected, endpoint }) {
             <li><span className="map-viewer__swatch map-viewer__swatch--route" aria-hidden="true"/>导航路线</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--place" aria-hidden="true"/>已保存地点</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--target" aria-hidden="true"/>目的地</li>
-          </ul>
-        </section>, document.body,
-    )}
-  </>;
+    </ul>}>
+    {imageUrl ? <img className="device-media__map" src={imageUrl} alt="机器狗周围的导航地图"/>
+      : <span className="device-media__empty">等待地图数据</span>}
+  </MediaWidget>;
 }
 
 function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
@@ -303,3 +318,4 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
 window.VirtualJoystick = VirtualJoystick;
 window.VideoCanvas = VideoCanvas;
 window.MapWidget = MapWidget;
+window.MediaWidget = MediaWidget;

@@ -652,6 +652,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
     from cloud.go2.state import LIFE_ACTIONS
     normalized = action.lower()
     admin_routes = {
+        "set_search_scope": ("/api/go2/navigation/search-scope", "PUT", params),
         "tag_location": ("/api/go2/navigation/locations", "POST", {"name": str(params.get("name") or "").strip()}),
         "set_home": ("/api/go2/navigation/home", "PUT", {}),
         "set_personality": ("/api/go2/personality", "POST", {"prompt": str(params.get("prompt") or "").strip(),
@@ -714,23 +715,25 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             "deadline": min(float(session["expires_at"]), time.time() + 180),
         })
 
-    canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "RECOGNIZE_PERSON", "STOP"} else action
+    canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "FIND_OBJECT", "RECOGNIZE_PERSON", "STOP"} else action
     ensure_go2_action(canonical)
     if canonical == "SPORT":
         return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {}), **correlation})
     if canonical == "NAVIGATE":
         return await _internal_request("/api/go2/navigation/go", "POST", session, {"name": params.get("name", "")})
-    if canonical == "VISUAL_NAVIGATE":
+    if canonical in {"VISUAL_NAVIGATE", "FIND_OBJECT"}:
+        from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
         target = params.get("target")
         if not isinstance(target, str) or not target.strip() or len(target.strip()) > 100:
             raise HTTPException(status_code=400, detail="visual navigation requires a target")
         task_id = "go2_" + uuid.uuid4().hex
         return await _internal_request("/api/go2/chat", "POST", session, {
-            "message": f"朝画面中的{target.strip()}安全接近，未确认到达前不要声称抵达",
-            "skill_id": "go2_visual_navigate",
+            "message": (f"在指定范围内寻找{target.strip()}并安全接近" if canonical == "FIND_OBJECT"
+                        else f"朝画面中的{target.strip()}安全接近，未确认到达前不要声称抵达"),
+            "skill_id": "go2_find_object" if canonical == "FIND_OBJECT" else "go2_visual_navigate",
             "params": {"target": target.strip()},
             "task_id": task_id,
-            "deadline": min(float(session["expires_at"]), time.time() + 180),
+            "deadline": min(float(session["expires_at"]), time.time() + (SEARCH_SERVER_TIMEOUT_S if canonical == "FIND_OBJECT" else 180)),
         })
     if canonical == "RECOGNIZE_PERSON":
         return await _internal_request("/api/go2/identity/recognize", "POST", session, {})

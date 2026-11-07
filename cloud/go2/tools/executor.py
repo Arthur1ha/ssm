@@ -10,7 +10,7 @@ import uuid
 from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
-from cloud.go2.actions import ACTIONS
+from cloud.go2.actions import ACTIONS, SPORT_COMMANDS
 from cloud.go2.control import LeaseConflict, control_lease, session_tasks
 from cloud.go2.execution import ExecutionContext, current_context, use_context
 from cloud.go2.tools.registry import get_tool_spec
@@ -87,7 +87,7 @@ def _check_motion_owner(command: str | None, context: ExecutionContext):
     return previous
 
 
-def check_direct_motion(command: str | None, params: dict, context: ExecutionContext) -> None:
+def check_direct_motion(command: str | None, params: dict, context: ExecutionContext, *, dispatch_only=False) -> None:
     """Shared preflight for tools, FSM buttons, and joystick commands."""
     validate_execution_context(context)
     previous = _check_motion_owner(command, context)
@@ -95,11 +95,11 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
         raise ValueError("Go2 未连接")
     runtime = runtime_for(go2)
     if command != 'StopMove' and runtime is not None:
-        reason = runtime.active_reason() or go2.body_ready_reason()
+        reason = runtime.active_reason() or (None if dispatch_only else go2.body_ready_reason())
         if reason:
             raise ValueError(reason)
     pending = getattr(go2, "pending_action", None)
-    if isinstance(pending, dict):
+    if isinstance(pending, dict) and not dispatch_only:
         running = ACTIONS.get(pending.get("command"))
         if command != "StopMove":
             raise ValueError("body_action_pending_confirmation")
@@ -117,8 +117,11 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
         # validated when the actual Move command is sent.
         validator = getattr(go2, "_validate_motion", None)
         if validator is not None and (command != "Move" or {"x", "y", "z"} & params.keys()):
-            validator(command, params)
-    if command and hasattr(go2, "fsm_next"):
+            if dispatch_only:
+                validator(command, params, dispatch_only=True)
+            else:
+                validator(command, params)
+    if command and not dispatch_only and hasattr(go2, "fsm_next"):
         state = getattr(go2, "fsm_state", "")
         permitted = command == "StopMove" and state not in ("offline", "connecting")
         permitted = permitted or (command == "Move" and state == "moving")
@@ -139,7 +142,7 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
 
 async def execute_action(command: str, params: dict | None = None, *,
                          context: ExecutionContext | None = None,
-                         life_task_id: str | None = None) -> dict:
+                         life_task_id: str | None = None, dispatch_only=False) -> dict:
     """The physical action boundary shared by buttons, tools and workflows.
 
     Sending and completion are deliberately separate. The adapter retains the
@@ -148,6 +151,9 @@ async def execute_action(command: str, params: dict | None = None, *,
     context = context or current_context()
     params = {} if params is None else params
     validate_execution_context(context)
+    if dispatch_only and (context.origin_kind != 'user_delegated'
+                          or command not in SPORT_COMMANDS or command == 'StopMove'):
+        raise ValueError('dispatch_only requires a user body action')
     action = ACTIONS.get(command)
     if action is None:
         raise ValueError(f"Unknown command: {command}")
@@ -162,7 +168,7 @@ async def execute_action(command: str, params: dict | None = None, *,
     from cloud.go2.service import prepare_user_interaction, drive
     if command != "StopMove" and context.origin_kind != "agent_autonomous":
         await prepare_user_interaction(context)
-    check_direct_motion(command, params, context)
+    check_direct_motion(command, params, context, dispatch_only=dispatch_only)
     if context.origin_kind == "user_delegated" and context.expires_at > time.time():
         # This is deliberately after validation and inside the reserved call:
         # rejected requests and duplicate delivery cannot end an activity.
@@ -170,7 +176,7 @@ async def execute_action(command: str, params: dict | None = None, *,
         await user_intervention()
         # Activity shutdown may have changed the connection or posture while
         # we awaited cleanup; do not send using the old preflight snapshot.
-        check_direct_motion(command, params, context)
+        check_direct_motion(command, params, context, dispatch_only=dispatch_only)
     if context.origin_kind == "user_delegated" and context.session_id != "system":
         from cloud.peers.gateway import cancel_pending
         cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous", reason="user_takeover")
@@ -185,7 +191,10 @@ async def execute_action(command: str, params: dict | None = None, *,
                 from cloud.observability import emit_agent_event
                 emit_agent_event("device.command", action=command, params=params,
                                  transport="webrtc", status="dispatching")
-            raw = await go2.send_command(command, params) if params else await go2.send_command(command)
+            if dispatch_only:
+                raw = await go2.send_command(command, params, dispatch_only=True)
+            else:
+                raw = await go2.send_command(command, params) if params else await go2.send_command(command)
         result = normalize_result("go2_sport", raw)
         return {**result, "action": command, "device_epoch": dispatch_epoch}
     finally:
@@ -285,7 +294,7 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
 
 async def execute_command_request(command: str, params: dict, *, context: ExecutionContext,
                                   request_id: str | None = None, trace_id: str | None = None,
-                                  deadline: float | None = None) -> dict:
+                                  deadline: float | None = None, dispatch_only=False) -> dict:
     """Durably reserve a direct request before entering the shared action path.
 
     A reservation with no result survives process loss as unconfirmed; a retry
@@ -331,9 +340,11 @@ async def execute_command_request(command: str, params: dict, *, context: Execut
         with bind_context(trace_id=trace_id, agent_id="go2", session_id=context.session_id,
                           task_id=request_id, request_id=request_id, origin_kind=context.origin_kind):
             if deadline is None:
-                result = await execute_action(command, params, context=context, life_task_id=life_task_id)
+                result = await execute_action(command, params, context=context, life_task_id=life_task_id,
+                                              dispatch_only=dispatch_only)
             else:
-                result = await asyncio.wait_for(execute_action(command, params, context=context, life_task_id=life_task_id),
+                result = await asyncio.wait_for(execute_action(command, params, context=context, life_task_id=life_task_id,
+                                                              dispatch_only=dispatch_only),
                                                 timeout=max(0, deadline - time.time()))
     except asyncio.TimeoutError:
         result = {"result": "timeout", "error": "command_deadline_exceeded", "confirmation_scope": "request",

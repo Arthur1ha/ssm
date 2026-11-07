@@ -112,7 +112,7 @@ async def test_query_is_scoped_to_trusted_origin_and_session(device):
 
 
 @pytest.mark.asyncio
-async def test_button_and_tool_use_identical_rejection_and_single_send_boundary(device):
+async def test_manual_button_uses_send_receipt_while_tool_retains_observation_guard(device):
     from cloud.go2.router import CommandRequest, go2_command
     from cloud.go2.tools.executor import execute_tool
     robot, _ = device
@@ -122,12 +122,12 @@ async def test_button_and_tool_use_identical_rejection_and_single_send_boundary(
         assert page[key] == tool[key]
     assert robot.send_command.await_count == 2
     robot.runtime.body(None, confirmation='unknown')
-    with pytest.raises(HTTPException) as exc:
-        await go2_command(CommandRequest(cmd='Hello'), context=USER)
+    page = await go2_command(CommandRequest(cmd='Hello'), context=USER)
+    assert page['result'] == 'accepted'
+    robot.send_command.assert_awaited_with('Hello', {}, dispatch_only=True)
     tool = await execute_tool('go2_sport', {'cmd': 'Hello'}, context=USER)
     assert tool['error'] == 'device_precondition'
-    assert exc.value.detail == tool['message']
-    assert robot.send_command.await_count == 2
+    assert robot.send_command.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -409,7 +409,7 @@ async def test_http_heartbeat_is_non_intervening_but_new_motion_uses_boundary(de
         repeat = await client.post('/api/go2/commands', json={'cmd': 'Hello', 'request_id': 'http-command'})
         assert repeat.status_code == 200
         intervention.assert_awaited_once()
-    robot.send_command.assert_awaited_once_with('Hello')
+    robot.send_command.assert_awaited_once_with('Hello', {}, dispatch_only=True)
 
 
 @pytest.mark.asyncio

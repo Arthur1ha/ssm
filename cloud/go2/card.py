@@ -7,7 +7,7 @@ from copy import deepcopy
 from cloud.cards.validation import normalize_card
 
 from cloud.go2.connection import go2
-from cloud.go2.actions import ACTIONS, BODY_STATES, TRANSIENT_STATES, fsm_transitions, body_views, velocity_schema
+from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, BODY_STATES, TRANSIENT_STATES, fsm_transitions, body_views, velocity_schema
 from cloud.go2.state import LIFE_VIEWS, STATE_REASON_LABELS, life_transitions
 
 GO2_CARD_TOPIC = "ssm/agents/go2/card"
@@ -45,6 +45,7 @@ def _publish_go2_state() -> None:
             "life_owner", "life_task_id", "available_actions", "blocked_actions",
             "available_life_actions", "life_blocked_reasons", "pending_action", "ts",
             "last_action", "body_observation_source", "body_observed_at",
+            "available_manual_actions", "blocked_manual_actions",
             "body_telemetry_fresh", "exploration_enabled", "last_transition",
         )
         state = {key: snapshot[key] for key in fields if key in snapshot}
@@ -73,6 +74,8 @@ def _go2_state_machine() -> dict:
                 "action": trigger,
                 "params": {},
                 "completion": ACTIONS[trigger].completion,
+                **({"dispatch_only": True, "description": "手动发送动作指令，发送后即可继续操作。"}
+                   if trigger in SPORT_COMMANDS and trigger != 'StopMove' else {}),
             })
     # These edges explain observation-driven recovery and completion. They
     # carry no action and never authorize a button or a timed fake completion.
@@ -123,6 +126,8 @@ def _go2_state_machine() -> dict:
     body.update(id="body", label="身体", state_field="body_state",
                 parent={"region": "activity", "state": "active"}, retain_when_inactive=True,
                 available_actions_field="available_actions", blocked_actions_field="blocked_actions",
+                manual_available_actions_field="available_manual_actions",
+                manual_blocked_actions_field="blocked_manual_actions",
                 diagram_group="姿态与动作", node_radius=34)
     # Keep every capability inside the initial viewport. Standing anchors the
     # posture row; all gestures fit below it without horizontal overflow.

@@ -165,3 +165,66 @@ def test_fresh_low_state_cannot_use_stale_sport_to_confirm_posture(observed):
         robot._on_low_state({'data': {'motor_state': [{'q': q} for q in STANDING],
                                       'imu_state': {'rpy': [0, 0, 0]}}})
     assert robot.fsm_state is None
+
+@pytest.mark.parametrize('feedback', ['renewed', 'frozen', 'increasing_loss'])
+def test_nonzero_motor_loss_accepts_stationary_angles_but_rejects_growing_loss(observed, feedback):
+    robot, _, clock = observed
+    for i in range(20):
+        clock[0] += .1
+        q = STANDING.copy()
+        if feedback != 'frozen':
+            q[0] += .0002 * (i % 3)
+        motors = [{'q': value, 'lost': 0} for value in q]
+        motors[0]['lost'] = 5 + (i if feedback == 'increasing_loss' else 0)
+        robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, -.07], 'yaw_speed': 0}})
+        robot._on_low_state({'data': {'motor_state': motors, 'imu_state': {'rpy': [0, 0, 0]}}})
+    assert (robot.fsm_state == 'standing') is (feedback != 'increasing_loss')
+    assert (robot._low_state['motor_positions'] is not None) is (feedback != 'increasing_loss')
+
+
+def test_joint_feedback_evidence_does_not_cross_connection_epoch(observed):
+    robot, _, clock = observed
+    motors = [{'q': value, 'lost': 0} for value in STANDING]
+    motors[0]['lost'] = 5
+    for i in range(10):
+        clock[0] += .1
+        motors[0]['q'] = STANDING[0] + i * .0002
+        positions = robot._motor_positions_from_feedback(motors, clock[0])
+    assert positions is not None
+    robot.reset_sensor_epoch()
+    clock[0] += .1
+    assert robot._motor_positions_from_feedback(motors, clock[0]) is None
+
+
+def test_confirmed_motor_feedback_can_be_stationary_without_becoming_offline(observed):
+    robot, _, clock = observed
+    motors = [{'q': value, 'lost': 0} for value in STANDING]
+    motors[0]['lost'] = 5
+    for i in range(10):
+        clock[0] += .1
+        motors[0]['q'] = STANDING[0] + i * .0002
+        assert robot._motor_positions_from_feedback(motors, clock[0]) is not None or i < 6
+    for _ in range(25):
+        clock[0] += .1
+        assert robot._motor_positions_from_feedback(motors, clock[0]) is not None
+    # A new loss or a receive gap invalidates the old liveness proof.
+    motors[0]['lost'] += 1
+    assert robot._motor_positions_from_feedback(motors, clock[0]) is None
+    clock[0] += 2
+    assert robot._motor_positions_from_feedback(motors, clock[0]) is None
+
+
+@pytest.mark.parametrize('timeout,error', [(True, 0), (False, 0x100), (False, 0x20)])
+def test_active_motor_fault_blocks_despite_valid_angles_and_fresh_sport(observed, timeout, error):
+    robot, feed, clock = observed
+    feed(count=7)
+    motors = [{'q': value, 'lost': 5, 'reserve': [0, 800]} for value in STANDING]
+    motors[0]['reserve'][0] = error
+    for _ in range(10):
+        clock[0] += .1
+        robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, 0]}})
+        robot._on_low_state({'data': {'motor_state': motors, 'bit_flag': 0x80 if timeout else 0,
+                                    'imu_state': {'rpy': [0, 0, 0]}}})
+    assert robot._low_state['motor_positions'] is None
+    assert robot.body_ready_reason() == 'body_telemetry_stale'
+    assert robot.available_actions == ['StopMove']

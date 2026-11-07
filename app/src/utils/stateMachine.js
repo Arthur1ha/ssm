@@ -35,14 +35,15 @@ function stateActionReason(machine, region, transition, state, { offline, busy, 
   if (stale) return '状态连接正在恢复，等待最新状态';
   if (busy) return '正在等待本次执行结果';
   const key = transition.availability_key || transition.action;
-  const blocked = state?.[region.blocked_actions_field]?.[key];
+  const blocked = state?.[transition.dispatch_only ? region.manual_blocked_actions_field : region.blocked_actions_field]?.[key];
   if (blocked) {
     const message = typeof blocked === 'object' ? blocked.message || blocked.reason || '当前不可用' : blocked;
     return machine?.reason_labels?.[message] || message;
   }
-  const available = state?.[region.available_actions_field];
+  const available = state?.[transition.dispatch_only ? region.manual_available_actions_field : region.available_actions_field];
+  if (transition.dispatch_only && !Array.isArray(available)) return '正在同步可用动作';
   if (Array.isArray(available) && !available.includes(key)) return '当前状态暂不可用';
-  if (region.id === machine?.primary_region && machine.freshness_field && state?.[machine.freshness_field] === false) {
+  if (!transition.dispatch_only && region.id === machine?.primary_region && machine.freshness_field && state?.[machine.freshness_field] === false) {
     return '设备反馈已过期，等待最新状态';
   }
   return '';
@@ -100,7 +101,7 @@ function stateBoardTopology(machine, state = {}) {
     .filter(edge => !edge.safety && !edge.graph_hidden && stateActionVisible(region, edge, state))
     .map((transition,index) => ({id:`${region.id}:${index}`,region,transition,
       src:anchor(region,transition.src),dst:anchor(region,transition.dst),
-      active:stateRegionActive(region,all,state) && state[region.state_field] === transition.src})))
+      active:stateRegionActive(region,all,state) && (transition.dispatch_only || state[region.state_field] === transition.src)})))
     .filter(edge => ids.has(edge.src) && ids.has(edge.dst));
   return {nodes,edges};
 }

@@ -119,7 +119,7 @@ async def test_direct_http_command_accepts_only_catalog_params(robot, command):
     robot.send_command.assert_not_called()
     result = await go2_command(CommandRequest(cmd=command), context=VISITOR)
     assert result["confirmation_scope"] == "request"
-    robot.send_command.assert_awaited_once_with(command)
+    robot.send_command.assert_awaited_once_with(command, {}, dispatch_only=True)
 
 
 @pytest.mark.asyncio

@@ -86,19 +86,23 @@ const commandBus = {
   async waitForLampTask(unitId, taskId, timeoutMs = 25000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.min(10000, deadline - Date.now()));
       try {
         const result = await apiClient.request(
           `/api/commands/${encodeURIComponent(unitId)}/tasks/${encodeURIComponent(taskId)}`,
+          { signal: controller.signal },
         );
         if (result?.result !== 'executing') return result;
       } catch (error) {
         if ([401, 403, 404].includes(error.status)) {
           return { result: 'error', task_id: taskId, error: error.message };
         }
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      } finally { clearTimeout(timer); }
+      const remaining = deadline - Date.now();
+      if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(1000, remaining)));
     }
-    return { result: 'executing', task_id: taskId };
+    return { result: 'timeout', task_id: taskId };
   },
 
   async cancelGo2Task(taskId) {
@@ -112,6 +116,7 @@ const commandBus = {
   },
 
   describe(result) {
+    if (result?.dispatch_only && result?.result === 'accepted') return '指令已发送';
     if (result?.result === 'needs_clarification' && result.question) return result.question;
     if (result?.error === 'stop_unconfirmed') return '停止指令尚未确认，请查看机器狗当前状态';
     if (result?.result === 'accepted') return '指令已发送，尚未确认完成';

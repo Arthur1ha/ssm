@@ -5,6 +5,7 @@ from copy import deepcopy
 
 from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, sport_description, sport_tool_schema, move_tool_schema, led_tool_schema
 from cloud.go2.state import life_tool_schema
+from cloud.agents.go2.workflows.search import SEARCH_TOOL_TIMEOUT_S
 
 
 def _schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
@@ -44,6 +45,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_visible_target", "视觉识别目标并与雷达点云配对，在地图上规划到目标附近的停靠点，停稳后重新观察确认", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
+        ToolSpec("go2_find_object", "在已配置的单房间范围内持续换观察点寻找地面物品，跨帧确认后定位并接近；需实测相机标定，未检查区域不代表目标不存在", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", led_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
@@ -125,6 +127,12 @@ CARD_SKILLS = {
         "name": "视觉目标导航",
         "tags": ["navigation", "vision", "motion", "robot"],
         "invoke": {"action": "VISUAL_NAVIGATE"},
+    },
+    "go2_find_object": {
+        "tool_name": "go2_find_object",
+        "name": "单房间找物并接近",
+        "tags": ["search", "navigation", "vision", "motion", "robot"],
+        "invoke": {"action": "FIND_OBJECT"},
     },
     "go2_recognize_person": {
         "tool_name": "go2_recognize_person",

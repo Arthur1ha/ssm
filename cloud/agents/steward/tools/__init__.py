@@ -135,6 +135,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                 logger.warning("lamp delegated reply unavailable step=%s error=%s",
                                step_id, type(exc).__name__)
     elif kind == "http":
+        from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
         correlation = current_event_context()
         body = {"session_id": context["session_id"], "actor": context.get("actor"),
                 "persist": context.get("persist"), "space_id": context.get("space_id"),
@@ -144,7 +145,8 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                            or f"请执行 {skill_id}：{json.dumps(params, ensure_ascii=False)}",
                 "goal": params.get("goal"), "skill_id": skill_id, "params": params,
                 "task_id": step_id,
-                "deadline": min(deadline, time.time() + (160 if skill_id == "go2_visual_navigate" else 90)),
+                "deadline": min(deadline, time.time() + (SEARCH_SERVER_TIMEOUT_S if skill_id == "go2_find_object"
+                                                        else 160 if skill_id == "go2_visual_navigate" else 90)),
                 "trace_id": correlation.get("trace_id"),
                 "parent_run_id": correlation.get("run_id")}
         timeout = (max(1, deadline - time.time()) if unit_id == "go2" or skill_id == "adjust_lighting"
@@ -330,7 +332,7 @@ def make_executor(run, context: dict, resume: bool = False):
             if args.get("unit_id") == "go2" and args.get("skill_id") == "go2_move" and any(
                 step.get("tool") == "invoke_skill"
                 and (step.get("params") or {}).get("unit_id") == "go2"
-                and (step.get("params") or {}).get("skill_id") == "go2_visual_navigate"
+                and (step.get("params") or {}).get("skill_id") in {"go2_visual_navigate", "go2_find_object"}
                 and (step.get("result") or {}).get("result") != "ok"
                 for step in run.steps[:-1]
             ):
