@@ -65,13 +65,18 @@ def _validate_state_machine(sm: dict) -> None:
     for transition in sm["transitions"]:
         if not isinstance(transition, dict) or transition.get("src") not in states or transition.get("dst") not in states:
             raise ValueError("transition src/dst must reference state_machine.states")
+        if "id" in transition:
+            _required_string(transition["id"], "transition.id")
         for field in ("trigger", "label"):
             _required_string(transition.get(field), f"transition.{field}")
         if "action" in transition and not isinstance(transition["action"], str):
             raise ValueError("transition.action must be a string")
         if "params" in transition and not isinstance(transition["params"], dict):
             raise ValueError("transition.params must be an object")
-        for field in ("graph_hidden", "safety", "available_only", "dispatch_only"):
+        for field in ("training_events", "training_fixed_params"):
+            if field in transition and (not isinstance(transition[field], list) or any(not isinstance(item, str) or not item for item in transition[field])):
+                raise ValueError(f"transition.{field} must be a string array")
+        for field in ("graph_hidden", "safety", "available_only", "dispatch_only", "training_disabled"):
             if field in transition and type(transition[field]) is not bool:
                 raise ValueError(f"transition.{field} must be a boolean")
         for field in ("availability_key", "completion", "description"):
@@ -85,6 +90,12 @@ def _validate_state_machine(sm: dict) -> None:
                   "manual_blocked_actions_field", "execution_field", "last_execution_field", "freshness_field", "until_field"):
         if field in sm:
             _required_string(sm[field], f"state_machine.{field}")
+    if 'prepare_action' in sm:
+        prepare = sm['prepare_action']
+        if (not isinstance(prepare, dict) or set(prepare) != {'via', 'action'}
+                or prepare.get('via') not in states):
+            raise ValueError('state_machine.prepare_action must declare a known via state and action')
+        _required_string(prepare.get('action'), 'state_machine.prepare_action.action')
     if not isinstance(sm.get("views", {}), dict):
         raise ValueError("state_machine.views must be an object")
     for state, view in sm.get("views", {}).items():

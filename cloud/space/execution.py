@@ -23,6 +23,12 @@ class ExecutionContext:
     space_id: str = "main"
     origin_kind: str = "user_delegated"
     expires_at: int = 0
+    # Populated only by server-owned identity/event adapters, never model input.
+    requester: dict | None = None
+    trigger_ref: str | None = None
+    trigger_revision: int | None = None
+    trigger_transition_id: str | None = None
+    trigger_mode_epoch: int | None = None
 
 
 SYSTEM_CONTEXT = ExecutionContext("system", "admin", True, origin_kind="system")

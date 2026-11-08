@@ -84,7 +84,7 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
         profile = profile_loader()
         event = state.get("pending_event") or {}
         if event:
-            if event.get("kind") == "teaching":
+            if event.get("kind") == "training_event":
                 return {"should_explore": False, "should_social": False,
                         "event_decision": "accept", "decision_reason": "enabled_teaching",
                         "current_goal": {"kind": "teaching", "event_id": event.get("event_id"),

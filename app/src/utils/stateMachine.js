@@ -34,6 +34,9 @@ function stateActionReason(machine, region, transition, state, { offline, busy, 
   if (transition.safety) return '';
   if (stale) return '状态连接正在恢复，等待最新状态';
   if (busy) return '正在等待本次执行结果';
+  if (state?.[region.state_field] != null && state[region.state_field] !== transition.src) {
+    return '请先切换到' + (region.views?.[transition.src]?.label || transition.src);
+  }
   const key = transition.availability_key || transition.action;
   const blocked = state?.[transition.dispatch_only ? region.manual_blocked_actions_field : region.blocked_actions_field]?.[key];
   if (blocked) {
@@ -68,10 +71,17 @@ function stateNodeControl(node, edges) {
   // Multiple source states may declare the same telemetry-independent command.
   const commands = new Map();
   for (const edge of incoming.filter(edge => edge.transition.action && edge.active && (!node.current
-    || edge.transition.available_only || edge.transition.dispatch_only))) {
+    || edge.transition.available_only))) {
     const key = JSON.stringify([edge.transition.action,
       Object.entries(edge.transition.params || {}).sort(([a],[b]) => a.localeCompare(b))]);
     if (!commands.has(key) || !edge.reason) commands.set(key,edge);
+  }
+  if (!node.current && ![...commands.values()].some(edge => !edge.reason)) {
+    for (const edge of incoming.filter(edge => edge.preparedTransition)) {
+      const key = JSON.stringify([edge.transition.action, edge.transition.params || {}]);
+      commands.set(key, {...edge,active:true,reason:edge.preparationReason,
+        transition:edge.preparedTransition});
+    }
   }
   const active = [...commands.values()];
   const available = active.filter(edge => !edge.reason);
@@ -117,22 +127,12 @@ function stateTransitionDescription(transition) {
     || description.startsWith('以下条件会阻止请求：') || description.startsWith('仅在当前连接收到')) return '';
   return description;
 }
-/* Match declared command/enum bindings, never the free-text teaching wording.
- * Numeric defaults (e.g. blink count) are content, not different graph edges. */
-function stateTransitionTeachings(transition, teachings, card) {
-  if (!transition?.action) return [];
-  return teachings.filter(item => {
-    if (item.unit_id !== card?.unit_id || !item.binding) return false;
-    const {skill_id, params = {}} = item.binding;
-    const skill = card.skills?.find(entry => entry.id === skill_id);
-    const properties = skill?.params_schema?.properties || {};
-    const sameCommand = skill?.invoke?.action === transition.action
-      || Object.entries(properties).some(([key, field]) => field.enum?.includes(transition.action)
-        && params[key] === transition.action);
-    return sameCommand && Object.entries(transition.params || {}).every(([key, value]) =>
-      !properties[key]?.enum || params[key] === value);
-  });
+/* Small graphs need a shallower default canvas; explicit Card diagrams win. */
+function stateGraphDimensions(nodeCount, diagram) {
+  return {width: diagram?.width || 600,
+    height: diagram?.height || (nodeCount <= 2 ? 200 : nodeCount <= 4 ? 320 : 600)};
 }
+
 /* Fold presentation-only parents into an observed child. Commands and gating
  * still belong to their original region; connection stays in the page header. */
 function stateBoardTopology(machine, state = {}) {
@@ -160,10 +160,13 @@ function stateBoardTopology(machine, state = {}) {
     .filter(edge => !edge.safety && !edge.graph_hidden && stateActionVisible(region, edge, state))
     .map((transition,index) => ({id:`${region.id}:${index}`,region,transition,
       src:anchor(region,transition.src),dst:anchor(region,transition.dst),
-      active:stateRegionActive(region,all,state) && (transition.dispatch_only || state[region.state_field] === transition.src)})))
+      // Manual dispatch changes how we wait for results, not the source pose.
+      // Keep explicit manual recovery available when no pose has been observed.
+      active:stateRegionActive(region,all,state) && (state[region.state_field] === transition.src
+        || transition.dispatch_only && state[region.state_field] == null)})))
     .filter(edge => ids.has(edge.src) && ids.has(edge.dst));
   return {nodes,edges};
 }
 Object.assign(window, { stateMachineRegions, primaryStateRegion, stateRegionActive, stateRegionLabel,
-  stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology, stateTransitionTeachings,
-  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateTransitionDescription });
+  stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology,
+  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateTransitionDescription, stateGraphDimensions });

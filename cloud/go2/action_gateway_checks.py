@@ -133,6 +133,43 @@ async def test_library_commands_outside_selected_catalog_are_not_public(robot):
 
 
 @pytest.mark.asyncio
+async def test_internal_balance_stand_uses_command_boundary_without_public_tool(robot, monkeypatch, tmp_path):
+    from cloud.go2.router import CommandRequest, go2_command
+    from cloud.go2.actions import fsm_transitions, sport_tool_schema
+
+    monkeypatch.setenv('SSM_TRAINING_DIR', str(tmp_path / 'training'))
+    robot.send_command.return_value = {
+        'result': 'accepted', 'confirmation': 'sport_rpc',
+        'confirmation_scope': 'request', 'request_status_code': 0,
+    }
+    result = await go2_command(CommandRequest(cmd='BalanceStand'), context=VISITOR)
+    assert result['result'] == 'accepted'
+    assert result['confirmation_scope'] == 'request'
+    robot.send_command.assert_awaited_once_with('BalanceStand')
+    assert control_lease.snapshot().owner_session_id == VISITOR.session_id
+    assert 'BalanceStand' not in sport_tool_schema()['properties']['cmd']['enum']
+    assert 'BalanceStand' not in fsm_transitions()['standing']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('condition', ['sitting', 'lying', 'stale', 'pending', 'lease'])
+async def test_internal_balance_stand_keeps_motion_preconditions(robot, condition):
+    from cloud.go2.router import CommandRequest, go2_command
+
+    if condition in {'sitting', 'lying'}:
+        robot.runtime.body(condition, confirmation='observed')
+    elif condition == 'stale':
+        robot._sport_state_observed_at = time.monotonic() - 30
+    elif condition == 'pending':
+        robot.pending_action = {'command': 'Sit', 'phase': 'accepted'}
+    elif condition == 'lease':
+        control_lease.acquire(OTHER_VISITOR)
+    with pytest.raises(HTTPException):
+        await go2_command(CommandRequest(cmd='BalanceStand'), context=VISITOR)
+    robot.send_command.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("command", NEW_COMMANDS)
 async def test_ordinary_stop_cannot_claim_interruption_of_new_actions(robot, command):
     from cloud.go2.tools.executor import execute_tool

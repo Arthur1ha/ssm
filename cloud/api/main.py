@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from cloud.observability import configure_logging
@@ -31,7 +32,8 @@ from cloud.esp32.router import router as esp32_router, internal_router as esp32_
 from cloud.esp32.state import ESP32State
 from cloud.go2 import router as go2_router_module
 from cloud.go2.router import router as go2_router
-from cloud.api.teachings import router as teachings_router
+from cloud.api.training import router as training_router
+from cloud.agents.common.training import service as training_service
 from cloud.api.people import router as people_router
 from cloud.api.devices import router as devices_router
 from cloud.api.sessions import router as sessions_router
@@ -293,12 +295,28 @@ app.include_router(go2_router)
 app.include_router(people_router)
 app.include_router(esp32_router)
 app.include_router(esp32_internal_router)
-app.include_router(teachings_router)
+app.include_router(training_router)
 app.include_router(devices_router)
 app.include_router(sessions_router)
 app.include_router(intents_router)
 app.include_router(activity_router)
 app.include_router(personality_router)
+
+
+def _emit_training(event_type, **context):
+    """Only identifiers/cursors reach SSE; private utterances stay in snapshots."""
+    safe = {key: value for key, value in context.items() if key in {
+        'space_id', 'session_id', 'unit_id', 'proposal_id', 'teaching_id', 'revision', 'cursor',
+        'transition_id', 'status', 'reasons'}}
+    event = {'type': event_type, 'event_id': 'evt_' + uuid.uuid4().hex,
+             'ts': time.time(), **safe}
+    if event_type == 'training.proposed':
+        intents_module._events.emit(context['session_id'], event)
+    else:
+        intents_module._events.emit_space(context['space_id'], event)
+
+
+training_service.configure_events(_emit_training)
 
 _allowed_origins = [
     origin.strip() for origin in os.getenv("SSM_ALLOWED_ORIGINS", "").split(",") if origin.strip()

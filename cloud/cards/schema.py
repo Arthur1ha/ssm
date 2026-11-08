@@ -10,12 +10,16 @@ from typing import Literal, NotRequired, TypedDict
 class FsmTransition(TypedDict):
     """状态机一条转移：从 src 态经 trigger 命令到 dst 态。"""
 
+    id: NotRequired[str]  # 稳定转换标识
     src: str        # 源状态
     dst: str        # 目标状态
     trigger: str    # 触发命令名（ESP32: CMD_BRIGHT；Go2: Move 等）
     label: str      # 人类可读按钮文案，如「开灯」
     action: NotRequired[str]   # MQTT action 名（如 SET_STATE），供前端直接派发
     params: NotRequired[dict]  # 该转移的默认 params（颜色/亮度等）
+    training_disabled: NotRequired[bool]
+    training_events: NotRequired[list[str]]
+    training_fixed_params: NotRequired[list[str]]
     safety: NotRequired[bool]  # 高优先级安全转移，仍走同一状态机派发路径
     graph_hidden: NotRequired[bool]  # 通过其他控件执行的动作，不在状态图里画线
     availability_key: NotRequired[str]  # 默认 action；参数化动作可绑定独立门禁键
@@ -52,6 +56,7 @@ class StateRegion(TypedDict):
     blocked_actions_field: NotRequired[str]  # state 中的 {动作键: 阻止原因}
     manual_available_actions_field: NotRequired[str]
     manual_blocked_actions_field: NotRequired[str]
+    prepare_action: NotRequired[dict[str, str]]  # {via, action}: 服务端确认中间姿态后执行目标动作
     until_field: NotRequired[str]  # 可选 Unix 秒截止时间；到期仍等服务端状态同步
     diagram_group: NotRequired[str]  # 白板中的空间分组，不改变区域的运行语义
     node_radius: NotRequired[int]  # 白板坐标中的圆形节点半径
@@ -195,6 +200,7 @@ class AgentCard(TypedDict):
     tags: NotRequired[list[str]]
     skills: list[SkillDef]
     state: dict        # 动态状态，初始为空
+    training_capabilities: NotRequired[dict]  # 静态可训练能力
     state_machine: NotRequired[StateMachine]   # 静态拓扑，无此字段则前端回退富页
     modes: NotRequired[list[ModeAxis]]          # 声明式模式轴；无则无模式开关
     telemetry: NotRequired[list[TelemetryField]] # 实时字段声明；无则无字段展示

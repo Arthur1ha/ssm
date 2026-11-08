@@ -114,6 +114,8 @@ def life_transitions(region):
             transitions.append({
                 "src": source, "dst": spec.target, "trigger": spec.action,
                 "label": spec.label, "action": "LIFE", "params": {"action": spec.action},
+                "training_fixed_params": ["action"],
+                **({"training_disabled": True} if spec.action in {"start_explore", "stop_explore"} else {}),
                 "availability_key": spec.action,
                 "description": " · ".join(conditions),
                 **({"required_actor": spec.required_actor} if spec.required_actor else {}),

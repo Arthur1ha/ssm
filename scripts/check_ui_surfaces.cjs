@@ -36,7 +36,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
       await page.addScriptTag({ path: file });
     }
     for (const file of ['ApiClient.js', 'components/Icon.jsx', 'components/SessionGate.jsx',
-      'components/SpaceMenu.jsx', 'components/RulesDrawer.jsx', 'components/AdminSpaceDrawer.jsx',
+      'components/SpaceMenu.jsx', 'components/TrainingDrawer.jsx', 'components/AdminSpaceDrawer.jsx',
       'components/OrchestratorSettingsDrawer.jsx', 'components/SpacePeopleDrawer.jsx']) {
       await page.addScriptTag({ content: compile(`app/src/${file}`) });
     }
@@ -51,7 +51,6 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
     await page.addScriptTag({ content: `
       window.getAgentDisplayName = () => '空间管家';
       window.AgentPersonalitySettings = () => React.createElement('p', null, '人格设置预览');
-      window.RulesScreen = () => React.createElement('p', {style:{padding:16}}, '规则内容预览');
       const fixtures = {
         '/api/admin/space': {name:'测试空间',device_ids:[]},
         '/api/admin/device-candidates': [], '/api/people': [],
@@ -66,11 +65,12 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
         const close = () => setActive('');
         return React.createElement(React.Fragment, null,
           React.createElement(SpaceMenu, {
-            onRules:()=>setActive('rules'),onShareSpace:()=>setActive('invite'),
+            onTraining:()=>setActive('training'),onShareSpace:()=>setActive('invite'),
             onSpaceSettings:()=>setActive('space'),onOrchestratorSettings:()=>setActive('agent'),
             onPeople:()=>setActive('people'),onExit:close,
           }),
-          ...[[RulesDrawer,'rules'],[AdminInviteDrawer,'invite'],[AdminSpaceDrawer,'space'],
+          active === 'training' && React.createElement(TrainingDrawer,{unitId:'go2',training:{records:[]},onClose:close}),
+          ...[[AdminInviteDrawer,'invite'],[AdminSpaceDrawer,'space'],
             [OrchestratorSettingsDrawer,'agent'],[SpacePeopleDrawer,'people']].map(([Component,key]) =>
               React.createElement(Component,{key,open:active===key,onClose:close})),
         );
@@ -90,20 +90,26 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
             receivesFocus: element.contains(document.activeElement) };
         });
       });
-      assert(result.length >= 4, 'Expected real closed drawers to remain mounted');
+      assert(result.length >= 3, 'Expected real closed drawers to remain mounted');
       for (const item of result) assert.deepEqual(item, { visibility: 'hidden', inert: true, receivesFocus: false });
     };
+    const widths = new Map();
     const assertLayout = async selector => {
       const layout = await page.$eval(selector, element => {
         const rect = element.getBoundingClientRect();
         return { left: rect.left, right: rect.right, width: innerWidth,
           scrollWidth: element.scrollWidth, clientWidth: element.clientWidth,
           documentWidth: document.documentElement.scrollWidth,
-          shadow: getComputedStyle(element).boxShadow };
+          shadow: getComputedStyle(element).boxShadow, panelWidth: rect.width,
+          height: rect.height, top: rect.top, bottom: rect.bottom, viewportHeight: innerHeight };
       });
       assert(layout.left >= -1 && layout.right <= layout.width + 1, `${selector} leaves viewport: ${JSON.stringify(layout)}`);
       assert(layout.documentWidth <= layout.width + 1, 'Document has horizontal overflow');
       assert(layout.scrollWidth <= layout.clientWidth + 1, `${selector} has horizontal overflow`);
+      if (!widths.has(layout.width)) widths.set(layout.width, Math.round(layout.panelWidth));
+      assert.equal(Math.round(layout.panelWidth), widths.get(layout.width), `${selector} differs from the management drawer width`);
+      assert.equal(Math.round(layout.bottom), layout.viewportHeight, `${selector} is not anchored to the bottom`);
+      assert(layout.top > 0 && layout.height > 0, `${selector} should fit within the viewport`);
       assert.equal(layout.shadow, 'none', `${selector} has a decorative shadow`);
     };
     const screenshot = async name => {
@@ -113,9 +119,9 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
     };
     const drawers = [
       ['分享空间', '.invite-drawer', '分享空间'],
-      ['自动化规则', '.rules-drawer', '教导与自动规则'],
-      ['空间设置', '[aria-labelledby="space-drawer-title"]', '空间设置'],
-      ['空间管家', '.orchestrator-settings-drawer', '空间管家'],
+      ['伙伴训练', '.training-drawer', '伙伴训练'],
+      ['空间管理', '[aria-labelledby="space-drawer-title"]', '空间管理'],
+      ['空间管家', '.orchestrator-settings-drawer', '空间管家管理'],
       ['人员库', '[aria-labelledby="space-people-title"]', '空间人员库'],
     ];
     for (const width of [320, 390, 1280]) {
@@ -126,19 +132,22 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
         await page.waitForSelector('.space-menu__panel', { visible: true });
         await assertClosed();
         await assertLayout('.space-menu__panel');
+        const bottomGap = await page.$eval('.space-menu__panel', panel =>
+          panel.getBoundingClientRect().bottom - panel.querySelector('.space-menu__item--exit').getBoundingClientRect().bottom);
+        assert(bottomGap <= 24, `Empty space below exit: ${bottomGap}px`);
         if (menuText === '分享空间') await screenshot(`management-${width}`);
         await page.evaluate(text => [...document.querySelectorAll('.space-menu__item')]
           .find(button => button.querySelector('strong').textContent === text).click(), menuText);
-        await page.waitForSelector(`${selector}.is-open`, { visible: true });
+        await page.waitForSelector(selector, { visible: true });
         assert.equal(await page.$eval(`${selector} h2`, element => element.textContent), title);
         assert.equal(await page.$eval(selector, element => element.inert), false);
         const close = `${selector} header button[aria-label]`;
         await page.waitForSelector(close, { visible: true });
         await assertClosed();
         await assertLayout(selector);
-        await screenshot(`${menuText === '自动化规则' ? 'rules' : selector.includes('people') ? 'people' : menuText === '分享空间' ? 'invite' : menuText === '空间设置' ? 'space' : 'agent'}-${width}`);
+        await screenshot(`${menuText === '伙伴训练' ? 'training' : selector.includes('people') ? 'people' : menuText === '分享空间' ? 'invite' : menuText === '空间管理' ? 'space' : 'agent'}-${width}`);
         await page.click(close);
-        await page.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).visibility === 'hidden', {}, selector);
+        await page.waitForFunction(selector => !document.querySelector(selector) || getComputedStyle(document.querySelector(selector)).visibility === 'hidden', {}, selector);
       }
       // Keyboard navigation must never land in any closed drawer.
       await page.focus('.space-menu__trigger');

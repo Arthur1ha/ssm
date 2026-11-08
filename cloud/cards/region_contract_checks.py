@@ -11,9 +11,10 @@ import pytest
 from cloud.cards.builder import build_card_from_manifest
 from cloud.cards.registry import CardRegistry
 from cloud.cards.validation import normalize_card
+from edge.lamp_contract import FSM_VERSION
 
 
-def lamp(version=2):
+def lamp(version=FSM_VERSION):
     return build_card_from_manifest({
         "unit_id": "esp32_desk_led", "parent_id": "esp32_desk",
         "name": "桌面灯", "agent_type": "actuator", "fsm": "led", "fsm_version": version,
@@ -21,19 +22,22 @@ def lamp(version=2):
     })
 
 
-def test_lamp_card_matches_actual_edge_error_and_recovery_contract():
+def test_lamp_card_matches_three_state_edge_contract():
     from edge.ism import LED_TABLE
     machine = lamp()["state_machine"]
     declared = {(edge["src"], edge["trigger"]): edge["dst"] for edge in machine["transitions"]}
     for key, destination in LED_TABLE.items():
         assert declared[key] == destination
-    assert {"OFF", "ON", "BLINKING", "ERROR"} == set(machine["states"])
+    assert {"OFF", "ON", "BLINKING"} == set(machine["states"])
+    assert set(machine["views"]) == set(machine["states"])
+    assert all(edge["src"] in machine["states"] and edge["dst"] in machine["states"]
+               for edge in machine["transitions"])
     assert declared[("BLINKING", "BLINK_DONE")] in {"OFF", "ON"}
     assert all(not edge.get("action") for edge in machine["transitions"]
-               if edge["trigger"] in {"BLINK_DONE", "LED_FAIL"})
+               if edge["trigger"] == "BLINK_DONE")
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, FSM_VERSION])
 def test_lamp_board_shows_only_lighting_and_keeps_autonomy_in_settings(version):
     card = lamp(version)
     machine = card["state_machine"]
@@ -42,9 +46,11 @@ def test_lamp_board_shows_only_lighting_and_keeps_autonomy_in_settings(version):
     assert primary["state_field"] == "ism"
     assert set(regions) == {"device"}
     assert primary["states"] == machine["states"]
-    if version == 2:
-        assert primary["states"] == ["OFF", "ON", "BLINKING", "ERROR"]
-    assert "ERROR" in primary["views"]
+    if version in (2, FSM_VERSION):
+        assert primary["states"] == ["OFF", "ON", "BLINKING"]
+        assert "ERROR" not in primary["views"]
+    else:
+        assert "ERROR" in primary["views"]
     assert primary["transitions"] == machine["transitions"]
     normalize_card(card)
     assert card["modes"][0]["state_field"] == "autonomy_mode"

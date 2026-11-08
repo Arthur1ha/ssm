@@ -3,7 +3,7 @@
 from typing import Any
 
 from copy import deepcopy
-from edge.lamp_contract import ACTION_SCHEMAS, valid_params
+from edge.lamp_contract import ACTION_SCHEMAS, BLINK_DEFAULT, FSM_VERSION, valid_params
 
 PHYSICAL_TIMEOUT = 20.0
 
@@ -24,6 +24,10 @@ LEGACY_ACTION_SCHEMAS = {
               "additionalProperties": False},
 }
 
+# Deployed v2 lamps only support finite blinking.
+V2_ACTION_SCHEMAS = deepcopy(LEGACY_ACTION_SCHEMAS)
+V2_ACTION_SCHEMAS["SET_STATE"]["properties"]["state"]["enum"] = ["ON", "OFF"]
+
 # Public subset and its tool association live here; hardware argument limits
 # are the versioned firmware contract, consumed by the receiver as well.
 LAMP_SKILLS = {
@@ -32,7 +36,7 @@ LAMP_SKILLS = {
     "SET_COLOR": {"tool": "set_led_color", "id": "set_light_color", "name": "设置灯光颜色",
                   "description": "设置 RGB 和亮度；省略亮度时保留当前值"},
     "BLINK": {"tool": "blink_led", "id": "blink_light", "name": "闪烁灯光",
-              "description": "闪烁指定次数，恢复先前灯光后确认完成"},
+              "description": "默认持续闪烁（count=0），直到开灯、关灯或调色；回执确认已启动。仅明确指定正整数次数时，闪完恢复先前灯光并确认完成"},
 }
 PHYSICAL_ACTIONS = {
     action: {"tool": metadata["tool"], "timeout": PHYSICAL_TIMEOUT}
@@ -110,17 +114,32 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
     return False
 
 
-def lamp_skill(action: str, *, legacy: bool = False) -> dict:
+def lamp_skill(action: str, *, legacy: bool = False, fsm_version: int = FSM_VERSION) -> dict:
     metadata = LAMP_SKILLS[action]
     schema = deepcopy(LEGACY_ACTION_SCHEMAS[action] if legacy else
+                      V2_ACTION_SCHEMAS[action] if fsm_version == 2 else
                       TOOL_DECLARATIONS[metadata["tool"]]["params_schema"])
     return {"id": metadata["id"], "name": metadata["name"],
-            "description": metadata["description"], "tags": ["actuator", "light"],
+            "description": ("闪烁指定次数，恢复先前灯光后确认完成"
+                            if action == "BLINK" and (legacy or fsm_version == 2)
+                            else metadata["description"]), "tags": ["actuator", "light"],
             "params_schema": schema, "invoke": {"action": action}}
 
 
-def valid_lamp_params(action: str, params: Any, *, allow_legacy: bool = False) -> bool:
-    return valid_params(action, params, schemas=LEGACY_ACTION_SCHEMAS if allow_legacy else ACTION_SCHEMAS)
+def valid_lamp_params(action: str, params: Any, *, allow_legacy: bool = False,
+                      card: dict | None = None) -> bool:
+    schemas = LEGACY_ACTION_SCHEMAS if allow_legacy else ACTION_SCHEMAS
+    if card is not None:
+        schemas = {(skill.get("invoke") or {}).get("action"): skill["params_schema"]
+                   for skill in card.get("skills", []) if skill.get("params_schema")}
+    return valid_params(action, params, schemas=schemas)
+
+
+def blink_default(card: dict | None = None) -> int:
+    """Only advertise continuous blinking when the device declares support."""
+    if card is None:
+        return BLINK_DEFAULT
+    return 0 if valid_lamp_params("BLINK", {"count": 0}, card=card) else 3
 
 
 def normalize_brightness(action: str, params: dict, current: dict) -> dict:

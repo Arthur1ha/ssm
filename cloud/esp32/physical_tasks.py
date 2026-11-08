@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import uuid
 
@@ -32,7 +33,7 @@ def _fingerprint(unit_id: str, session_id: str, action: str, params: dict) -> st
 
 def reserve(task_id: str, *, unit_id: str, session_id: str, action: str,
             params: dict, request_params: dict | None = None,
-            origin_kind: str | None = None) -> bool:
+            origin_kind: str | None = None, training: dict | None = None) -> bool:
     """Return True only to the first publisher of this exact task ID.
 
     The caller must hold no other cross-process lock while publishing.
@@ -55,7 +56,9 @@ def reserve(task_id: str, *, unit_id: str, session_id: str, action: str,
             "session_id": session_id, "action": action,
             "fingerprint": fingerprint, "status": "reserved",
             "request_fingerprint": request_fingerprint, "origin_kind": origin_kind,
-            "result": None, "created_at": time.time(),
+            "request_params": request_params if request_params is not None else params,
+            "params": params,
+            "result": None, "created_at": time.time(), "training": training,
         }, exclusive=True)
 
 
@@ -85,6 +88,9 @@ def record_result(task_id: str, unit_id: str, result: dict) -> bool | None:
         old["result"] = dict(result)
         old["status"] = "observed"
         old["updated_at"] = time.time()
+        if result.get("result") == "ok":
+            # Server receipt time, never an untrusted device supplied timestamp.
+            old["completed_at"] = old["updated_at"]
         write_record(path, old)
         return True
 
@@ -107,6 +113,44 @@ def get(task_id: str, *, unit_id: str, session_id: str,
                 or (origin_kind is not None and old.get("origin_kind") not in (None, origin_kind))):
             raise ValueError("physical_task_id_conflict")
     result = old.get("result")
-    return {"task_id": task_id, **result} if isinstance(result, dict) else {
+    training = old.get("training") or {}
+    attribution = {key: training[key] for key in ("training_refs", "reasons", "transition_id")
+                   if key in training}
+    return {"task_id": task_id, **attribution, **result} if isinstance(result, dict) else {
         "task_id": task_id, "result": "unknown", "error": "edge_result_unconfirmed",
+        **attribution,
     }
+
+
+def completion_history(*, unit_id: str, transition_id: str, teaching_id: str,
+                       since: float, origin_kind: str | None = None,
+                       trigger_ref: str | None = None) -> tuple[bool, float | None]:
+    """Project confirmed completion times from the authoritative task records."""
+    latest = None
+    try:
+        with locked_directory(PHYSICAL_TASKS_DIR):
+            for path in PHYSICAL_TASKS_DIR.glob("*.json"):
+                row = read_record(path)
+                if row is None or row.get("unit_id") != unit_id:
+                    continue
+                training = row.get("training") or {}
+                if (training.get("transition_id") != transition_id
+                        or teaching_id not in training.get("teaching_ids", [])
+                        or (origin_kind is not None and row.get("origin_kind") != origin_kind)
+                        or (trigger_ref is not None and training.get("trigger_ref") != trigger_ref)
+                        or row.get("created_at", 0) < since):
+                    continue
+                result = row.get("result") or {}
+                if result.get("result") in {None, "accepted", "executing", "timeout"}:
+                    return False, None
+                if result.get("result") == "ok":
+                    # Older ledger rows predate completed_at; their terminal
+                    # updated_at is the same server-owned first success receipt.
+                    completed = row.get("completed_at", row.get("updated_at"))
+                    if (type(completed) not in (int, float) or not math.isfinite(completed)
+                            or completed < row.get("created_at", 0)):
+                        return False, None
+                    latest = max(latest or completed, completed)
+    except (OSError, ValueError, TypeError):
+        return False, None
+    return True, latest

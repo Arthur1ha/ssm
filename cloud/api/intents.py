@@ -161,12 +161,40 @@ async def _internal_request(
     return await asyncio.to_thread(_sync_internal_request, path, method, session, body)
 
 
+class TrainingSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    unit_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    transition_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    teaching_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def validate_training_selection(selection, session, *, unit_id=None):
+    if selection is None:
+        return None
+    from cloud.agents.common.training import service
+    try:
+        selected = TrainingSelection.model_validate(selection).model_dump(exclude_none=True)
+        if unit_id and selected['unit_id'] != unit_id:
+            raise ValueError('selection_unit_mismatch')
+        snapshot = service.snapshot(selected['unit_id'], {**session, 'space_id': session.get('space_id', DEFAULT_SPACE_ID)})
+        if not any(e['id'] == selected['transition_id'] and e['trainable'] for e in snapshot['catalog']['transitions']):
+            raise ValueError('invalid_selection_transition')
+        if selected.get('teaching_id') and not any(
+            r['teaching_id'] == selected['teaching_id'] and selected['transition_id'] in r['definition']['transition_ids']
+            for r in snapshot['records']):
+            raise ValueError('invalid_selection_teaching')
+        return selected
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail='invalid_training_selection') from exc
+
+
 class IntentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(..., min_length=1, max_length=4000)
     intent_hint: str | None = Field(None, max_length=80)
     device_hint: str | None = Field(None, max_length=120)
     resume_run_id: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    selection: TrainingSelection | None = None
 
 
 class CommandRequest(BaseModel):
@@ -446,6 +474,7 @@ async def create_intent(
     req: IntentRequest,
     session: dict[str, Any] = Depends(require_csrf),
 ):
+    selection = validate_training_selection(req.selection, session)
     event_id = "evt_" + uuid.uuid4().hex
     trace_id = "tr_" + uuid.uuid4().hex
     resume_run_id = req.resume_run_id
@@ -475,6 +504,8 @@ async def create_intent(
         "trace_id": trace_id,
         "user_revision": user_revision,
     }
+    if selection:
+        payload["selection"] = selection
     if req.intent_hint:
         payload["intent_hint"] = req.intent_hint
     if req.device_hint:
@@ -591,7 +622,7 @@ def _valid_lamp_params(action: str, params: Any) -> bool:
 
 
 def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any],
-                   run_id: str | None = None, resume: bool = False) -> dict[str, Any]:
+                   run_id: str | None = None, resume: bool = False, selection=None) -> dict[str, Any]:
     """Adapt an authenticated device-page session to the lamp Planner → Executor."""
     from cloud.space.execution import ExecutionContext
 
@@ -604,21 +635,20 @@ def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any],
                                    task_id=task_id)
 
     return agent.run_user_loop(message, unit_id, context, dispatch,
-                               run_id=run_id, resume=resume)
+                         run_id=run_id, resume=resume, selection=selection)
 
 
 async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
-                            *, run_id: str | None = None, resume: bool = False) -> dict[str, Any]:
+                            *, run_id: str | None = None, resume: bool = False, selection=None) -> dict[str, Any]:
     """理解灯的对话，并在即时命令时等待 ESP32 的执行结果。"""
     if not message.strip():
         raise HTTPException(status_code=400, detail="chat requires message")
     if run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
         raise HTTPException(status_code=400, detail="invalid run_id")
+    selection = validate_training_selection(selection, session, unit_id=unit_id)
     card = _configured_card(unit_id)
     if unit_id != os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led") or card is None:
         raise HTTPException(status_code=404, detail="unit is not available in the current space")
-    if not card.get("online"):
-        raise HTTPException(status_code=503, detail="unit is offline")
     from cloud.esp32.service import get_agent
 
     agent = get_agent()
@@ -629,7 +659,7 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
         unit_id, session["session_id"], json.dumps(message, ensure_ascii=False),
     )
     try:
-        result = await run_in_threadpool(_run_lamp_chat, agent, unit_id, message, session, run_id, resume)
+        result = await run_in_threadpool(_run_lamp_chat, agent, unit_id, message, session, run_id, resume, selection)
     except Exception:
         device_chat_logger.exception(
             "[DeviceChat/Error] unit=%s session=%s", unit_id, session["session_id"],
@@ -687,7 +717,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         if operation == "start_explore" and session["actor"] != "admin":
             raise HTTPException(status_code=403, detail="only an administrator may start exploration")
         ensure_go2_action("LIFE")
-        return await _internal_request("/api/go2/life", "POST", session, {"action": operation})
+        return await _internal_request("/api/go2/life", "POST", session, {"action": operation, **({"request_id": request_id} if request_id else {})})
     if normalized == "velocity":
         ensure_go2_action("VELOCITY")
         return await _internal_request("/api/go2/velocity", "POST", session, params)
@@ -704,21 +734,23 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail="set_mode requires axis=autonomy and value")
         return await _internal_request("/api/go2/autonomy", "PUT", session, {"mode": params["value"]})
     if normalized == "chat":
-        message = str(params.get("message") or "").strip()
-        if not message:
+        message = str(params.get("message") or "")
+        if not message.strip():
             raise HTTPException(status_code=400, detail="chat requires message")
         task_id = str(params.get("task_id") or ("go2_" + uuid.uuid4().hex))
         if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
             raise HTTPException(status_code=400, detail="invalid task_id")
         return await _internal_request("/api/go2/chat", "POST", session, {
             "message": message, "task_id": task_id,
+            "selection": validate_training_selection(params.get("selection"), session, unit_id="go2"),
             "deadline": min(float(session["expires_at"]), time.time() + 180),
         })
 
     canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "FIND_OBJECT", "RECOGNIZE_PERSON", "STOP"} else action
     ensure_go2_action(canonical)
     if canonical == "SPORT":
-        return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {}), **correlation})
+        return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {}),
+                                       **({"prepare_standing": params["prepare_standing"]} if "prepare_standing" in params else {}), **correlation})
     if canonical == "NAVIGATE":
         return await _internal_request("/api/go2/navigation/go", "POST", session, {"name": params.get("name", "")})
     if canonical in {"VISUAL_NAVIGATE", "FIND_OBJECT"}:
@@ -799,10 +831,11 @@ async def create_command(
         return {"ok": True, "result": {"result": "ok", "mode": agent.get_autonomy_mode()}}
 
     if req.action.lower() == "chat":
-        message = str(req.params.get("message") or "").strip()
+        message = str(req.params.get("message") or "")
         result = await execute_lamp_chat(unit_id, message, session,
                                          run_id=req.params.get("run_id"),
-                                         resume=req.params.get("resume") is True)
+                                         resume=req.params.get("resume") is True,
+                                         selection=req.params.get("selection"))
         return {"ok": True, "result": result}
 
     from cloud.api.main import _esp32_state
@@ -882,13 +915,13 @@ async def resume_go2_command_task(task_id: str, req: CommandRequest,
                                   session: dict[str, Any] = Depends(require_csrf)):
     if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
-    message = str(req.params.get("message") or "").strip()
-    if req.action.lower() != "chat" or not message:
+    message = str(req.params.get("message") or "")
+    if req.action.lower() != "chat" or not message.strip():
         raise HTTPException(status_code=400, detail="chat requires message")
     from cloud.api.activity import user_intervention
     await user_intervention()
     return await _internal_request(f"/api/go2/tasks/{task_id}/resume", "POST", session,
-                                   {"message": message})
+                                   {"message": message, "selection": validate_training_selection(req.params.get("selection"), session, unit_id="go2")})
 
 
 @router.get("/api/commands/{unit_id}/tasks/{task_id}")

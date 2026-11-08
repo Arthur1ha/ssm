@@ -10,7 +10,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
 from cloud.agents.common.runner import invoke_blocking
-from cloud.agents.common.teaching_bindings import validate_for_teaching
 from cloud.observability import current_event_context, emit_agent_event
 from cloud.agents.steward.tools.coordination import allows_step
 from cloud.agents.steward.tools.card import validate_public_skill
@@ -37,7 +36,6 @@ def _public_view(cards: dict) -> list:
     return [{"unit_id": uid, "online": card.get("online", False),
              "name": card.get("name"), "services": card.get("services", {}),
              "observations": card.get("observations", []),
-             "autonomous_skills": card.get("autonomous_skills", []),
              "skills": [{"id": skill.get("id"), "name": skill.get("name"),
                          "description": skill.get("description"),
                          "params_schema": skill.get("params_schema", {})}
@@ -185,20 +183,6 @@ class AwaitResult(_Args):
     """查询既有设备任务结果。"""
     task_id: str
 
-class TeachingDraft(_Args):
-    """一条要交给主人确认的教导草案。"""
-    unit_id: str = Field(min_length=1, description="目标智能体的 Agent Card unit_id")
-    name: str = Field(min_length=1, max_length=120, description="教导名称")
-    trigger: str = Field(min_length=1, max_length=500, description="何时适用，用自然语言描述")
-    behavior: str = Field(min_length=1, max_length=500, description="希望智能体如何行动，用自然语言描述")
-    binding: dict[str, Any] | None = Field(description=(
-        "设备当前可验证的自动执行映射；只有观察和自主技能都能精确表达用户条件时填写。"
-        "格式为 observation_id、where、skill_id、params；不能把看到任意人等同于识别主人。"))
-
-class SaveRule(_Args):
-    """提交教导和可验证的自动执行映射，由主人一起确认。"""
-    rule: TeachingDraft
-
 class SendMessage(_Args):
     """向同空间智能体发送受限消息。"""
     target: str
@@ -224,7 +208,7 @@ class AskUser(_Args):
 STEWARD_TOOL_SCHEMAS = {
     "list_agents": ListAgents, "get_space_context": GetSpaceContext,
     "read_state": ReadState, "invoke_skill": InvokeSkill,
-    "await_result": AwaitResult, "save_rule": SaveRule,
+    "await_result": AwaitResult,
     "send_message": SendMessage, "start_activity": StartActivity,
     "set_space_constraint": SetSpaceConstraint,
     "clear_space_constraints": ClearSpaceConstraints, "ask_user": AskUser,
@@ -235,12 +219,17 @@ def make_executor(run, context: dict, resume: bool = False):
     """Bind the trusted context and domain services to one Graph tool call."""
     run_id, session_id = run.run_id, run.session_id
     async def execute(name: str, args: dict, step_id: str) -> dict:
+        if name in {"list_training", "propose_training"}:
+            from cloud.agents.common.training.tools import execute_training
+            if run.parent_run_id or context.get("peer_request_id"):
+                return {"result": "rejected", "error": "direct_user_request_required"}
+            return await execute_training(name, args, {**context, "run_id": run_id})
         if context.get("peer_request_id") and peer_coordination_cancelled(context["peer_request_id"]):
             return {"result": "cancelled", "error": "higher_priority_user_request"}
         if context.get("expires_at") and context["expires_at"] <= time.time():
             return {"result": "timeout", "error": "session_expired"}
         if name in {"invoke_skill", "set_space_constraint",
-                    "clear_space_constraints", "save_rule"} and any(
+                    "clear_space_constraints"} and any(
                         step.get("tool") == "start_activity" and
                         (step.get("result") or {}).get("result") == "ok"
                         for step in run.steps):
@@ -352,41 +341,8 @@ def make_executor(run, context: dict, resume: bool = False):
                     min(5, max(0.1, run.deadline - time.time())))
             return await invoke_blocking(
                 _wait_mqtt_result, task_id, session_id, min(run.deadline, time.time() + 20))
-        if name == "save_rule":
-            if context.get("actor") != "admin" or not context.get("persist"):
-                return {"result": "rejected", "error": "persistence_permission_denied"}
-            rule = args.get("rule")
-            if not isinstance(rule, dict) or any(
-                    not isinstance(rule.get(key), str) or not rule[key].strip()
-                    for key in ("unit_id", "name", "trigger", "behavior")):
-                return {"result": "rejected", "error": "invalid_teaching"}
-            if (len(rule["name"].strip()) > 120 or
-                    len(rule["trigger"].strip()) > 500 or
-                    len(rule["behavior"].strip()) > 500 or
-                    not isinstance(run.goal, str) or not run.goal.strip() or len(run.goal) > 1000):
-                return {"result": "rejected", "error": "teaching_text_too_long"}
-            available = _cards(context)
-            members = get_space_cards(available, get_space_registry())
-            members.update({uid: card for uid, card in available.items()
-                            if card.get("space_id") == DEFAULT_SPACE_ID})
-            target = members.get(rule["unit_id"])
-            if not target or (target.get("services") or {}).get("teachings_endpoint") != "/api/teachings":
-                return {"result": "rejected", "error": "target_not_teachable"}
-            binding = rule.get("binding")
-            if binding is not None:
-                try:
-                    binding = validate_for_teaching(binding, target, rule["trigger"])
-                except (ValueError, KeyError, TypeError):
-                    return {"result": "rejected", "error": "unsupported_teaching_binding"}
-            draft = {key: rule[key].strip() for key in ("unit_id", "name", "trigger", "behavior")}
-            draft["source_text"] = run.goal
-            draft["confirmation_id"] = f"{run_id}:{step_id}"[:120]
-            if binding is not None:
-                draft["binding"] = binding
-            feedback = ("请确认教导和自动触发设置。" if binding is not None
-                        else "请确认教导；当前没有可验证的自动触发设置。")
-            transport.do_publish_feedback(session_id, "pending_rule", feedback,
-                                          rule=draft, run_id=run_id)
-            return {"result": "accepted", "reason": "awaiting_user_confirmation"}
         return {"result": "rejected", "error": "unknown_tool"}
     return execute
+
+from cloud.agents.common.training.tools import SCHEMAS as TRAINING_SCHEMAS
+STEWARD_TOOL_SCHEMAS.update(TRAINING_SCHEMAS)

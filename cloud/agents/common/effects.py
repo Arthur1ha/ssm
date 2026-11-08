@@ -5,13 +5,32 @@ unknown after a crash and must be reconciled with the device task ledger;
 it is never permission to dispatch the call again.
 """
 
+import contextlib
+import contextvars
 import fcntl
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
 import time
+
+
+_current_effect = contextvars.ContextVar('physical_effect', default=None)
+
+
+def current_effect():
+    return _current_effect.get()
+
+
+@contextlib.contextmanager
+def use_effect(ledger, identity):
+    token = _current_effect.set((ledger, tuple(identity)))
+    try:
+        yield
+    finally:
+        _current_effect.reset(token)
 
 
 class FileEffectLedger:
@@ -133,3 +152,63 @@ class FileEffectLedger:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+
+    def annotate_execution(self, identity, metadata):
+        """Reserve the device boundary in the already-authoritative effect row."""
+        identity = self._identity(*identity)
+        path, lock_path = self._paths(identity)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            row = self._read(path, identity)
+            if row is None:
+                raise ValueError('effect_not_reserved')
+            if row.get('execution') is not None:
+                raise ValueError('effect_device_boundary_already_reserved')
+            row['execution'] = {**metadata, 'reserved_at': time.time()}
+            self._write(path, row)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def completion_history(self, *, unit_id, transition_id, teaching_id, since,
+                           origin_kind, trigger_ref=None):
+        """Rebuild completion facts from dispatch rows plus existing observations.
+
+        Unknown pending, accepted and timed-out work cannot establish cooldown.
+        Completion observations take precedence over immutable request receipts.
+        """
+        last = None
+        try:
+            for path in self.root.glob('*.json'):
+                with path.open(encoding='utf-8') as source:
+                    row = json.load(source)
+                execution = row.get('execution') or {}
+                if (execution.get('unit_id') != unit_id
+                        or execution.get('transition_id') != transition_id
+                        or teaching_id not in execution.get('teaching_ids', [])
+                        or execution.get('origin_kind') != origin_kind
+                        or (trigger_ref is not None and execution.get('trigger_ref') != trigger_ref)
+                        or execution.get('reserved_at', row['reserved_at']) < since):
+                    continue
+                identity = tuple(row['identity'])
+                observed = self._read(self._paths((*identity[:3], identity[3] + ':completion'))[0],
+                                      (*identity[:3], identity[3] + ':completion'))
+                receipt = observed or row
+                result = receipt.get('result') or {}
+                if result.get('result') == 'ok' and result.get('confirmation_scope') == 'completion':
+                    completed = receipt.get('observed_at')
+                    if (type(completed) not in (int, float) or not math.isfinite(completed)
+                            or completed < row['reserved_at']):
+                        return False, last
+                    last = max(last or 0, completed)
+                elif result.get('result') in {'blocked', 'rejected'}:
+                    continue
+                elif observed is not None and result.get('result') in {'error', 'cancelled'}:
+                    continue
+                else:
+                    return False, last
+            return True, last
+        except (OSError, ValueError, KeyError, TypeError):
+            return False, last

@@ -75,6 +75,9 @@ def _go2_state_machine() -> dict:
                 "action": trigger,
                 "params": {},
                 "completion": ACTIONS[trigger].completion,
+                # Continuous motion/remote control is outside first-version training.
+                **({"training_disabled": True} if trigger in {'Move', 'EnterMoveControl', 'BalanceStand'} else {}),
+                **({"training_events": ["vision.person_presence"]} if trigger == "Hello" else {}),
                 **({"dispatch_only": True}
                    if trigger in SPORT_COMMANDS and trigger != 'StopMove' else {}),
             })
@@ -124,6 +127,7 @@ def _go2_state_machine() -> dict:
     body = {key: deepcopy(state_machine[key]) for key in
             ("states", "transitions", "views", "layout")}
     body.update(id="body", label="身体", state_field="body_state",
+                prepare_action={"via": "standing", "action": "SPORT"},
                 parent={"region": "activity", "state": "active"}, retain_when_inactive=True,
                 available_actions_field="available_actions", blocked_actions_field="blocked_actions",
                 manual_available_actions_field="available_manual_actions",
@@ -192,7 +196,6 @@ def _build_go2_card() -> dict:
         "name": "Go2 机器狗",
         "description": "四足机器人，支持运动控制、导航和视觉感知",
         "agent_type": "robot",
-        "services": {"teachings_endpoint": "/api/teachings"},
         "observations": [
             {"id": "vision.person_presence", "name": "看到人",
              "description": "只判断画面中是否有人，不识别身份", "fields": {"detected": "boolean"}},
@@ -203,7 +206,6 @@ def _build_go2_card() -> dict:
              "available": identity_skill.enabled,
              "fields": {"recognized": "boolean"}},
         ],
-        "autonomous_skills": ["go2_sport"],
         "online": False,
         "transport": {
             "kind": "http",
@@ -261,7 +263,8 @@ def _build_go2_card() -> dict:
              "available_actions_field": "available_actions", "blocked_actions_field": "blocked_actions", "availability_key": "Move", "params_schema": velocity_schema()},
         ],
     }
-    return normalize_card(card)
+    from cloud.agents.common.training.catalog import declare_training
+    return declare_training(normalize_card(card))
 
 
 def _publish_go2_card() -> None:

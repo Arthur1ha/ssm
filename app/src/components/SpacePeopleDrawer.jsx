@@ -111,14 +111,13 @@ function SpacePeopleDrawer({ open, onClose }) {
 
   return <>
     <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-    <aside className={`space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
+    <aside className={`management-dialog space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
       role="dialog" aria-modal="true" aria-labelledby="space-people-title">
-      <div className="space-drawer__handle" aria-hidden="true"/>
       <header className="space-drawer__header">
         <div><h2 id="space-people-title">空间人员库</h2></div>
         <div className="space-drawer__header-actions">
           <div className="feedback-button"><button className="btn" onClick={loadPeople} disabled={busy}>刷新</button>{feedback('refresh')}</div>
-          <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭人员库"><Icon name="x" size={16}/></button>
+          <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭人员库"><Icon name="x" size={16}/></button>
         </div>
       </header>
       <div className="space-drawer__body">

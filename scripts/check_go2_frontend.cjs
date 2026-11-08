@@ -27,24 +27,14 @@ assert.equal(grouped.length,1,'A node pair must have one line');
 assert.equal(grouped[0].directions.length,2);
 assert.equal(grouped[0].directions[0].edges.length,2,'Automatic rule was discarded behind a manual rule');
 assert.equal(context.window.stateTransitionLabel({trigger:'action_completed',label:'动作完成并确认姿态'}),'动作执行完毕');
-const matchingRules = context.window.stateTransitionTeachings;
-const bindingCard = {unit_id:'dog',skills:[{id:'sport',invoke:{action:'SPORT'},params_schema:{properties:{cmd:{enum:['Sit','Hello']}}}}]};
-const boundRules = [
-  {unit_id:'dog',binding:{skill_id:'sport',params:{cmd:'Sit'}}},
-  {unit_id:'dog',binding:{skill_id:'sport',params:{cmd:'Hello'}}},
-  {unit_id:'other',binding:{skill_id:'sport',params:{cmd:'Sit'}}},
-  {unit_id:'dog',behavior:'Sit'},
-];
-assert.equal(matchingRules({action:'Sit',params:{}},boundRules,bindingCard).length,1,'Rule projection mixed unrelated commands, agents or unbound teachings');
-assert.equal(matchingRules({action:''},boundRules,bindingCard).length,0,'Observation edge acquired action rules');
-const lampBindingCard={unit_id:'lamp',skills:[{id:'set',invoke:{action:'SET_STATE'},params_schema:{properties:{state:{enum:['ON','OFF']}}}}]};
-assert.equal(matchingRules({action:'SET_STATE',params:{state:'OFF'}},[{unit_id:'lamp',binding:{skill_id:'set',params:{state:'ON'}}}],lampBindingCard).length,0,'ON rule leaked onto OFF transition');
 const sittingNode = {id:'body:sitting',label:'坐下',current:false};
 const sitEdge = {dst:'body:sitting',active:true,reason:'',transition:{action:'Sit',params:{}}};
 assert.equal(nodeControl(sittingNode,[sitEdge]).transition.action,'Sit','Target node must resolve its legal command');
 assert.equal(nodeControl(sittingNode,[{...sitEdge,active:false}]).transition,null,'Node click must not invent a multi-step route');
 assert.equal(nodeControl(sittingNode,[{...sitEdge,reason:'等待有效设备反馈'}]).reason,'等待有效设备反馈');
 assert.equal(nodeControl({...sittingNode,current:true},[sitEdge]).transition,null,'Current state must not re-execute');
+assert.equal(nodeControl({...sittingNode,current:true},[{...sitEdge,transition:{action:'Sit',dispatch_only:true}}]).transition,null,
+  'Manual dispatch must not re-execute the current posture');
 assert.equal(nodeControl(sittingNode,[sitEdge,{...sitEdge,transition:{action:'Other',params:{}}}]).transition,null,'Ambiguous targets need explicit action selection');
 assert.equal(nodeControl(sittingNode,[sitEdge,{...sitEdge,src:'lying'}]).choices.length,1,'Identical commands were presented as separate choices');
 const automaticEdge={dst:'body:sitting',active:true,reason:'',transition:{trigger:'observed'}};
@@ -70,7 +60,7 @@ assert.equal(lampOverlay.control_ts,1001,'Physical frame erased cloud control st
 lampOverlay=merge(lampOverlay,{ts:102,ism:'ON',control_ts:999,control_state:'manual',autonomy_mode:'manual'});
 assert.equal(lampOverlay.control_state,'holding','Old control cursor replaced newer overlay');
 const files = ['app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
-  'app/src/pages/RulesPage.jsx', 'app/src/components/RulesDrawer.jsx',
+  'app/src/hooks/useTraining.js', 'app/src/components/TrainingPreview.jsx', 'app/src/components/TrainingDrawer.jsx', 'app/src/pages/TransitionInspector.jsx',
   'app/src/components/DeviceWidgets.jsx', 'app/src/pages/fsmWidgets.jsx',
   'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx',
   'app/src/pages/HierarchicalFsmBoard.jsx', 'app/src/pages/FsmDevicePage.jsx'];
@@ -105,6 +95,15 @@ async function checkCommandResults() {
   payload = {accepted:true};
   assert.equal((await sandbox.bus.command('esp32_desk_led','OFF')).result,'accepted');
   assert.equal(sandbox.bus.describe({result:'accepted',dispatch_only:true}), '指令已发送');
+  assert.equal(sandbox.bus.describe({result:'blocked',error:'training_blocked',reasons:[{code:'cooldown',remaining_s:2.2}]}),'冷却中，还需等待 3 秒');
+  let taskWaits = [];
+  sandbox.bus.waitForGo2Task = async id => { taskWaits.push(id); return {result:'accepted',dispatch_only:true}; };
+  for (const wrapped of [false,true]) {
+    const result = {result:'executing',task_id:'body_preparation'};
+    payload = wrapped ? {ok:true,result} : result;
+    assert.equal((await sandbox.bus.command('go2','SPORT',{cmd:'Hello',prepare_standing:true})).result,'accepted');
+  }
+  assert.deepEqual(taskWaits,['body_preparation','body_preparation']);
   console.log('PASS: explicit command outcomes survive legacy accepted flags; new lamp dispatch still waits for its result.');
 }
 
@@ -131,10 +130,12 @@ async function checkInteractions() {
       }
     },
     useMemo: callback => callback(),
+    useCallback: callback => callback,
   };
   const ChatPanel = () => null;
-  const ui = vm.createContext({ React, window: {}, console, setTimeout, clearTimeout, ChatPanel,
-    apiClient: { addEventListener() {}, removeEventListener() {} },
+  const ui = vm.createContext({ React, window: {addEventListener(){},removeEventListener(){},dispatchEvent(){}}, console, setTimeout, clearTimeout, ChatPanel, Icon: () => null,
+    sessionStorage: {getItem(){return null},setItem(){},removeItem(){}},
+    apiClient: { addEventListener() {}, removeEventListener() {}, request: async () => ({records:[],edge_annotations:[]}) },
     commandBus: { describe: result => result.error || result.result,
       async command(unitId, action, params) { calls.push({unitId, action, params}); return { result: 'accepted' }; } },
     EventSource: function() { sources.push(this); this.close = () => {}; },
@@ -199,7 +200,7 @@ async function checkInteractions() {
     'import json; from cloud.go2.card import _go2_state_machine; print(json.dumps(_go2_state_machine()))'],
   { cwd: root, env: { ...process.env, UV_CACHE_DIR: process.env.UV_CACHE_DIR || '/tmp/ssm-uv' }, encoding: 'utf8' })).stdout);
   const lampCard = JSON.parse((await promisify(execFile)('uv', ['run','python','-c',
-    'import json; from cloud.cards.builder import build_card_from_manifest; print(json.dumps(build_card_from_manifest({"unit_id":"esp32_desk_led","name":"ws2812_ring","agent_type":"actuator","fsm_version":2,"capabilities":[{"action":"SET_COLOR"},{"action":"SET_STATE"},{"action":"BLINK"}]})))'],
+    'import json; from edge.lamp_contract import FSM_VERSION; from cloud.cards.builder import build_card_from_manifest; print(json.dumps(build_card_from_manifest({"unit_id":"esp32_desk_led","name":"ws2812_ring","agent_type":"actuator","fsm_version":FSM_VERSION,"capabilities":[{"action":"SET_COLOR"},{"action":"SET_STATE"},{"action":"BLINK"}]})))'],
     {cwd:root,env:{...process.env,UV_CACHE_DIR:process.env.UV_CACHE_DIR || '/tmp/ssm-uv-cache'},encoding:'utf8'})).stdout);
   const velocitySchema = JSON.parse((await promisify(execFile)('uv', ['run','python','-c',
     'import json; from cloud.go2.actions import velocity_schema; print(json.dumps(velocity_schema()))'],
@@ -272,11 +273,20 @@ async function checkInteractions() {
     console.log('Browser React runtime:', await page.evaluate(() => React.version));
     await page.addScriptTag({ content: `window.__calls=[]; window.__sources=[];window.__velocities=[];
       window.__teachings=[];window.__teachingReads=[];
-      window.apiClient={addEventListener(){},removeEventListener(){},async request(url){
+      const listeners=new EventTarget();
+      window.__emit=detail=>listeners.dispatchEvent(new CustomEvent('server-event',{detail}));
+      window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;
+      window.apiClient={addEventListener:(...a)=>listeners.addEventListener(...a),removeEventListener:(...a)=>listeners.removeEventListener(...a),async request(url,options={}){
+        __requests.push({url,options});
+        if(url.startsWith('/api/training/proposals/') && url.endsWith('/confirm')){if(window.__conflict) throw Object.assign(new Error('conflict'),{status:409});return {saved:true};}
+        if(url.startsWith('/api/training/proposals/'))return __proposal;
+        if(url==='/api/training/proposals')return __proposal;
+        if(url.startsWith('/api/training/') && options.method==='PUT')return {};
         if(url.startsWith('/api/teachings')){__teachingReads.push(url);return __teachings;}
+        if(url.includes('/training'))return __training;
         if(url==='/api/devices')return [__lampCard,__card];return {};}};
       window.apiErrorText=error=>error.message;
-      window.commandBus={describe:r=>r.result==='accepted'?'指令已发送，尚未确认完成':'执行完成',
+      window.commandBus={describe:r=>r.error || (r.result==='accepted'?'指令已发送，尚未确认完成':'执行完成'),
         command:async(unit,action,params)=>{__calls.push({unit,action,params}); await new Promise(r=>setTimeout(r,100));return {result:'accepted'};},
         velocity(unit,action,params){__velocities.push({unit,action,params});}};
       window.EventSource=function(){__sources.push(this);this.close=()=>{};};
@@ -296,6 +306,102 @@ async function checkInteractions() {
 
     await page.waitForSelector('.device-state-board');
     await page.evaluate(() => document.fonts.ready);
+    if (process.argv.includes('--posture-only')) {
+      const tap = async (value, action, params = {}) => {
+        const selector = `[data-state="body:${value}"]`;
+        await page.waitForFunction(selector => document.querySelector(selector)?.dataset.executable === 'true', {}, selector);
+        const count = await page.evaluate(() => __calls.length);
+        await page.evaluate(selector => {
+          const node = document.querySelector(selector);
+          node.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+          node.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+        }, selector);
+        await page.waitForFunction(() => document.querySelector('.device-state-board').getAttribute('aria-busy') === 'false');
+        assert.equal(await page.evaluate(() => __calls.length), count + 1);
+        assert.deepEqual(await page.evaluate(() => ({action:__calls.at(-1).action,params:__calls.at(-1).params})), {action,params});
+        assert.equal(await page.$('[aria-label="状态说明"] .btn'),null,'Known posture offered two rise commands');
+      };
+      for (const [source,stand] of [['sitting','RiseSit'],['lying','StandUp']]) {
+        await page.evaluate(source => __renderState({...__state,revision:__state.revision+1,
+          body_state:source,fsm_state:source,body_telemetry_fresh:true,available_actions:[source==='sitting'?'RiseSit':'StandUp']}), source);
+        await tap('standing',stand);
+        const targets = await page.evaluate(source => __sm.regions.find(r => r.id==='body').transitions
+          .filter(t => t.src==='standing' && t.dispatch_only && t.dst!==source).map(t => [t.dst,t.action]), source);
+        for (const [target,action] of targets) await tap(target,'SPORT',{cmd:action,prepare_standing:true});
+        const count = await page.evaluate(() => __calls.length);
+        await page.tap(`[data-state="body:${source}"]`);
+        assert.equal(await page.evaluate(() => __calls.length),count,'Current pose was re-executed');
+      }
+      await page.evaluate(() => __renderState({...__state,revision:__state.revision+1,body_state:'sitting',
+        fsm_state:'sitting',body_telemetry_fresh:false}));
+      await page.waitForFunction(() => document.querySelector('[data-state="body:lying"]').dataset.executable==='false');
+      const count = await page.evaluate(() => __calls.length);
+      await page.$eval('[data-state="body:lying"]',node => node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+      await page.waitForFunction(() => document.querySelector('.device-whiteboard__feedback')?.textContent.includes('设备反馈已过期'));
+      assert.equal(await page.evaluate(() => __calls.length),count,'Stale posture started an automatic sequence');
+      assert.deepEqual(errors,[]);
+      console.log('PASS: sitting/lying select the correct rise, every standing-based action requests server preparation, duplicate taps/current poses do not replay, stale preparation reports its reason.');
+      return;
+    }
+    if (process.argv.includes('--training-only')) {
+      await page.click('.device-header__settings');
+      await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备能力与技能')).click());
+      await page.waitForSelector('[role="dialog"][aria-label="设备能力与技能"]');
+      await page.waitForFunction(() => document.querySelector('.device-settings-panel').getAnimations().every(animation => animation.playState === 'finished'));
+      assert.equal(await page.$$('.device-settings-panel').then(nodes => nodes.length), 1);
+      assert.equal(await page.$('details.device-settings-capabilities'), null, 'Capabilities should open as a drawer');
+      assert.equal(await page.$eval('.device-settings-panel', node => Math.round(node.getBoundingClientRect().bottom)), 844);
+      assert.equal(await page.$eval('.device-settings-capabilities', node => node.textContent.includes('公开技能')), true);
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.device-settings-panel'));
+      await page.evaluate(() => {
+        const edge=__sm.regions.find(r=>r.id==='body').transitions.find(t=>t.action==='Sit' && t.src==='standing');
+        edge.id='tr_sit'; edge.training_fixed_params=[];
+        __training.catalog.transitions=[{id:'tr_sit',trainable:true}];
+        __training.records=[{teaching_id:'teach1',revision:1,transition_ids:['tr_sit'],source_text:'坐下前等三秒',transitionLabel:'站立 → 坐下',changeText:'完成后冷却 3 秒',scopeText:'用户委托请求',desired_status:'enabled',load_status:'loaded',execution_reasons:[]}];
+        __training.edge_annotations=[{transition_id:'tr_sit',teachings:[{desired_status:'enabled'}]}];
+        __renderState(__state);
+        __emit({type:'training.updated',unit_id:'go2',cursor:1});
+      });
+      await page.waitForSelector('.training-edge-badge');
+      const count=await page.evaluate(()=>__calls.length);
+      await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
+      await page.waitForSelector('.training-inspector');
+      assert.equal(await page.evaluate(()=>__calls.length),count,'Line inspection sent a command');
+      assert.equal(await page.$eval('.training-inspector',e=>e.textContent.includes('冷却 3 秒')),true);
+      await page.click('.training-inspector button');
+      assert.equal(await page.$eval('.training-selection',e=>e.textContent.includes('所选转换')),true);
+      await page.evaluate(()=>{
+        __proposal={proposal_id:'p1',unit_id:'go2',expected_revision:1,capability_hash:'hash',transition_ids:['tr_sit'],transitionLabel:'站立 → 坐下',changeText:'完成后冷却 3 秒',scopeText:'用户委托请求',confirmation_allowed:true,after:{source_text:'坐下前等三秒'}};
+        __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p1'});
+      });
+      await page.waitForSelector('.training-change');
+      await page.click('.training-change .training-actions button:last-child');
+      await page.waitForFunction(()=>__requests.some(r=>r.url.endsWith('/confirm')));
+      assert.deepEqual(await page.evaluate(()=>__requests.find(r=>r.url.endsWith('/confirm')).options.body),{expected_revision:1,capability_hash:'hash'});
+      assert.equal(await page.evaluate(()=>__calls.length),count,'Confirmation sent a device command');
+      await page.click('.device-header__settings');
+      await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('伙伴训练')).click());
+      await page.waitForSelector('.training-drawer');
+      await page.click('.training-record .training-actions button:nth-child(2)');
+      await page.waitForFunction(()=>__requests.some(r=>r.options.method==='PUT'));
+      assert.deepEqual(await page.evaluate(()=>__requests.find(r=>r.options.method==='PUT').options.body),{enabled:false,expected_revision:1});
+      await page.click('.training-record .training-actions button:last-child');
+      await page.waitForSelector('.training-change');
+      assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/proposals' && r.options.body.operation==='remove')),true);
+      await page.evaluate(()=>window.__conflict=true);
+      await page.click('.training-change .training-actions button:last-child');
+      await page.waitForFunction(()=>document.querySelector('.training-change')?.textContent.includes('草稿仍保留'));
+      assert.equal(await page.evaluate(()=>__calls.length),count,'Removal preview or conflict dispatched a device command');
+      await page.click('.training-change .training-actions button:first-child');
+      for (const width of [768,1440,390]) {
+        await page.setViewport({width,height:844,deviceScaleFactor:1,hasTouch:true,isMobile:true});
+        assert.equal(await page.$eval('.fsm-whiteboard__viewport',e=>e.getBoundingClientRect().width>0),true);
+      }
+      assert.deepEqual(errors,[]);
+      console.log('PASS: simulated edge inspection, confirmation without hardware dispatch, pause, removal preview, conflict preservation and responsive viewport.');
+      return;
+    }
     if (process.argv.includes('--reachability-only')) {
       const play='[data-state="life:play"]';
       assert.equal(await page.$eval(play,node=>node.dataset.reachable),'true','Idle cannot reach interaction');
@@ -321,15 +427,12 @@ async function checkInteractions() {
       await page.evaluate(()=>__renderState({...__state,revision:3,activity_state:'active',life_state:'idle',connected:false},{...__card,_online:false}));
       await page.waitForFunction(()=>document.querySelector('[data-state="life:play"]').dataset.reachable==='false');
       await page.evaluate(()=>__renderState({ism:'BLINKING',ts:1},{...__lampCard,_online:true}));
-      await page.waitForSelector('[data-state="device:ERROR"]');
-      assert.equal(await page.$eval('[data-state="device:ERROR"]',node=>node.dataset.reachable),'true','Lamp event destinations use different reachability rules');
-      assert.equal(await page.$eval('[data-state="device:ERROR"]',node=>node.dataset.executable),'false');
-      await page.tap('[data-state="device:ERROR"]');
-      await page.waitForSelector('[aria-label="转换说明"]');
-      assert.equal(await page.evaluate(()=>__calls.length),0,'Inspecting lamp failure rules dispatched a command');
-      await page.evaluate(()=>__renderState({ism:'ERROR',ts:2},{...__lampCard,_online:true}));
-      await page.waitForSelector('[data-state="device:ERROR"].is-current');
-      assert.equal(await page.$eval('[data-state="device:ON"]',node=>node.dataset.executable),'true','Lamp error recovery is missing');
+      await page.waitForSelector('[data-state="device:BLINKING"].is-current');
+      assert.deepEqual(await page.$$eval('.fsm-whiteboard__node',nodes=>nodes.map(node=>node.dataset.state).sort()),
+        ['device:BLINKING','device:OFF','device:ON']);
+      assert.equal(await page.$eval('[data-state="device:ON"]',node=>node.dataset.reachable),'true');
+      assert.equal(await page.$eval('[data-state="device:ON"]',node=>node.dataset.executable),'true','Blinking lamp cannot return to steady light');
+      assert.equal(await page.evaluate(()=>__calls.length),0,'Rendering lamp states dispatched a command');
       assert.deepEqual(errors,[]);
       console.log('PASS: manual versus event reachability, idle-to-interaction, rest/offline gates, shared lamp projection, focused rules and blur dismissal.');
       return;
@@ -350,7 +453,7 @@ async function checkInteractions() {
       await page.waitForFunction(()=>document.querySelector('.device-state-board').getAttribute('aria-busy')==='false');
       assert.equal(await page.evaluate(()=>__calls.length),1,'Repeated movement taps dispatched duplicate entry');
       assert.equal(await page.evaluate(()=>__calls[0].action),'EnterMoveControl');
-      assert.equal(await page.$$eval('.device-remote-controls button',nodes=>nodes.some(node=>/进入遥控|开始移动/.test(node.textContent))),false,'A second entry button remains');
+      assert.equal(await page.$$('.device-remote-controls button').then(nodes=>nodes.length),0,'A separate movement-mode button remains');
       assert.equal(await page.evaluate(()=>__velocities.length),0,'Selecting movement sent velocity');
       const pad='[aria-label="移动摇杆，方向键控制，松开停止"]';
       assert.equal(await page.$eval(pad,node=>node.getAttribute('aria-disabled')),'true');
@@ -362,12 +465,32 @@ async function checkInteractions() {
       await page.waitForFunction(()=>__velocities.some(call=>call.params.vx>0));
       await page.keyboard.up('ArrowUp');
       await page.waitForFunction(()=>Object.values(__velocities.at(-1).params).every(value=>value===0));
+      const turnPad='[aria-label="转向摇杆，方向键控制，松开停止"]';
+      await page.focus(turnPad);await page.keyboard.down('ArrowRight');
+      await page.waitForFunction(()=>__velocities.some(call=>call.params.vyaw<0));
+      await page.keyboard.up('ArrowRight');
+      await page.waitForFunction(()=>Object.values(__velocities.at(-1).params).every(value=>value===0));
+      await page.$eval('.device-joysticks',node=>node.scrollIntoView({block:'center'}));
+      const centers=await page.$$eval('.device-joysticks [role="group"]',nodes=>nodes.map(node=>{
+        const r=node.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
+      }));
+      const moveTouch=await page.touchscreen.touchStart(centers[0].x,centers[0].y-20);
+      const turnTouch=await page.touchscreen.touchStart(centers[1].x+20,centers[1].y);
+      await page.waitForFunction(()=>__velocities.at(-1)?.params.vx>0&&__velocities.at(-1)?.params.vyaw<0);
+      await moveTouch.end();
+      await page.waitForFunction(()=>__velocities.at(-1)?.params.vx===0&&__velocities.at(-1)?.params.vyaw<0);
+      await turnTouch.end();
+      await page.waitForFunction(()=>Object.values(__velocities.at(-1).params).every(value=>value===0));
+      const beforeStop=await page.evaluate(()=>__calls.length);
+      await page.tap('[data-state="body:standing"]');
+      await page.waitForFunction(count=>__calls.length===count+1,{},beforeStop);
+      assert.equal(await page.evaluate(()=>__calls.at(-1).action),'StopMove','Selecting standing did not leave movement');
       await page.evaluate(()=>__renderState({...__state,revision:3,control_mode:'normal',available_actions:[]}));
-      await page.waitForFunction(selector=>document.querySelector(selector).getAttribute('aria-disabled')==='true',{},pad);
+      await page.waitForFunction(()=>!document.querySelector('.device-remote-controls'));
       await page.tap('[data-state="body:moving"]');
-      assert.equal(await page.evaluate(()=>__calls.length),1,'Unavailable movement bypassed state checks');
+      assert.equal(await page.evaluate(()=>__calls.length),beforeStop+1,'Unavailable movement bypassed state checks');
       assert.deepEqual(errors,[]);
-      console.log('PASS: one-tap remote entry, no duplicate entry or second button, no automatic velocity, state gating and release-to-stop.');
+      console.log('PASS: one-tap movement, no mode buttons, translation/turning and release-to-stop, selecting standing exits, duplicate and state gates.');
       if (process.argv.includes('--direct-only')) {
         const tapOnce = async (id,action,params={}) => {
           const selector=`[data-state="${id}"]`;
@@ -393,7 +516,7 @@ async function checkInteractions() {
         await page.waitForFunction(()=>document.querySelector('[data-state="body:sitting"]').dataset.executable==='false');
         await page.tap('[data-state="body:sitting"]');
         assert.equal(await page.evaluate(()=>__calls.length),count,'Blocked action was sent');
-        await page.tap('.fsm-whiteboard__edge');
+        await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
         await page.waitForSelector('[aria-label="转换说明"]');
         assert.equal(await page.evaluate(()=>__calls.length),count,'Inspecting rules sent a command');
         // Distinct declared commands still require the user to choose one.
@@ -415,7 +538,7 @@ async function checkInteractions() {
         await page.evaluate(()=>__renderState({ism:'ON',ts:2},{...__lampCard,_online:true}));
         await tapOnce('device:OFF','SET_STATE',{state:'OFF'});
         const blink=lampCard.state_machine.transitions.find(t=>t.src==='ON' && t.action==='BLINK');
-        await tapOnce('device:BLINKING','BLINK',blink.params);
+        await tapOnce('device:BLINKING','BLINK',blink.id ? {} : blink.params);
         assert.deepEqual(errors,[]);
         console.log('PASS: direct dog and lamp state commands, duplicate declarations collapsed, blocked actions and rule inspection never dispatch, distinct actions remain selectable.');
       }
@@ -494,12 +617,14 @@ async function checkInteractions() {
       return;
     }
     if (process.argv.includes('--layout-only')) {
+      await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
       await page.evaluate(()=>{
         __card.widgets=[{type:'video',endpoint:'/api/go2/video',states:[],requires_connection:true},
           {type:'map',endpoint:'/api/go2/map.png',states:[],requires_connection:true}];
         __renderState(__state);
       });
       await page.waitForSelector('.device-whiteboard__media');
+      const go2Height = await page.$eval('.device-state-workspace', element => element.getBoundingClientRect().height);
       const graph = await page.$eval('.fsm-whiteboard__viewport',svg=>({
         loops:[...svg.querySelectorAll('.fsm-whiteboard__edge')].filter(edge=>edge.dataset.source===edge.dataset.target).length,
         nodes:Object.fromEntries([...svg.querySelectorAll('.fsm-whiteboard__node')].map(node=>
@@ -513,6 +638,22 @@ async function checkInteractions() {
       await page.evaluate(()=>__renderState({ism:'ON',ts:1},{...__lampCard,_online:true}));
       await page.waitForSelector('.fsm-whiteboard__node[data-state="device:ON"]');
       assert.equal(await page.$$eval('.fsm-whiteboard__edge',edges=>edges.some(edge=>edge.dataset.source===edge.dataset.target)),false);
+      const lampHeight = await page.$eval('.device-state-workspace', element => element.getBoundingClientRect().height);
+      assert(lampHeight < go2Height - 80, `Lamp board did not shrink: lamp=${lampHeight}, Go2=${go2Height}`);
+      console.log(`Adaptive board height at 390px: lamp=${Math.round(lampHeight)}px, Go2=${Math.round(go2Height)}px`);
+      for (const [width,height] of [[320,740],[390,844],[768,1024],[1440,1000],[390,520]]) {
+        await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+        assert.equal(await page.$eval('.fsm-whiteboard__viewport', svg => {
+          const bounds = svg.getBoundingClientRect();
+          return [...svg.querySelectorAll('.fsm-whiteboard__node')].every(node => {
+            const r = node.getBoundingClientRect();
+            return r.left >= bounds.left-1 && r.right <= bounds.right+1 && r.top >= bounds.top-1 && r.bottom <= bounds.bottom+1;
+          });
+        }), true, `Lamp state clipped at ${width}×${height}`);
+        assert.equal(await page.$eval('.device-page__chat input', element => element.getBoundingClientRect().bottom <= innerHeight), true);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      }
+      await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
       await page.screenshot({path:'/tmp/ssm-lamp-no-loops.png',fullPage:true});
       assert.deepEqual(errors,[]);
       console.log('PASS: quick Go2/lamp layout render, renamed nodes, no self-loop edges.');
@@ -746,7 +887,7 @@ async function checkInteractions() {
     assert.equal(await page.$('.device-header__stop'),null,'Go2 header should not show a stop button');
     await page.click('.device-header__settings');
     assert.equal(await page.$eval('.device-settings-safety',node=>node.disabled),false,'No feedback removed the settings stop action');
-    await page.click('[aria-label="关闭设备设置"]');
+    await page.click('[aria-label="关闭管理"]');
     await page.evaluate(()=>__sources[0].onmessage({data:JSON.stringify({...__state,epoch:'a',revision:99,body_state:'standing'})}));
     assert.equal(await page.$$('.fsm-whiteboard__node[data-state="body:unknown"],.fsm-whiteboard__node.is-current[data-state^="body:"]').then(nodes=>nodes.length),0);
     await page.evaluate(()=>__renderState({...__state,epoch:'c',revision:1,activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',available_actions:['EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore','stop_explore']},__card,'visitor'));
@@ -788,11 +929,11 @@ async function checkInteractions() {
     await page.waitForFunction(()=>Object.values(__velocities.at(-1).params).every(value=>value===0));
     await page.screenshot({path:'/tmp/go2-whiteboard-controls-mobile.png',fullPage:true});
     const beforeExit=await page.evaluate(()=>__calls.length);
-    await page.$$eval('.device-remote-controls button',nodes=>nodes.find(node=>node.textContent==='退出遥控').click());
+    await page.tap('.fsm-whiteboard__node[data-state="body:standing"]');
     await page.waitForFunction(before=>__calls.length>before,{},beforeExit);
     assert.equal(await page.evaluate(()=>__calls.at(-1).action),'StopMove');
     await page.evaluate(()=>__renderState({...__state,revision:3,control_mode:'normal',available_actions:['EnterMoveControl','StopMove']}));
-    await page.waitForFunction(()=>document.querySelector('[aria-label="移动摇杆，方向键控制，松开停止"]').getAttribute('aria-disabled')==='true');
+    await page.waitForFunction(()=>!document.querySelector('.device-remote-controls'));
     await page.tap('.fsm-whiteboard__node[data-state="body:standing"]');
     await page.waitForFunction(()=>!document.querySelector('.device-remote-controls'));
     await closeExplanation();
@@ -830,7 +971,7 @@ async function checkInteractions() {
     assert.equal(await page.$('.device-header__stop'),null,'Go2 header should remain compact when the stream is stale');
     await page.click('.device-header__settings');
     assert.equal(await page.$eval('.device-settings-safety',node=>node.disabled),false,'Stale stream disabled the settings stop action');
-    await page.click('[aria-label="关闭设备设置"]');
+    await page.click('[aria-label="关闭管理"]');
     await page.evaluate(()=>__renderState({ism:'ON',ts:1},{unit_id:'lamp',name:'灯',_online:true,transport:{},state_machine:{states:['OFF','ON'],state_field:'ism',initial:'OFF',views:{OFF:{label:'关'},ON:{label:'开'}},transitions:[{src:'ON',dst:'OFF',trigger:'off',action:'SET_STATE',label:'关灯',params:{state:'OFF'}}]},widgets:[],modes:[],skills:[]}));
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="device:ON"]');
     assert.equal(await page.$$('.fsm-whiteboard__node').then(nodes=>nodes.length),2);
@@ -846,7 +987,7 @@ async function checkInteractions() {
     });
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="device:ON"]');
     assert.deepEqual(await page.$$eval('.fsm-whiteboard__node', nodes => nodes.map(node => node.dataset.state).sort()),
-      ['device:BLINKING','device:ERROR','device:OFF','device:ON']);
+      ['device:BLINKING','device:OFF','device:ON']);
     assert.equal(await page.$('[aria-label="选择灯光颜色"]')!==null,true,'Lamp color controls lost');
     await page.focus('[aria-label="选择灯光颜色"]');
     const beforeColor=await page.evaluate(()=>__calls.length);
@@ -854,7 +995,7 @@ async function checkInteractions() {
     assert.equal(await page.evaluate(()=>__calls.at(-1).action),'SET_COLOR');
     await page.click('.device-header__settings');
     assert.equal(await page.$$eval('.device-settings-axis button.is-active',nodes=>nodes.some(node=>node.textContent.includes('自动调光'))),true);
-    await page.click('[aria-label="关闭设备设置"]');
+    await page.click('[aria-label="关闭管理"]');
     await page.screenshot({path:'/tmp/ssm-whiteboard-lamp-mobile.png',fullPage:true});
     await page.$eval('.fsm-whiteboard__edge[data-label="关灯"][data-available="true"]',node=>node.focus());
     await page.keyboard.press('Enter');

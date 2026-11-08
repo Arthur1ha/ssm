@@ -16,13 +16,12 @@ def _physical_schema(name: str, tool: str, params_schema: dict | None = None):
     for key, definition in schema["properties"].items():
         annotation = (Literal[tuple(definition["enum"])] if "enum" in definition else
                       int if definition.get("type") == "integer" else str)
-        required = key in schema.get("required", ())
+        required = key in schema.get("required", ()) and not (tool == "blink_led" and key == "count")
         if not required:
             annotation = annotation | None
         limits = {field: definition[source] for source, field in
                   (("minimum", "ge"), ("maximum", "le")) if source in definition}
         fields[key] = (annotation, Field(default=... if required else None, **limits))
-    fields["taught_id"] = (str | None, None)
     return create_model(name, __doc__=declaration["description"],
                         __config__=ConfigDict(extra="forbid", strict=True), **fields)
 
@@ -77,6 +76,9 @@ def visible_schemas(*, lighting_only: bool, card: dict | None = None) -> dict:
 
     allowed = PHYSICAL_TOOLS | {"ask_user"} if lighting_only else SCHEMAS.keys()
     schemas = {name: schema for name, schema in SCHEMAS.items() if name in allowed}
+    if not lighting_only:
+        from cloud.agents.common.training.tools import SCHEMAS as training_schemas
+        schemas.update(training_schemas)
     if card is not None:
         declared = {(skill.get("invoke") or {}).get("action"): skill
                     for skill in card.get("skills", [])}

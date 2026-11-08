@@ -14,6 +14,7 @@ from cloud.go2.connection import go2
 from cloud.go2.control import control_lease, LeaseConflict
 from cloud.go2.execution import current_context
 from cloud.go2.navigation.navigator import navigator
+from cloud.go2.navigation.target_view import make_target_hint, select_target_view, target_hint_valid
 from cloud.go2.perception import visual_target
 from cloud.go2.perception.visual_target import (
     TargetUnlocalized, STANDOFF_M, STANDOFF_TOLERANCE_M, TARGET_KEEPOUT_M,
@@ -36,88 +37,79 @@ APPROACH_COMMAND_FLOOR = .25
 
 
 def observation_waypoint(grid, pose, observation, bounds=None):
-    """Choose a short mapped observation move; never infer target distance.
-
-    Image bearing is only a direction proposal. Every sampled body pose and
-    the space beyond the proposed endpoint must be measured free. Navigator
-    independently checks the live map while executing.
-    """
-    offset, height = visual_target.target_offset(observation['observation'], observation['frame'])
-    box = observation['observation']['bbox_1000']
-    if height >= .30 or box[3] >= 850:
-        raise TargetUnlocalized('object_returns_unavailable')
-    # Reuse the previous visual-servo direction convention. This nominal
-    # bearing does not become a metric object coordinate or arrival evidence.
-    bearing = pose['heading'] - math.atan(offset)
-    # A small forward observation can improve depth without rotating through
-    # unobserved floor. It is still accepted only by the same full-path check.
-    turn = getattr(grid, 'turn_sweep_details', None)
-    candidates = []
-    if (abs(math.atan(offset)) <= .02
-            or (callable(turn) and turn(pose['x'], pose['y'], pose['heading'], bearing)['clear'])):
-        candidates.append(bearing)
-    if pose['heading'] not in candidates:
-        candidates.append(pose['heading'])
-    distance = REOBSERVE_STEP_M
-    from cloud.go2.navigation.occupancy_grid import TURN_CLEARANCE_M
-    reason = 'no_known_free_observation_path'
-    for bearing in candidates:
-        for fraction in (0., .25, .5, .75, 1., 1.5, 2.):
-            x = pose['x'] + distance * fraction * math.cos(bearing)
-            y = pose['y'] + distance * fraction * math.sin(bearing)
-            if bounds is not None and not (bounds[0] + TURN_CLEARANCE_M <= x <= bounds[2] - TURN_CLEARANCE_M
-                                          and bounds[1] + TURN_CLEARANCE_M <= y <= bounds[3] - TURN_CLEARANCE_M):
-                reason = 'target_outside_search_bounds'
-                break
-            if not grid.is_body_clear(x, y, bearing):
-                reason = 'no_known_free_observation_path'
-                break
-        else:
-            return {'x': pose['x'] + distance * math.cos(bearing),
-                    'y': pose['y'] + distance * math.sin(bearing),
-                    'heading': bearing}
-    raise TargetUnlocalized(reason)
+    """Compatibility entrypoint for the shared bearing-only view selector."""
+    hint = make_target_hint(observation)
+    point = select_target_view(grid, pose, hint, bounds)
+    if point is None:
+        raise TargetUnlocalized('no_known_free_observation_path')
+    return point
 
 
-async def _localize_with_reobservation(target, locate, context, bounds, receipts):
-    """Restore bounded visual approach when a tiny target has no depth yet."""
-    after_move = None
-    for attempt in range(REOBSERVE_MAX_STEPS + 1):
+async def _localize_with_reobservation(target, locate, context, bounds, receipts, hint_state,
+                                     initial_reason=None):
+    """Keep recent target direction through temporary misses and missing depth."""
+    after_move = hint_state.get('after_move')
+    attempted = hint_state.setdefault('attempted', [])
+    soft = {'object_returns_unavailable', 'target_not_visible'}
+    remaining = max(0, REOBSERVE_MAX_STEPS-len(receipts))
+    for attempt in range(remaining + 1):
         try:
+            if initial_reason is not None:
+                reason, initial_reason = initial_reason, None
+                raise TargetUnlocalized(reason)
             return await _await_authorized(locate(target, **(
                 {'after_received_at': after_move} if after_move is not None else {})), context)
         except TargetUnlocalized as exc:
-            if exc.reason != 'object_returns_unavailable' or attempt == REOBSERVE_MAX_STEPS:
+            if exc.reason not in soft or attempt == remaining:
                 raise
-        observed = await _await_authorized(visual_target.observe_target(target), context)
-        if not observed['found']:
-            raise TargetUnlocalized('target_not_visible')
+            last_reason = exc.reason
+        observed = await _await_authorized(visual_target.observe_target(
+            target, **({'after_received_at': after_move} if after_move is not None else {})), context)
         snapshot, reason = navigator.snapshot()
         if reason:
             raise TargetUnlocalized(reason)
         pose, grid = snapshot
-        if pose.get('session_id') != observed['frame']['odom_session_id']:
+        frame = observed.get('frame') or {}
+        if pose.get('session_id') != frame.get('odom_session_id'):
             raise TargetUnlocalized('odom_session_mismatch')
-        visual_target._ensure_stable(observed['frame']['pose_at_capture'], pose)
-        point = observation_waypoint(grid, pose, observed, bounds)
-        emit_agent_event('vision.motion', phase='request', kind='observation_reposition',
+        visual_target._ensure_stable(frame['pose_at_capture'], pose)
+        if observed.get('found'):
+            fresh_hint = make_target_hint(observed)
+            if fresh_hint is None:
+                raise TargetUnlocalized('vision_result_invalid')
+            hint_state['hint'] = fresh_hint
+        hint = hint_state.get('hint')
+        if not target_hint_valid(hint, pose):
+            raise TargetUnlocalized('target_hint_unavailable' if hint else last_reason)
+        if not attempted:
+            attempted.extend([hint['capture_pose'].copy(), pose.copy()])
+        point = select_target_view(grid, pose, hint, bounds, attempted)
+        if point is None:
+            raise TargetUnlocalized('no_known_free_observation_path')
+        attempted.append(point)
+        emit_agent_event('vision.motion', phase='request', kind='target_reobservation',
                          waypoint=point, step_m=REOBSERVE_STEP_M,
                          target_distance_known=False)
         receipt = await _await_authorized(navigator.go_to_coordinate(
             point['x'], point['y'], owner_session_id=context.session_id,
-            # Align then move along the body-forward axis. Splitting a small
-            # joystick magnitude diagonally can leave both axes ineffective.
-            bounds=bounds, holonomic=False, speed_limit=APPROACH_COMMAND_LIMIT,
-            minimum_command_speed=APPROACH_COMMAND_FLOOR,
+            heading=point['heading'], bounds=bounds, holonomic=point['holonomic'],
+            speed_limit=APPROACH_COMMAND_LIMIT, minimum_command_speed=APPROACH_COMMAND_FLOOR,
             arrival_tolerance_m=.08), context, on_result=receipts.append)
         if receipt.get('status') != 'succeeded':
             raise TargetUnlocalized(receipt.get('reason') or 'observation_move_unconfirmed')
         actual = receipt.get('last_trusted_pose') or {}
         if (actual.get('session_id') != pose.get('session_id')
-                or not all(type(actual.get(k)) in (int, float) and math.isfinite(actual[k]) for k in ('x', 'y'))
-                or math.hypot(actual['x']-pose['x'], actual['y']-pose['y']) < .10):
+                or not all(type(actual.get(k)) in (int, float) and math.isfinite(actual[k])
+                           for k in ('x', 'y', 'heading'))):
             raise TargetUnlocalized('observation_move_unconfirmed')
+        moved = math.hypot(actual['x']-pose['x'], actual['y']-pose['y'])
+        turned = abs(math.atan2(math.sin(actual['heading']-pose['heading']),
+                               math.cos(actual['heading']-pose['heading'])))
+        if (turned < .10 if point['view_kind'] == 'turn' else moved < .10):
+            raise TargetUnlocalized('observation_move_unconfirmed')
+        attempted.append(actual.copy())
         after_move = time.monotonic()
+        hint_state['after_move'] = after_move
     raise TargetUnlocalized('object_returns_unavailable')
 
 
@@ -159,21 +151,25 @@ def _same_target(first: dict, second: dict) -> bool:
             and math.hypot(first['x'] - second['x'], first['y'] - second['y']) <= 0.35)
 
 
-async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None) -> dict:
+async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None,
+                                     target_hint: dict | None = None) -> dict:
     """Confirm on different stationary frames, approach, stop and recheck.
 
     Bounds, when provided by a search, are (min_x,min_y,max_x,max_y) in the
     current odom session. Model profiles alone never establish target depth.
     """
     if not isinstance(target, str) or not target.strip() or len(target) > 100:
-        return {'result': 'blocked', 'reason': 'invalid_target'}
+        return {'result': 'blocked', 'reason': 'invalid_target', 'target_hint': target_hint,
+                'observation_moves': []}
     if not go2.is_connected:
-        return {'result': 'blocked', 'reason': 'disconnected'}
+        return {'result': 'blocked', 'reason': 'disconnected', 'target_hint': target_hint,
+                'observation_moves': []}
     context = current_context()
     navigation = None
     location = None
     task_pose = None
     observation_moves = []
+    hint_state = {'hint': target_hint}
 
     def remember_navigation(receipt):
         nonlocal navigation, task_pose
@@ -194,14 +190,24 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                 return await visual_target.locate_ground_target(name, calibration, **kwargs)
             return await visual_target.locate_lidar_target(name, **kwargs)
         _authorize(context)
-        location, pose, _ = await _localize_with_reobservation(
-            target, locate, context, bounds, observation_moves)
-        _authorize(context, renew=True)
-        confirmed, pose, _ = await _await_authorized(locate(
-            target, after_frame_id=location['source_frame_id'],
-            after_received_at=location['source_received_at']), context)
-        if not _same_target(location, confirmed):
-            raise TargetUnlocalized('target_confirmation_mismatch')
+        retry_reason = None
+        while True:
+            location, pose, _ = await _localize_with_reobservation(
+                target, locate, context, bounds, observation_moves, hint_state, retry_reason)
+            _authorize(context, renew=True)
+            try:
+                confirmed, pose, _ = await _await_authorized(locate(
+                    target, after_frame_id=location['source_frame_id'],
+                    after_received_at=location['source_received_at']), context)
+            except TargetUnlocalized as exc:
+                if (exc.reason not in {'object_returns_unavailable', 'target_not_visible'}
+                        or len(observation_moves) >= REOBSERVE_MAX_STEPS):
+                    raise
+                retry_reason = exc.reason
+                continue
+            if not _same_target(location, confirmed):
+                raise TargetUnlocalized('target_confirmation_mismatch')
+            break
         location = confirmed
         task_pose = pose
         snapshot, reason = navigator.snapshot()
@@ -238,7 +244,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
             return {'result': 'error' if navigation.get('status') == 'failed' else navigation.get('status', 'blocked'),
                     'reason': navigation.get('reason'), 'target': target,
                     'navigation': navigation, 'target_location': location,
-                    'observation_moves': observation_moves,
+                    'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                     'last_trusted_pose': task_pose}
         stopped_at = time.monotonic()
         _authorize(context, renew=True)
@@ -256,7 +262,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         _authorize(context, renew=True)
         return {'result': 'ok', 'target': target, 'confirmation': 'odom_stopped_and_visual_recheck',
                 'target_location': verified, 'navigation': navigation, 'stop': stop,
-                'observation_moves': observation_moves,
+                'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                 'distance_to_target_m': round(distance, 3),
                 'front_clearance_to_contact_m': round(distance - visual_target.ROBOT_HALF_LENGTH_M, 3),
                 'message': f'已到「{target}」附近，停稳后已重新确认目标。'}
@@ -267,16 +273,18 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         if observation_moves and task_pose is None:
             task_pose = observation_moves[-1].get('last_trusted_pose')
         stop_result = None
-        if exc.reason in {'authorization_expired', 'control_lease_changed'}:
+        if exc.reason in {'authorization_expired', 'control_lease_changed',
+                          'odom_session_mismatch', 'map_session_changed', 'map_mismatch',
+                          'disconnected', 'stop_unconfirmed', 'arrival_unconfirmed'}:
             stop_result = await navigator.stop_and_confirm(owner_session_id=context.session_id)
         unconfirmed = stop_result is not None and stop_result.get('result') != 'ok'
         if unconfirmed:
             return {'result': 'accepted', 'reason': 'stop_unconfirmed', 'target': target,
                     'cause': exc.reason, 'stop': stop_result, 'navigation': navigation,
-                    'observation_moves': observation_moves,
+                    'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                     'target_location': location, 'last_trusted_pose': task_pose}
         return {'result': 'blocked', 'reason': exc.reason, 'target': target,
                 'message': _MESSAGES.get(exc.reason, f'尚未确认到达：{exc.reason}。'),
                 'navigation': navigation, 'target_location': location,
-                'observation_moves': observation_moves,
+                'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                 'last_trusted_pose': task_pose}

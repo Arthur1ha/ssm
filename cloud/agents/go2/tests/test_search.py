@@ -60,8 +60,9 @@ async def run(adapter, **changes):
 
 
 @pytest.mark.asyncio
-async def test_visible_target_is_confirmed_before_any_motion():
-    adapter = Replay([{"found": True, "frame_id": 1}, {"found": True, "frame_id": 2}])
+async def test_nearby_target_is_rechecked_only_before_reporting_completion():
+    adapter = Replay([{"found": True, "frame_id": n, 'observation': {'proximity': 'nearby'}}
+                      for n in (1, 2)])
     state = await run(adapter)
     assert state["result"]["result"] == "ok"
     assert adapter.calls == ["observe", "observe", "approach"]
@@ -69,7 +70,7 @@ async def test_visible_target_is_confirmed_before_any_motion():
 
 @pytest.mark.asyncio
 async def test_same_frame_never_counts_as_confirmation():
-    adapter = Replay([{"found": True, "frame_id": 1}] * 2)
+    adapter = Replay([{"found": True, "frame_id": 1, 'observation': {'proximity': 'nearby'}}] * 2)
     state = await run(adapter)
     assert state["result"]["reason"] == "confirmation_frame_reused"
     assert "approach" not in adapter.calls
@@ -77,8 +78,10 @@ async def test_same_frame_never_counts_as_confirmation():
 
 @pytest.mark.asyncio
 async def test_out_of_view_target_requires_new_observation_after_move():
-    adapter = Replay([{"found": False, "frame_id": 1}, {"found": True, "frame_id": 2},
-                      {"found": True, "frame_id": 3}], choices=[{"target": {"path_cost_m": 1.0}}])
+    adapter = Replay([{"found": False, "frame_id": 1},
+                      {"found": True, "frame_id": 2, 'observation': {'proximity': 'nearby'}},
+                      {"found": True, "frame_id": 3, 'observation': {'proximity': 'nearby'}}],
+                     choices=[{"target": {"path_cost_m": 1.0}}])
     state = await run(adapter)
     assert adapter.calls == ["observe", "select", "navigate", "observe", "observe", "approach"]
     assert state["result"]["steps"] == 1
@@ -90,6 +93,23 @@ async def test_absence_does_not_claim_object_nonexistent():
     assert state["result"]["result"] == "blocked"
     assert state["result"]["found"] is False
     assert state["result"]["coverage"]["unchecked_known_cells"] == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stop_ok, same_session', [(True, True), (False, True), (True, False)])
+async def test_transient_pose_gap_reobserves_only_after_confirmed_same_session_stop(stop_ok, same_session):
+    adapter = Replay([{'found': False, 'frame_id': 1},
+        *[{'found': True, 'frame_id': n, 'observation': {'proximity': 'nearby'}} for n in (2, 3)]],
+        choices=[{'target': {'path_cost_m': .8}}])
+    async def navigate(state):
+        adapter.calls.append('navigate')
+        return {'result': 'blocked', 'reason': 'localization_unavailable',
+                'stop': {'result': 'ok' if stop_ok else 'accepted'},
+                'last_trusted_pose': {'session_id': 'map' if same_session else 'old'}}
+    adapter.navigate = navigate
+    result = await run(adapter)
+    assert (result['result']['result'] == 'ok') == (stop_ok and same_session)
+    assert adapter.calls.count('observe') == (3 if stop_ok and same_session else 1)
 
 
 @pytest.mark.asyncio
@@ -111,7 +131,8 @@ async def test_budget_is_explicit_not_parent_runner_turn_limit():
 
 @pytest.mark.asyncio
 async def test_found_photo_survives_failed_approach():
-    adapter = Replay([{"found": True, "frame_id": 1}, {"found": True, "frame_id": 2, "media_ref": "/photo"}],
+    adapter = Replay([{"found": True, "frame_id": 1, 'observation': {'proximity': 'nearby'}},
+                     {"found": True, "frame_id": 2, "media_ref": "/photo", 'observation': {'proximity': 'nearby'}}],
                      approach={"result": "blocked", "reason": "calibration_unavailable"})
     state = await run(adapter)
     assert state["result"]["found"] is True
@@ -255,10 +276,10 @@ async def test_real_navigation_blocked_receipt_survives_search_checkpoint(monkey
     grid.cells[:] = FREE
     grid.grid[:] = False
     grid.known_floor[:] = True
-    # The path is clear, but rotating the rectangular body crosses unmeasured
-    # ground. This must remain a genuine blocked receipt, not become an error.
+    # The centre path is clear, but turning the rectangular body crosses an
+    # actual obstacle. Keep this a real blocked receipt through serialization.
     ix, iy = grid.odom_to_grid(.30, .30)
-    grid.known_floor[iy, ix] = False
+    grid.obstacles[iy, ix] = True
     grid.has_free_space_evidence = True
     commands = []
     now = time.monotonic()
@@ -269,6 +290,7 @@ async def test_real_navigation_blocked_receipt_survives_search_checkpoint(monkey
         move_velocity=lambda *args, **kwargs: commands.append(args))
     monkeypatch.setattr(nav_module, 'go2', robot)
     nav = nav_module.Navigator()
+    monkeypatch.setattr(nav, '_snapshot', lambda: ((robot.odom.copy(), grid), None))
 
     class WithRealNavigation(Replay):
         async def navigate(self, state):
@@ -433,7 +455,7 @@ async def test_monitor_failure_preserves_completed_navigation_receipt(monkeypatc
     assert result['coverage']['unchecked_known_cells'] == 10
 
 
-def transit_device(monkeypatch):
+def segment_device(monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from cloud.agents.go2.workflows.search import DeviceSearch
@@ -441,10 +463,14 @@ def transit_device(monkeypatch):
     from cloud.go2.execution import ExecutionContext
     from cloud.go2.perception import visual_target
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'map'}
-    robot = SimpleNamespace(odom=pose, latest_frame_snapshot=lambda: (b'jpeg', {
+    robot = SimpleNamespace(odom=pose, odom_received_at=time.monotonic(), odom_frame_id='odom',
+                            _velocity_command_active=False, latest_frame_snapshot=lambda: (b'jpeg', {
         'frame_id': 1, 'received_at': time.monotonic(), 'odom_session_id': 'map',
         'width': 640, 'height': 360}))
     monkeypatch.setattr(connection, 'go2', robot)
+    from cloud.go2.navigation.navigator import navigator
+    monkeypatch.setattr(navigator, 'snapshot', lambda: ((robot.odom.copy(), object()), None))
+    monkeypatch.setattr(navigator, 'last_trusted_pose', None)
     monkeypatch.setattr(visual_target, 'image_quality', lambda _: 1.)
     context = ExecutionContext('test', 'admin', False, expires_at=int(time.time()) + 60)
     adapter = DeviceSearch(context, 'transit', (-2., -2., 2., 2.), 'map')
@@ -456,59 +482,298 @@ def transit_device(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_transit_candidate_stops_navigation_and_requires_fresh_graph_confirmation(monkeypatch):
+async def test_segment_stops_and_joins_motion_before_waiting_for_model(monkeypatch):
     from unittest.mock import AsyncMock
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2.perception import visual_target
-    adapter, robot = transit_device(monkeypatch)
-    cancelled = asyncio.Event()
+    adapter, robot = segment_device(monkeypatch)
+    monkeypatch.setattr(navigator, 'snapshot', lambda: pytest.fail('map gating belongs to Navigator'))
+    closed, inference_started, finish_inference = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async def moving(*args, **kwargs):
+        robot._velocity_command_active = True
         try:
-            await asyncio.Event().wait()
+            while True:
+                robot.odom = {**robot.odom, 'x': robot.odom['x']+.035}
+                robot.odom_received_at = time.monotonic()
+                await asyncio.sleep(.015)
         finally:
-            cancelled.set()
+            robot._velocity_command_active = False
+            closed.set()
     stop = AsyncMock(return_value={'result': 'ok'})
     monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
     monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
-    monkeypatch.setattr(visual_target, 'detect_visible_target', AsyncMock(
-        return_value={'found': True, 'bbox_1000': [100, 100, 200, 200]}))
-    candidate = {'x': 1., 'y': 0., 'heading': 0., 'path_cost_m': 1.}
-    receipt = await asyncio.wait_for(adapter.navigate(initial(candidate=candidate)), 1)
-    assert receipt['result'] == 'ok' and receipt['reason'] == 'transit_candidate_stopped'
-    assert 'found' not in receipt and receipt['transit_candidate']['frame_id'] == 1
-    assert cancelled.is_set()
-    stop.assert_awaited_once_with(owner_session_id='test')
-    # The movement image is not one of the two required stopped observations.
-    replay = Replay([{'found': False, 'frame_id': 0}, {'found': True, 'frame_id': 2},
-                     {'found': True, 'frame_id': 3}], choices=[{'target': candidate}])
-    replay.navigate = AsyncMock(return_value=receipt)
-    result = await run(replay)
-    assert replay.calls.count('observe') == 3
-    assert result['result']['result'] == 'ok' and 'approach' in replay.calls
+    detect = AsyncMock()
+    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
+    receipt = await asyncio.wait_for(adapter.navigate(initial(
+        candidate={'x': 2., 'y': 0., 'heading': 0.})), 1)
+    assert receipt['reason'] == 'observation_segment_stopped'
+    assert receipt['result'] == 'ok' and receipt['goal_reached'] is False
+    assert .80 <= receipt['distance_m'] < .95
+    assert closed.is_set() and not robot._velocity_command_active
+    detect.assert_not_awaited()
+    stop.assert_awaited_once()
+    stationary_x = robot.odom['x']
+    async def slow_observation(*args, **kwargs):
+        assert closed.is_set() and not robot._velocity_command_active
+        assert kwargs['after_received_at'] == adapter.after_time
+        inference_started.set()
+        await finish_inference.wait()
+        return {'found': False, 'frame': {'frame_id': 2, 'received_at': time.monotonic()},
+                'pose': robot.odom, 'quality': 1., 'observation': {'found': False}}
+    monkeypatch.setattr(visual_target, 'observe_target', slow_observation)
+    observation = asyncio.create_task(adapter.observe(initial()))
+    await asyncio.wait_for(inference_started.wait(), 1)
+    await asyncio.sleep(.05)
+    assert robot.odom['x'] == stationary_x
+    finish_inference.set()
+    assert not (await observation)['found']
 
 
 @pytest.mark.asyncio
-async def test_transit_miss_does_not_interrupt_navigation_or_mark_coverage(monkeypatch):
+@pytest.mark.parametrize('fault', ['localization_unavailable', 'control_lease_changed', 'stop_unconfirmed'])
+async def test_segment_faults_stop_without_starting_vision(monkeypatch, fault):
     from unittest.mock import AsyncMock
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2.perception import visual_target
-    adapter, robot = transit_device(monkeypatch)
-    observed = asyncio.Event()
-    async def detect(*args):
-        observed.set()
-        return {'found': False, 'bbox_1000': None}
+    adapter, robot = segment_device(monkeypatch)
     async def moving(*args, **kwargs):
-        await observed.wait()
-        return {'status': 'succeeded', 'last_trusted_pose': robot.odom}
-    stop = AsyncMock(return_value={'result': 'ok'})
+        await asyncio.Event().wait()
     monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
+    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(
+        return_value={'result': 'accepted' if fault == 'stop_unconfirmed' else 'ok'}))
+    if fault == 'control_lease_changed':
+        adapter.guard = AsyncMock(return_value=fault)
+    elif fault == 'localization_unavailable':
+        robot.odom_received_at = time.monotonic()-2
+    else:
+        async def moving_distance(*args, **kwargs):
+            robot.odom = {**robot.odom, 'x': .85}
+            await asyncio.Event().wait()
+        monkeypatch.setattr(navigator, 'go_to_coordinate', moving_distance)
+    detect = AsyncMock()
     monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
-    receipt = await asyncio.wait_for(adapter.navigate(initial(
-        candidate={'x': 1., 'y': 0., 'heading': 0.})), 1)
-    assert receipt['result'] == 'ok'
+    receipt = await asyncio.wait_for(adapter.navigate(initial(candidate={'x': 2., 'y': 0., 'heading': 0.})), 1)
+    assert receipt['result'] == 'blocked' and receipt['reason'] == fault
+    detect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_segment_cancellation_joins_navigation(monkeypatch):
+    from cloud.go2.navigation.navigator import navigator
+    adapter, _ = segment_device(monkeypatch)
+    started, closed = asyncio.Event(), asyncio.Event()
+    async def moving(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
+    task = asyncio.create_task(adapter.navigate(initial(candidate={'x': 2., 'y': 0., 'heading': 0.})))
+    await asyncio.wait_for(started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_single_detection_moves_before_recheck_and_later_miss_retains_direction():
+    hint = {'kind': 'bearing_only', 'frame_id': 1}
+    adapter = Replay([{'found': True, 'frame_id': 1, 'target_hint': hint},
+                      {'found': False, 'frame_id': 2}])
+    captured = []
+    async def select(state):
+        captured.append(state['target_hint'])
+        adapter.calls.append('select')
+        if len(captured) == 1:
+            return {'target': {'source': 'target_reobservation', 'path_cost_m': .3}}
+        return {'reason': 'no_safe_view'}
+    adapter.select = select
+    state = await run(adapter)
+    assert captured == [hint, hint]
+    assert adapter.calls == ['observe', 'select', 'navigate', 'observe', 'select']
+    assert state['result']['result'] == 'blocked'
+
+
+@pytest.mark.asyncio
+async def test_missing_depth_reobserves_before_retrying_arrival():
+    hint = {'kind': 'bearing_only', 'frame_id': 1}
+    adapter = Replay([{'found': True, 'frame_id': n, 'target_hint': hint,
+                      'observation': {'proximity': 'nearby'}} for n in range(1, 5)],
+        choices=[{'target': {'source': 'target_reobservation', 'path_cost_m': .3}}])
+    count = 0
+    async def approach(state):
+        nonlocal count
+        count += 1
+        return ({'result': 'blocked', 'reason': 'object_returns_unavailable', 'target_hint': hint}
+                if count == 1 else {'result': 'ok', 'reason': 'arrival_verified'})
+    adapter.approach = approach
+    state = await run(adapter)
+    assert state['result']['result'] == 'ok'
+    assert count == 2 and adapter.calls.count('navigate') == 1
+    assert len(state['target_views']) == 1
+
+
+@pytest.mark.asyncio
+async def test_pose_drift_retries_only_new_static_frame_once(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import visual_target
+    adapter, robot = segment_device(monkeypatch)
+    sample = {'found': False, 'frame': {'frame_id': 2, 'received_at': time.monotonic()},
+              'pose': robot.odom, 'quality': 1., 'observation': {'found': False}}
+    observe = AsyncMock(side_effect=[visual_target.TargetUnlocalized('pose_changed_during_detection'), sample])
+    monkeypatch.setattr(visual_target, 'observe_target', observe)
+    before = adapter.after_time
+    assert not (await adapter.observe(initial()))['found']
+    assert observe.await_count == 2
+    assert observe.await_args_list[1].kwargs['after_received_at'] > before
     assert not adapter.coverage.records
-    stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remembered_direction_precedes_unrelated_exploration(monkeypatch):
+    from types import SimpleNamespace
+    from cloud.go2.navigation import frontier
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.navigation.target_view import make_target_hint
+    adapter, robot = segment_device(monkeypatch)
+    hint = make_target_hint({'found': True, 'frame': {'pose_at_capture': robot.odom,
+        'odom_session_id': 'map', 'frame_id': 1, 'received_at': time.monotonic(),
+        'width': 640, 'height': 360},
+        'observation': {'bbox_1000': [750, 500, 800, 600]}})
+    grid = SimpleNamespace(map_session='map', is_body_clear=lambda *_: True,
+                           turn_sweep_details=lambda *_: {'clear': True})
+    monkeypatch.setattr(navigator, 'snapshot', lambda: ((robot.odom.copy(), grid), None))
+    monkeypatch.setattr(frontier, 'select_observation_target', lambda *_a, **_k:
+                        pytest.fail('must look near the remembered target first'))
+    choice = await adapter.select(initial(target_hint=hint))
+    assert choice['target']['source'] == 'target_reobservation'
+    assert choice['target']['heading'] < 0  # face the target on the right before approaching
+    assert choice['target']['path_cost_m'] <= .30 + 1e-6
+
+
+@pytest.mark.asyncio
+async def test_stationary_odom_wobble_is_not_a_successful_segment(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.agents.go2.workflows import search
+    from cloud.go2.navigation.navigator import navigator
+    adapter, robot = segment_device(monkeypatch)
+    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_S', .06)
+    async def moving(*args, **kwargs):
+        while True:
+            robot.odom = {**robot.odom, 'x': .002 if robot.odom['x'] <= 0 else -.002}
+            robot.odom_received_at = time.monotonic()
+            await asyncio.sleep(.01)
+    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
+    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'ok'}))
+    receipt = await adapter.navigate(initial(candidate={'x': 2., 'y': 0., 'heading': 0.}))
+    assert receipt['reason'] == 'motion_not_observed'
+    assert receipt['result'] == 'blocked'
+
+
+@pytest.mark.asyncio
+async def test_plain_exploration_keeps_existing_point_navigation(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    adapter, robot = segment_device(monkeypatch)
+    result = {'status': 'succeeded', 'last_trusted_pose': {**robot.odom, 'x': 1.}}
+    move = AsyncMock(return_value=result)
+    monkeypatch.setattr(navigator, 'go_to_coordinate', move)
+    monkeypatch.setattr(adapter, '_watch_observation_segment', AsyncMock(
+        side_effect=AssertionError('object search segmentation must not run in pure exploration')))
+    receipt = await adapter.navigate(initial(mode='explore', candidate={'x': 1., 'y': 0., 'heading': 0.}))
+    assert receipt['result'] == 'ok'
+    assert 'segment' not in receipt
+    assert move.call_args.kwargs.keys() == {'heading', 'owner_session_id', 'bounds'}
+
+
+@pytest.mark.asyncio
+async def test_approximate_search_continues_past_old_depth_budget_and_finishes_visually(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.perception import visual_target
+    device, _ = segment_device(monkeypatch)
+    hint = {'kind': 'bearing_only', 'frame_id': 1}
+    observations = [{'found': True, 'frame_id': n, 'target_hint': hint,
+                     'observation': {'proximity': 'far' if n <= 5 else 'nearby'}}
+                    for n in range(1, 8)]
+    adapter = Replay(observations, choices=[{'target': {'source': 'target_reobservation',
+                                                     'path_cost_m': .3}}] * 5)
+    adapter.approach = device.approach
+    stop = AsyncMock(return_value={'result': 'ok'})
+    monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
+    monkeypatch.setattr(visual_target, 'locate_lidar_target', AsyncMock(
+        side_effect=AssertionError('approximate search must not require target depth')))
+    state = await run(adapter)
+    assert state['result']['result'] == 'ok'
+    assert state['result']['reason'] == 'target_nearby_visual'
+    assert state['steps'] == 5
+    receipt = state['result']['approach']
+    assert receipt['precision'] == 'approximate'
+    assert receipt['target_location'] is None and receipt['distance_to_target_m'] is None
+    stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_one_nearby_frame_requests_stationary_recheck_not_more_movement(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    device, _ = segment_device(monkeypatch)
+    hint = {'kind': 'bearing_only', 'frame_id': 1}
+    observations = [{'found': True, 'frame_id': n, 'target_hint': hint,
+                     'observation': {'proximity': 'nearby'}} for n in range(1, 3)]
+    adapter = Replay(observations)
+    adapter.approach = device.approach
+    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'ok'}))
+    state = await run(adapter)
+    assert state['result']['result'] == 'ok'
+    assert adapter.calls == ['observe'] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('proximity', ['far', 'uncertain', None, True])
+async def test_visibility_alone_does_not_mean_nearby(monkeypatch, proximity):
+    from unittest.mock import AsyncMock
+    device, _ = segment_device(monkeypatch)
+    device.effect = AsyncMock(side_effect=AssertionError('no motion effect for a visual decision'))
+    receipt = await device.approach(initial(observation={'found': True,
+        'observation': {'proximity': proximity}}, target_hint={'kind': 'bearing_only'}))
+    assert receipt['result'] == 'blocked' and receipt['reason'] == 'target_view_needed'
+
+
+@pytest.mark.asyncio
+async def test_nearby_visual_result_still_requires_confirmed_stop(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    device, _ = segment_device(monkeypatch)
+    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'blocked'}))
+    result = await device.approach(initial(observation={'found': True,
+        'nearby_confirmed': True, 'observation': {'proximity': 'nearby'}}))
+    assert result['result'] == 'blocked' and result['reason'] == 'stop_unconfirmed'
+
+
+@pytest.mark.asyncio
+async def test_blocked_target_view_does_not_wander_away_from_known_target(monkeypatch):
+    from types import SimpleNamespace
+    from cloud.go2.navigation import frontier
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.navigation.target_view import make_target_hint
+    adapter, robot = segment_device(monkeypatch)
+    hint = make_target_hint({'found': True, 'frame': {'pose_at_capture': robot.odom,
+        'odom_session_id': 'map', 'frame_id': 1, 'received_at': time.monotonic(),
+        'width': 640, 'height': 360}, 'observation': {'bbox_1000': [750, 500, 800, 600]}})
+    grid = SimpleNamespace(map_session='map', is_body_clear=lambda *_: False,
+                           turn_sweep_details=lambda *_: {'clear': False})
+    monkeypatch.setattr(navigator, 'snapshot', lambda: ((robot.odom.copy(), grid), None))
+    monkeypatch.setattr(frontier, 'select_observation_target', lambda *_a, **_k:
+                        pytest.fail('do not abandon a visible target for unrelated exploration'))
+    result = await adapter.select(initial(target_hint=hint))
+    assert result['reason'] == 'no_known_free_observation_path'
+
+
+
+
 
 
 @pytest.mark.asyncio
@@ -516,7 +781,7 @@ async def test_transit_miss_does_not_interrupt_navigation_or_mark_coverage(monke
 async def test_search_reposition_requires_actual_motion_and_fresh_next_view(monkeypatch, distance, expected):
     from unittest.mock import AsyncMock
     from cloud.go2.navigation.navigator import navigator
-    adapter, robot = transit_device(monkeypatch)
+    adapter, robot = segment_device(monkeypatch)
     robot.odom = {**robot.odom, 'session_id': 'map'}
     start = robot.odom.copy()
     moved = {**start, 'x': start['x']+distance}
@@ -535,74 +800,3 @@ async def test_search_reposition_requires_actual_motion_and_fresh_next_view(monk
     if expected == 'blocked':
         assert receipt['reason'] == 'observation_move_unconfirmed'
         assert receipt['navigation_receipt']['status'] == 'succeeded'
-
-
-@pytest.mark.asyncio
-async def test_transit_cancel_joins_navigation_and_model_observer(monkeypatch):
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.perception import visual_target
-    adapter, _ = transit_device(monkeypatch)
-    started, detector_closed, navigation_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    async def detect(*args):
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            detector_closed.set()
-    async def moving(*args, **kwargs):
-        try:
-            await asyncio.Event().wait()
-        finally:
-            navigation_closed.set()
-    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
-    task = asyncio.create_task(adapter.navigate(initial(candidate={'x': 1., 'y': 0., 'heading': 0.})))
-    await asyncio.wait_for(started.wait(), 1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 1)
-    assert detector_closed.is_set() and navigation_closed.is_set()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('stale', [True, False])
-async def test_transit_ignores_stale_or_other_session_frames(monkeypatch, stale):
-    from unittest.mock import AsyncMock
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.perception import visual_target
-    adapter, robot = transit_device(monkeypatch)
-    robot.latest_frame_snapshot = lambda: (b'jpeg', {'frame_id': 1,
-        'received_at': time.monotonic() - (2 if stale else 0),
-        'odom_session_id': 'map' if stale else 'another-session'})
-    async def moving(*args, **kwargs):
-        await asyncio.sleep(.03)
-        return {'status': 'succeeded', 'last_trusted_pose': robot.odom}
-    detect = AsyncMock()
-    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
-    receipt = await asyncio.wait_for(adapter.navigate(initial(
-        candidate={'x': 1., 'y': 0., 'heading': 0.})), 1)
-    assert receipt['result'] == 'ok'
-    detect.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_transit_candidate_after_authority_loss_only_stops(monkeypatch):
-    from unittest.mock import AsyncMock
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.perception import visual_target
-    adapter, _ = transit_device(monkeypatch)
-    adapter.guard = AsyncMock(side_effect=[None, 'execution_context_expired'])
-    async def moving(*args, **kwargs):
-        await asyncio.Event().wait()
-    stop = AsyncMock(return_value={'result': 'ok'})
-    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
-    monkeypatch.setattr(visual_target, 'detect_visible_target', AsyncMock(
-        return_value={'found': True, 'bbox_1000': [100, 100, 200, 200]}))
-    receipt = await asyncio.wait_for(adapter.navigate(initial(
-        candidate={'x': 1., 'y': 0., 'heading': 0.})), 1)
-    assert receipt['result'] == 'blocked'
-    assert receipt['reason'] == 'execution_context_expired'
-    assert receipt['transit_candidate'] is None
-    stop.assert_awaited_once()

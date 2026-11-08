@@ -542,7 +542,10 @@ class Navigator:
         if not getattr(go2, 'is_connected', False) or not pose:
             return {"result": "accepted", "status": "failed", "reason": "stop_unconfirmed"}
         try:
-            stopped = await self._confirm_stopped((pose['x'], pose['y'], False), pose.get('heading'))
+            # Cancellation confirms rest wherever braking finished. Arrival
+            # separately supplies its goal and heading below; the request pose
+            # is not an arrival target and may change while the robot stops.
+            stopped = await self._confirm_stopped(None, None)
         except (RuntimeError, ValueError, KeyError) as exc:
             stopped = False
             self.last_stop_diagnostics = {"reason": "stop_command_or_pose_error",
@@ -733,7 +736,7 @@ class Navigator:
                 previous_stamp, previous_pose = stamp, pose
                 diagnostic("awaiting_stable_pose")
                 continue
-            near_goal = math.hypot(pose["x"] - goal[0], pose["y"] - goal[1]) < arrival_tolerance
+            near_goal = goal is None or math.hypot(pose["x"] - goal[0], pose["y"] - goal[1]) < arrival_tolerance
             heading_ok = (heading is None or
                           abs(_normalize_angle(pose["heading"] - heading)) <= HEADING_THRESHOLD)
             still = math.hypot(pose["x"] - previous_pose["x"],

@@ -43,7 +43,7 @@ function AgentPersonalitySettings({ agentId, active = true }) {
       setFeedback({ tone: 'ok', text: '名字、人格与特质已保存，下次决策起使用新名字' });
     } catch (error) {
       const reason = error?.status === 409
-        ? '配置已在其他窗口更新；当前输入已保留，请复制内容后重新打开设置再保存'
+        ? '配置已在其他窗口更新；当前输入已保留，请复制内容后重新打开管理再保存'
         : apiErrorText(error, '保存失败，输入已保留，请重试');
       setFeedback({ tone: 'error', text: reason });
     } finally { setSaving(false); }
@@ -86,7 +86,7 @@ function AgentPersonalitySettings({ agentId, active = true }) {
       <div className="agent-personality__actions">
         <small>版本 {profile.revision} · {prompt.length} / 4000</small>
         <button type="submit" className="btn btn--accent" disabled={saving || loading || !changed || !name.trim() || !prompt.trim()}>
-          {saving ? '保存中…' : '保存人格设置'}
+          {saving ? '保存中…' : '保存人格'}
         </button>
       </div>
     </form>}

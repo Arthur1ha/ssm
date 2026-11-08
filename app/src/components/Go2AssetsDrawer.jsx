@@ -2,7 +2,7 @@
 function Go2AssetsDrawer({ open, onClose }) {
   const { useCallback, useEffect, useState } = React;
   const [locations, setLocations] = useState([]);
-  const [memory, setMemory] = useState({ taught: [], today: '', summaries: [], last_evolved: null });
+  const [memory, setMemory] = useState({ today: '', summaries: [], last_evolved: null });
   const [locationName, setLocationName] = useState('');
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState('');
@@ -21,7 +21,6 @@ function Go2AssetsDrawer({ open, onClose }) {
     }
     if (memoryResult.status === 'fulfilled') {
       setMemory({
-        taught: Array.isArray(memoryResult.value?.taught) ? memoryResult.value.taught : [],
         today: memoryResult.value?.today || '（今天暂无记录）',
         summaries: Array.isArray(memoryResult.value?.summaries) ? memoryResult.value.summaries : [],
         last_evolved: memoryResult.value?.last_evolved || null,
@@ -75,29 +74,22 @@ function Go2AssetsDrawer({ open, onClose }) {
   };
 
   const formatCoordinate = value => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
-  const taughtLabel = rule => {
-    const value = `${rule.trigger} → ${rule.behavior}`;
-    if (typeof value === 'string') return value;
-    if (value && typeof value === 'object') return JSON.stringify(value);
-    return '未命名习惯';
-  };
   const feedback = key => message?.key === key && <small className={`action-feedback action-feedback--${message.tone}`}
     role={message.tone === 'error' ? 'alert' : 'status'} title={message.text}>{message.text}</small>;
 
   return (
     <>
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-      <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
+      <aside className={`management-dialog space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
         role="dialog" aria-modal="true" aria-labelledby="go2-assets-title">
-        <div className="space-drawer__handle" aria-hidden="true"/>
         <header className="space-drawer__header">
-          <div><h2 id="go2-assets-title">{getAgentDisplayName('go2')}设置</h2></div>
+          <div><h2 id="go2-assets-title">{getAgentDisplayName('go2')}管理</h2></div>
           <div className="space-drawer__header-actions">
             <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
               {loading ? '同步中…' : '刷新资产'}
             </button>{feedback('refresh')}</div>
-            <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭 Go2 设置">
-              <Icon name="x" size={14}/>
+            <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭 Go2 管理">
+              <Icon name="x" size={16}/>
             </button>
           </div>
         </header>
@@ -150,7 +142,7 @@ function Go2AssetsDrawer({ open, onClose }) {
           <section className="asset-section asset-section--memory">
             <div className="asset-section__heading">
               <div><h3>长期记忆摘要</h3></div>
-              <span>{memory.taught.length} 条习惯</span>
+              <span>经历与摘要</span>
             </div>
             <div className="memory-block">
               <h4>今日事件</h4><pre>{memory.today || '（今天暂无记录）'}</pre>
@@ -161,13 +153,6 @@ function Go2AssetsDrawer({ open, onClose }) {
                 <div key={item.date}><strong>{item.date}</strong><pre>{item.summary}</pre></div>
               )) : <p className="asset-empty">还没有每日摘要。</p>}
               <p>特质最近更新：{memory.last_evolved || '尚未更新'}</p>
-            </div>
-            <div className="memory-block">
-              <h4>已教习惯</h4>
-              {memory.taught.length ? <ul>{memory.taught.map((rule, index) => (
-                <li key={rule.teaching_id || index}><span>{taughtLabel(rule)}</span>
-                  <code>已记住，尚未接入自动执行</code></li>
-              ))}</ul> : <p className="asset-empty">还没有保存的调教习惯。</p>}
             </div>
           </section>
         </div>

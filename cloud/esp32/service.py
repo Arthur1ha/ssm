@@ -110,6 +110,7 @@ class ESP32Agent(ReactiveMind):
         """自主模式收到外部命令时，开启让位窗口。"""
         if self._autonomy_mode != "reactive":
             return
+        self._autonomy_epoch += 1
         self._user_hold_until = time.time() + USER_HOLD_TTL
         from cloud.peers.gateway import cancel_pending
         cancel_pending(initiator_unit_id=unit_id, origin_kind="agent_autonomous",
@@ -120,6 +121,7 @@ class ESP32Agent(ReactiveMind):
         """Peer requests get a shorter reactive hold without cancelling peer work."""
         if self._autonomy_mode != "reactive":
             return
+        self._autonomy_epoch += 1
         self._user_hold_until = max(self._user_hold_until, time.time() + PEER_HOLD_TTL)
         logger.info("peer command on %s → 自主调光让位 %ds", unit_id, PEER_HOLD_TTL)
 
@@ -132,13 +134,13 @@ class ESP32Agent(ReactiveMind):
                       run_id: str | None = None, resume: bool = False,
                       trace_id: str | None = None,
                       parent_run_id: str | None = None,
-                      deadline: float | None = None) -> dict:
+                      deadline: float | None = None, selection: dict | None = None) -> dict:
         """Run the active lamp conversation loop."""
         from cloud.agents.lamp.graph import run_lamp_loop
         return run_lamp_loop(self, text, unit_id, context, dispatch,
                              lighting_only=lighting_only, run_id=run_id,
                              resume=resume, trace_id=trace_id,
-                             parent_run_id=parent_run_id, deadline=deadline)
+                             parent_run_id=parent_run_id, deadline=deadline, selection=selection)
 
     def _make_llm(self):
         return get_text_model("lamp")

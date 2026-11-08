@@ -151,7 +151,10 @@ def validate_skill_params(card: dict, skill_id: str, params: dict) -> dict:
     skill = _find_skill(card, skill_id)
     if skill is None:
         raise PermissionError("skill is not on the current target card")
-    _validate_schema(skill.get("params_schema") or {"type": "object", "properties": {}}, params)
+    schema = skill.get("params_schema") or {"type": "object", "properties": {}}
+    if (skill.get("invoke") or {}).get("action") == "BLINK":
+        schema = {**schema, "required": [key for key in schema.get("required", []) if key != "count"]}
+    _validate_schema(schema, params)
     return skill
 
 

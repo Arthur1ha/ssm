@@ -6,6 +6,7 @@ import time
 import neopixel
 from machine import ADC, Pin
 from probe import PRESENCE
+from lamp_contract import BLINK_DEFAULT
 from config import UNIT_IR, UNIT_SOUND
 from config import (
     LIGHT_SENSOR_PIN, IR_SENSOR_PIN, SOUND_SENSOR_PIN,
@@ -202,7 +203,7 @@ class BSM:
         else:
             raise ValueError("unknown LED state")
 
-    def led_blink(self, r=255, g=255, b=255, count=3):
+    def led_blink(self, r=255, g=255, b=255, count=BLINK_DEFAULT):
         self._set_raw(r, g, b)
         self._blink_id += 1
         self._blink_r     = r
@@ -225,10 +226,11 @@ class BSM:
             self._set_raw(self._blink_r, self._blink_g, self._blink_b)
         else:
             self._set_raw(0, 0, 0)
-            self._blink_count -= 1
-            if self._blink_count <= 0:
-                self._blinking = False
-                self._event_cb("BLINK_DONE", {"blink_id": self._blink_id})
+            if self._blink_count > 0:
+                self._blink_count -= 1
+                if self._blink_count == 0:
+                    self._blinking = False
+                    self._event_cb("BLINK_DONE", {"blink_id": self._blink_id})
 
 
     def _apply_led(self):

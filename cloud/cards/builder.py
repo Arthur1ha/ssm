@@ -75,7 +75,8 @@ FSM_DEFS: dict[str, StateMachine] = {
         "state_field": "ism",
         "states": ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK", "ERROR"],
         "transitions": [
-            {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t], "action": a, "params": p}
+            {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t], "action": a, "params": p,
+             **({"training_fixed_params": ["state"]} if a == "SET_STATE" else {})}
             for (s, t, d, a, p) in _LED_EDGES
         ],
         "initial": "OFF",
@@ -114,7 +115,6 @@ _LED_V2_COMMANDS = {
     "CMD_OFF": ("关灯", "SET_STATE", {"state": "OFF"}),
     "CMD_COLOR": ("调色", "SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
     "CMD_BLINK": ("闪烁", "BLINK", {"count": BLINK_DEFAULT}),
-    "LED_FAIL": ("恢复灯光失败", "", {}),
 }
 
 
@@ -124,7 +124,9 @@ def _current_led_transitions():
         label, action, params = _LED_V2_COMMANDS[trigger]
         transitions.append({"src": src, "dst": dst, "trigger": trigger,
                             "label": label, "action": action, "params": deepcopy(params),
-                            "graph_hidden": trigger == "CMD_COLOR"})
+                            "graph_hidden": trigger == "CMD_COLOR",
+                            **({"training_events": ["sensor.sound_detected"]} if action == "BLINK" else {}),
+                            **({"training_fixed_params": ["state"]} if action == "SET_STATE" else {})})
     for target in BLINK_DONE_TARGETS:
         transitions.append({"src": "BLINKING", "dst": target, "trigger": "BLINK_DONE",
                             "label": "闪烁结束",
@@ -142,10 +144,8 @@ NEW_LED_FSM: StateMachine = {
                 "type": "light_ring"},
         "ON": {"label": "常亮", "description": "按当前颜色和亮度持续发光。",
                "type": "light_ring"},
-        "BLINKING": {"label": "闪烁", "description": "闪烁结束后恢复先前灯光。",
+        "BLINKING": {"label": "闪烁", "description": "持续闪烁，直到切换为常亮或熄灭；仅指定次数时自动结束。",
                      "type": "light_ring"},
-        "ERROR": {"label": "灯光异常", "description": "上次灯光恢复失败，可重试控制并等待设备真实回执。",
-                  "type": "light_ring"},
     },
 }
 
@@ -227,7 +227,7 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     state 固定为空 {}（动态状态由 state topic 单独维护）。
     """
     unit_id = manifest.get("unit_id", "")
-    if _fsm_key(manifest) == "led" and manifest.get("fsm_version") not in (None, 1, FSM_VERSION):
+    if _fsm_key(manifest) == "led" and manifest.get("fsm_version") not in (None, 1, 2, FSM_VERSION):
         raise ValueError("unsupported lamp fsm_version")
     name = manifest.get("name", unit_id)
     agent_type = manifest.get("agent_type", "sensor")
@@ -243,8 +243,8 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     skills: list[SkillDef] = []
     for cap in capabilities:
         action = cap.get("action", "")
-        current_lamp = _fsm_key(manifest) == "led" and manifest.get("fsm_version") == FSM_VERSION
-        skill = (lamp_skill(action) if current_lamp and action in LAMP_SKILLS
+        current_lamp = _fsm_key(manifest) == "led" and manifest.get("fsm_version") in (2, FSM_VERSION)
+        skill = (lamp_skill(action, fsm_version=manifest["fsm_version"]) if current_lamp and action in LAMP_SKILLS
                  else CAPABILITY_SKILLS.get(action))
         if current_lamp and action in LAMP_SKILLS and cap.get("params_schema") is not None:
             if cap["params_schema"] != skill["params_schema"]:
@@ -273,15 +273,18 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
     fsm_key = _fsm_key(manifest)
     if fsm_key:
         if fsm_key == "led" and agent_type == "actuator":
-            card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat",
-                                "teachings_endpoint": "/api/teachings"}
+            card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat"}
             card["observations"] = [
                 {"id": "sensor.sound_detected", "fields": {"detected": "boolean"}},
                 {"id": "sensor.light_changed", "fields": {"level": "string"}},
             ]
-            card["autonomous_skills"] = ["set_light_color", "set_light_state", "blink_light"]
         machine = deepcopy(NEW_LED_FSM if fsm_key == "led" and
-                           manifest.get("fsm_version") == FSM_VERSION else FSM_DEFS[fsm_key])
+                           manifest.get("fsm_version") in (2, FSM_VERSION) else FSM_DEFS[fsm_key])
+        if fsm_key == "led" and manifest.get("fsm_version") == 2:
+            for transition in machine["transitions"]:
+                if transition.get("action") == "BLINK":
+                    transition["params"]["count"] = 3
+            machine["views"]["BLINKING"]["description"] = "闪烁结束后恢复先前灯光。"
         # A lamp and a robot share the same region contract. The flat fields
         # remain available to older consumers and the edge keeps its own enums.
         machine["primary_region"] = "device"
@@ -290,8 +293,6 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
             **{key: deepcopy(machine[key]) for key in
                ("state_field", "states", "transitions", "views") if key in machine},
         }]
-        # Keep every physical state and recovery edge in the board projection;
-        # in particular, ERROR must remain visible when the device reports it.
         card["state_machine"] = machine
         modes = MODE_DEFS.get(fsm_key)
         if modes:
@@ -302,9 +303,10 @@ def build_card_from_manifest(manifest: dict) -> AgentCard:
         widgets = WIDGET_DEFS.get(fsm_key)
         if widgets and "SET_COLOR" in capability_actions:
             card["widgets"] = _copy_widgets(widgets)
-            if fsm_key == "led" and manifest.get("fsm_version") != FSM_VERSION:
+            if fsm_key == "led" and manifest.get("fsm_version") not in (2, FSM_VERSION):
                 card["widgets"][0]["states"] = ["BRIGHT", "DIM", "COLOR"]
-    return normalize_card(card)
+    from cloud.agents.common.training.catalog import declare_training
+    return declare_training(normalize_card(card))
 
 
 def parse_card(payload: dict) -> AgentCard:

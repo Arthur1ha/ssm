@@ -159,7 +159,6 @@ function MapWidget({ connected, endpoint }) {
             <li><span className="map-viewer__swatch map-viewer__swatch--free" aria-hidden="true"/>可通行</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--obstacle" aria-hidden="true"/>障碍物</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--clearance" aria-hidden="true"/>避让区</li>
-            <li><span className="map-viewer__swatch map-viewer__swatch--unknown" aria-hidden="true"/>未探索</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--route" aria-hidden="true"/>导航路线</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--place" aria-hidden="true"/>已保存地点</li>
             <li><span className="map-viewer__swatch map-viewer__swatch--target" aria-hidden="true"/>目的地</li>

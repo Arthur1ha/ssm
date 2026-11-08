@@ -60,7 +60,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                        trace_id: str | None = None, parent_run_id: str | None = None,
                        allowed_tools: frozenset[str] | None = None,
                        tool_guard=None, task_context=None,
-                       publish_reply: bool = True) -> dict:
+                       publish_reply: bool = True, selection: dict | None = None) -> dict:
     view = get_store()
     async with view.index.async_session_lock("go2", session_id):
         return await _run_go2_loop_locked(
@@ -69,7 +69,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             on_step=on_step, resume=resume, trace_id=trace_id,
             parent_run_id=parent_run_id, allowed_tools=allowed_tools,
             tool_guard=tool_guard, task_context=task_context,
-            publish_reply=publish_reply)
+            publish_reply=publish_reply, selection=selection)
 
 
 async def _run_go2_loop_locked(session_id: str, message: str, *, context: ExecutionContext,
@@ -78,7 +78,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                deadline: float | None, on_step, resume: bool,
                                trace_id: str | None, parent_run_id: str | None,
                                allowed_tools: frozenset[str] | None,
-                               tool_guard, task_context, publish_reply: bool) -> dict:
+                               tool_guard, task_context, publish_reply: bool, selection: dict | None) -> dict:
     # Resolve public requests before registering a run or claiming device work.
     # CHAT is an explicit conversation entry, not a missing hardware tool.
     initial_tool = None
@@ -149,6 +149,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             episode_store=episode_memory)
         messages = go2_messages(current, supplement=supplemental,
                                 memory=remembered.text if remembered.fragments else "")
+        if selection:
+            messages.append(HumanMessage(content="选中的可信转换：" + str(selection)))
         if task_context is not None:
             messages.append(HumanMessage(content="【本轮可信任务状态】\n" + str(task_context())))
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
@@ -177,6 +179,13 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
 
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
         nonlocal interaction_token, motion_unconfirmed
+        if name in {"list_training", "propose_training"}:
+            from dataclasses import asdict
+            from cloud.agents.common.training.tools import execute_training
+            if allowed_tools is not None or skill_id or run.parent_run_id or session_id.startswith("peer_"):
+                return {"result": "rejected", "error": "direct_user_request_required"}
+            return await execute_training(name, arguments, {**asdict(context), "run_id": run.run_id,
+                                                            "source_text": message, "selection": selection})
         if name not in TOOL_REGISTRY:
             return {"result": "rejected", "error": "unknown_tool"}
         if allowed_tools is not None and name not in allowed_tools:
@@ -337,6 +346,9 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             return current
 
         declarations = tool_schemas(context)
+        if allowed_tools is None and context.origin_kind == "user_delegated":
+            from cloud.agents.common.training.tools import SCHEMAS as training_schemas
+            declarations.update(training_schemas)
         if allowed_tools is not None:
             declarations = {name: schema for name, schema in declarations.items()
                             if name in allowed_tools}
@@ -345,7 +357,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 run, model=get_text_llm(), tool_schemas=declarations,
                 build_messages=build_messages, execute=execute, finalize=finalize,
                 on_step=on_step, on_progress=progress,
-                effectful=lambda name: name not in READ_ONLY_TOOLS,
+                effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
                 initial_tool=initial_tool, resume=resume,
                 terminal_tools=frozenset({"go2_navigate_to_visible_target", "go2_find_object"}),
                 resume_value=message if resume else None, checkpointer=view.checkpointer)

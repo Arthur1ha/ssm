@@ -86,8 +86,7 @@ def _prompt(agent, state: ReactiveState) -> str:
         "如果本轮先调灯，完成后仍有可玩玩法与社交机会，应再决定是否发送邀请；"
         "仍可选择普通交流或不发消息，同伴也可拒绝。邀请不等于游戏完成。"
         "判断游戏输赢只看本局目标导航回执；狗之后自由探索到达别处，不等于找到游戏目标。"
-        "观测中的 teaching_candidates 是已校验且启用的主人教导。命中且当前可执行时，"
-        "按其中的 agent_tool 和参数调用工具；若因安全或更高优先级要求不执行，应说明原因。"
+        "观测中的 training_intent 是本次唯一允许的绑定动作；若不执行，应说明原因。"
         "仍须遵守用户让位和真实执行回执。"
         f"社交主动性：{profile['traits']['social_initiative']}/100；"
         f"调光敏感度：{profile['traits']['adjustment_sensitivity']}/100，"
@@ -159,6 +158,10 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         call = calls[0]
         if call.get("name") not in VISIBLE or not isinstance(call.get("args"), dict):
             return {"status": "rejected", "call": None}
+        intent = state['sense'].get('training_intent')
+        if intent and (call.get('name') != 'blink_led' or call['args'] != intent['params']
+                       or state.get('turns', 0) or time.time() >= intent['deadline']):
+            return {"status": "blocked", "call": None}
         return {"turns": state.get("turns", 0) + 1,
                 "call": {"name": call["name"], "args": call["args"],
                          "id": call.get("id") or "call_" + uuid.uuid4().hex}}
@@ -172,7 +175,6 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                 or not agent._should_act() or not agent._device_online()):
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
-        args.pop("taught_id", None)
         if name in PHYSICAL and (not state["sense"].get("lighting_eligible")
                 or any(step.get("tool") in PHYSICAL for step in state.get("steps", []))):
             event(state, "tool.rejected", tool=name, reason="lighting_not_eligible")
@@ -190,10 +192,18 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if name in PHYSICAL:
             from cloud.esp32.physical_tasks import stable_task_id
             task_id = stable_task_id(agent._find_led_unit(), state["run_id"], call["id"])
-            ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id)
+            ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id,
+                                      training_intent=state['sense'].get('training_intent'))
         else:
             ok = agent._dispatch_tool(name, args, agent._find_led_unit())
         result = getattr(agent, "_last_reactive_tool_result", {"result": "unknown"})
+        intent = state['sense'].get('training_intent')
+        if intent:
+            from cloud.agents.common.training.service import _emit
+            _emit('training.applied', space_id='main', unit_id=agent._find_led_unit(),
+                  teaching_id=intent['teaching_id'], revision=intent['revision'],
+                  transition_id=intent['transition_id'], status=result.get('result', 'unknown'),
+                  reasons=result.get('reasons', []))
         step = {"step_id": call["id"], "tool": name, "params": args, "result": result}
         event(state, "tool.result", tool=name, step_id=call["id"], result=result,
               status=result.get("result", "unknown"),
@@ -328,16 +338,15 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     now = time.time() if now is None else now
     if not agent._should_act() or not agent._device_online():
         return None
+    if (event.get('eligible_at_arrival') is False or
+            event.get('autonomy_epoch', agent._autonomy_epoch) != agent._autonomy_epoch):
+        return None
     if event.get("enqueue_ts", now) < getattr(agent, "_autonomy_since", 0):
         return None
     unit = str(event.get("unit_id") or "")
     last_events = getattr(agent, "_graph_last_event_ts", None)
     if last_events is None:
         last_events = agent._graph_last_event_ts = {}
-    if unit and now - last_events.get(unit, 0) < 5:
-        return None
-    if unit:
-        last_events[unit] = now
     sense = agent._sense()
     if sense is None:
         return None
@@ -350,23 +359,41 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     elif unit.endswith("_light") and "level" in payload:
         observation = {"id": "sensor.light_changed", "values": {"level": payload["level"]},
                        "source": unit, "ts": payload.get("ts", 0)}
-    if observation:
-        from cloud.agents.common import teachings
-        from cloud.agents.common.teaching_bindings import candidates
+    intent = None
+    if observation and observation['id'] == 'sensor.sound_detected':
+        from cloud.agents.common.training.catalog import catalog_for
+        from cloud.agents.common.training.policy import training_event_intent
+        from cloud.agents.common.training.store import list_records
+        from cloud.agents.common.training.service import load_runtime
         from cloud.cards.registry import get_registry
         card = get_registry().get_card(agent._find_led_unit())
+        received = (agent._state.actuator_snapshot().get(agent._find_led_unit(), {}).get('state') or {})
+        ts = observation['ts']
+        event_id = '%s:%s' % (unit, ts)
+        seen = getattr(agent, '_training_seen_events', None)
+        if seen is None:
+            seen = agent._training_seen_events = set()
+        if event_id in seen:
+            return None
         if card:
-            sense["teaching_candidates"] = candidates(
-                teachings.list_for(agent._find_led_unit()), observation, card, now=now)
-            from cloud.esp32.tool_registry import TOOL_DECLARATIONS
-            for candidate in sense["teaching_candidates"]:
-                skill = next((item for item in card.get("skills", [])
-                              if item.get("id") == candidate["binding"]["skill_id"]), None)
-                action = (skill or {}).get("invoke", {}).get("action")
-                candidate["agent_tool"] = next((name for name, declaration in TOOL_DECLARATIONS.items()
-                                                if declaration.get("action") == action), None)
-            sense["teaching_candidates"] = [candidate for candidate in sense["teaching_candidates"]
-                                            if candidate["agent_tool"] in VISIBLE]
+            from cloud.space.execution import ExecutionContext
+            load_runtime(card, ExecutionContext('agent_auto', 'agent', False, 'main', 'agent_autonomous'))
+            intent = training_event_intent({**observation, 'event_id': event_id},
+                list_records(agent._find_led_unit(), space_id='main'), catalog_for(card),
+                {'state': received, 'state_fresh': type(received.get('_received_at')) in (int, float)
+                 and 0 <= now - received['_received_at'] <= 30}, now=now)
+        if intent:
+            seen.add(event_id)
+            if len(seen) > 256:
+                seen.clear()
+                seen.add(event_id)
+            intent['deadline'] = ts + 5
+            intent['autonomy_epoch'] = agent._autonomy_epoch
+            sense['training_intent'] = intent
+    if not intent and unit and now - last_events.get(unit, 0) < 5:
+        return None
+    if unit:
+        last_events[unit] = now
     profile = get_profile()
     stable_level = settled_light_level(
         agent, sense["light_level"], now,
@@ -382,7 +409,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     agent._autonomy_light_missing = not sense.get("light_available", False)
     # Entering reactive mode is only a baseline observation. A lighting action
     # needs a subsequent material trigger and a fresh light reading.
-    sense["lighting_eligible"] = bool(sense.get("teaching_candidates") or
+    sense["lighting_eligible"] = bool(intent or
                                       sense.get("light_available") and sense["proactive_hints"])
     space = get_space_context(agent._find_led_unit(), state=agent._state)
     activity, eligible = activity_peers(agent._find_led_unit(), space["peers"])
@@ -391,7 +418,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         profile["traits"]["social_initiative"], unit_id=agent._find_led_unit())
     if opportunity:
         sense["social_opportunity"] = opportunity
-    rule_sig = tuple(item["teaching_id"] for item in sense.get("teaching_candidates", ()))
+    rule_sig = intent['event_id'] if intent else None
     try:
         peers = lamp_tools.list_peers(agent._find_led_unit())
     except Exception:
@@ -405,7 +432,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         (opportunity["kind"], tuple(opportunity["event_ids"]), int(now // 300))
         if opportunity else None,
     )
-    if signature == agent._last_reason_sig or now - agent._last_reason_ts < 10:
+    if not intent and (signature == agent._last_reason_sig or now - agent._last_reason_ts < 10):
         return None
     return sense, signature
 
@@ -419,6 +446,14 @@ def run_reactive_sensor_event(agent, event: dict, *, now: float | None = None,
     sense, signature = prepared
     agent._last_reason_ts = time.time() if now is None else now
     result = run_reactive_event(agent, sense, **kwargs)
+    intent = sense.get('training_intent')
+    if intent and not result.get('steps'):
+        from cloud.agents.common.training.service import _emit
+        reason = ('event_expired' if time.time() >= intent['deadline'] else
+                  'autonomy_unavailable' if not agent._should_act() else 'model_declined')
+        _emit('training.applied', space_id='main', unit_id=agent._find_led_unit(),
+              teaching_id=intent['teaching_id'], revision=intent['revision'],
+              transition_id=intent['transition_id'], status='blocked', reasons=[{'code': reason}])
     opportunity = sense.get("social_opportunity")
     if result.get("status") != "error":
         sent = any(step.get("tool") == "send_message" and

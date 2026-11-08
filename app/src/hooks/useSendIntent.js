@@ -86,9 +86,6 @@ function useSendIntent() {
       } else if (stage === 'question') {
         pendingRunRef.current = payload.run_id || null;
         if (!payload.question) callbacks.onStatus?.('请补充信息');
-      } else if (stage === 'pending_rule' && payload.rule) {
-        finish();
-        callbacks.onPendingRule?.(payload.rule);
       } else if (stage === 'discovery_candidates') {
         finish();
         // Discovery messages inform the user; device onboarding uses its
@@ -112,6 +109,7 @@ function useSendIntent() {
     resetTimeout(150000);
     const body = { text: text.trim() };
     if (pendingRunRef.current) body.resume_run_id = pendingRunRef.current;
+    if (callbacks.selection) body.selection = callbacks.selection;
     if (callbacks.deviceHint) body.device_hint = callbacks.deviceHint;
     if (callbacks.intentHint) body.intent_hint = callbacks.intentHint;
     try {

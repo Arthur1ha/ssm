@@ -40,12 +40,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_observe", "用摄像头回答当前画面问题", _schema({"question": _string(default="描述你看到的场景")}), timeout_s=32),
         ToolSpec("go2_life", "休息保持连接和姿态；唤醒回待命；开启探索需管理员，停止探索不重放旧任务", life_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_status", "查询设备连接和姿态", _schema({}), timeout_s=3),
-        ToolSpec("go2_list_teachings", "列出已保存教导及自动执行状态", _schema({}), timeout_s=5),
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_visible_target", "视觉识别目标并与雷达点云配对，在地图上规划到目标附近的停靠点，停稳后重新观察确认", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
-        ToolSpec("go2_find_object", "在已配置的单房间范围内持续换观察点寻找地面物品，跨帧确认后定位并接近；需实测相机标定，未检查区域不代表目标不存在", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
+        ToolSpec("go2_find_object", "寻找地面物品，按可通行路径朝目标方向边走边看；连续画面粗略判断已在附近并停稳即完成，不要求精确目标坐标或测距。结果不代表可直接触碰目标，后续任务按需进一步定位；未检查区域不代表目标不存在", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", led_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
@@ -176,12 +175,7 @@ CARD_SKILLS = {
         "tags": ["navigation", "persistent", "robot"],
         "invoke": {"action": "TAG_LOCATION"},
     },
-    "go2_list_teachings": {
-        "tool_name": "go2_list_teachings",
-        "name": "查看已保存教导",
-        "tags": ["memory", "robot"],
-        "invoke": {"action": "LIST_TEACHINGS"},
-    },
+
 }
 
 

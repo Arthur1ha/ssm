@@ -5,7 +5,7 @@ import time
 import uuid
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
-from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API
+from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API, SPORT_CMD
 
 from cloud.go2.connection.fsm import Go2FSM, CommandBlocked
 from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, SPORT_COMMANDS, LED_COLORS, LED_DEFAULT_COLOR,
@@ -30,6 +30,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._completion_target: str | None = None
         self._completion_samples = 0
         self._motion_epoch = 0
+        self._last_zero_velocity_epoch = None
         self._action_deadline = None
         self._velocity_timer = None
         self._move_control_active = False
@@ -358,9 +359,46 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         next_state = self._validate_motion(cmd, params, dispatch_only=dispatch_only)
         spec = ACTIONS[cmd]
         if cmd == "EnterMoveControl":
+            # A UI flag cannot enable the firmware's joystick listener. Both
+            # setup requests are serialized with body commands, and neither
+            # sends velocity. Recheck posture and generation after each ACK.
+            self._move_control_active = False
+            self._motion_epoch += 1
+            epoch, connection = self._motion_epoch, self._conn
+            for options in ({"api_id": ACTIONS['BalanceStand'].api_id},
+                            {"api_id": SPORT_CMD['SwitchJoystick'], "parameter": {"data": True}}):
+                self._validate_motion(cmd)
+                try:
+                    response = await asyncio.wait_for(
+                        connection.datachannel.pub_sub.publish_request_new(RTC_TOPIC['SPORT_MOD'], options),
+                        timeout=5.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if epoch == self._motion_epoch and connection is self._conn:
+                        self.is_connected = False
+                        self.body_confirmation = 'unknown'
+                    raise RuntimeError('遥控激活失败，连接状态需要重新确认') from exc
+                if epoch != self._motion_epoch or connection is not self._conn or not self.is_connected:
+                    cancelled = asyncio.get_running_loop().create_future()
+                    cancelled.set_result({'result':'cancelled','error':'遥控激活已被后续指令打断'})
+                    return cancelled, response
+                packet = response.get('data') if isinstance(response, dict) else None
+                header = packet.get('header') if isinstance(packet, dict) else None
+                status = header.get('status') if isinstance(header, dict) else None
+                code = status.get('code') if isinstance(status, dict) else None
+                if type(code) is not int:
+                    raise ValueError('机器狗尚未确认遥控激活')
+                if code != 0:
+                    return None, response
+            self._validate_motion(cmd)
             self._move_control_active = True
-            self.runtime.commit("remote_enter", control_mode="remote")
-            return None, None
+            logger.info('[Go2/Conn] 遥控激活已确认（BalanceStand + SwitchJoystick）')
+            return None, response
+        if (self._move_control_active or self._velocity_command_active) and cmd not in {'Move', 'BalanceStand'}:
+            # Stop the wireless stick before leaving control for another action.
+            # StopMove's RPC alone must not leave the last stick value latched.
+            self.stop_velocity()
         source = self.fsm_state
         source_confirmation = self.body_confirmation
         old_pending = self.pending_action
@@ -505,6 +543,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._finish_pending("cancelled", "velocity_override")
         self._motion_epoch += 1
         self._velocity_command_active = active
+        self._last_zero_velocity_epoch = self._motion_epoch if not active else None
         if active:
             self._motion_observation_enabled = True
             self._stationary_samples = 0

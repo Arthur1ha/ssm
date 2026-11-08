@@ -26,7 +26,7 @@ def _readable_json(payload: Any) -> Response:
 _CARD_GROUPS = (
     ("card_schema_version", "version", "unit_id", "device_id", "parent_id", "name", "description", "agent_type", "tags"),
     ("online", "transport", "services"),
-    ("skills", "observations", "autonomous_skills"),
+    ("skills", "observations"),
     ("state", "state_machine", "modes", "telemetry", "widgets", "suggestions"),
 )
 
@@ -55,7 +55,7 @@ def _card_response(card: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "card_schema_version", "version", "unit_id", "device_id", "parent_id", "name", "description", "agent_type",
         "online", "transport", "services", "state", "state_machine", "skills", "modes", "telemetry",
-        "widgets", "suggestions", "tags", "observations", "autonomous_skills",
+        "widgets", "suggestions", "tags", "observations",
     )
     return {key: card.get(key) for key in keys if key in card}
 

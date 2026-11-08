@@ -21,25 +21,26 @@ def _voxel(points=None):
                      "data": {"points": np.asarray(points if points is not None else [], dtype=float)}}}
 
 
-def test_voxel_without_free_evidence_remains_unknown():
+def test_unobserved_cells_are_free_without_inventing_measured_floor():
     grid = OccupancyGrid(_voxel([[0.8, 0.8, 0.5]]), robot_pose={"x": 0, "y": 0})
-    assert grid.cells[4, 4] == UNKNOWN
-    assert not grid.is_free(4, 4)
+    assert grid.cells[4, 4] == FREE
+    assert grid.is_free(4, 4)
     assert grid.cells[20, 20] == FREE
-    assert grid.grid[4, 4]
-    assert grid.has_free_space_evidence is False
+    assert not grid.grid[4, 4]
+    assert not grid.measured_floor[4, 4]
+    assert grid.has_free_space_evidence is True
     with pytest.raises(ValueError):
         grid.odom_to_grid(1.0, 0.0)
 
 
-def test_measured_floor_opens_short_exploration_path_but_unknown_stays_blocked():
+def test_missing_floor_returns_do_not_block_navigation():
     floor = [[x / 20, y / 20, -0.3]
              for x in range(-6, 21) for y in range(-8, 9)]
     grid = OccupancyGrid(_voxel(floor), robot_pose={"x": 0, "y": 0})
     assert grid.has_free_space_evidence
     assert raycast_directions(grid, {"x": 0, "y": 0, "heading": 0})["forward"] >= .6
     assert astar(grid.grid, grid.odom_to_grid(0, 0), grid.odom_to_grid(.6, 0))
-    assert not grid.is_free(*grid.odom_to_grid(-0.85, 0))
+    assert grid.is_free(*grid.odom_to_grid(-0.85, 0))
 
 
 def test_nearby_measured_floor_bridges_only_local_sensor_blind_gap():
@@ -66,12 +67,11 @@ def test_observation_target_always_has_valid_body_sweep():
     assert astar(grid.grid, grid.odom_to_grid(0, 0), grid.odom_to_grid(target.x, target.y))
 
 
-def test_no_observation_pose_when_body_ground_is_unconfirmed():
+def test_absent_sensor_map_is_not_navigation_evidence():
     grid = OccupancyGrid(_voxel(), robot_pose={"x": 0., "y": 0.})
     pose = {"x": 0., "y": 0., "heading": 0.}
-    selected = select_observation_target(grid, pose, ObservationCoverage(None), bounds=(-1,-1,1,1))
-    assert selected.target is None
-    assert selected.reason == 'observation_geometry_unconfirmed'
+    assert not grid.has_free_space_evidence
+    assert grid.turn_sweep_details(0., 0., 0., np.pi / 2)['clear']
 
 
 def test_local_floor_bridge_does_not_clear_obstacle():
@@ -104,12 +104,12 @@ def test_narrow_straight_corridor_uses_width_clearance_but_rejects_turn():
     odom = {"x": 0.0, "y": 0.0, "heading": 0.0}
     assert raycast_directions(grid, odom)["forward"] > 1.0
     assert astar(grid.grid, grid.odom_to_grid(0, 0), grid.odom_to_grid(.8, 0))
-    # Translation evidence does not authorize an observation pose with a
-    # complete known body sweep. The old selector returned a bare waypoint.
+    # Looking straight down the corridor is allowed; turning into a wall is not.
     selection = select_observation_target(grid, odom, ObservationCoverage(None),
                                          bounds=(-1, -1, 2, 2))
-    assert selection.target is None
-    assert selection.reason == 'observation_geometry_unconfirmed'
+    assert selection.target is not None
+    target = selection.target
+    assert grid.turn_sweep_details(target.x, target.y, target.heading, target.heading)['clear']
     assert grid.is_body_clear(0, 0, 0)
     assert not grid.is_body_clear(0, 0, np.pi / 2)
     assert not grid.is_turn_clear(0, 0)
@@ -187,19 +187,23 @@ def test_navigation_failure_never_sends_forward(monkeypatch, failure):
     if failure == "blocked_goal":
         grid.grid[:, 27] = True  # barrier separates robot from goal's free region
         grid.grid[20, 36] = True
-    robot = SimpleNamespace(
+    class SensorRobot(SimpleNamespace):
+        @property
+        def odom_received_at(self):
+            return now - 10 if failure == 'stale_pose' else time.monotonic()
+
+        @property
+        def voxel_received_at(self):
+            return now - 10 if failure == 'stale_map' else time.monotonic()
+
+    robot = SensorRobot(
         is_connected=True, odom={"x": 0.0, "y": 0.0, "heading": 0.0},
-        odom_received_at=now, voxel_received_at=now,
         odom_frame_id="odom", voxel_frame_id="odom",
         _odom_session_id="session", occupancy_grid=grid,
         move_velocity=lambda x, y, yaw, **kwargs: commands.append((x, y, yaw)),
     )
     if failure == "no_map":
         robot.occupancy_grid = None
-    elif failure == "stale_map":
-        robot.voxel_received_at = now - 10
-    elif failure == "stale_pose":
-        robot.odom_received_at = now - 10
     elif failure == "wrong_frame":
         robot.voxel_frame_id = "map"
     monkeypatch.setattr(nav_module, "go2", robot)
@@ -400,6 +404,25 @@ def test_map_debug_serializes_numpy_sample(monkeypatch):
     assert result["grid"]["inflated_only_cells"] > 0
 
 
+def test_map_image_waits_for_snapshot_then_serves_current_map(monkeypatch):
+    from cloud.go2 import router
+    from cloud.agents.go2.memory import spatial
+    from fastapi import HTTPException
+    robot = SimpleNamespace(is_connected=True, voxel_received_at=time.monotonic(),
+        occupancy_grid=None, odom={}, odom_received_at=time.monotonic(),
+        odom_frame_id='odom', global_path=[])
+    monkeypatch.setattr(router, 'go2', robot)
+    monkeypatch.setattr(spatial, 'list_locations', lambda: [])
+    with pytest.raises(HTTPException) as waiting:
+        asyncio.run(router.go2_map_image())
+    assert waiting.value.status_code == 503
+    robot.occupancy_grid = OccupancyGrid(_voxel([[.6, 0., .5]]))
+    response = asyncio.run(router.go2_map_image())
+    assert response.media_type == 'image/png'
+    assert response.body.startswith(b'\x89PNG')
+    assert response.headers['cache-control'] == 'private, no-store'
+
+
 def test_stop_confirmation_recovers_short_pose_gap_without_using_stale_samples(monkeypatch):
     commands = []
     robot = _synthetic_robot(commands)
@@ -456,3 +479,23 @@ def test_stop_confirmation_rejects_changed_coordinate_session(monkeypatch):
     result = asyncio.run(scenario())
     assert result['result'] == 'accepted'
     assert result['diagnostics']['reason'] == 'map_session_changed'
+
+
+@pytest.mark.parametrize('arrival', [False, True])
+def test_braking_drift_can_confirm_stop_but_not_arrival(monkeypatch, arrival):
+    robot = _synthetic_robot([])
+    monkeypatch.setattr(nav_module, 'go2', robot)
+    monkeypatch.setattr(nav_module, 'STOP_CONFIRMATION_S', .85)
+    async def scenario():
+        async def feed():
+            for x in (.20, .40, .44, .44, .44, .44):
+                await asyncio.sleep(.10)
+                robot.odom = {'x': x, 'y': 0., 'heading': .4}
+                robot.odom_received_at = time.monotonic()
+        update = asyncio.create_task(feed())
+        nav = nav_module.Navigator()
+        result = (await nav._confirm_stopped((0., 0.), 0.) if arrival
+                  else (await nav.stop_and_confirm())['result'] == 'ok')
+        await update
+        return result
+    assert asyncio.run(scenario()) is (not arrival)

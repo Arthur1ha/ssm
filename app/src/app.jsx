@@ -41,7 +41,7 @@ function App({ session, logout, refreshSession }) {
   const traceRequests = useRef(new Map());
   const pendingReplies = useRef([]);
   const nextRequestId = useRef(0);
-  const [rulesOpen,   setRulesOpen]   = useState(false);
+  const [trainingOpen,   setTrainingOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
@@ -49,8 +49,11 @@ function App({ session, logout, refreshSession }) {
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const [deviceNotice, setDeviceNotice] = useState('');
   const [activityQuestion, setActivityQuestion] = useState(null);
-  const [pendingRule, setPendingRule]  = useState(null);
-  const [savingRule,  setSavingRule]   = useState(false);
+  const [trainingUnit, setTrainingUnit] = useState('');
+  const training = useTraining(trainingUnit);
+  const [trainingSelection, setTrainingSelection] = useState(null);
+  const [trainingLocation, setTrainingLocation] = useState(null);
+  const locateTraining = (uid, id) => { setTrainingLocation({unit_id:uid,transition_id:id,nonce:Date.now()}); navigate(`#/devices/${encodeURIComponent(uid)}`); };
   const [, setAgentNamesRevision] = useState(0);
 
   useEffect(() => {
@@ -192,6 +195,7 @@ function App({ session, logout, refreshSession }) {
       { type: 'process', agent: 'cloud_orchestrator', requestId,
         text: '已收到请求', eventId: `initial:${requestId}` },
     ]);
+    setTrainingSelection(null);
     send(t, {
       onMessage: (msg, agent, event) => appendReply({ ...event, text: msg,
         agent_id: agent || 'cloud_orchestrator' }),
@@ -212,32 +216,9 @@ function App({ session, logout, refreshSession }) {
         pendingReplies.current = pending.filter(item => item.trace_id !== traceId);
         pending.filter(item => item.trace_id === traceId).forEach(appendReply);
       },
-      onPendingRule: rule => {
-        if (session.actor === 'admin') {
-          finishRequest(requestId, rule.binding
-            ? '教导和触发条件已整理好，请确认。'
-            : '教导已整理好；设备暂时无法准确识别这个触发条件。');
-          setPendingRule(rule);
-        } else {
-          finishRequest(requestId, '临时体验不能保存长期教导。');
-        }
-      },
+      selection: trainingSelection,
       intentHint: options.intentHint,
     });
-  };
-
-  const handleConfirmRule = () => {
-    if (!pendingRule || savingRule) return;
-    setSavingRule(true);
-    apiClient.request('/api/teachings', { method: 'POST', body: pendingRule })
-      .then(item => { setPendingRule(null); setSavingRule(false);
-        appendActivity({ type: 'teaching_saved', teaching: item,
-          unitName: agents.find(agent => agent.unit_id === item.unit_id)?.name
-            || getAgentDisplayName(item.unit_id) }); })
-      .catch(error => {
-        appendActivity({ type: 'ai', agent: 'orchestrator', text: apiErrorText(error) });
-        setSavingRule(false);
-      });
   };
 
   /* 返回主屏：先播退出动画再实际跳转 */
@@ -289,12 +270,12 @@ function App({ session, logout, refreshSession }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             {session.actor === 'visitor' && <SessionBadge session={session}/>}
-            {session.actor === 'admin' && <div className="feedback-button"><button type="button" className="btn device-scan-trigger"
-              onClick={() => { setDeviceNotice(''); setDeviceScanOpen(true); }} aria-label="扫描设备二维码添加设备">
-              <Icon name="scan" size={16}/><span>扫描设备</span>
+            {session.actor === 'admin' && <div className="feedback-button"><button type="button" className="icon-button device-scan-trigger"
+              onClick={() => { setDeviceNotice(''); setDeviceScanOpen(true); }} aria-label="扫描设备" title="扫描设备">
+              <Icon name="scan" size={18}/>
             </button>{deviceNotice && <small className="action-feedback action-feedback--ok" role="status" title={deviceNotice}>{deviceNotice}</small>}</div>}
             {session.actor === 'admin' && <SpaceMenu
-              onShareSpace={() => setInviteOpen(true)} onRules={() => setRulesOpen(true)}
+              onShareSpace={() => setInviteOpen(true)} onTraining={() => { setTrainingUnit(agents[0]?.unit_id || ''); setTrainingOpen(true); }}
               onSpaceSettings={() => setSpaceOpen(true)} onOrchestratorSettings={() => setOrchestratorOpen(true)}
               onPeople={() => setPeopleOpen(true)} onExit={logout}/>}
           </div>
@@ -324,50 +305,17 @@ function App({ session, logout, refreshSession }) {
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
-          <div style={{ padding: '16px 20px 8px', marginTop: 4 }}>
-            <span style={{ fontSize: 13, color: 'var(--color-text-dim)', fontWeight: 500 }}>对话</span>
-          </div>
-
           <ActivityFeed entries={activityLog} agents={agents} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}
-            onOpenRules={() => setRulesOpen(true)}
             onAnswerActivity={event => {
               setActivityQuestion(event);
               navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
             }}/>
 
-          {pendingRule && session.actor === 'admin' && (
-            <div className="teaching-preview-wrap">
-              <div className="teaching-card teaching-card--preview">
-                <div className="teaching-card__top">
-                  <span className="teaching-card__eyebrow">待确认的教导</span>
-                  <span className="teaching-card__target">{agents.find(a => a.unit_id === pendingRule.unit_id)?.name
-                    || getAgentDisplayName(pendingRule.unit_id)}</span>
-                </div>
-                <h3 className="teaching-card__title">{pendingRule.name}</h3>
-                <div className="teaching-card__sequence">
-                  <div className="teaching-card__line"><span>当</span><p>{pendingRule.trigger}</p></div>
-                  <div className="teaching-card__line"><span>就</span><p>{pendingRule.behavior}</p></div>
-                </div>
-                {pendingRule.binding ? <div className="rule-card__mapping">
-                  <span className="rule-card__mapping-label">确认后启用的触发设置</span>
-                  <strong>{window.ruleObservationCopy(pendingRule.binding.observation_id, pendingRule.binding.where)}
-                    <span aria-hidden="true">→</span>
-                    {window.ruleActionCopy(pendingRule.binding.skill_id, pendingRule.binding.params,
-                      agents.find(a => a.unit_id === pendingRule.unit_id))}</strong>
-                </div> : <p className="teaching-card__note">设备目前没有能准确匹配这句话的触发条件或自主动作；确认后只保存教导，不会自动执行。</p>}
-                {pendingRule.binding && <p className="teaching-card__note">设备还需开启自主模式；命中后仍会检查状态与安全限制。</p>}
-                <div className="teaching-card__actions">
-                  <button className="teaching-button teaching-button--quiet" onClick={() => setPendingRule(null)}>取消</button>
-                  <button className="teaching-button teaching-button--primary" onClick={handleConfirmRule} disabled={savingRule}>
-                    {savingRule ? '正在保存…' : pendingRule.binding ? '确认并启用' : '仅记住教导'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          {session.actor === 'admin' && <TrainingPreview proposal={training.proposal} error={training.error}
+            onConfirm={async () => { const p = training.proposal; if (await training.confirm()) locateTraining(p.unit_id,p.transition_ids?.[0]); }} onCancel={training.cancel} onLocate={locateTraining}/>}
           <div style={{ height: 16 }}/>
         </div>
 
@@ -389,6 +337,7 @@ function App({ session, logout, refreshSession }) {
               ))}
             </div>
           )}
+          {trainingSelection && <div className="training-selection">正在追改所选教导，请输入你的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
           <MainInputBar
             onSend={handleSend}
             thinking={thinking}
@@ -402,7 +351,14 @@ function App({ session, logout, refreshSession }) {
 
         </>}
 
-        {session.actor === 'admin' && <RulesDrawer open={rulesOpen} onClose={() => setRulesOpen(false)}/>}
+        {session.actor === 'admin' && trainingOpen && <TrainingDrawer
+          unitId={trainingUnit} training={training} agents={agents} onUnitChange={setTrainingUnit}
+          onClose={() => setTrainingOpen(false)}
+          onLocate={(uid, id) => { setTrainingOpen(false); locateTraining(uid, id); }}
+          onRevise={record => {
+            setTrainingSelection({unit_id:trainingUnit,transition_id:record.transition_ids[0],teaching_id:record.teaching_id});
+            setTrainingOpen(false);
+          }}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
         {session.actor === 'admin' && <OrchestratorSettingsDrawer open={orchestratorOpen} onClose={() => setOrchestratorOpen(false)}/>}
@@ -426,6 +382,7 @@ function App({ session, logout, refreshSession }) {
           }}
         >
           <FsmDevicePage
+            trainingLocation={trainingLocation?.unit_id === displayUid ? trainingLocation : null}
             unitId={displayUid}
             device={displayDevice}
             liveState={unitData[displayUid]}
@@ -486,9 +443,9 @@ function DeviceScanDialog({ onClose, onBound }) {
   };
 
   return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
-    <section className="device-scan-dialog" role="dialog" aria-modal="true" aria-labelledby="device-scan-title" onClick={event => event.stopPropagation()}>
+    <section className="management-dialog device-scan-dialog" role="dialog" aria-modal="true" aria-labelledby="device-scan-title" onClick={event => event.stopPropagation()}>
       <header><div><h2 id="device-scan-title">扫码添加设备</h2></div>
-        <button className="btn header-icon-btn" onClick={onClose} aria-label="关闭扫码"><Icon name="x" size={16}/></button></header>
+        <button className="icon-button header-icon-btn" onClick={onClose} aria-label="关闭扫码"><Icon name="x" size={16}/></button></header>
       <p>扫描设备上的二维码标签，识别后自动加入当前空间。</p>
       {!busy && !pasteOpen && <QrScanner key={attempt} onScan={submit} hint="将设备二维码放入框内"/>}
       {pasteOpen && !busy && <form className="session-entry__form" onSubmit={event => { event.preventDefault(); submit(code); }}>

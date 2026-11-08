@@ -109,7 +109,7 @@ async def test_detection_requests_pixel_bbox_as_json(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_visible_target_request_asks_only_for_presence_and_bbox(monkeypatch):
+async def test_visible_target_request_includes_coarse_proximity_without_metric_distance(monkeypatch):
     from cloud.go2 import models
     from cloud.go2.perception import visual_target
     events = []
@@ -123,15 +123,20 @@ async def test_visible_target_request_asks_only_for_presence_and_bbox(monkeypatc
             prompt = messages[0].content
             assert '"found"' in prompt and '"bbox_1000"' in prompt
             assert '0–1000' in prompt and '不要输出像素坐标' in prompt
+            assert '"proximity"' in prompt and 'nearby' in prompt and 'uncertain' in prompt
+            assert '不要估计距离或世界坐标' in prompt
             assert all(key not in prompt for key in ('confidence', 'count', 'static'))
-            return SimpleNamespace(content='{"found":true,"bbox_1000":[606,567,652,662]}')
+            return SimpleNamespace(content=json.dumps({'found': True,
+                'bbox_1000': [606, 567, 652, 662], 'proximity': 'nearby',
+                'proximity_reason': '目标位于身前近处地面'}))
 
     monkeypatch.setattr(models, 'get_vision_llm', lambda: VisionModel())
     monkeypatch.setattr(visual_target, 'emit_agent_event',
                         lambda event, **fields: events.append((event, fields)))
     result = await detect_visible_target(b'jpeg', '白色毛绒玩具',
                                          {'width': 640, 'height': 360, 'frame_id': 43})
-    assert result == {'found': True, 'bbox_1000': [606, 567, 652, 662]}
+    assert result == {'found': True, 'bbox_1000': [606, 567, 652, 662],
+                      'proximity': 'nearby', 'proximity_reason': '目标位于身前近处地面'}
     assert any(event == 'vision.model' and fields.get('phase') == 'parsed'
                and fields['observation'] == result for event, fields in events)
 

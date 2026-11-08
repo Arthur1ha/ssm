@@ -34,6 +34,7 @@ test_*.py
 !cloud/go2/tests/test_target_navigation_regressions.py
 !cloud/go2/tests/test_search_interfaces.py
 !cloud/go2/tests/test_target_approach.py
+!cloud/go2/tests/test_target_view.py
 !cloud/go2/tests/test_frontier.py
 !cloud/go2/tests/test_navigation_safety.py
 !cloud/go2/tests/test_recording.py

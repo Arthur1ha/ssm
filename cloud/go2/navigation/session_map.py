@@ -1,6 +1,7 @@
-"""Bounded odom-session evidence fusion; no persistent/relocalized coordinates.
+"""Bounded odom-session map with current obstacles in the latest voxel window.
 
-Decoded voxels are already in odom. Missing returns never clear obstacles.
+Decoded voxels are already in odom. The user-selected obstacle-only policy
+treats absent returns as traversable; old obstacles outside the window remain.
 The receiver submits into one active job and one replaceable pending slot.
 """
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +11,7 @@ import time
 import numpy as np
 
 from cloud.go2.navigation.occupancy_grid import (
-    OccupancyGrid, FREE, UNKNOWN, OCCUPIED, PATH_CLEARANCE_M,
+    OccupancyGrid, FREE, OCCUPIED, PATH_CLEARANCE_M,
 )
 
 MAX_MAP_CELLS = 400_000
@@ -103,6 +104,9 @@ class SessionMap:
         if not session_id or local.frame_id != 'odom':
             self.last_error = 'frame_or_session_invalid'
             return None
+        if not local.has_observation:
+            self.last_error = 'empty_voxel_observation'
+            return previous
         if previous is not None and stamp <= previous.observed_at:
             return previous
         resolution = local.resolution
@@ -144,29 +148,14 @@ class SessionMap:
         sl = region(local)
         measured = local.measured_floor
         local_floor = local.known_floor
-        # A floor voxel under an old obstacle is not evidence that its body volume
-        # is empty. Mark the contradiction for another view and remain blocked.
-        pending[sl] |= obstacles[sl] & measured & ~local.obstacles
         floor[sl] |= local_floor
         hits[sl] = np.minimum(hits[sl].astype(np.uint32) + measured, 65535).astype(np.uint16)
-        obstacles[sl] |= local.obstacles
-        pending[sl][local.obstacles] = False
+        # Refresh the entire current window, not a permanent union of obstacle
+        # hits. Otherwise a person walking by leaves an obstacle forever. This
+        # follows the explicit policy that missing returns are traversable.
+        obstacles[sl] = local.obstacles
+        pending[sl] = False
         observed[sl][measured | local.obstacles] = stamp
-        # Fill only one-cell holes surrounded by independently repeated floor
-        # evidence. Unknown edges, obstacle-adjacent gaps and large holes remain.
-        reliable = (hits >= 2) & ~obstacles
-        near_obstacle = obstacles.copy()
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                sy = slice(max(0, -dy), min(shape[0], shape[0] - dy))
-                sx = slice(max(0, -dx), min(shape[1], shape[1] - dx))
-                ty = slice(max(0, dy), min(shape[0], shape[0] + dy))
-                tx = slice(max(0, dx), min(shape[1], shape[1] + dx))
-                near_obstacle[ty, tx] |= obstacles[sy, sx]
-        fill = np.zeros(shape, bool)
-        fill[1:-1, 1:-1] = (reliable[:-2, 1:-1] & reliable[2:, 1:-1]
-                            & reliable[1:-1, :-2] & reliable[1:-1, 2:])
-        floor |= fill & ~near_obstacle
         inflated = obstacles.copy()
         radius = int(np.ceil(PATH_CLEARANCE_M / resolution))
         ys, xs = np.nonzero(obstacles)
@@ -192,9 +181,11 @@ class SessionMap:
         result.pending_recheck = pending
         result.last_observed = observed
         result.measured_floor_z = local.measured_floor_z
-        result.cells = np.where(inflated, OCCUPIED, np.where(floor, FREE, UNKNOWN)).astype(np.uint8)
+        result.has_observation = True
+        result.cells = np.where(inflated, OCCUPIED, FREE).astype(np.uint8)
         result.grid = result.cells != FREE
-        result.has_free_space_evidence = bool(np.any(hits))
+        result.has_free_space_evidence = local.has_free_space_evidence or bool(
+            previous is not None and previous.has_free_space_evidence)
         for value in vars(result).values():
             if isinstance(value, np.ndarray):
                 value.flags.writeable = False

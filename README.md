@@ -94,7 +94,8 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 | `POST /api/intents`、`POST /api/commands/{unit_id}` | 认证后的统一手机命令入口 |
 | `GET /api/events` | 按会话过滤的反馈与设备状态 SSE |
 | `POST /api/emergency-stop` | 管理员和体验者均可用的全局安全停止 |
-| `GET/POST/PATCH/DELETE /api/teachings` | 管理员教导记忆 CRUD；确认后仅保存，暂不自动执行 |
+| `/api/training`、`/api/training/proposals` | 管理员培养记录、修改草案与用户确认；设备页培养入口查看和追改 |
+| `GET /api/devices/{unit_id}/training` | 可训练转换、有效定义和设备加载状态 |
 | `/api/admin/*` | 固定空间和访客邀请管理 |
 | `/api/go2/*` | 内部 Go2 数据面；写接口要求内部服务身份与可信执行上下文 |
 
@@ -236,3 +237,5 @@ Mosquitto 只服务 ESP32、FastAPI 与编排器等内部节点；PWA 不连接 
   → 编排器 Planner 生成任务 → Dispatcher 下发（ESP32 走 MQTT / Go2 走 HTTP）
   → 设备执行 → Evaluator 确认 → FastAPI 按 session_id 过滤反馈 → 手机 SSE 收到结果
 ```
+
+训练切换说明及待验收项见 [训练证据与发布检查](docs/superpowers/plans/training-evidence/README.md)。旧教学接口退役，旧数据不自动迁移或启用。

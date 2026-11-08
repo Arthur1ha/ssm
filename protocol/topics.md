@@ -29,7 +29,7 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/agents/{unit_id}/manifest` | ESP32 智能体（当前为灯） | `{"unit_id": "...", "parent_id":"...", "agent_type": "actuator", "tags":[...], "capabilities": [...], "ts": ...}`；灯的新版 manifest 带 `"fsm_version":2`，云端据此选择卡片；空 payload = 单元缺席或撤销旧声明。传感器不再发布非空 manifest；新固件启动/重连时发送一次空 retained payload 清理旧声明，云端发现层也忽略旧传感器 manifest。 |
+| `ssm/agents/{unit_id}/manifest` | ESP32 智能体（当前为灯） | `{"unit_id": "...", "parent_id":"...", "agent_type": "actuator", "tags":[...], "capabilities": [...], "ts": ...}`；灯的新版 manifest 带 `"fsm_version":3`，云端据此选择卡片；空 payload = 单元缺席或撤销旧声明。传感器不再发布非空 manifest；新固件启动/重连时发送一次空 retained payload 清理旧声明，云端发现层也忽略旧传感器 manifest。 |
 | `ssm/agents/{unit_id}/card` | Go2 / 云端编排器（retained）| 完整 AgentCard JSON；空 payload = 撤销能力声明。编排器使用内部 `unit_id=cloud_orchestrator`、`agent_type=decision`，仅进入同伴视图，不进入物理设备列表 |
 | `ssm/agents/cloud_orchestrator/status` | 云端编排器（retained + LWT） | `"online"` 或 `"offline"`；同伴请求可用性以此为准，不能以保留的 card 推断在线 |
 
@@ -97,7 +97,7 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/task/{unit_id}/{task_id}` | Cloud | `{"task_id":"...","session_id":"...","action":"SET_STATE","params":{"state":"ON"},"actor":"admin\|visitor\|agent","persist":false,"space_id":"main","ts":1234567890}`；灯的正式命令为 `SET_STATE`（`ON/OFF`）、`SET_COLOR`（`r/g/b/brightness`）、`BLINK`（`r/g/b/count`）。旧固件的 `SET_STATE BRIGHT/DIM` 仅在迁移期兼容；不携带云端 service token，发布者由 broker ACL 限制为 API/编排器账号 |
+| `ssm/task/{unit_id}/{task_id}` | Cloud | `{"task_id":"...","session_id":"...","action":"SET_STATE","params":{"state":"ON"},"actor":"admin\|visitor\|agent","persist":false,"space_id":"main","ts":1234567890}`；灯的正式命令为 `SET_STATE`（`ON/OFF`）、`SET_COLOR`（`r/g/b/brightness`）、`BLINK`（`r/g/b/count`）；v3 默认 `count=0` 持续闪烁，只有明确指定 `1..20` 次数时才自动结束。持续闪烁启动后即回传 `ok`（`ism_state=BLINKING`），有限次数则等待恢复后回传成功。旧固件的 `SET_STATE BRIGHT/DIM` 仅在迁移期兼容；不携带云端 service token，发布者由 broker ACL 限制为 API/编排器账号 |
 | `ssm/result/{unit_id}/{task_id}` | ESP32 | `{"task_id":"...","session_id":"...","result":"executing\|ok\|cancelled\|blocked\|error","ism_state":"ON","ts":...}`；旧固件可省略 `session_id`，编排器按已登记任务归属补齐 |
 
 任务消息可附带 `trace_id`（用户任务根 ID）、`run_id`（发起智能体运行）和 `request_id`（同伴请求）；ESP32 在回执中回传收到的关联字段，异步 `BLINK` 完成回执也沿用同一组值。旧固件不回传时，云端按已登记 `task_id` 补齐查询关联。这些字段只用于观测，不参与权限判断或设备动作选择。

@@ -12,11 +12,12 @@ const commandBus = {
         ? `/api/commands/go2/tasks/${encodeURIComponent(params.resume_run_id)}/resume`
         : `/api/commands/${encodeURIComponent(unitId)}`;
       const data = await apiClient.request(endpoint, {
-        method: 'POST', body: go2Chat && params.resume_run_id ? { action, params: { message: params.message } } :
+        method: 'POST', body: go2Chat && params.resume_run_id ? { action, params: { message: params.message, ...(params.selection ? {selection:params.selection} : {}) } } :
           { action, params: go2Chat ? { ...params, task_id: taskId } :
             deviceChat ? { ...params, run_id: lampRunId } : params }, signal: controller.signal,
       });
       if (data?.result && typeof data.result === 'object') {
+        if (unitId === 'go2' && data.result.result === 'executing' && data.result.task_id) return this.waitForGo2Task(data.result.task_id);
         if (data.result.result === 'executing' && taskId) return this.waitForGo2Task(taskId);
         if (deviceChat && data.result.result === 'executing') return this.waitForLampRun(unitId, lampRunId);
         if (!deviceChat && unitId !== 'go2' && data.result.result === 'timeout' && data.result.task_id) {
@@ -29,6 +30,7 @@ const commandBus = {
         return this.waitForLampTask(unitId, data.task_id);
       }
       // Explicit device outcomes outrank compatibility acceptance flags.
+      if (unitId === 'go2' && data?.result === 'executing' && data.task_id) return this.waitForGo2Task(data.task_id);
       if (typeof data?.result === 'string') return data;
       if (data?.status === 'dispatched' || data?.accepted === true || data?.ok === true && !data?.result) {
         return { ...data, result: 'accepted' };
@@ -118,6 +120,7 @@ const commandBus = {
   describe(result) {
     if (result?.dispatch_only && result?.result === 'accepted') return '指令已发送';
     if (result?.result === 'needs_clarification' && result.question) return result.question;
+    if (result?.error === 'training_blocked' && result.reasons?.length) return result.reasons.map(reason => reason.code === 'cooldown' ? `冷却中，还需等待 ${Math.ceil(reason.remaining_s)} 秒` : ({condition_unsatisfied:'未满足教导条件',condition_unknown:'无法确认教导条件',awaiting_load:'教导等待加载'})[reason.code] || reason.code).join('；');
     if (result?.error === 'stop_unconfirmed') return '停止指令尚未确认，请查看机器狗当前状态';
     if (result?.result === 'accepted') return '指令已发送，尚未确认完成';
     if (result?.result === 'executing') return '正在执行';

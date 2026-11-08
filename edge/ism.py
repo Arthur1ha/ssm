@@ -18,9 +18,8 @@ class Trigger:
     CMD_BLINK        = "CMD_BLINK"
     CMD_RESET        = "CMD_RESET"
     BLINK_DONE       = "BLINK_DONE"
-    LED_FAIL         = "LED_FAIL"
 
-LED_STATES = (State.OFF, State.ON, State.BLINKING, State.ERROR)
+LED_STATES = (State.OFF, State.ON, State.BLINKING)
 BLINK_DONE_TARGETS = (State.OFF, State.ON)
 
 SENSOR_TABLE = {
@@ -43,11 +42,6 @@ LED_TABLE = {
     (State.BLINKING, Trigger.CMD_ON):    State.ON,
     (State.BLINKING, Trigger.CMD_COLOR): State.ON,
     (State.BLINKING, Trigger.CMD_BLINK): State.BLINKING,
-    (State.BLINKING, Trigger.LED_FAIL): State.ERROR,
-    (State.ERROR,    Trigger.CMD_OFF):   State.OFF,
-    (State.ERROR,    Trigger.CMD_ON):    State.ON,
-    (State.ERROR,    Trigger.CMD_COLOR): State.ON,
-    (State.ERROR,    Trigger.CMD_BLINK): State.BLINKING,
 }
 
 

@@ -25,7 +25,7 @@
 
 ---
 
-日期：2026-11-07。状态：**首版计划待核对，未实施**。本版取代此前 16 项复杂流程计划；执行范围仅为下列 8 项，不能继续执行旧版的 workflow/parallel/wait/compiler/grants 任务。
+日期：2026-11-07。状态：**计划内代码实现与旧链路退役完成；最终修改未验证，由用户验收**。本版取代此前 16 项复杂流程计划；执行范围仅为下列 8 项，不能继续执行旧版的 workflow/parallel/wait/compiler/grants 任务。
 
 当前工作区存在其他设备探索和前端改动。实施前执行 `git status --short`，仅修改本任务必要部分，不能覆盖、暂存或提交其他工作；不使用 `git add .`。任务中的提交是执行阶段的建议边界，本文更新不提交代码。
 
@@ -319,13 +319,15 @@ changeText/scopeText 来自服务端可读投影，不能单凭模型自由文�
 
 此时 P1a 闭环必须可演示：一句话设置准入条件或默认参数，确认、查看图上差异、模拟请求被限制/参数改变、追改、撤销；A 的真实事件派发由 Task 6 完成。未通过不能继续扩范围。
 
+实现交付同步：Task 1–7 代码已完成，Task 3/4 审查修复已落地，Task 8 文档与人工验收表已交付。历史通过记录仅对应当时版本；最终代码未验证。下列测试、集成验收、审查复核和提交步骤保留其实际状态，不以实现完成替代验收通过。
+
 ### Task 6: “看到人就打招呼”的真实事件链路，再复用到灯
 
 **Files:** Modify `cloud/go2/{service,mode/free_explore}.py`, `cloud/agents/go2/workflows/free_explore.py`, `cloud/agents/lamp/workflows/{reactive,runtime}.py`, `cloud/esp32/{service,tool_executor}.py`, `cloud/agents/common/training/{policy,catalog,service,check_fixtures}.py`；Create `cloud/agents/go2/training_checks.py`, `cloud/agents/lamp/training_checks.py`。只有发现原权限不支持已确认动作时才修改 `cloud/space/execution.py` 的精确校验。
 
 **Interfaces:** policy 的 `training_event_intent` 返回 `{teaching_id,revision,transition_id,event_id,params}` 或 None。check_fixtures 的 `person_greeting_fixture()` 返回真实 Go2 Card 目录、已加载站立→招手教导、时间戳=100 的有效 person_presence 事件与站立 facts；`lamp_sound_fixture()` 返回对应 OFF→BLINKING、count=2 的声音教导。两个 fixture 均返回 `{catalog,records,event,facts}`。
 
-- [ ] **Step 1: 写 A/C 的单事件匹配失败测试。**
+- [x] **Step 1: 写 A/C 的单事件匹配失败测试。**
 
 ```python
 from cloud.agents.common.training.policy import training_event_intent
@@ -345,7 +347,7 @@ def test_sound_event_uses_its_own_parameters():
 ```
 
 - [ ] **Step 2: 运行** `uv --cache-dir /tmp/ssm-uv-cache run python -m pytest cloud/agents/go2/training_checks.py cloud/agents/lamp/training_checks.py -q`；预期缺匹配实现失败。
-- [ ] **Step 3: 接入机器狗已有人物检测结果到原自主 Graph。**
+- [x] **Step 3: 接入机器狗已有人物检测结果到原自主 Graph。**
 
 ```text
 有效检测：没人→有人
@@ -358,8 +360,8 @@ def test_sound_event_uses_its_own_parameters():
 ```
 
 持续有人不因每帧重复触发，未知/过期帧不重置“人已离开”；重新确认离开后再出现才是新事件。此软件适配只读取已有检测结果，不增加检测器或识别具体人物。匹配事件可请求绑定动作或说明为何不执行，不允许追加起身/走近等未教导动作。休息/躺卧/模式不允许时不补跑、不自动开启探索。普通手动 Hello 不因缺少看到人事件而被拒绝。
-- [ ] **Step 4: 灯复用同一匹配契约。** 声音来源/时间戳形成稳定事件关联；当前 OFF 才匹配，原 lamp Graph 最多提出一个绑定动作。重复事件不重复派发，冷却/让位/过期事件不排队；匹配教学时不再另起普通调光，未匹配维持原自主判断。
-- [ ] **Step 5: 精确校验自动动作授权与冷却。** 对已确认单设备 teaching 引用、固定目标和参数作服务端校验，不冒充 admin、不开放一般自主权限。教导明确冷却用于该教导动作，避免原普通自主同参冷却吞掉已经确认的行为；其他普通冷却保持。用户追教“任何招手都间隔一分钟”时，独立普通 guard 同时约束手动和事件请求。
+- [x] **Step 4: 灯复用同一匹配契约。** 声音来源/时间戳形成稳定事件关联；当前 OFF 才匹配，原 lamp Graph 最多提出一个绑定动作。重复事件不重复派发，冷却/让位/过期事件不排队；匹配教学时不再另起普通调光，未匹配维持原自主判断。
+- [x] **Step 5: 精确校验自动动作授权与冷却。** 对已确认单设备 teaching 引用、固定目标和参数作服务端校验，不冒充 admin、不开放一般自主权限。教导明确冷却用于该教导动作，避免原普通自主同参冷却吞掉已经确认的行为；其他普通冷却保持。用户追教“任何招手都间隔一分钟”时，独立普通 guard 同时约束手动和事件请求。
 - [ ] **Step 6: 完成 A 的首要端到端验收，再跑 C。** 真实 runtime→Graph→模拟传输，不只测 matcher。验证收到人事件只有一个 Hello 请求、未知姿态零请求、持续有人不重复、手动仍可用、追改/暂停/撤销、动作未确认不显示完成；图上条件、原话和当前命中原因一致。运行两个设备训练及原权限测试并提交。 `git commit -m "feat: execute user-taught transitions from existing device events"`。
 
 ### Task 7: 删除旧教学链路，保留有用基础
@@ -368,15 +370,15 @@ def test_sound_event_uses_its_own_parameters():
 
 **Interfaces:** 最终只有新训练配置和消费入口。旧 API 返回 404；旧数据不进入新列表、条件匹配或动作派发。新培养抽屉替换旧规则管理入口。
 
-- [ ] **Step 1: 编写退役失败检查，列出旧生产引用。**
+- [x] **Step 1: 编写退役失败检查，列出旧生产引用。**
 
 ```bash
 rg -n 'save_rule|pending_rule|onPendingRule|teaching_candidates|teaching_bindings|go2_list_teachings|teachings_endpoint|/api/teachings|RulesPage|RulesDrawer' cloud app
 ```
 
 retirement_checks 用实际文件存在性与生产模块扫描检查上述符号（排除 *_checks.py 和历史文档）；隔离旧 enabled 数据目录，新列表应为空，投递事件无训练派发。测试完整 app 装配的旧 GET/POST/binding 路由均为 404，禁止真实服务 lifespan 连接硬件。
-- [ ] **Step 2: 运行** `uv --cache-dir /tmp/ssm-uv-cache run python -m pytest cloud/agents/common/training/retirement_checks.py -q`；预期残留引用失败。
-- [ ] **Step 3: 删除旧文件和挂接。**
+- [x] **Step 2: 运行** `uv --cache-dir /tmp/ssm-uv-cache run python -m pytest cloud/agents/common/training/retirement_checks.py -q`；预期残留引用失败。
+- [x] **Step 3: 删除旧文件和挂接。**
 
 ```python
 # 最终 app 装配仅保留新教学 router。
@@ -385,10 +387,12 @@ app.include_router(training_router)
 ```
 
 清理管家旧 schema/提示词/执行分支，灯旧 teaching_candidates，Go2 的特定 Hello 教导消费/Graph teaching 分支，go2_list_teachings 工具，Card 的旧 teachings_endpoint。autonomous_skills 经全仓核对仅服务旧教学时删除；普通 skills/observations 保留。Go2/ESP32 memory 的 taught 字段和资产列表改接新抽屉，其他记忆人格字段不动。
-- [ ] **Step 4: 清理旧 UI 和缓存入口。** 删除 pendingRule/handleConfirmRule、teaching_saved 旧卡片、旧 binding 编辑器、index 脚本和 #rules 页面注册；菜单改开新抽屉。旧缓存或旧 pending_rule 请求只能提示刷新/重新教学，不能写入新记录。保留现有节点控制、普通聊天和设备设置。
+- [x] **Step 4: 清理旧 UI 和缓存入口。** 删除 pendingRule/handleConfirmRule、teaching_saved 旧卡片、旧 binding 编辑器、index 脚本和 #rules 页面注册；菜单改开新抽屉。旧缓存或旧 pending_rule 请求只能提示刷新/重新教学，不能写入新记录。保留现有节点控制、普通聊天和设备设置。
 - [ ] **Step 5: 运行退役与新旧基础回归，确认旧原文件内容未变并提交。** `git commit -m "refactor: retire legacy teaching bindings and interfaces"`。
 
 ### Task 8: 首版端到端验收与切换说明
+
+2026-11-07 用户最新指示：不再运行验证，由用户自行验收。此任务交付切换文档和人工检查表；自动验收与真机验证保持未完成。无提交、部署或生产数据变更。
 
 **Files:** Create `cloud/agents/common/training/acceptance_checks.py`, `docs/superpowers/plans/training-evidence/README.md`；Modify README 中相关入口及本计划复选框（仅按实际完成更新）。
 
@@ -405,10 +409,10 @@ git diff --check
 
 原 Go2/灯/Card/权限测试按当前仓库有效路径运行，不能引用已被其他工作删除的测试路径或为通过而回退它们。fixture 隔离配置、checkpoint/effect 目录和网络；不加载生产 .env 或连接设备。
 - [ ] **Step 2: 对 A/B/C 及 D 的可信模拟事实跑完整用户旅程。** 自然语言→草案→确认→加载→图上痕迹→模拟执行结果→追改→暂停/撤销；重启后配置与冷却有效。真实模型回放另记正确性和澄清次数，不把脚本模型通过当成自然语言质量通过。
-- [ ] **Step 3: 编写发布切换说明。**
+- [x] **Step 3: 编写发布切换说明。**
 
 ```text
-代码准备：旧教学引用已清理，软件验收通过；当前仍不部署。
+代码准备：旧教学入口已替换；最终软件验收待用户执行，当前仍不部署。
 后续发布前：停止旧服务接收教学和继续派发，核对在途动作，停止旧 worker。
 归档：复制实际旧教导目录，记录文件校验和及数量；原文件不改写。
 完整切换：API、各角色 worker、Card 与 PWA 使用同一新版本；新训练目录为空。

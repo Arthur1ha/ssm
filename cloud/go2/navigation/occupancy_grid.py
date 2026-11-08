@@ -1,7 +1,7 @@
-"""Local 2D grid from measured floor and obstacle voxels.
+"""Local obstacle map: unobserved cells inside the map are traversable.
 
-Empty voxels alone are not free-space evidence. A floor return must be present
-before a cell can be used for navigation.
+Measured floor is retained for perception, not required to authorize navigation.
+Raw obstacles and their clearance inflation remain blocked.
 """
 import math
 
@@ -17,7 +17,6 @@ ROBOT_HALF_WIDTH_M = 0.155
 SAFETY_MARGIN_M = 0.04
 PATH_CLEARANCE_M = ROBOT_HALF_WIDTH_M + SAFETY_MARGIN_M
 TURN_CLEARANCE_M = math.hypot(ROBOT_HALF_LENGTH_M, ROBOT_HALF_WIDTH_M) + SAFETY_MARGIN_M
-LOCAL_FLOOR_BRIDGE_M = SELF_RETURN_RADIUS_M + 0.25
 UNKNOWN = 0
 FREE = 1
 OCCUPIED = 2
@@ -35,10 +34,11 @@ class OccupancyGrid:
             raise ValueError("invalid voxel geometry")
         self.frame_id = (d.get("header") or {}).get("frame_id") or d.get("frame_id")
         self.has_free_space_evidence = False
+        self.has_observation = False
         self.measured_floor_z: float | None = None
         self.obstacles = None
         self.cells = self._build(d.get("data", {}).get("points"), robot_pose)
-        # Existing A* accepts a blocked bitmap. UNKNOWN is blocked too.
+        # A* and the map renderer share this obstacle/clearance mask.
         self.grid = self.cells != FREE
 
     def _build(self, points, robot_pose: dict | None) -> np.ndarray:
@@ -47,6 +47,7 @@ class OccupancyGrid:
             raise ValueError("invalid voxel dimensions")
         cells = np.full((ny, nx), UNKNOWN, dtype=np.uint8)
         obstacles = np.zeros((ny, nx), dtype=bool)
+        valid_points = False
         self.measured_floor = np.zeros((ny, nx), dtype=bool)
         if points is not None:
             pts = np.asarray(points)
@@ -60,16 +61,15 @@ class OccupancyGrid:
                 ix = np.rint((pts[:, 0] - self.origin[0]) / self.resolution).astype(int)
                 iy = np.rint((pts[:, 1] - self.origin[1]) / self.resolution).astype(int)
                 inside = (ix >= 0) & (iy >= 0) & (ix < nx) & (iy < ny)
+                valid_points = bool(np.any(inside))
                 if floor_z is not None:
                     floor_hits = inside & (np.abs(pts[:, 2] - floor_z) <= 0.08)
                     cells[iy[floor_hits], ix[floor_hits]] = FREE
                     self.measured_floor[iy[floor_hits], ix[floor_hits]] = True
-                    self._bridge_nearby_floor(cells, pts[floor_hits], robot_pose)
                     obstacle_hits = inside & (pts[:, 2] > floor_z + Z_FLOOR_M)
                     obstacle_hits &= pts[:, 2] < floor_z + Z_CEIL_M
                 else:
-                    # Without a measured floor the map cannot authorize travel,
-                    # but still show obstacle returns in the diagnostic image.
+                    # Keep detecting obstacles even without a floor fit.
                     obstacle_hits = inside & (pts[:, 2] > Z_FLOOR_M)
                     obstacle_hits &= pts[:, 2] < Z_CEIL_M
                 obstacles[iy[obstacle_hits], ix[obstacle_hits]] = True
@@ -98,51 +98,14 @@ class OccupancyGrid:
                 valid = (ix >= 0) & (iy >= 0) & (ix < nx) & (iy < ny)
                 inflated[iy[valid], ix[valid]] = True
         cells[footprint] = FREE
-        # Keep floor evidence separate from the inflated obstacle layer. A turn
-        # needs known ground and raw obstacle clearance, not a second inflation.
+        # Floor evidence remains available to metric perception only. Missing
+        # floor returns do not block a navigation cell or a body sweep.
         self.known_floor = cells == FREE
+        cells[:] = FREE
         cells[inflated] = OCCUPIED
-        self.has_free_space_evidence = bool(np.any((cells == FREE) & ~footprint))
+        self.has_observation = valid_points
+        self.has_free_space_evidence = valid_points and bool(np.any(cells == FREE))
         return cells
-
-    def _bridge_nearby_floor(self, cells: np.ndarray, floor_points: np.ndarray,
-                             robot_pose: dict | None) -> None:
-        """Fill only the short lidar blind gap to nearby measured floor hits.
-
-        Each opened cell lies on a ray ending at an observed floor cell on the
-        measured plane. The obstacle inflation below still takes precedence.
-        """
-        if not robot_pose or not len(floor_points):
-            return
-        x, y = robot_pose["x"], robot_pose["y"]
-        dx = floor_points[:, 0] - x
-        dy = floor_points[:, 1] - y
-        distance = np.hypot(dx, dy)
-        near = (distance > SELF_RETURN_RADIUS_M
-                ) & (distance <= LOCAL_FLOOR_BRIDGE_M)
-        if not np.any(near):
-            return
-        # One measured endpoint per five-degree sector is enough to join the
-        # footprint to the floor patch without inventing an open disk.
-        angles = np.mod(np.arctan2(dy[near], dx[near]), 2 * math.pi)
-        sectors = np.floor(angles * 72 / (2 * math.pi)).astype(int)
-        endpoints = floor_points[near]
-        lengths = distance[near]
-        for sector in np.unique(sectors):
-            members = np.flatnonzero(sectors == sector)
-            endpoint = endpoints[members[np.argmax(lengths[members])]]
-            steps = max(1, math.ceil(math.hypot(endpoint[0] - x, endpoint[1] - y)
-                                      / self.resolution))
-            for step in range(1, steps + 1):
-                ratio = step / steps
-                wx = x + (endpoint[0] - x) * ratio
-                wy = y + (endpoint[1] - y) * ratio
-                try:
-                    ix, iy = self.odom_to_grid(wx, wy)
-                except ValueError:
-                    break
-                if cells[iy, ix] == UNKNOWN:
-                    cells[iy, ix] = FREE
 
     def _measured_floor_height(self, pts: np.ndarray, robot_pose: dict | None) -> float | None:
         """Accept only a broad, locally measured horizontal floor patch."""
@@ -213,7 +176,7 @@ class OccupancyGrid:
                                & (np.abs(across) <= PATH_CLEARANCE_M)))
 
     def is_turn_clear(self, x: float, y: float) -> bool:
-        """Turning in place needs known ground and obstacle clearance."""
+        """Turning in place needs obstacle clearance inside the map."""
         return self.turn_clearance_details(x, y)["clear"]
 
     def turn_clearance_details(self, x: float, y: float) -> dict:
@@ -244,8 +207,6 @@ class OccupancyGrid:
         obstacle_distances = np.hypot(dx, dy)
         obstacle_count = int(np.count_nonzero(obstacle_distances <= TURN_CLEARANCE_M))
         blockers = []
-        if unknown_cells:
-            blockers.append("unmeasured_floor")
         if obstacle_count:
             blockers.append("measured_obstacle")
         return {**details, "clear": not blockers, "blockers": blockers,
@@ -261,7 +222,7 @@ class OccupancyGrid:
         """Check the actual shortest-angle rectangular body sweep, in radians.
 
         Cells intersecting the rectangle are included conservatively by a half
-        cell diagonal. Unknown ground remains a distinct failure from obstacles.
+        cell diagonal. Missing floor returns do not block motion.
         """
         delta = (target_heading - heading + math.pi) % (2 * math.pi) - math.pi
         radius = TURN_CLEARANCE_M + self.resolution
@@ -292,7 +253,7 @@ class OccupancyGrid:
                       & (np.abs(-dx * s + dy * c) <= PATH_CLEARANCE_M + padding))
         unknown = int(np.count_nonzero(sweep & ~self.known_floor[bottom:top, left:right]))
         obstacles = int(np.count_nonzero(sweep & self.obstacles[bottom:top, left:right]))
-        blockers = (["unmeasured_floor"] if unknown else []) + (["measured_obstacle"] if obstacles else [])
+        blockers = ["measured_obstacle"] if obstacles else []
         return {"clear": not blockers, "blockers": blockers,
                 "unknown_floor_cells": unknown, "obstacle_cells": obstacles,
                 "sweep_angle_rad": float(delta)}

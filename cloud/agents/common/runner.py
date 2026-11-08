@@ -25,7 +25,7 @@ from pydantic import BaseModel, ValidationError
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
-from cloud.agents.common.effects import FileEffectLedger
+from cloud.agents.common.effects import FileEffectLedger, use_effect
 from cloud.observability import emit_agent_event
 
 UNCERTAIN = {"accepted", "executing", "timeout", "unknown"}
@@ -269,8 +269,9 @@ async def run_role_graph(
                     if result is None:
                         result = {"result": "unknown", "error": "prior_dispatch_unconfirmed"}
                 else:
-                    result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
-                                                    timeout=max(0.1, current.deadline - time.time()))
+                    with use_effect(ledger, (current.agent_id, thread_id, current.run_id, step_id)):
+                        result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
+                                                        timeout=max(0.1, current.deadline - time.time()))
                 if isinstance(result, dict) and result.get("result") not in {
                     "unknown", "timeout", "executing", "accepted"
                 }:

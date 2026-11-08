@@ -68,7 +68,7 @@ def run_lamp_loop(agent, text: str, unit_id: str, context: ExecutionContext,
                   run_id: str | None = None, resume: bool = False,
                   trace_id: str | None = None,
                   parent_run_id: str | None = None,
-                  deadline: float | None = None) -> dict:
+                  deadline: float | None = None, selection: dict | None = None) -> dict:
     """Run one lamp Graph thread against observed ESP32 and peer results."""
     if (context.space_id != "main"
             or context.origin_kind not in {"user_delegated", "agent_autonomous"}
@@ -81,14 +81,14 @@ def run_lamp_loop(agent, text: str, unit_id: str, context: ExecutionContext,
         return _run_lamp_loop_locked(
             agent, text, unit_id, context, dispatch, index=index,
             lighting_only=lighting_only, run_id=run_id, resume=resume,
-            trace_id=trace_id, parent_run_id=parent_run_id, deadline=deadline)
+            trace_id=trace_id, parent_run_id=parent_run_id, deadline=deadline, selection=selection)
 
 
 def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionContext,
                           dispatch, *, index: FileRunIndex, lighting_only: bool,
                           run_id: str | None, resume: bool,
                           trace_id: str | None, parent_run_id: str | None,
-                          deadline: float | None) -> dict:
+                          deadline: float | None, selection: dict | None) -> dict:
     saver = FileCheckpointSaver()
     thread_id = thread_id_for(unit_id, context.session_id)
     previous = (load_run(run_id, context.session_id, unit_id,
@@ -184,7 +184,14 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                             run.goal, step, invoke_text, publish_text,
                             progress_closed, min(run.deadline, time.time() + 4))
 
-    def execute(name, params, step_id):
+    async def execute(name, params, step_id):
+        if name in {"list_training", "propose_training"}:
+            from dataclasses import asdict
+            from cloud.agents.common.training.tools import execute_training
+            if run.parent_run_id or context.session_id.startswith("peer_"):
+                return {"result": "rejected", "error": "direct_user_request_required"}
+            return await execute_training(name, params, {**asdict(context), "run_id": run.run_id,
+                                                        "source_text": text, "selection": selection})
         return execute_lamp_tool(name, params, step_id, agent=agent, unit_id=unit_id,
                                  context=context, dispatch=dispatch,
                                  lighting_only=lighting_only, run_id=run.run_id)
@@ -259,10 +266,10 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             tool_schemas=visible_schemas(lighting_only=lighting_only,
                                         card=cards.get_registry().get_card(unit_id)),
             build_messages=lambda current: decision_messages(
-                current, agent=agent, unit_id=unit_id, supplement=text if resume else ""),
+                current, agent=agent, unit_id=unit_id, supplement=(text if resume else "") + ("\n选中转换：" + str(selection) if selection else "")),
             execute=execute, reconcile_effect=reconcile,
             finalize=finalize, checkpointer=saver, on_progress=progress,
-            effectful=lambda name: name not in READ_ONLY_TOOLS,
+            effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
             resume=resume, resume_value=text if resume else None,
         ))
     if run.status != "needs_clarification":

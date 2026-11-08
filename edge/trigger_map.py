@@ -82,8 +82,6 @@ class TriggerMap:
         was_blinking = self._ism_led.state == State.BLINKING
         if action == "BLINK":
             if not was_blinking:
-                # ERROR is not a restorable physical lighting state. A retry
-                # from ERROR finishes with a confirmed off state.
                 self._blink_restore = (State.ON if self._ism_led.state == State.ON
                                        else State.OFF)
             self._blink_id = blink_id
@@ -130,6 +128,7 @@ class TriggerMap:
 
         elif event == "BLINK_DONE":
             if (self._ism_led.state != State.BLINKING or
+                    self._blink_config[3] == 0 or
                     data.get("blink_id") != self._blink_id):
                 return
             target = self._blink_restore
@@ -140,11 +139,10 @@ class TriggerMap:
                 else:
                     self._bsm.led_set_state("OFF")
             except Exception as exc:
-                self._blink_restore = None
+                # Keep the last confirmed state and restore target for retries.
+                # Execution errors belong in task results, not a fourth LED state.
                 self._blink_id = None
-                self._blink_config = None
-                self._ism_led.transition(Trigger.LED_FAIL)
-                self._publish_led_state()
+                self._publish_led_state(force=True)
                 if self._pending_blink:
                     tid, sid = self._pending_blink
                     self._pending_blink = None
@@ -192,7 +190,7 @@ class TriggerMap:
         except Exception as exc:
             self._publish_result(task_id, session_id, "error", str(exc))
             return
-        if ok and action == "BLINK":
+        if ok and action == "BLINK" and self._blink_config[3] > 0:
             self._pending_blink = (task_id, session_id)
             self._publish_result(task_id, session_id, "executing")
         else:

@@ -140,6 +140,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
             index.put_if_absent(run_id, agent_id, session_id, thread_id)
         except ValueError:
             return {"run_id": run_id, "result": "rejected", "error": "run_id_conflict"}
+    context = {**context, "source_text": supplemental if resume else context["user_msg"]}
     if resume:
         context = {**context, "user_msg": run.goal}
     history = _recent_session_history(saver, thread_id, run_id)
@@ -225,10 +226,10 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                       session_id=session_id, origin_kind=run.origin_kind):
         asyncio.run(run_role_graph(
             run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
-            build_messages=lambda current: build_messages(current, supplemental, history), execute=execute,
+            build_messages=lambda current: build_messages(current, supplemental, history) + ([HumanMessage(content="选中的可信转换：" + str(context["selection"]))] if context.get("selection") else []), execute=execute,
             on_step=on_step, on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
-            effectful=lambda name: name in {"invoke_skill", "save_rule", "send_message", "start_activity",
+            effectful=lambda name: name in {"invoke_skill", "propose_training", "send_message", "start_activity",
                                               "set_space_constraint", "clear_space_constraints"},
             resume=resume, resume_value=supplemental))
     if run.status != "needs_clarification":

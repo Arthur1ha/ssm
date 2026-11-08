@@ -115,7 +115,7 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
         <div/>
       </div>
 
-      {/* 扩展插槽（pendingRule 卡片、快捷建议等） */}
+      {/* 扩展插槽（培养草案卡片、快捷建议等） */}
       {children}
 
       {/* 输入栏 */}

@@ -263,7 +263,46 @@ async def prepare_user_interaction(context: ExecutionContext):
 
 
 
-async def perform_life_control(action: str, context: ExecutionContext):
+async def perform_life_control(action: str, context: ExecutionContext, *, request_id: str | None = None):
+    """Life buttons and tools use the same confirmed teaching boundary."""
+    from cloud.agents.common.effects import FileEffectLedger, current_effect, use_effect
+    from cloud.go2.tasks import command_identity
+    from cloud.go2.tools.executor import _training_preflight, _training_result, validate_execution_context
+    import uuid
+    validate_execution_context(context)
+    effect = current_effect()
+    own = effect is None
+    if own:
+        identity = command_identity(context, request_id or 'life_' + uuid.uuid4().hex)
+        ledger = FileEffectLedger()
+        reservation = ledger.reserve(*identity, 'LIFE', {'action': action})
+        if reservation['reservation'] == 'existing':
+            return {**(reservation.get('result') or {'result': 'accepted', 'error': 'command_result_unconfirmed'}),
+                    'command_request_id': identity[3], 'replayed': True}
+    else:
+        ledger, identity = effect
+    with use_effect(ledger, identity):
+        checked = await _training_preflight('LIFE', {'action': action}, context)
+        if checked['allowed']:
+            checked = await _training_preflight('LIFE', {'action': action}, context, reserve=True)
+        if not checked['allowed']:
+            result = {'result': 'blocked', 'error': 'training_blocked', **_training_result(checked)}
+        else:
+            try:
+                result = await _perform_life_control(action, context)
+            except Exception:
+                if own:
+                    ledger.mark_result(*identity, {'result': 'error', 'error': 'life_control_failed'})
+                raise
+            result = {**result, **_training_result(checked),
+                      'confirmation_scope': 'completion' if result.get('result') == 'ok' else 'request'}
+        if own:
+            result = {**result, 'command_request_id': identity[3]}
+            ledger.mark_result(*identity, result)
+        return result
+
+
+async def _perform_life_control(action: str, context: ExecutionContext):
     from cloud.go2.state import LIFE_ACTIONS
     from cloud.go2.navigation.navigator import navigator
     if action not in LIFE_ACTIONS:

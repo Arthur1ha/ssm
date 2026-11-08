@@ -255,7 +255,7 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
         observation = json.loads(raw)
         if not isinstance(observation, dict):
             raise ValueError('non-object vision output')
-        fields = (('found', 'bbox_1000') if mode == 'visible_target' else
+        fields = (('found', 'bbox_1000', 'proximity', 'proximity_reason') if mode == 'visible_target' else
                   ('count', 'static', 'confidence', 'bbox',
                    'ground_contact_visible', 'contact_pixel'))
         emit_agent_event('vision.model', phase='parsed', frame_id=frame.get('frame_id'),
@@ -274,11 +274,17 @@ async def detect_visible_target(jpeg: bytes, target: str, frame: dict) -> dict:
     """Find any matching visible object and its image region for visual approach."""
     instruction = (
         '在图像中寻找用户描述的物体。'
-        '只输出 JSON：{"found":布尔值,"bbox_1000":[左,上,右,下]或null}。'
+        '只输出 JSON：{"found":布尔值,"bbox_1000":[左,上,右,下]或null,'
+        '"proximity":"nearby"或"far"或"uncertain","proximity_reason":"简短画面依据"}。'
         '画面里有任何一个符合描述的物体就设 found=true；若有多个，选画面中最清楚的一个。'
         '看不到符合描述的物体时设 found=false、bbox_1000=null。'
         'bbox_1000 必须用相对于整张图的 0–1000 坐标，左上角为原点，'
         '满足 0<=左<右<=1000、0<=上<下<=1000。不要输出像素坐标。'
+        '相机安装在机器狗前部。proximity 是找物任务的粗略视觉判断：'
+        '目标已在机器狗身前近处、无需继续穿过一段房间才能靠近时为 nearby；'
+        '仍在房间远处或明显需要继续靠近时为 far；遮挡、尺度或透视不足以判断时为 uncertain。'
+        '结合地面、家具与整体场景判断，不要仅凭框大或位于画面底部判定 nearby。'
+        '看不到目标时必须为 uncertain。此判断不表示可以触碰目标或已经精确到位。'
         '不要估计距离或世界坐标，不要输出 JSON 之外的文字。'
     )
     return await _ask_vision(jpeg, target, frame, instruction, 'visible_target')

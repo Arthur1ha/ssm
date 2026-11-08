@@ -211,7 +211,7 @@ def select_observation_target(grid, odom, coverage, *, bounds, current=None):
     # of overlapping disk queries around sparse frontier clusters.
     turn_mask = None
     if hasattr(grid, 'known_floor') and hasattr(grid, 'obstacles'):
-        blocked = ~grid.known_floor | grid.obstacles
+        blocked = grid.obstacles
         turn_mask = ~blocked.copy()
         ny, nx = blocked.shape
         reach = math.ceil((TURN_CLEARANCE_M + grid.resolution / 2) / grid.resolution)
@@ -333,7 +333,7 @@ def select_observation_target(grid, odom, coverage, *, bounds, current=None):
                         except ValueError:
                             clear = False
                             break
-                        if (gx, gy) != (tx, ty) and (not grid.known_floor[gy, gx] or grid.obstacles[gy, gx]):
+                        if (gx, gy) != (tx, ty) and grid.obstacles[gy, gx]:
                             clear = False
                             break
                     if clear:

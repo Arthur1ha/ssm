@@ -122,7 +122,7 @@ function describeRunProgress(event, compact = false) {
     go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
     get_space_context: '查看空间信息', read_state: '查看传感器状态',
     await_result: '核对执行结果', request_peer_skill: '协同处理请求',
-    save_rule: '整理待确认教导', go2_chat: '回应当前问题',
+    go2_chat: '回应当前问题',
     start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
     clear_space_constraints: '撤销空间里的共同要求' })[actionId] || '处理当前请求';
   // Raw light settings belong in the device detail view, not conversational progress.

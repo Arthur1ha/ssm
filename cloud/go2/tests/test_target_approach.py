@@ -230,11 +230,13 @@ def setup_observation_move(monkeypatch, *, clear=True):
     calls, navigate = setup_approach(monkeypatch)
     use_lidar_without_site_calibration(monkeypatch)
     pose = {'x': .45, 'y': 0., 'heading': 0., 'session_id': 's'}
-    grid = SimpleNamespace(is_body_clear=lambda *args: clear)
+    grid = SimpleNamespace(is_body_clear=lambda x, y, h: clear and abs(y) < .01,
+                           turn_sweep_details=lambda x, y, h, end: {'clear': clear and abs(y) < .01 and abs(end) < .01})
     navigate.return_value = {'status': 'succeeded', 'last_trusted_pose': {**pose, 'x': .75}}
     monkeypatch.setattr(approach.navigator, 'snapshot', lambda: ((pose, grid), None))
     monkeypatch.setattr(vision, 'observe_target', AsyncMock(return_value={
-        'found': True, 'frame': {'width': 640, 'height': 360, 'odom_session_id': 's', 'pose_at_capture': pose},
+        'found': True, 'frame': {'width': 640, 'height': 360, 'odom_session_id': 's', 'pose_at_capture': pose,
+                                'frame_id': 1, 'received_at': time.monotonic()},
         'observation': {'found': True, 'bbox_1000': [450, 400, 550, 600]}}))
     return calls, navigate
 
@@ -265,9 +267,10 @@ async def test_reobservation_has_finite_motion_and_never_claims_arrival_without_
         side_effect=vision.TargetUnlocalized('object_returns_unavailable')))
     result = await approach.navigate_to_visible_target('owl')
     assert result['result'] == 'blocked'
-    assert result['reason'] == 'object_returns_unavailable'
-    assert navigate.await_count == approach.REOBSERVE_MAX_STEPS
-    assert len(result['observation_moves']) == approach.REOBSERVE_MAX_STEPS
+    # A mocked unchanged live pose cannot select the same viewpoint repeatedly.
+    assert result['reason'] == 'no_known_free_observation_path'
+    assert navigate.await_count == 1
+    assert len(result['observation_moves']) == 1
     assert 'confirmation' not in result
 
 
@@ -282,13 +285,14 @@ async def test_missing_depth_never_bypasses_measured_free_path(monkeypatch):
 
 
 def test_observation_can_translate_forward_without_unverified_rotation():
-    pose = {'x': 0., 'y': 0., 'heading': 0.}
-    observed = {'frame': {'width': 640, 'height': 360},
+    pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
+    observed = {'found': True, 'frame': {'width': 640, 'height': 360, 'pose_at_capture': pose,
+                                        'odom_session_id': 's', 'frame_id': 1, 'received_at': time.monotonic()},
                 'observation': {'found': True, 'bbox_1000': [870, 520, 895, 565]}}
     grid = SimpleNamespace(is_body_clear=lambda x, y, heading: abs(y) < .01,
-                           turn_sweep_details=lambda *_: {'clear': False})
+                           turn_sweep_details=lambda x, y, h, end: {'clear': abs(y) < .01 and abs(end) < .01})
     point = approach.observation_waypoint(grid, pose, observed)
-    assert point == {'x': .30, 'y': 0., 'heading': 0.}
+    assert (point['x'], point['y'], point['heading']) == (.30, 0., 0.)
     grid.is_body_clear = lambda *_: False
     with pytest.raises(vision.TargetUnlocalized, match='no_known_free_observation_path'):
         approach.observation_waypoint(grid, pose, observed)
@@ -316,6 +320,77 @@ async def test_pose_changed_after_observation_blocks_reposition(monkeypatch):
     result = await approach.navigate_to_visible_target('owl')
     assert result['reason'] == 'pose_changed_during_detection'
     navigate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_temporary_visual_miss_keeps_hint_then_requires_metric_confirmation(monkeypatch):
+    calls, navigate = setup_observation_move(monkeypatch)
+    hint = approach.make_target_hint(vision.observe_target.return_value)
+    vision.observe_target.return_value['found'] = False
+    original = vision.locate_lidar_target
+    attempts = []
+    async def locate(target, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise vision.TargetUnlocalized('target_not_visible')
+        return await original(target, **kwargs)
+    monkeypatch.setattr(vision, 'locate_lidar_target', locate)
+    result = await approach.navigate_to_visible_target('owl', target_hint=hint)
+    assert result['result'] == 'ok'
+    assert result['target_hint'] == hint
+    assert len(result['observation_moves']) == 1
+    assert 'after_received_at' in attempts[1]
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_expired_hint_and_visual_miss_cannot_move(monkeypatch):
+    _, navigate = setup_observation_move(monkeypatch)
+    hint = approach.make_target_hint(vision.observe_target.return_value)
+    hint['received_at'] -= 61
+    vision.observe_target.return_value['found'] = False
+    monkeypatch.setattr(vision, 'locate_lidar_target', AsyncMock(
+        side_effect=vision.TargetUnlocalized('target_not_visible')))
+    result = await approach.navigate_to_visible_target('owl', target_hint=hint)
+    assert result['reason'] == 'target_hint_unavailable'
+    assert result['target_hint'] == hint
+    navigate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_second_metric_confirmation_miss_can_reobserve_with_same_budget(monkeypatch):
+    _, navigate = setup_observation_move(monkeypatch)
+    original = vision.locate_lidar_target
+    count = 0
+    async def locate(target, **kwargs):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise vision.TargetUnlocalized('target_not_visible')
+        return await original(target, **kwargs)
+    monkeypatch.setattr(vision, 'locate_lidar_target', locate)
+    result = await approach.navigate_to_visible_target('owl')
+    assert result['result'] == 'ok'
+    assert len(result['observation_moves']) == 1
+    assert navigate.await_count == 2
+    assert result['confirmation'] == 'odom_stopped_and_visual_recheck'
+
+
+@pytest.mark.asyncio
+async def test_rotation_view_requires_real_turn_not_translation(monkeypatch):
+    _, navigate = setup_observation_move(monkeypatch)
+    sample = vision.observe_target.return_value
+    pose = sample['frame']['pose_at_capture']
+    g = SimpleNamespace(is_body_clear=lambda x,y,h: abs(x-pose['x']) < .01 and abs(y) < .01,
+                        turn_sweep_details=lambda *args: {'clear': True})
+    monkeypatch.setattr(approach.navigator, 'snapshot', lambda: ((pose,g),None))
+    navigate.return_value = {'status': 'succeeded', 'last_trusted_pose': pose.copy()}
+    monkeypatch.setattr(vision, 'locate_lidar_target', AsyncMock(
+        side_effect=vision.TargetUnlocalized('object_returns_unavailable')))
+    result = await approach.navigate_to_visible_target('owl')
+    assert result['reason'] == 'observation_move_unconfirmed'
+    assert navigate.call_args.args == (pose['x'], pose['y'])
+    assert abs(navigate.call_args.kwargs['heading']) >= .30
 
 
 @pytest.mark.asyncio

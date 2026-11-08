@@ -16,6 +16,7 @@ from cloud.go2.space_context import prompt_space_context
 
 
 _GRAPH_RULES = (
+    "长期教导先读取已有教导与转换目录，只提出草案等待用户确认；唯一目标少追问，多个目标须澄清。慢一点须给出数值；临时动作和长期默认区分，追改须修改原教导。缺能力时说明，不能声称学会。"
     "逐步推进当前目标。工具通过原生 tool calling 调用，每轮最多调用一个工具；"
     "执行下一动作前先观察上一工具的真实结果。缺少方向、时长等必需信息时调用 ask_user；"
     "不能把步数猜成距离或时长。工具返回 accepted、executing、timeout、unknown 时"
@@ -31,6 +32,7 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
     """The robot may talk about an invitation even when its body is offline."""
     profile = profile or get_profile()
     facts = reply_facts(run)
+    # Proposal creation is not user confirmation or device execution.
     return (
         f"{reply_persona(profile)}\n"
         f"空间智能体称呼与设备 ID：{json.dumps(agent_names(), ensure_ascii=False)}。\n"
@@ -41,6 +43,7 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
         "如果只有动作接口成功响应，可说设备确认指令，不能声称独立视觉验证或已经到达。"
         "视觉导航只按工具结果中的 message 描述接近和复核，不把接近说成已经到达目标。"
         "草稿中的未确认事实和未来承诺要删掉。只输出你要说的话。\n"
+        "教学草案只表示待用户确认，不表示已保存、已学会或已经执行。"
         + json.dumps(facts, ensure_ascii=False, default=str)
     )
 

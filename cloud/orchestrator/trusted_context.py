@@ -84,7 +84,7 @@ def parse_trusted_intent(
             raise TrustedContextError("session expired")
 
     text = unsigned.get("text")
-    if not isinstance(text, str) or not text.strip():
+    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
         raise TrustedContextError("missing intent text")
     resume_run_id = unsigned.get("resume_run_id")
     if resume_run_id is not None and (not isinstance(resume_run_id, str)
@@ -105,7 +105,8 @@ def parse_trusted_intent(
         "space_id": MAIN_SPACE_ID,
         "issued_at": float(issued_at),
         "expires_at": float(expires_at) if expires_at is not None else None,
-        "user_msg": text.strip(),
+        "user_msg": text,
+        "selection": unsigned.get("selection"),
         "requirements": [],
         "intent_hint": unsigned.get("intent_hint", ""),
         "device_hint": unsigned.get("device_hint", ""),

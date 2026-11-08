@@ -9,7 +9,6 @@ def build_card(unit_id: str) -> dict:
         "description": "协调空间内智能体任务",
         "agent_type": "decision",
         "space_id": "main",
-        "services": {"teachings_endpoint": "/api/teachings"},
         "online": False,
         "transport": {"kind": "mqtt"},
         "skills": [{

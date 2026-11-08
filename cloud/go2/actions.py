@@ -64,7 +64,7 @@ ACTIONS = {spec.command: spec for spec in (
     ActionSpec("Move", "移动", "sport", 1008, ("standing", "moving"),
                "moving", None, "unavailable", interruptible=True,
                parameter_keys=("x", "y", "z")),
-    ActionSpec("EnterMoveControl", "进入遥控", "local", None, ("standing",),
+    ActionSpec("EnterMoveControl", "准备移动", "local", None, ("standing",),
                None, "standing", "local"),
     ActionSpec("BalanceStand", "平衡站立", "sport", 1002, ("standing",),
                None, "standing", "unavailable"),

@@ -275,7 +275,9 @@ async def test_timeout_with_correlated_physical_id_accepts_later_completion(devi
         await asyncio.Event().wait()
     robot.send_command.side_effect = pending
     result = await execute_command_request('Hello', {}, context=USER,
-                                          request_id='timed-out', deadline=time.time() + .05)
+                                          # Leave room for the real teaching/ownership
+                                          # preflight before timing out the device wait.
+                                          request_id='timed-out', deadline=time.time() + 1)
     assert entered.is_set()
     assert result['result'] == 'timeout'
     assert result['request_id'] == 'timeout-physical'

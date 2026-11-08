@@ -125,6 +125,10 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
         state = getattr(go2, "fsm_state", "")
         permitted = command == "StopMove" and state not in ("offline", "connecting")
         permitted = permitted or (command == "Move" and state == "moving")
+        # Internal firmware activation is intentionally absent from the public
+        # body graph. Match the connection validator without skipping its
+        # posture freshness, pending-action or ownership checks above.
+        permitted = permitted or (command == "BalanceStand" and state == "standing")
         permitted = permitted or go2.fsm_next(command) is not None
         if not permitted:
             raise ValueError(f"{command} blocked in {state}")
@@ -140,6 +144,59 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
             session_tasks.cancel(previous.owner_session_id)
 
 
+async def _training_preflight(command, params, context, *, reserve=False, dispatch_only=False):
+    if command == 'StopMove' or (command == 'LIFE' and params.get('action') == 'stop_explore'):
+        return {'allowed': True, 'params': params, 'training_refs': [], 'reasons': [], 'transition_id': None}
+    from cloud.agents.common.effects import current_effect
+    from cloud.agents.common.training import service, store
+    from cloud.go2.card import _build_go2_card
+    card = _build_go2_card()
+    if not reserve:
+        await invoke_blocking(service.load_runtime, card, context)
+    async with go2._command_lock:
+        with store.partition_lock('go2', space_id=context.space_id) as data:
+            if context.trigger_ref and context.trigger_mode_epoch is not None:
+                from cloud.go2.service import drive
+                if (context.expires_at <= time.time() or context.trigger_mode_epoch != drive._generation
+                        or drive.user_interrupt or drive._pending_question_id
+                        or drive._task is None or drive._task.done()):
+                    return {'allowed': False, 'params': params, 'training_refs': [],
+                            'transition_id': None, 'reasons': [{'code': 'autonomy_unavailable'}]}
+            current = go2.state_snapshot()
+            fresh_body = current.get('body_telemetry_fresh') is True
+            if not fresh_body:
+                current = {**current, 'body_state': None, 'fsm_state': None}
+            effect = current_effect()
+            def history(record, transition_id):
+                if effect is None:
+                    return False, None
+                return effect[0].completion_history(
+                    unit_id='go2', transition_id=transition_id,
+                    teaching_id=record['teaching_id'], since=service.teaching_baseline(record),
+                    origin_kind=context.origin_kind,
+                    trigger_ref=record['teaching_id'] if record['definition']['trigger'] else None)
+            checked = service.evaluate_execution(
+                card, current, command, params, context, data['records'].values(), history,
+                state_fresh=(bool(go2.is_connected) if command == 'LIFE' else fresh_body))
+            if checked['allowed'] and reserve:
+                if command != 'LIFE':
+                    check_direct_motion(command, checked['params'], context, dispatch_only=dispatch_only)
+                if checked['training_refs']:
+                    if effect is None:
+                        raise ValueError('training_effect_identity_missing')
+                    effect[0].annotate_execution(effect[1], {
+                        'unit_id': 'go2', 'transition_id': checked['transition_id'],
+                        'teaching_ids': [ref['teaching_id'] for ref in checked['training_refs']],
+                        'origin_kind': context.origin_kind, 'session_id': context.session_id,
+                        'trigger_ref': context.trigger_ref, 'request_params': params,
+                        'dispatch_params': checked['params']})
+            return checked
+
+
+def _training_result(checked):
+    return {key: checked[key] for key in ('training_refs', 'reasons', 'transition_id')}
+
+
 async def execute_action(command: str, params: dict | None = None, *,
                          context: ExecutionContext | None = None,
                          life_task_id: str | None = None, dispatch_only=False) -> dict:
@@ -151,6 +208,22 @@ async def execute_action(command: str, params: dict | None = None, *,
     context = context or current_context()
     params = {} if params is None else params
     validate_execution_context(context)
+    from cloud.agents.common.effects import FileEffectLedger, current_effect, use_effect
+    if current_effect() is None:
+        from cloud.go2.tasks import command_identity, track_command_result
+        ledger = FileEffectLedger()
+        identity = command_identity(context, 'action_' + uuid.uuid4().hex)
+        ledger.reserve(*identity, command, params)
+        with use_effect(ledger, identity):
+            try:
+                result = await execute_action(command, params, context=context,
+                                              life_task_id=life_task_id, dispatch_only=dispatch_only)
+            except (ValueError, LeaseConflict) as exc:
+                ledger.mark_result(*identity, {'result': 'blocked', 'error': str(exc)})
+                raise
+        ledger.mark_result(*identity, result)
+        track_command_result(go2, ledger, identity, result, context=context)
+        return result
     if dispatch_only and (context.origin_kind != 'user_delegated'
                           or command not in SPORT_COMMANDS or command == 'StopMove'):
         raise ValueError('dispatch_only requires a user body action')
@@ -165,6 +238,15 @@ async def execute_action(command: str, params: dict | None = None, *,
     # Reject malformed velocity before interrupting navigation.
     if command == "Move":
         go2._validate_velocity(**{axis: params.get(axis, 0.0) for axis in ("x", "y", "z")})
+    checked = await _training_preflight(command, params, context, dispatch_only=dispatch_only)
+    if not checked['allowed']:
+        return {'result': 'blocked', 'error': 'training_blocked', **_training_result(checked)}
+    # Trained button actions need the existing correlated completion path so
+    # their confirmed receipt can establish cooldown in the original ledger.
+    if dispatch_only and checked['training_refs']:
+        dispatch_only = False
+    original_params = params
+    params = checked['params']
     from cloud.go2.service import prepare_user_interaction, drive
     if command != "StopMove" and context.origin_kind != "agent_autonomous":
         await prepare_user_interaction(context)
@@ -180,11 +262,16 @@ async def execute_action(command: str, params: dict | None = None, *,
     if context.origin_kind == "user_delegated" and context.session_id != "system":
         from cloud.peers.gateway import cancel_pending
         cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous", reason="user_takeover")
+    checked = await _training_preflight(command, original_params, context, reserve=True, dispatch_only=dispatch_only)
+    if not checked['allowed']:
+        return {'result': 'blocked', 'error': 'training_blocked', **_training_result(checked)}
+    params = checked['params']
     runtime = runtime_for(go2)
     token = None
     if command != "StopMove" and runtime is not None and runtime.data['life_state'] == 'idle':
         token = runtime.begin_life('play', context.session_id, life_task_id or 'command_' + uuid.uuid4().hex)
     dispatch_epoch = runtime.data['epoch'] if runtime is not None else None
+    dispatch_life_id = runtime.data['life_task_id'] if runtime is not None else None
     try:
         with use_context(context):
             if life_task_id is not None:
@@ -196,7 +283,23 @@ async def execute_action(command: str, params: dict | None = None, *,
             else:
                 raw = await go2.send_command(command, params) if params else await go2.send_command(command)
         result = normalize_result("go2_sport", raw)
-        return {**result, "action": command, "device_epoch": dispatch_epoch}
+        result = {**result, "action": command, "device_epoch": dispatch_epoch, **_training_result(checked)}
+        from cloud.go2.tasks import track_command_result
+        ledger, identity = current_effect()
+        if identity[2] != 'direct-command':
+            track_command_result(go2, ledger, identity, result, context=context)
+        return result
+    except asyncio.CancelledError:
+        if runtime is not None and runtime.data['epoch'] == dispatch_epoch:
+            pending = runtime.data.get('pending_action') or runtime.data.get('last_action') or {}
+            if pending.get('life_task_id') == dispatch_life_id and pending.get('command') == command:
+                from cloud.go2.tasks import track_command_result
+                ledger, identity = current_effect()
+                track_command_result(go2, ledger, identity, {
+                    'result': 'accepted', 'error': 'command_result_unconfirmed',
+                    'request_id': pending.get('request_id'), 'device_epoch': dispatch_epoch,
+                    **_training_result(checked)}, context=context)
+        raise
     finally:
         if token is not None:
             runtime.finish_life(token)
@@ -229,7 +332,8 @@ def normalize_result(name: str, raw: object) -> dict:
     return {"result": "error", "error": "invalid_tool_result"}
 
 
-async def execute_tool(name: str, params: dict | None = None, *, context: ExecutionContext | None = None) -> dict:
+async def execute_tool(name: str, params: dict | None = None, *, context: ExecutionContext | None = None,
+                       request_id: str | None = None) -> dict:
     context = context or current_context()
     spec = get_tool_spec(name)
     if spec is None:
@@ -266,7 +370,11 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
         life_token = runtime.begin_life('play', context.session_id, 'tool_' + str(id(asyncio.current_task())))
     try:
         with use_context(context):
-            if inspect.iscoroutinefunction(fn):
+            if name == 'go2_life' and request_id is not None:
+                from cloud.go2.service import perform_life_control
+                raw = await asyncio.wait_for(perform_life_control(params['action'], context, request_id=request_id),
+                                             timeout=spec.timeout_s)
+            elif inspect.iscoroutinefunction(fn):
                 raw = await asyncio.wait_for(fn(**params), timeout=spec.timeout_s)
             elif spec.motion:
                 # A timed-out worker thread could keep moving the robot after
@@ -302,7 +410,7 @@ async def execute_command_request(command: str, params: dict, *, context: Execut
     """
     import re
     from hashlib import sha256
-    from cloud.agents.common.effects import FileEffectLedger
+    from cloud.agents.common.effects import FileEffectLedger, use_effect
     from cloud.go2.tasks import command_identity, read_command_result, track_command_result
     from cloud.observability import bind_context, emit_agent_event
 
@@ -337,7 +445,7 @@ async def execute_command_request(command: str, params: dict, *, context: Execut
     try:
         if deadline is not None and deadline <= time.time():
             raise ValueError("request_deadline_expired")
-        with bind_context(trace_id=trace_id, agent_id="go2", session_id=context.session_id,
+        with use_effect(ledger, identity), bind_context(trace_id=trace_id, agent_id="go2", session_id=context.session_id,
                           task_id=request_id, request_id=request_id, origin_kind=context.origin_kind):
             if deadline is None:
                 result = await execute_action(command, params, context=context, life_task_id=life_task_id,
@@ -355,7 +463,7 @@ async def execute_command_request(command: str, params: dict, *, context: Execut
         track_command_result(go2, ledger, identity, {
             "result": "accepted", "error": "command_result_unconfirmed",
             "command_request_id": request_id, "trace_id": trace_id,
-            "device_epoch": epoch, **correlated_receipt()})
+            "device_epoch": epoch, **correlated_receipt()}, context=context)
         raise
     except LeaseConflict as exc:
         result = {"result": "blocked", "error": "control_lease_conflict",
@@ -372,5 +480,5 @@ async def execute_command_request(command: str, params: dict, *, context: Execut
                      origin_kind=context.origin_kind, action=command, transport="webrtc", result=result,
                      status=result["result"])
     ledger.mark_result(*identity, result)
-    track_command_result(go2, ledger, identity, result)
+    track_command_result(go2, ledger, identity, result, context=context)
     return read_command_result(context, request_id, robot=go2)

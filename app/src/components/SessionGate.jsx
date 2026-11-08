@@ -369,12 +369,11 @@ function AdminInviteDrawer({ open, onClose }) {
   return (
     <>
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-      <aside className={`invite-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}
+      <aside className={`management-dialog invite-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open}
         inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
         role="dialog" aria-modal="true" aria-labelledby="invite-drawer-title">
-        <div className="invite-drawer__handle"/>
         <header><h2 id="invite-drawer-title">分享空间</h2>
-          <button className="btn" onClick={onClose} aria-label="关闭"><Icon name="x" size={14}/></button></header>
+          <button className="icon-button" onClick={onClose} aria-label="关闭分享空间"><Icon name="x" size={16}/></button></header>
         <div className="invite-drawer__body">
           <div className={`invite-state ${invite?.enabled ? 'is-enabled' : ''}`}>
             <i/><span>{invite?.enabled ? '邀请已启用' : '邀请未启用'}</span>

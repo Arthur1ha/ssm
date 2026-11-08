@@ -16,7 +16,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cloud.go2.connection import go2
 from cloud.go2.mode.free_explore import drive
@@ -270,12 +270,14 @@ async def go2_state(context=Depends(require_authenticated_read)):
 
 class LifeRequest(BaseModel):
     action: str
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,100}$")
 
 
 @router.post('/life')
 async def go2_life(req: LifeRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.tools.executor import execute_tool
-    return await execute_tool('go2_life', {'action': req.action}, context=_normalize_context(context))
+    return await execute_tool('go2_life', {'action': req.action}, context=_normalize_context(context),
+                              request_id=req.request_id)
 
 
 class CommandRequest(BaseModel):
@@ -285,6 +287,7 @@ class CommandRequest(BaseModel):
     request_id: str | None = None
     trace_id: str | None = None
     deadline: float | None = None
+    prepare_standing: bool = False
 
 
 class VelocityRequest(BaseModel):
@@ -301,6 +304,10 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
     context = _normalize_context(context)
+    if req.prepare_standing:
+        from cloud.agents.go2.workflows.body_action import start_body_action
+        return await start_body_action(cmd, req.params, context=context, request_id=req.request_id,
+                                       trace_id=req.trace_id, deadline=req.deadline)
     try:
         result = await execute_command_request(cmd, req.params, context=context,
                                               request_id=req.request_id, trace_id=req.trace_id,
@@ -361,6 +368,7 @@ async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends
 class ChatRequest(BaseModel):
     session_id: str | None = None  # untrusted compatibility field; ignored
     message: str
+    selection: dict | None = None
     skill_id: str | None = None
     params: dict | None = None
     task_id: str | None = None
@@ -389,6 +397,9 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.agents.go2.graph import run_go2_loop
     context = _normalize_context(context)
+    from dataclasses import asdict
+    from cloud.api.intents import validate_training_selection
+    selection = validate_training_selection(req.selection, asdict(context), unit_id="go2")
     if req.trace_id is not None and not re.fullmatch(r"tr_[A-Fa-f0-9]{32}", req.trace_id):
         raise HTTPException(status_code=400, detail="invalid trace_id")
     if req.parent_run_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", req.parent_run_id):
@@ -406,7 +417,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         if not 0 <= req.sync_window_s <= 30:
             raise HTTPException(status_code=400, detail="invalid sync_window_s")
         fingerprint = hashlib.sha256(json.dumps({
-            "message": req.message, "skill_id": req.skill_id, "params": req.params,
+            "message": req.message, "skill_id": req.skill_id, "params": req.params, "selection": selection,
         }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
         async def run_task():
@@ -414,7 +425,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
                 context.session_id, req.message, skill_id=req.skill_id,
                 params=req.params, context=context, run_id=req.task_id,
                 deadline=deadline, trace_id=trace_id,
-                parent_run_id=req.parent_run_id,
+                parent_run_id=req.parent_run_id, selection=selection,
             )
 
         try:
@@ -432,7 +443,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         run_go2_loop(
             context.session_id, req.message, skill_id=req.skill_id,
             params=req.params, context=context,
-            trace_id=trace_id, parent_run_id=req.parent_run_id,
+            trace_id=trace_id, parent_run_id=req.parent_run_id, selection=selection,
         ),
         name=f"go2-chat-{context.session_id}",
     )
@@ -460,8 +471,11 @@ async def go2_task_resume(task_id: str, req: ChatRequest,
                           context: ExecutionContext = Depends(require_service_context)):
     from cloud.agents.go2.graph import run_go2_loop
     context = _normalize_context(context)
+    from dataclasses import asdict
+    from cloud.api.intents import validate_training_selection
+    selection = validate_training_selection(req.selection, asdict(context), unit_id="go2")
     return await run_go2_loop(context.session_id, req.message, context=context,
-                              run_id=task_id, resume=True)
+                              run_id=task_id, resume=True, selection=selection)
 
 
 @router.post("/tasks/{task_id}/cancel")
@@ -495,6 +509,9 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
     from cloud.agents.go2.graph import run_go2_loop
 
     context = _normalize_context(context)
+    from dataclasses import asdict
+    from cloud.api.intents import validate_training_selection
+    selection = validate_training_selection(req.selection, asdict(context), unit_id="go2")
 
     async def sse_gen():
         stream_task = asyncio.current_task()
@@ -505,7 +522,7 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
             task = asyncio.create_task(run_go2_loop(
                 context.session_id, req.message, context=context,
                 run_id=req.task_id, deadline=req.deadline,
-                trace_id=req.trace_id, parent_run_id=req.parent_run_id,
+                trace_id=req.trace_id, parent_run_id=req.parent_run_id, selection=selection,
                 on_step=lambda step: queue.put_nowait({"type": "tool_done", "tool": step["tool"],
                                                        "step_id": step["step_id"], "result": step["result"]}),
             ))
@@ -693,6 +710,9 @@ async def emergency_stop(context: ExecutionContext = Depends(require_service_con
     # and any RPC/observation waits. It remains available without posture data.
     if go2.is_connected:
         go2.stop_velocity()
+    owner = control_lease.snapshot()
+    if owner is not None:
+        session_tasks.cancel(owner.owner_session_id)
     from cloud.peers.gateway import cancel_pending
     cancel_pending(origin_kind="agent_autonomous", reason="user_takeover")
     from cloud.go2.navigation.navigator import navigator
@@ -810,12 +830,10 @@ async def go2_memory(context=Depends(require_admin_read)):
     """返回 Go2 的成长资产、今日事件及近期每日摘要。"""
     context = _normalize_context(context)
     _require_admin_persist(context)
-    from cloud.agents.common import teachings
     from cloud.agents.go2.memory.episode import episode_memory
     from cloud.agents.go2.memory.daily_summary import get_recent_summaries
     from cloud.agents.go2.personality.profile import get_evolution_metadata
-    return {"taught": teachings.list_for("go2", space_id=context.space_id),
-            "today": episode_memory.format_today(),
+    return {"today": episode_memory.format_today(),
             "summaries": get_recent_summaries(7),
             "last_evolved": get_evolution_metadata().get("last_evolved")}
 
@@ -1125,12 +1143,12 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
 
     grid_obj = go2.occupancy_grid
     odom     = go2.odom
+    if grid_obj is None:
+        raise HTTPException(status_code=503, detail="地图数据尚未就绪")
+
     if (go2.odom_received_at is None or time.monotonic() - go2.odom_received_at > 1.0 or
             go2.odom_frame_id != grid_obj.frame_id):
         odom = {}
-
-    if grid_obj is None:
-        raise HTTPException(status_code=503, detail="地图数据尚未就绪")
 
     nx, ny = grid_obj.width[0], grid_obj.width[1]
     W, H   = nx * SCALE, ny * SCALE
@@ -1138,7 +1156,7 @@ async def go2_map_image(context=Depends(require_authenticated_read)):
     # 翻转行让 Y 轴朝上（北朝上）与世界坐标一致
     from cloud.go2.navigation.occupancy_grid import FREE, OCCUPIED
     arr = np.empty((ny, nx, 3), dtype=np.uint8)
-    arr[:] = (14, 18, 28)  # unknown
+    arr[:] = (34, 65, 70)  # unobserved in-map cells are traversable too
     arr[grid_obj.cells == FREE] = (34, 65, 70)
     arr[grid_obj.cells == OCCUPIED] = (100, 100, 100)  # inflated clearance
     arr[grid_obj.obstacles] = (210, 85, 75)  # raw obstacle returns

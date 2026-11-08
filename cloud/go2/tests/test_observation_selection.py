@@ -21,17 +21,15 @@ BOUNDS = (-3.9, -2.9, 3.9, 2.9)
 POSE = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'a'}
 
 
-def test_frontier_beyond_old_distance_limit_can_be_selected():
+def test_unseen_view_beyond_old_distance_limit_can_be_selected():
     grid = room()
     coverage = ObservationCoverage('a', bounds=BOUNDS)
-    # Mark the whole interior observed; only geometric frontier utility remains.
-    for iy, ix in zip(*np.nonzero(grid.cells == FREE)):
-        x, y = grid.grid_to_odom(int(ix), int(iy))
-        coverage._seen[(math.floor(x/grid.resolution + 1e-6), math.floor(y/grid.resolution + 1e-6))] = 1.
+    # Unobserved useful views are on the far side of this traversable room.
+    coverage.gain = lambda _grid, pose: 100 if pose['x'] > 1.6 else 0
     selection = select_observation_target(grid, POSE, coverage, bounds=BOUNDS)
     assert selection.target is not None
     assert math.hypot(selection.target.x, selection.target.y) > 1.5
-    assert selection.target.source == 'frontier'
+    assert selection.target.source == 'visual_coverage'
 
 
 def test_known_room_still_selects_unseen_camera_view_and_keeps_target_stable():
@@ -71,13 +69,13 @@ def test_scope_is_required_and_turn_sweep_still_rejects_real_obstacles():
     assert not result['clear'] and 'measured_obstacle' in result['blockers']
 
 
-def test_small_turn_does_not_require_unvisited_full_circle():
+def test_missing_floor_does_not_block_either_small_or_full_turn():
     grid = room()
     # The cell centered at y=.35 is inside the full turn disk but outside the
     # conservatively padded body rectangle for this three-hundredths turn.
     ix, iy = grid.odom_to_grid(0., .36)
     grid.known_floor[iy, ix] = False
-    assert not grid.is_turn_clear(0., 0.)
+    assert grid.is_turn_clear(0., 0.)
     assert grid.turn_sweep_details(0., 0., 0., .03)['clear']
 
 
@@ -152,9 +150,11 @@ def test_unexecutable_views_get_measured_forward_reposition(monkeypatch):
     assert selected.reason == 'observation_reposition_selected'
     assert selected.target.source == 'observation_reposition'
     assert (selected.target.x, selected.target.y, selected.target.heading) == (.30, 0., 0.)
-    # Forward unknown ground must prevent the fallback too.
+    # Missing floor does not block repositioning; a real obstacle still does.
     ix, iy = grid.odom_to_grid(.6, 0.)
     grid.known_floor[iy, ix] = False
+    assert select_observation_target(grid, POSE, coverage, bounds=BOUNDS).target is not None
+    grid.obstacles[iy, ix] = True
     blocked = select_observation_target(grid, POSE, coverage, bounds=BOUNDS)
     assert blocked.target is None
     assert blocked.reason == 'observation_start_unconfirmed'

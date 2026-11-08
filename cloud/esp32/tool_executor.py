@@ -13,6 +13,25 @@ from cloud.observability import emit_agent_event
 _physical_lock = threading.Lock()
 
 
+def _check_training(card, current, action, params, context, records):
+    """Use shared policy with facts from the original physical ledger."""
+    from cloud.agents.common.training.service import evaluate_execution, teaching_baseline
+    from cloud.esp32.physical_tasks import completion_history
+
+    def history(record, transition_id):
+        return completion_history(
+            unit_id=card["unit_id"], transition_id=transition_id,
+            teaching_id=record["teaching_id"], since=teaching_baseline(record),
+            origin_kind=context.origin_kind,
+            trigger_ref=record['teaching_id'] if record['definition']['trigger'] else None)
+
+    received = current.get("_received_at")
+    fresh = (type(received) in (int, float)
+             and 0 <= time.time() - received <= 30)
+    return evaluate_execution(card, current, action, params, context, list(records),
+                              history, state_fresh=fresh)
+
+
 def execute_physical(*, state, unit_id: str, action: str, params: dict,
                      context: ExecutionContext, dispatch, wait: bool = True,
                      source: str = "lamp_chat", preflight=None,
@@ -28,7 +47,7 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
 
     legacy = bool(card and {"BRIGHT", "DIM"} <= set(
         (card.get("state_machine") or {}).get("states", [])))
-    if action not in PHYSICAL_ACTIONS or not valid_lamp_params(action, params, allow_legacy=legacy):
+    if action not in PHYSICAL_ACTIONS or not isinstance(params, dict):
         return {"result": "rejected", "error": "invalid_lamp_action"}
     if (context.space_id != "main" or context.actor not in {"admin", "visitor", "agent"}
             or context.origin_kind not in {"user_delegated", "agent_autonomous"}):
@@ -39,6 +58,20 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
         return {"result": "rejected", "error": "autonomous_persistence_forbidden"}
     task_id = task_id or "task_" + uuid.uuid4().hex
     request_params = dict(params)
+    try:
+        # A completed/reserved request is replayed before current policy/defaults.
+        previous = get(task_id, unit_id=unit_id, session_id=context.session_id,
+                       action=action, request_params=request_params,
+                       origin_kind=context.origin_kind)
+        if previous is not None:
+            return {**previous, "action": action}
+        if card is not None:
+            from cloud.agents.common.training.service import load_runtime
+            load_runtime(card, context)
+    except ValueError as exc:
+        return {"result": "rejected", "error": str(exc), "task_id": task_id}
+    except Exception as exc:
+        return {"result": "blocked", "error": "training_unavailable", "task_id": task_id}
     with _physical_lock:
         reserved_here = False
         try:
@@ -47,28 +80,56 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                            origin_kind=context.origin_kind)
             if previous is not None:
                 return {**previous, "action": action}
-            current = (state.actuator_snapshot().get(unit_id, {}).get("state") or {})
-            params = normalize_brightness(action, params, current)
-            if card is not None:
-                if card.get("unit_id") != unit_id or not card.get("online"):
-                    return {"result": "blocked", "error": "lamp_unavailable"}
-                if (card.get("transport") or {}).get("kind") != "mqtt":
-                    return {"result": "rejected", "error": "unsupported_device_transport"}
-                if not any((skill.get("invoke") or {}).get("action") == action
-                           for skill in card.get("skills", [])):
-                    return {"result": "rejected", "error": "undeclared_lamp_action"}
-                current_ism = str(current.get("ism") or (card.get("state") or {}).get("ism") or "")
-                if not fsm_allows(card, current_ism, action, params):
-                    return {"result": "blocked", "error": "lamp_action_unavailable"}
-            if preflight is not None:
-                block = preflight(current, params)
-                if block:
-                    return {"result": "blocked", "error": block}
-            first = reserve(task_id, unit_id=unit_id, session_id=context.session_id,
-                            action=action, params=params, request_params=request_params,
-                            origin_kind=context.origin_kind)
-            if not first:
-                return {**get(task_id, unit_id=unit_id, session_id=context.session_id), "action": action}
+            from cloud.agents.common.training.store import partition_lock
+            with partition_lock(unit_id, space_id=context.space_id) as data:
+                current = (state.actuator_snapshot().get(unit_id, {}).get("state") or {})
+                training = {"allowed": True, "params": params, "reasons": [], "training_refs": [], "transition_id": None}
+                if card is not None:
+                    training = _check_training(card, current, action, params, context, data['records'].values())
+                    if not training['allowed']:
+                        return {"result": "blocked", "error": "training_blocked", **training}
+                    params = training['params']
+                if action == "SET_COLOR" and card:
+                    machine = card.get('state_machine') or {}
+                    regions = machine.get('regions') or [machine]
+                    edge = next((edge for region in regions for edge in region.get('transitions', [])
+                                 if edge.get('id') == training['transition_id']), None)
+                    if edge:
+                        base = edge.get('params') or {}
+                        params = {**{key: base[key] for key in ('r', 'g', 'b') if key in base}, **params}
+                if action == "BLINK" and "count" not in params:
+                    from cloud.esp32.tool_registry import blink_default
+                    params = {**params, "count": blink_default(card)}
+                if not valid_lamp_params(action, params, allow_legacy=legacy, card=card):
+                    return {"result": "rejected", "error": "invalid_lamp_action"}
+                params = normalize_brightness(action, params, current)
+                if card is not None:
+                    if card.get("unit_id") != unit_id or not card.get("online"):
+                        return {"result": "blocked", "error": "lamp_unavailable"}
+                    if (card.get("transport") or {}).get("kind") != "mqtt":
+                        return {"result": "rejected", "error": "unsupported_device_transport"}
+                    if not any((skill.get("invoke") or {}).get("action") == action
+                               for skill in card.get("skills", [])):
+                        return {"result": "rejected", "error": "undeclared_lamp_action"}
+                    current_ism = str(current.get("ism") or (card.get("state") or {}).get("ism") or "")
+                    if not fsm_allows(card, current_ism, action, params):
+                        return {"result": "blocked", "error": "lamp_action_unavailable"}
+                if preflight is not None:
+                    block = preflight(current, params)
+                    if block:
+                        return {"result": "blocked", "error": block}
+                if current != (state.actuator_snapshot().get(unit_id, {}).get("state") or {}):
+                    return {"result": "blocked", "error": "state_changed_before_dispatch"}
+                first = reserve(task_id, unit_id=unit_id, session_id=context.session_id,
+                                action=action, params=params, request_params=request_params,
+                                origin_kind=context.origin_kind,
+                                training={'transition_id': training['transition_id'],
+                                          'teaching_ids': [ref['teaching_id'] for ref in training['training_refs']],
+                                          'trigger_ref': context.trigger_ref,
+                                          'training_refs': training['training_refs'],
+                                          'reasons': training['reasons']})
+                if not first:
+                    return {**get(task_id, unit_id=unit_id, session_id=context.session_id), "action": action}
             reserved_here = True
             dispatched = dispatch(unit_id, action, params, context, source, task_id=task_id)
             if dispatched != task_id:
@@ -84,7 +145,7 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                 return {**reserved, "action": action}
             return {"result": "error", "error": str(exc), "task_id": task_id}
     if not wait:
-        return {"result": "accepted", "task_id": task_id, "action": action}
+        return {"result": "accepted", "task_id": task_id, "action": action, **{k: training[k] for k in ("training_refs", "reasons", "transition_id")}}
     # Waiting holds no dispatch lock: a new user command may cancel a blink.
     outcome = state.wait_task_result(task_id, timeout=(PHYSICAL_ACTIONS[action]["timeout"]
                                                      if timeout is None else timeout))
@@ -98,7 +159,8 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                      action=action, status=outcome.get("result", "error"),
                      result=outcome, completion_basis="edge_result")
     return {"result": outcome.get("result", "error"), "task_id": task_id,
-            "action": action, "error": outcome.get("error") or outcome.get("reason")}
+            "action": action, "error": outcome.get("error") or outcome.get("reason"),
+            **{k: training[k] for k in ("training_refs", "reasons", "transition_id")}}
 
 
 def execute_peer_skill(*, initiator_unit_id: str, target_unit_id: str,

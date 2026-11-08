@@ -37,7 +37,9 @@ class ReactiveMind:
         now = time.time()
         if unit_id.endswith("_sound"):
             self._last_sound_ts = now
-        self._event_queue.put({"unit_id": unit_id, "payload": payload, "enqueue_ts": now})
+        self._event_queue.put({"unit_id": unit_id, "payload": payload, "enqueue_ts": now,
+                               "autonomy_epoch": self._autonomy_epoch,
+                               "eligible_at_arrival": self._should_act()})
 
     def _sense(self) -> dict | None:
         observed = sense_sensors(self._state, self._last_sound_ts)
@@ -56,7 +58,7 @@ class ReactiveMind:
         return (snap.get(led_unit, {}).get("state") or {}).get("ism", "").upper()
 
     def _dispatch_tool(self, tool_name: str, params: dict, led_unit: str,
-                       *, task_id: str | None = None) -> bool:
+                       *, task_id: str | None = None, training_intent: dict | None = None) -> bool:
         """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
 
         set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
@@ -103,14 +105,18 @@ class ReactiveMind:
             card = get_registry().get_card(led_unit)
             legacy = bool(card and {"BRIGHT", "DIM"} <= set(
                 (card.get("state_machine") or {}).get("states", [])))
-            if not valid_lamp_params(action, params, allow_legacy=legacy):
+            valid = valid_lamp_params(action, params, allow_legacy=legacy, card=card)
+            if not valid and action == 'BLINK' and 'count' not in params:
+                from cloud.esp32.tool_registry import blink_default
+                valid = valid_lamp_params(action, {**params, 'count': blink_default(card)}, allow_legacy=legacy, card=card)
+            if not valid:
                 logger.warning("invalid reactive tool arguments: %s %s", tool_name, params)
                 return False
 
         if tool_name in ("set_led_state", "set_led_color", "blink_led"):
             params["unit_id"] = led_unit
             key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
-            if now - self._cooldown.get(key, 0) < 300:
+            if not training_intent and now - self._cooldown.get(key, 0) < 300:
                 logger.debug("cooldown skip: %s", key)
                 self._last_reactive_tool_result = {"result": "blocked", "error": "repeat_action_cooldown"}
                 return False
@@ -147,7 +153,8 @@ class ReactiveMind:
                 from cloud.space.execution import ExecutionContext
                 card = get_registry().get_card(led_unit)
                 def preflight(current, arguments):
-                    if not self._should_act():
+                    if not self._should_act() or (training_intent and (time.time() >= training_intent['deadline']
+                            or training_intent['autonomy_epoch'] != self._autonomy_epoch)):
                         return "autonomy_unavailable"
                     if not card:
                         return "lamp_unavailable"
@@ -163,7 +170,10 @@ class ReactiveMind:
                     state=self._state, unit_id=led_unit, action=action,
                     params={k: v for k, v in params.items() if k != "unit_id"},
                     context=ExecutionContext("agent_auto", "agent", False,
-                                             "main", "agent_autonomous", 0),
+                                             "main", "agent_autonomous", 0,
+                                             trigger_ref=training_intent['teaching_id'] if training_intent else None,
+                                             trigger_revision=training_intent['revision'] if training_intent else None,
+                                             trigger_transition_id=training_intent['transition_id'] if training_intent else None),
                     dispatch=dispatch, task_id=task_id,
                     source="lamp_reactive", preflight=preflight,
                     card=card,

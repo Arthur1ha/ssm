@@ -127,31 +127,6 @@ function ActivityFeed({ entries, agents = [], activity, activityEvents = [], act
             </div>
           );
         }
-        if (e.type === 'teaching_saved') {
-          const teaching = e.teaching || {};
-          const card = agents.find(agent => agent.unit_id === teaching.unit_id);
-          return <div key={`teaching-${teaching.teaching_id || i}`} className="teaching-saved teaching-card">
-            <div className="teaching-card__top">
-              <span className="teaching-card__eyebrow">已记住的教导</span>
-              <span className="teaching-card__target">{e.unitName}</span>
-            </div>
-            <h3 className="teaching-card__title">{teaching.name}</h3>
-            <div className="teaching-card__sequence">
-              <div className="teaching-card__line"><span>当</span><p>{teaching.trigger}</p></div>
-              <div className="teaching-card__line"><span>就</span><p>{teaching.behavior}</p></div>
-            </div>
-            {teaching.binding && <div className="rule-card__mapping">
-              <span className="rule-card__mapping-label">实际触发设置</span>
-              <strong>{window.ruleObservationCopy(teaching.binding.observation_id, teaching.binding.where)}
-                <span aria-hidden="true">→</span>
-                {window.ruleActionCopy(teaching.binding.skill_id, teaching.binding.params, card)}</strong>
-            </div>}
-            <div className="teaching-saved__footer">
-              <span>{teaching.execution_status === 'enabled' ? '已启用 · 设备自主模式下生效' : '已记住 · 暂不自动触发'}</span>
-              {onOpenRules && <button className="teaching-link" onClick={onOpenRules}>查看教导与规则 <span aria-hidden="true">↗</span></button>}
-            </div>
-          </div>;
-        }
         if (e.type === 'ai' || e.type === 'peer_message') {
           const agent = e.sender || e.agent || 'orchestrator';
           const oc = getAgentBubbleColor(agent);

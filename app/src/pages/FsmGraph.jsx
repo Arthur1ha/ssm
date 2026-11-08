@@ -1,6 +1,6 @@
 /* Card-owned spatial layout. State clicks delegate actions; edges inspect rules. */
 function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', views = {},
-  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram }) {
+  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram, trainingEdges = [] }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
   const svgRef = useRef(null);
@@ -10,13 +10,13 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
     view:views[value],current:value === current}));
   const graphEdges = edges || transitions.filter(edge => !edge.safety && !edge.graph_hidden)
     .map((transition,index) => ({...transition,id:String(index),transition,active:transition.src === current}));
-  const width = diagram?.width || 600, height = diagram?.height || 600;
+  const {width,height} = stateGraphDimensions(graphNodes.length, diagram);
   const cx = width/2, cy = height/2;
   const radius = graphNodes.length === 1 ? 0 : graphNodes.length < 6 ? 188 : 244;
   const points = Object.fromEntries(graphNodes.map((node,index) => {
-    const angle = index * Math.PI * 2 / graphNodes.length - Math.PI / 2;
+    const angle = index * Math.PI * 2 / graphNodes.length - (graphNodes.length === 2 ? Math.PI : Math.PI / 2);
     return [node.id,{x:diagram && node.layout ? node.layout.x*width : cx + radius*Math.cos(angle),
-      y:diagram && node.layout ? node.layout.y*height : cy + radius*Math.sin(angle),
+      y:diagram && node.layout ? node.layout.y*height : cy + Math.min(radius, height/2-56)*Math.sin(angle),
       radius:node.radius || 39, node}];
   }));
   const bounds = Object.values(points);
@@ -148,6 +148,7 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
           const automatic = rules.every(rule => !rule.transition.action);
           const running = pendingCommand && rules.some(rule => [rule.transition.trigger,rule.transition.action].includes(pendingCommand));
           const path = routes.get(edge.id);
+          const trained = edge.directions.some(d => d.edges.some(e => trainingEdges.some(a => a.transition_id === e.transition.id && a.teachings?.some(t => t.desired_status !== 'removed'))));
           const focused = selectedState && (edge.src === selectedState || edge.dst === selectedState);
           const emphasized = selected || focused || (!selectedState && !selectedLink && points[direction.src]?.node.current && !disabled);
           const title = edge.directions.length > 1 ? `${source.node.label} ↔ ${target.node.label}`
@@ -167,6 +168,7 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
             <path d={path} className="fsm-whiteboard__line"
               markerStart={reverse ? `url(#${marker.current})` : undefined}
               markerEnd={reverse ? undefined : `url(#${marker.current})`}/>
+            {trained && <g className="training-edge-badge" transform={`translate(${(source.x+target.x)/2} ${(source.y+target.y)/2})`}><circle r="12"/><text textAnchor="middle" dy="4">教</text></g>}
           </g>;
         })}
         {graphNodes.map(node => {

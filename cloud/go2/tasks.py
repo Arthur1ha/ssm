@@ -182,7 +182,7 @@ def observe_command_results(robot) -> None:
     phase = "timeout" if last.get("result") == "timeout" else "completion"
     if (entry is not None and last.get("result") in {"ok", "error", "rejected", "cancelled", "timeout"}
             and phase not in entry[3]):
-        ledger, identity, dispatched, observed = entry
+        ledger, identity, dispatched, observed, metadata = entry
         result = {**dispatched, "result": last["result"], "last_action": last,
                   "confirmation": last.get("confirmation"),
                   "confirmation_scope": "completion" if last["result"] == "ok" else "request"}
@@ -201,8 +201,7 @@ def observe_command_results(robot) -> None:
         else:
             observed.add(phase)
             from cloud.observability import emit_agent_event
-            import json
-            _space, origin, session = json.loads(identity[1])
+            origin, session = metadata['origin_kind'], metadata['session_id']
             emit_agent_event("device.result", trace_id=result.get("trace_id"), agent_id="go2",
                              session_id=session, origin_kind=origin, task_id=identity[3],
                              request_id=key[1], transport="webrtc", result=result,
@@ -216,7 +215,7 @@ def observe_command_results(robot) -> None:
             records.pop(old_key, None)
 
 
-def track_command_result(robot, ledger, identity, result) -> None:
+def track_command_result(robot, ledger, identity, result, *, context=None) -> None:
     if result.get('dispatch_only'):
         return
     if result.get("result") not in {"accepted", "executing", "timeout"}:
@@ -228,7 +227,17 @@ def track_command_result(robot, ledger, identity, result) -> None:
     records = getattr(robot, "_command_result_records", None)
     if records is None:
         records = robot._command_result_records = {}
-    records[(epoch, physical_id)] = (ledger, identity, dict(result), set())
+    if context is None:
+        # Legacy direct request identities only. Graph callers pass explicit facts.
+        import json
+        try:
+            _space, origin, session = json.loads(identity[1])
+        except (ValueError, TypeError):
+            return
+    else:
+        origin, session = context.origin_kind, context.session_id
+    records[(epoch, physical_id)] = (ledger, identity, dict(result), set(),
+                                   {'origin_kind': origin, 'session_id': session})
     robot._command_result_callback = lambda: observe_command_results(robot)
     observe_command_results(robot)
 

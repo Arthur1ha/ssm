@@ -53,46 +53,16 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
     tabIndex="-1" style={{visibility:'hidden'}}>{children}</section>;
 }
 
-function StateTransitionRules({ edges, records, error, card, onEdit, onRetry }) {
-  const rules = [...new Map(edges.flatMap(edge => stateTransitionTeachings(edge.transition,records,card))
-    .map(rule => [rule.teaching_id,rule])).values()];
-  return <>
-    {error && <div className="device-whiteboard__rule-error" role="status">规则读取失败 <button type="button" onClick={onRetry}>重试</button></div>}
-    {rules.map(rule => <article key={rule.teaching_id} className="device-whiteboard__rule">
-      <p>{ruleObservationCopy(rule.binding.observation_id,rule.binding.where)}</p>
-      <p>→ {ruleActionCopy(rule.binding.skill_id,rule.binding.params,card)}</p>
-      <footer><small>用户规则 · {({enabled:'已启用',ready:'未启用',unbound:'未绑定',capability_unavailable:'能力已变化'})[rule.execution_status] || '未启用'}</small>
-        <button type="button" onClick={() => onEdit(rule.teaching_id)}>编辑规则</button></footer>
-    </article>)}
-  </>;
-}
-
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
 function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, connected,
-  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, feedback, card }) {
+  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, feedback, card, training, onTeach, locateTransition }) {
   const { useState, useEffect, useRef, useCallback } = React;
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLinkId, setSelectedLinkId] = useState(null);
   const [selectedDirectionId, setSelectedDirectionId] = useState(null);
   const [anchor,setAnchor] = useState(null);
-  const [editingRule,setEditingRule] = useState(null);
   const canvasRef = useRef(null);
-  const [ruleSnapshot,setRuleSnapshot] = useState(null);
-  const ruleRequest = useRef(0);
-  const canReadRules = actor === 'admin' && card?.services?.teachings_endpoint === '/api/teachings';
-  const loadRules = useCallback(async () => {
-    const request = ++ruleRequest.current;
-    if (!canReadRules) { setRuleSnapshot(null); return; }
-    try {
-      const records = await apiClient.request(`/api/teachings?unit_id=${encodeURIComponent(unitId)}`);
-      if (request === ruleRequest.current) setRuleSnapshot({unitId,records,error:false});
-    } catch (_) {
-      if (request === ruleRequest.current) setRuleSnapshot(previous => ({unitId,error:true,
-        records:previous?.unitId === unitId ? previous.records : []}));
-    }
-  }, [unitId,canReadRules]);
-  useEffect(() => { loadRules(); return () => { ++ruleRequest.current; }; }, [loadRules]);
-  const rules = canReadRules && ruleSnapshot?.unitId === unitId ? ruleSnapshot.records : [];
+  const records = training?.records || [];
   const clearSelection = useCallback(() => {
     setSelectedId(null); setSelectedLinkId(null); setSelectedDirectionId(null); setAnchor(null); onSelectState?.(null);
   }, [onSelectState]);
@@ -101,7 +71,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       anchor?.element?.focus({preventScroll:true});
     clearSelection();
   }, [anchor,clearSelection]);
-  const [joystickExiting, setJoystickExiting] = useState(false);
   const nodeCommandPending = useRef(false);
   const primary = primaryStateRegion(sm);
   const stale = streamHealth === 'reconnecting';
@@ -123,6 +92,22 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       ? stateActionReason(sm,edge.region,edge.transition,liveState,{offline,busy,actor,stale})
       : '当前状态不可执行'};
   });
+  // The Card declares a preparation hub. Only an available direct transition
+  // into that hub may enable an indirect target; the server confirms each step.
+  for (const edge of edges) {
+    const prepare = edge.region.prepare_action;
+    if (!prepare || !edge.transition.action || edge.transition.src !== prepare.via || edge.active) continue;
+    const entry = edges.find(item => item.region.id === edge.region.id && item.active && !item.reason
+      && item.transition.dst === prepare.via && (item.transition.action || widgets.some(widget =>
+        widget.type === 'joystick' && remoteActive(widget)
+        && widget.state_field === edge.region.state_field)));
+    if (!entry) continue;
+    edge.preparationReason = sm?.freshness_field && liveState[sm.freshness_field] === false
+      ? '设备反馈已过期，等待最新状态'
+      : stateActionReason(sm,edge.region,edge.transition,{...liveState,[edge.region.state_field]:prepare.via},
+        {offline,busy,actor,stale});
+    edge.preparedTransition = {...edge.transition,prepare_action:prepare.action,dispatch_only:false};
+  }
   const nodes = topology.nodes.map(node => {
     const control = stateNodeControl(node,edges);
     if (!node.current && !control.transition && !control.choices.length) {
@@ -143,6 +128,8 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     const remote = widgets.find(widget => widget.type === 'joystick' && widget.visible !== false
       && widget.node_state === node?.value
       && (widget.state_field || primary?.state_field) === node?.region.state_field);
+    const activeRemote = widgets.find(widget => widget.type === 'joystick' && remoteActive(widget)
+      && widget.state_field === node?.region.state_field);
     const next = remote || node?.control.transition ? id : id === selectedId ? null : id;
     setSelectedId(next);
     setSelectedLinkId(null); setSelectedDirectionId(null);
@@ -150,7 +137,8 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     onSelectState?.(next && node?.region.id === primary?.id ? node.value : null);
     // An event-driven destination is reachable but is not a command. Inspect
     // its declared rule instead of inventing an action or leaving a dead tap.
-    if (next && !remote && !node?.control.choices.some(edge => !edge.reason) && node?.control.automatic.length) {
+    if (next && !remote && !(activeRemote && node?.value === node.region.prepare_action?.via)
+      && !node?.control.choices.some(edge => !edge.reason) && node?.control.automatic.length) {
       const automatic = node.control.automatic[0];
       const link = links.find(item => item.directions.some(direction => direction.edges.includes(automatic)));
       const direction = link?.directions.find(item => item.edges.includes(automatic));
@@ -162,10 +150,25 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         if (path) setAnchor({element,point:path.getPointAtLength(path.getTotalLength()/2),keyboard:nextAnchor?.keyboard});
       }
     }
-    if (nodeCommandPending.current || joystickExiting || busy || offline || stale) return;
-    const transition = remote ? !remoteActive(remote) && edges.find(edge => edge.dst === id && edge.active && !edge.reason
-      && edge.transition.action === remote.enter_action)?.transition : node?.control.transition;
-    if (!transition) return;
+    const transition = remote ? !remoteActive(remote) && node?.control.transition?.action === remote.enter_action
+      && node.control.transition : node?.control.transition;
+    // Selecting the preparation pose leaves movement; the user need not
+    // operate a separate control-mode toggle before choosing a body state.
+    if (activeRemote && node?.value === node.region.prepare_action?.via) {
+      if (nodeCommandPending.current || busy || offline || stale) return;
+      nodeCommandPending.current = true;
+      try { await onTransition?.({action:activeRemote.exit_action,params:{},label:'停止移动',safety:true}); }
+      catch (error) { report?.({result:'error',error:apiErrorText(error)}); }
+      finally { nodeCommandPending.current = false; }
+      return;
+    }
+    if (!transition) {
+      if (!node?.current && !node?.control.reachable) {
+        report?.({result:'blocked',error:node?.control.reason || '当前状态不可执行'});
+      }
+      return;
+    }
+    if (nodeCommandPending.current || busy || offline || stale) return;
     nodeCommandPending.current = true;
     try { await onTransition?.(transition); }
     catch (error) { report?.({result:'error',error:apiErrorText(error)}); }
@@ -179,6 +182,15 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     onSelectState?.(null);
   };
   useEffect(() => { clearSelection(); }, [unitId,liveState.epoch,clearSelection]);
+  useEffect(() => {
+    if (!locateTransition || !canvasRef.current) return;
+    const edge = edges.find(item => item.transition.id === locateTransition.id);
+    const link = edge && links.find(item => item.directions.some(direction => direction.edges.includes(edge)));
+    const direction = link?.directions.find(item => item.edges.includes(edge));
+    const element = link && [...canvasRef.current.querySelectorAll('.fsm-whiteboard__edge')].find(item => item.dataset.link === link.id);
+    const path = element?.querySelector('.fsm-whiteboard__line');
+    if (path && direction) { setSelectedLinkId(link.id); setSelectedDirectionId(direction.id); setSelectedId(null); setAnchor({element,point:path.getPointAtLength(path.getTotalLength()/2),keyboard:true}); }
+  }, [locateTransition, training?.catalog]);
   const ordered = widgets.map((widget,index) => ({...widget,_index:index}))
     .sort((a,b) => (a.order ?? a._index)-(b.order ?? b._index));
   const active = ordered.filter(widget => !widget.states?.length
@@ -195,7 +207,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const renderWidget = widget => window.fsmWidget?.(unitId,
     liveState[widget.state_field || primary?.state_field] || current,
     [{...widget,states:widget.type === 'joystick' && widget.node_state ? [] : widget.states,
-      _disabled:offline || stale || (widget.type === 'joystick' && (busy || joystickExiting
+      _disabled:offline || stale || (widget.type === 'joystick' && (busy
         || sm?.freshness_field && liveState[sm.freshness_field] === false))}],report,actor,liveState,
     widget.state_field || primary?.state_field,sm?.connection_field || '',connected);
   const phase = ({sending:'正在发送',dispatched:'已发送',sent:'等待设备确认',accepted:'已接收，完成待确认',executing:'正在执行',
@@ -203,8 +215,9 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     recovered:'姿态已恢复',completed:'已完成',ok:'已完成',rejected:'设备拒绝请求',failed:'执行失败',error:'执行失败',cancelled:'已取消'})[execution?.phase || execution?.result] || '等待设备反馈';
   const executionLabel = execution?.label || topology.edges.find(edge => [edge.transition.trigger,edge.transition.action]
     .includes(execution?.command))?.transition.label || '设备动作';
+  const graphSize = stateGraphDimensions(nodes.length, sm?.diagram);
   return <div className="device-state-board device-whiteboard"
-    style={{'--board-accent':color}} aria-busy={busy}
+    style={{'--board-accent':color, '--board-graph-ratio':graphSize.height / graphSize.width}} aria-busy={busy}
     onKeyDown={event => { if (event.key === 'Escape' && anchor) { event.stopPropagation(); closePopover(); } }}>
     {media.length > 0 && <div className="device-whiteboard__media" aria-label="实时画面与地图">
       {media.map(widget => <div key={`${widget.type}:${widget._index}`} className="device-whiteboard__media-slot"><div
@@ -216,7 +229,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
         selectedLink={selectedLinkId} selectedDirection={selectedDirection?.id} onSelectState={select} onInspectTransition={inspectEdge}
         onDismiss={clearSelection}
-        color={color} pendingCommand={pendingExecution?.command}/>
+        color={color} pendingCommand={pendingExecution?.command} trainingEdges={training?.edges || []}/>
         : <p className="device-state-note">等待设备状态机</p>}
       {selected && (selectedActions.length > 1 || selected.region.until_field && liveState[selected.region.until_field])
         && !remoteControls.some(widget => selected.value === widget.node_state) && <StateBoardPopover
@@ -238,20 +251,13 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
           </button>)}
         </div>
         <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
-          {selectedDirection.edges.map(edge => <article key={edge.id} className="device-whiteboard__system-rule">
-            {edge.transition.action ? <div className="device-whiteboard__actions"><button type="button" className="btn"
-              disabled={!!edge.reason} onClick={() => onTransition?.(edge.transition)}>{stateTransitionLabel(edge.transition)}</button></div>
-              : <p>{stateTransitionLabel(edge.transition)}</p>}
-            {stateTransitionDescription(edge.transition) && <small>{stateTransitionDescription(edge.transition)}</small>}
-          </article>)}
-          <StateTransitionRules edges={selectedDirection.edges} records={rules} card={card}
-            error={canReadRules && ruleSnapshot?.unitId === unitId && ruleSnapshot.error} onRetry={loadRules}
-            onEdit={id => { clearSelection(); setEditingRule(id); }}/>
+          {selectedDirection.edges.map(edge => <TransitionInspector key={edge.id}
+            selection={{label:stateTransitionLabel(edge.transition)}}
+            projection={records.filter(record => record.transition_ids?.includes(edge.transition.id))}
+            onTeach={actor === 'admin' && training?.catalog?.transitions?.some(t => t.id === edge.transition.id && t.trainable) ? record => { onTeach?.(edge.transition.id,record); closePopover(); } : null}/>) }
         </div>
       </StateBoardPopover>}
     </div>
-    {editingRule && ReactDOM.createPortal(<RulesDrawer open={true} initialTeachingId={editingRule}
-      onClose={() => { setEditingRule(null); loadRules(); }}/>,document.body)}
     {(feedback || offline || stale || execution || awaitingFeedback) && <div className="device-whiteboard__feedback" role="status" aria-live="polite">
       {feedback && <div>{feedback}</div>}
       {offline ? <div>设备未连接，暂不能执行动作</div>
@@ -269,14 +275,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         const entry = edges.find(edge => edge.active && edge.transition.action === widget.enter_action);
         const reason = entry?.reason || (!entry ? '当前状态不可进入遥控' : '');
         return <section key={widget._index} className="device-remote-controls" aria-label="移动控制">
-          <header><strong>移动</strong><span>{engaged ? '松手停止' : busy ? '正在进入遥控…' : reason ? '' : '等待遥控就绪'}</span>
-            {engaged && <button type="button" disabled={offline || !connected || joystickExiting}
-              onClick={async () => {
-                setJoystickExiting(true);
-                try { await onTransition({action:widget.exit_action,params:{},label:'退出遥控',safety:true}); }
-                finally { setJoystickExiting(false); }
-              }}>退出遥控</button>}
-          </header>
+          <header><strong>移动</strong><span>{engaged ? '推杆移动，松手停止' : busy ? '正在准备移动…' : reason ? '' : '等待移动就绪'}</span></header>
           {renderWidget(widget)}
           {!engaged && reason && <small role="status">{reason}</small>}
         </section>;

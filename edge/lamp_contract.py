@@ -1,12 +1,12 @@
 # Pure MicroPython-compatible lamp wire contract. No hardware or cloud imports.
-# Version 2 is the current firmware contract; historical cloud tables stay frozen.
+# Version 3 adds continuous blinking; historical cloud contracts stay frozen.
 
-FSM_VERSION = 2
+FSM_VERSION = 3
 BYTE_MIN = 0
 BYTE_MAX = 255
-BLINK_MIN = 1
+BLINK_MIN = 0
 BLINK_MAX = 20
-BLINK_DEFAULT = 3
+BLINK_DEFAULT = 0  # Continuous until another lighting command; positive = cycles.
 
 ACTION_SCHEMAS = {
     "SET_STATE": {
@@ -21,7 +21,8 @@ ACTION_SCHEMAS = {
     "BLINK": {
         "type": "object", "required": ["count"],
         "properties": {"count": {"type": "integer", "minimum": BLINK_MIN,
-                                  "maximum": BLINK_MAX}},
+                                  "maximum": BLINK_MAX,
+                                  "description": "0 表示持续闪烁，直到切换灯光；正整数表示闪烁次数"}},
         "additionalProperties": False,
     },
 }

@@ -2,7 +2,7 @@
  * 标题显示连接状态，白板统一展示状态与转移，富控件和对话按需呈现。
  * 核心控制由 Agent Card 的 transport / state_machine 驱动。
  */
-function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuestion }) {
+function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuestion, trainingLocation }) {
   const { useState, useEffect, useRef } = React;
 
   /* Card from /api/devices and SSE is authoritative. Fetch only fills a missing snapshot. */
@@ -30,6 +30,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       apiClient.removeEventListener('devices-synced', synced);
     };
   }, []);
+  const training = useTraining(unitId);
+  const [trainingOpen, setTrainingOpen] = useState(false);
+  const [trainingSelection, setTrainingSelection] = useState(null);
+  const [locateTransition, setLocateTransition] = useState(null);
+  useEffect(() => { if (trainingLocation?.transition_id) setLocateTransition({id:trainingLocation.transition_id,nonce:trainingLocation.nonce}); }, [trainingLocation]);
+  const locate = id => setLocateTransition({id,nonce:Date.now()});
   const [controlBusy, setControlBusy] = useState(false);
   const controlPending = useRef(false);
   const snapshotCursor = useRef({ unitId, state: null, retired: new Set() });
@@ -168,6 +174,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
   const [go2AssetsOpen, setGo2AssetsOpen] = useState(false);
   const [lampAssetsOpen, setLampAssetsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const reportExecution = result => setExecution(commandBus.describe(result));
 
   // 命令反馈是短暂提示；设备的当前状态由下方实时状态图呈现。
@@ -273,9 +280,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       return;
     }
     if (!t.safety) { controlPending.current = true; setControlBusy(true); }
-    setExecution(t.dispatch_only ? '正在发送指令…' : '正在等待设备执行反馈…');
+    setExecution(t.prepare_action ? '正在先起身，确认站稳后执行目标动作…'
+      : t.dispatch_only ? '正在发送指令…' : '正在等待设备执行反馈…');
     try {
-      const result = await commandBus.command(unitId, t.action, t.params || {});
+      const params = t.id ? Object.fromEntries((t.training_fixed_params || []).filter(key => Object.hasOwn(t.params || {}, key)).map(key => [key, t.params[key]])) : (t.params || {});
+      const result = await commandBus.command(unitId, t.prepare_action || t.action,
+        t.prepare_action ? {cmd:t.action,prepare_standing:true} : params);
       reportExecution(result);
     } catch (error) {
       reportExecution({ result: 'error', error: apiErrorText(error, '这次请求没有完成，请检查设备状态') });
@@ -300,11 +310,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     const answerText = activityQuestion && unitId === 'go2'
       ? `回答你刚才的问题「${activityQuestion.text}」（${activityQuestion.question_id || activityQuestion.event_id}）：${text}`
       : text;
-    const params = { message: answerText, ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
+    const params = { message: answerText, ...(trainingSelection ? {selection:trainingSelection} : {}), ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
     if (pendingRunId) {
       if (unitId === 'go2') params.resume_run_id = pendingRunId;
       else { params.run_id = pendingRunId; params.resume = true; }
     }
+    setTrainingSelection(null);
     commandBus.command(unitId, 'chat', params)
       .then(result => {
         setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
@@ -385,8 +396,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         </div>
         {!isGo2 && safetyAction && <button type="button" className="device-header__stop btn btn--danger"
           disabled={offline || !connected} onClick={() => dispatchTransition(safetyAction)}>{safetyAction.label}</button>}
-        <button type="button" className="device-header__settings"
-          onClick={() => setSettingsOpen(true)} aria-label="设备设置">⋯</button>
+        <button type="button" className="icon-button device-header__settings"
+          onClick={() => setSettingsOpen(true)} aria-label="管理" title="管理"><Icon name="settings" size={16}/></button>
       </div>
 
       {!cardLoaded && execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
@@ -396,7 +407,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
             actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth} feedback={execution}
-            onTransition={dispatchTransition} report={reportExecution}/>
+            onTransition={dispatchTransition} report={reportExecution} training={training} locateTransition={locateTransition}
+            onTeach={(transitionId,record) => { setTrainingSelection({unit_id:unitId,transition_id:transitionId,...(record ? {teaching_id:record.teaching_id} : {})}); setTrainingOpen(false); }} />
         </div>
       )}
 
@@ -407,7 +419,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
-      <div className="device-chat-heading">与{getAgentDisplayName(card || unitId)}对话</div>
+      {trainingSelection && <div className="training-selection" role="status">正在教导所选转换，请在下方输入你的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
+      <TrainingPreview proposal={training.proposal?.unit_id === unitId ? training.proposal : null} error={training.error} onConfirm={async () => { const id = training.proposal?.transition_ids?.[0]; if (await training.confirm()) locate(id); }} onCancel={training.cancel} onLocate={(_,id) => locate(id)}/>
       {activityQuestion && <div className="device-activity-question">
         <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
         <span>{activityQuestion.text}</span>
@@ -446,6 +459,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         )}
       </ChatPanel>
       </div>
+      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onLocate={(_,id) => {locate(id); setTrainingOpen(false);}} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:record.transition_ids[0],teaching_id:record.teaching_id}); setTrainingOpen(false);}}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         card={card}
         modes={modes} modeVals={effectiveModeVals} onSwitchMode={switchMode}
@@ -453,7 +467,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         onSafety={() => { setSettingsOpen(false); dispatchTransition(safetyAction); }}
         isGo2={isGo2} isLamp={isLamp} actor={actor} unitId={unitId}
         onGo2Settings={() => setGo2AssetsOpen(true)}
+        onTraining={() => setTrainingOpen(true)}
+        onCapabilities={() => setCapabilitiesOpen(true)}
         onLampSettings={() => setLampAssetsOpen(true)}/>
+      <DeviceCapabilitiesDrawer open={capabilitiesOpen} onClose={() => setCapabilitiesOpen(false)} card={card}/>
       {actor === 'admin' && isGo2 && <Go2AssetsDrawer open={go2AssetsOpen} onClose={() => setGo2AssetsOpen(false)}/>}
       {actor === 'admin' && isLamp && <LampAssetsDrawer unitId={unitId} open={lampAssetsOpen}
         onClose={() => setLampAssetsOpen(false)}/>}
@@ -464,7 +481,7 @@ window.FsmDevicePage = FsmDevicePage;
 
 function LampAssetsDrawer({ unitId, open, onClose }) {
   const { useEffect, useState } = React;
-  const [memory, setMemory] = useState({ taught: [], episodes: [], daily_summary: '' });
+  const [memory, setMemory] = useState({ episodes: [], daily_summary: '' });
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
   const base = '/api/esp32/' + encodeURIComponent(unitId);
@@ -472,7 +489,7 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
     setBusy(true);
     try {
       const records = await apiClient.request(base + '/memory');
-      setMemory(records || { taught: [], episodes: [], daily_summary: '' });
+      setMemory(records || { episodes: [], daily_summary: '' });
       setFeedback('');
     } catch (error) { setFeedback(apiErrorText(error, '灯的记忆暂时无法读取')); }
     finally { setBusy(false); }
@@ -486,15 +503,14 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
   }, [open, onClose]);
   return <>
     <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-    <aside className={`space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`}
+    <aside className={`management-dialog space-drawer go2-assets-drawer ${open ? 'is-open' : ''}`}
       role="dialog" aria-modal="true" aria-hidden={!open} inert={open ? undefined : ''}
       style={{ visibility: open ? 'visible' : 'hidden' }} aria-labelledby="lamp-assets-title">
-      <div className="space-drawer__handle"/>
       <header className="space-drawer__header">
-        <div><h2 id="lamp-assets-title">{getAgentDisplayName(unitId)}设置</h2></div>
+        <div><h2 id="lamp-assets-title">{getAgentDisplayName(unitId)}管理</h2></div>
         <div className="space-drawer__header-actions">
           <button className="btn" onClick={load} disabled={busy}>刷新</button>
-          <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭灯设置"><Icon name="x" size={14}/></button>
+          <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭灯管理"><Icon name="x" size={16}/></button>
         </div>
       </header>
       <div className="space-drawer__body" aria-busy={busy}>
@@ -504,17 +520,12 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
           <AgentPersonalitySettings agentId={unitId} active={open}/>
         </section>
         <section className="asset-section asset-section--memory">
-          <div className="asset-section__heading"><div><h3>灯的记忆</h3></div><span>{memory.taught?.length || 0} 条调教</span></div>
+          <div className="asset-section__heading"><div><h3>灯的记忆</h3></div><span>经历与摘要</span></div>
           <div className="memory-block"><h4>今日记录</h4><pre>{memory.daily_summary || '（今天暂无记录）'}</pre></div>
           <div className="memory-block"><h4>近期经历</h4>
             {memory.episodes?.length ? <ul>{memory.episodes.map((entry, index) =>
               <li key={entry.ts || index}><span>{entry.detail}</span><code>{entry.result}</code></li>)}</ul>
               : <p className="asset-empty">还没有保存的经历。</p>}
-          </div>
-          <div className="memory-block"><h4>已教习惯</h4>
-            {memory.taught?.length ? <ul>{memory.taught.map((rule, index) =>
-              <li key={rule.teaching_id || index}><span>{rule.trigger} → {rule.behavior}</span><code>{({unbound:'尚未绑定',ready:'已绑定，未启用',enabled:'已启用',capability_unavailable:'能力不足，已暂停'})[rule.execution_status || 'unbound']}</code></li>)}</ul>
-              : <p className="asset-empty">还没有保存的调教习惯。</p>}
           </div>
         </section>
       </div>
@@ -527,7 +538,7 @@ function FsmBoard(props) {
     onTransition={transition => props.onFire?.(transition.trigger)}/>;
 }
 
-function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, isLamp, actor, unitId, onGo2Settings, onLampSettings }) {
+function DeviceManagementPanel({ open, onClose, title, children }) {
   const panelRef = React.useRef(null);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
@@ -537,7 +548,7 @@ function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode
     const onKey = event => {
       if (event.key === 'Escape') closeRef.current();
       if (event.key !== 'Tab') return;
-      const focusables = panelRef.current?.querySelectorAll('button:not([disabled]), a[href], summary');
+      const focusables = panelRef.current?.querySelectorAll('button:not([disabled]), a[href]');
       if (!focusables?.length) return;
       if (event.shiftKey && document.activeElement === focusables[0]) {
         event.preventDefault();
@@ -554,8 +565,15 @@ function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode
 
   return <div className="device-settings-layer">
     <div className="device-settings-scrim" onClick={onClose}/>
-    <section ref={panelRef} className="device-settings-panel" role="dialog" aria-modal="true" aria-label="设备设置">
-      <header><h2>设备设置</h2><button type="button" className="btn" onClick={onClose} aria-label="关闭设备设置"><Icon name="x" size={15}/></button></header>
+    <section ref={panelRef} className="management-dialog device-settings-panel" role="dialog" aria-modal="true" aria-label={title}>
+      <header><h2>{title}</h2><button type="button" className="icon-button" onClick={onClose} aria-label={`关闭${title}`}><Icon name="x" size={16}/></button></header>
+      <div className="device-settings-body">{children}</div>
+    </section>
+  </div>;
+}
+
+function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offline, connected, safetyAction, onSafety, isGo2, isLamp, actor, unitId, onGo2Settings, onLampSettings, onTraining, onCapabilities }) {
+  return <DeviceManagementPanel open={open} onClose={onClose} title="管理">
       {safetyAction && <button type="button" className="btn btn--danger device-settings-safety"
         onClick={onSafety} disabled={offline || !connected}>{safetyAction.label}</button>}
       {actor === 'admin' && modes.map(axis => <section key={axis.id} className="device-settings-axis">
@@ -568,13 +586,27 @@ function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode
         </button>)}</div>
       </section>)}
       {actor === 'admin' && isGo2 && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onGo2Settings(); }}>
-        <span><strong>Go2 设置</strong><small>地点、人设与记忆</small></span><Icon name="arrow" size={15}/>
+        <span><strong>Go2 管理</strong><small>地点、人设与记忆</small></span><Icon name="arrow" size={15}/>
       </button>}
       {actor === 'admin' && isLamp && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onLampSettings(); }}>
-        <span><strong>灯智能体设置</strong><small>人设与记忆</small></span><Icon name="arrow" size={15}/>
+        <span><strong>灯智能体管理</strong><small>人设与记忆</small></span><Icon name="arrow" size={15}/>
       </button>}
-      <details className="device-settings-capabilities">
-        <summary>设备能力与技能</summary>
+      {actor === 'admin' && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onTraining(); }}>
+        <span><strong>伙伴训练</strong><small>查看、调整或暂停已保存的训练</small></span><Icon name="arrow" size={15}/>
+      </button>}
+      <button type="button" className="device-settings-go2" onClick={() => { onClose(); onCapabilities(); }}>
+        <span><strong>设备能力与技能</strong><small>查看观察条件与公开技能</small></span><Icon name="arrow" size={15}/>
+      </button>
+      <a className="device-settings-card" href={'/api/devices/' + encodeURIComponent(unitId) + '/agent'}
+        target="_blank" rel="noopener noreferrer">
+        <span><strong>Agent Card</strong><small>查看设备能力、状态机和控件声明</small></span><Icon name="arrow" size={15}/>
+      </a>
+  </DeviceManagementPanel>;
+}
+
+function DeviceCapabilitiesDrawer({ open, onClose, card }) {
+  return <DeviceManagementPanel open={open} onClose={onClose} title="设备能力与技能">
+      <div className="device-settings-capabilities">
         <section><h3>可用于自动触发的观察</h3>
           {card?.observations?.length ? card.observations.map(obs =>
             <p key={obs.id}><strong>{obs.name || obs.id}</strong><small>{obs.available === false ? '当前不可用 · ' : ''}{obs.description || '设备声明的观察条件'}</small></p>)
@@ -583,15 +615,9 @@ function DeviceSettingsMenu({ open, onClose, card, modes, modeVals, onSwitchMode
         <section><h3>公开技能</h3>
           {card?.skills?.length ? card.skills.map(skill =>
             <p key={skill.id}><strong>{skill.name}</strong>
-              <small>{(card.autonomous_skills || []).includes(skill.id) ? '可用于自主规则' :
-                skill.tags?.includes('persistent') ? '需管理员操作' : '可手动或通过对话调用'} · {skill.description}</small></p>)
+              <small>{skill.tags?.includes('persistent') ? '需管理员操作' : '可手动或通过对话调用'} · {skill.description}</small></p>)
             : <p><small>该设备暂未声明公开技能。</small></p>}
         </section>
-      </details>
-      <a className="device-settings-card" href={'/api/devices/' + encodeURIComponent(unitId) + '/agent'}
-        target="_blank" rel="noopener noreferrer">
-        <span><strong>Agent Card</strong><small>查看设备能力、状态机和控件声明</small></span><Icon name="arrow" size={15}/>
-      </a>
-    </section>
-  </div>;
+      </div>
+  </DeviceManagementPanel>;
 }

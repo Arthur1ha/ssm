@@ -28,8 +28,8 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
         key: 'refresh',
         tone: 'error',
         text: failures.length === 2
-          ? apiErrorText(failures[0].reason, '空间设置加载失败')
-          : '部分空间设置暂时无法读取，可稍后刷新',
+          ? apiErrorText(failures[0].reason, '空间信息加载失败')
+          : '部分空间信息暂时无法读取，可稍后刷新',
       });
     }
     setLoading(false);
@@ -85,19 +85,18 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
   return (
     <>
       <div className={`drawer-mask ${open ? 'is-open' : ''}`} onClick={onClose}/>
-      <aside className={`space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
+      <aside className={`management-dialog space-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={open ? undefined : ''} style={{ visibility: open ? 'visible' : 'hidden' }}
         role="dialog" aria-modal="true" aria-labelledby="space-drawer-title">
-        <div className="space-drawer__handle" aria-hidden="true"/>
         <header className="space-drawer__header">
           <div>
-            <h2 id="space-drawer-title">空间设置</h2>
+            <h2 id="space-drawer-title">空间管理</h2>
           </div>
           <div className="space-drawer__header-actions">
             <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
               {loading ? '同步中…' : '刷新空间'}
             </button>{feedback('refresh')}</div>
-            <button className="btn space-drawer__close" onClick={onClose} aria-label="关闭空间设置">
-              <Icon name="x" size={14}/>
+            <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭空间管理">
+              <Icon name="x" size={16}/>
             </button>
           </div>
         </header>
@@ -105,7 +104,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section asset-section--space">
             <div className="asset-section__heading">
-              <div><small>空间设置</small><h3>{space?.name || '当前空间'}</h3></div>
+              <div><small>空间管理</small><h3>{space?.name || '当前空间'}</h3></div>
               <span>{space?.device_ids?.length || 0} 台设备</span>
             </div>
             <form className="asset-inline-form" onSubmit={saveSpaceName}>
@@ -210,8 +209,8 @@ function DeviceLabelButton({ device }) {
   return <>
     <button type="button" className="btn" onClick={load}>设备标签</button>
     {open && ReactDOM.createPortal(<div className="device-label-backdrop" onClick={() => setOpen(false)}>
-      <section className="device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
-        <header><div><small>设备标签</small><h3>{device.name}设备标签</h3></div><button className="btn" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={14}/></button></header>
+      <section className="management-dialog device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
+        <header><div><small>设备标签</small><h3>{device.name}设备标签</h3></div><button className="icon-button" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={16}/></button></header>
         <p>保存或打印后贴在设备上。扫码前请先启动设备。</p>
         {busy && !label && <small className="action-feedback" role="status">正在读取设备标签…</small>}
         {label && <div className="device-label-qr" ref={qrRef}/>}

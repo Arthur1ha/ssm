@@ -142,6 +142,37 @@ def test_omitted_brightness_is_stable_across_retry(boundary):
     assert len(boundary.calls) == 1
 
 
+def test_blink_defaults_to_continuous_and_keeps_explicit_cycles(boundary):
+    assert boundary.run("BLINK", {}, task_id="continuous")["result"] == "accepted"
+    assert boundary.calls[-1]["params"] == {"count": 0}
+    assert boundary.run("BLINK", {"count": 3}, task_id="finite")["result"] == "accepted"
+    assert boundary.calls[-1]["params"] == {"count": 3}
+    transitions = card()["state_machine"]["transitions"]
+    assert all(edge["params"] == {"count": 0} for edge in transitions if edge.get("action") == "BLINK")
+
+
+def test_v2_firmware_keeps_finite_contract_and_rejects_continuous_before_publish(boundary):
+    from cloud.esp32.tool_registry import V2_ACTION_SCHEMAS, blink_default
+    old = build_card_from_manifest({
+        "unit_id": UNIT, "agent_type": "actuator", "fsm": "led", "fsm_version": 2,
+        "capabilities": [{"action": action, "params_schema": schema}
+                         for action, schema in V2_ACTION_SCHEMAS.items()],
+    })
+    assert old["state_machine"]["states"] == ["OFF", "ON", "BLINKING"]
+    assert blink_default(old) == 3
+    assert not valid_lamp_params("BLINK", {"count": 0}, card=old)
+    model = visible_schemas(lighting_only=True, card=old)["blink_led"]
+    with pytest.raises(ValidationError):
+        model(count=0)
+    assert all(edge["params"]["count"] == 3 for edge in old["state_machine"]["transitions"]
+               if edge.get("action") == "BLINK")
+    result = execute_physical(state=boundary.state, unit_id=UNIT, action="BLINK",
+                              params={"count": 0}, context=boundary.context,
+                              dispatch=boundary.dispatch, card=old, wait=False)
+    assert result["result"] == "rejected"
+    assert boundary.calls == []
+
+
 def test_rejection_happens_before_reservation_or_publish(boundary):
     assert boundary.run("BLINK", {"count": 21})["result"] == "rejected"
     assert boundary.calls == []
@@ -290,7 +321,8 @@ def test_waiting_blink_does_not_block_a_user_stop(boundary, monkeypatch):
     assert outcome[0]["result"] == "cancelled"
 
 
-@pytest.mark.parametrize("restore_fails,initial", [(False, "OFF"), (True, "OFF"), (False, "ERROR")])
+@pytest.mark.parametrize("restore_fails", [False, True])
+@pytest.mark.parametrize("initial", ["OFF", "ON"])
 def test_edge_blink_success_requires_restore_and_matching_feedback(monkeypatch, restore_fails, initial):
     monkeypatch.setitem(sys.modules, "clock", SimpleNamespace(unix_time=time.time))
     monkeypatch.setitem(sys.modules, "ism", ism)
@@ -307,7 +339,8 @@ def test_edge_blink_success_requires_restore_and_matching_feedback(monkeypatch, 
         if restore_fails:
             raise OSError("pixels unavailable")
 
-    bsm = SimpleNamespace(led_blink=lambda *_args: "blink_1", led_set_state=restore)
+    bsm = SimpleNamespace(led_blink=lambda *_args: "blink_1", led_set_state=restore,
+                          led_set_color=lambda *_args: restore("ON"))
     mqtt = SimpleNamespace(publish=lambda topic, payload, **_kwargs: events.append((topic, deepcopy(payload))))
     machine = ism.ISM(initial, UNIT, ism.LED_TABLE)
     bridge = bridge_module.TriggerMap(bsm, machine, None, None, mqtt)
@@ -316,6 +349,110 @@ def test_edge_blink_success_requires_restore_and_matching_feedback(monkeypatch, 
     bridge.on_bsm_event("BLINK_DONE", {"blink_id": "old"})
     assert machine.state == "BLINKING"
     bridge.on_bsm_event("BLINK_DONE", {"blink_id": "blink_1"})
-    assert events[-3] == ("restore", "OFF")
-    assert events[-2][1]["ism"] == ("ERROR" if restore_fails else "OFF")
+    assert events[-3] == ("restore", initial)
+    assert events[-2][1]["ism"] == ("BLINKING" if restore_fails else initial)
     assert events[-1][1]["result"] == ("error" if restore_fails else "ok")
+    if restore_fails:
+        assert events[-1][1]["error"] == "pixels unavailable"
+        # A duplicate completion cannot turn a failed task into success.
+        count = len(events)
+        bridge.on_bsm_event("BLINK_DONE", {"blink_id": "blink_1"})
+        assert len(events) == count
+        # A fresh retry still restores the original OFF/ON state.
+        restore_fails = False
+        bsm.led_blink = lambda *_args: "blink_2"
+        bridge.on_mqtt(f"ssm/task/{UNIT}/retry", {
+            "session_id": "s", "action": "BLINK", "params": {"count": 2}})
+        assert events[-1][1]["result"] == "executing"
+        bridge.on_bsm_event("BLINK_DONE", {"blink_id": "blink_2"})
+        assert machine.state == initial
+        assert events[-1][1]["task_id"] == "retry"
+        assert events[-1][1]["result"] == "ok"
+
+
+@pytest.fixture
+def edge_lamp(monkeypatch):
+    """Real BSM/ISM/TriggerMap with simulated pixels and wrapping device clock."""
+    monkeypatch.setitem(sys.modules, "ism", ism)
+    monkeypatch.setitem(sys.modules, "lamp_contract", lamp_contract)
+    from edge import config
+    monkeypatch.setitem(sys.modules, "config", config)
+    monkeypatch.setitem(sys.modules, "clock", SimpleNamespace(unix_time=time.time))
+    monkeypatch.setitem(sys.modules, "neopixel", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "machine", SimpleNamespace(ADC=object, Pin=object))
+    monkeypatch.setitem(sys.modules, "probe", SimpleNamespace(PRESENCE={}))
+
+    def load(name):
+        spec = importlib.util.spec_from_file_location("check_" + name, Path(__file__).parents[2] / "edge" / (name + ".py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    bsm_module, bridge_module = load("bsm"), load("trigger_map")
+    period = 1 << 30
+    clock = [period - 150]
+    bsm_module.time = SimpleNamespace(
+        ticks_ms=lambda: clock[0],
+        ticks_diff=lambda new, old: (new - old + period // 2) % period - period // 2)
+    pixels, events = [], []
+    driver = bsm_module.BSM.__new__(bsm_module.BSM)
+    driver._blink_id = 0
+    driver._set_raw = lambda *rgb: pixels.append(rgb)
+    machine = ism.ISM("OFF", UNIT, ism.LED_TABLE)
+    mqtt = SimpleNamespace(publish=lambda topic, payload, **_kw: events.append((topic, deepcopy(payload))))
+    bridge = bridge_module.TriggerMap(driver, machine, None, None, mqtt)
+    driver._event_cb = bridge.on_bsm_event
+
+    def tick():
+        clock[0] = (clock[0] + 300) % period
+        driver._tick_blink(clock[0])
+
+    def command(task_id, action="BLINK", params=None):
+        bridge.on_mqtt(f"ssm/task/{UNIT}/{task_id}", {
+            "session_id": "s", "action": action, "params": {} if params is None else params})
+
+    return SimpleNamespace(driver=driver, bridge=bridge, machine=machine, pixels=pixels,
+                           events=events, tick=tick, command=command)
+
+
+@pytest.mark.parametrize("action,params,target", [
+    ("SET_STATE", {"state": "OFF"}, "OFF"),
+    ("SET_STATE", {"state": "ON"}, "ON"),
+    ("SET_COLOR", {"r": 20, "g": 30, "b": 40}, "ON"),
+])
+def test_continuous_blink_survives_ticks_and_stops_only_on_new_command(edge_lamp, action, params, target):
+    lamp = edge_lamp
+    lamp.command("start")
+    assert lamp.events[-1][1]["result"] == "ok"
+    assert lamp.events[-1][1]["ism_state"] == "BLINKING"
+    assert lamp.bridge._pending_blink is None
+    blink_id = lamp.driver._blink_id
+    # Sixty seconds, crossing ticks_ms wrap, must not end a persistent state.
+    for _ in range(200):
+        lamp.tick()
+    assert lamp.driver._blinking and lamp.machine.state == "BLINKING"
+    assert (255, 255, 255) in lamp.pixels and (0, 0, 0) in lamp.pixels
+    assert len(lamp.pixels) == 201
+    lamp.command("start")  # Duplicate delivery replays success, never restarts.
+    assert lamp.driver._blink_id == blink_id
+    lamp.bridge.on_bsm_event("BLINK_DONE", {"blink_id": blink_id})
+    assert lamp.machine.state == "BLINKING"
+    lamp.command("switch", action, params)
+    assert lamp.events[-1][1]["result"] == "ok"
+    assert lamp.machine.state == target and not lamp.driver._blinking
+    count = len(lamp.pixels)
+    lamp.tick()
+    assert len(lamp.pixels) == count
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_explicit_blink_cycles_still_wait_for_real_completion(edge_lamp, count):
+    lamp = edge_lamp
+    lamp.command("finite", params={"count": count})
+    assert lamp.events[-1][1]["result"] == "executing"
+    for _ in range(2 * count - 2):
+        lamp.tick()
+    assert lamp.machine.state == "BLINKING"
+    lamp.tick()
+    assert lamp.machine.state == "OFF" and not lamp.driver._blinking
+    assert lamp.events[-1][1]["result"] == "ok"
