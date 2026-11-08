@@ -137,6 +137,9 @@ class Drive:
             from cloud.space.activity import get_activity_store
             if event_type == "observation":
                 facts.setdefault("source", "vision_description")
+            goal = self._active_goal or {}
+            if goal.get("kind") == "peer_message" and goal.get("event_id"):
+                facts.setdefault("trigger_message_id", goal["event_id"])
             return get_activity_store().record_event(activity_id, event_type, unit_id="go2",
                                                      text=str(text)[:500], **facts)
         return None

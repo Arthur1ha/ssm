@@ -1,11 +1,12 @@
 import asyncio
+import json
 import logging
 import math
 import time
 import uuid
 
 from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
-from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API, SPORT_CMD
+from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API, DATA_CHANNEL_TYPE
 
 from cloud.go2.connection.fsm import Go2FSM, CommandBlocked
 from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, SPORT_COMMANDS, LED_COLORS, LED_DEFAULT_COLOR,
@@ -31,6 +32,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._completion_samples = 0
         self._motion_epoch = 0
         self._last_zero_velocity_epoch = None
+        self._velocity_request_id = uuid.uuid4().int & 0x7fffffff
         self._action_deadline = None
         self._velocity_timer = None
         self._move_control_active = False
@@ -235,7 +237,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         code = status.get("code") if isinstance(status, dict) else None
         return {"result": "ok" if code == 0 and type(enabled) is bool else "unknown",
                 "request_status_code": code, "enabled": enabled if type(enabled) is bool else None,
-                "motion_channel": "WIRELESS_CONTROLLER", "connection_method": "Remote"}
+                "motion_channel": "SPORT_MOD/Move" if self._move_control_active else "WIRELESS_CONTROLLER",
+                "connection_method": "Remote"}
 
     def _finish_pending(self, result: str, error: str) -> None:
         pending = self.pending_action
@@ -359,45 +362,25 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         next_state = self._validate_motion(cmd, params, dispatch_only=dispatch_only)
         spec = ACTIONS[cmd]
         if cmd == "EnterMoveControl":
-            # A UI flag cannot enable the firmware's joystick listener. Both
-            # setup requests are serialized with body commands, and neither
-            # sends velocity. Recheck posture and generation after each ACK.
-            self._move_control_active = False
-            self._motion_epoch += 1
-            epoch, connection = self._motion_epoch, self._conn
-            for options in ({"api_id": ACTIONS['BalanceStand'].api_id},
-                            {"api_id": SPORT_CMD['SwitchJoystick'], "parameter": {"data": True}}):
-                self._validate_motion(cmd)
-                try:
-                    response = await asyncio.wait_for(
-                        connection.datachannel.pub_sub.publish_request_new(RTC_TOPIC['SPORT_MOD'], options),
-                        timeout=5.0)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    if epoch == self._motion_epoch and connection is self._conn:
-                        self.is_connected = False
-                        self.body_confirmation = 'unknown'
-                    raise RuntimeError('遥控激活失败，连接状态需要重新确认') from exc
-                if epoch != self._motion_epoch or connection is not self._conn or not self.is_connected:
-                    cancelled = asyncio.get_running_loop().create_future()
-                    cancelled.set_result({'result':'cancelled','error':'遥控激活已被后续指令打断'})
-                    return cancelled, response
-                packet = response.get('data') if isinstance(response, dict) else None
-                header = packet.get('header') if isinstance(packet, dict) else None
-                status = header.get('status') if isinstance(header, dict) else None
-                code = status.get('code') if isinstance(status, dict) else None
-                if type(code) is not int:
-                    raise ValueError('机器狗尚未确认遥控激活')
-                if code != 0:
-                    return None, response
+            # Prepare the explicit Sport Move channel without entering
+            # BalanceStand, whose joystick input controls body attitude.
+            waiter, response = await self._send_command('StopMove', None)
+            if waiter is not None:
+                return waiter, response
+            packet = response.get('data') if isinstance(response, dict) else None
+            header = packet.get('header') if isinstance(packet, dict) else None
+            status = header.get('status') if isinstance(header, dict) else None
+            code = status.get('code') if isinstance(status, dict) else None
+            if type(code) is not int:
+                raise ValueError('机器狗尚未确认移动准备')
+            if code != 0:
+                return None, response
             self._validate_motion(cmd)
             self._move_control_active = True
-            logger.info('[Go2/Conn] 遥控激活已确认（BalanceStand + SwitchJoystick）')
+            logger.info('[Go2/Conn] 移动准备已确认（Sport Move/StopMove）')
             return None, response
         if (self._move_control_active or self._velocity_command_active) and cmd not in {'Move', 'BalanceStand'}:
-            # Stop the wireless stick before leaving control for another action.
-            # StopMove's RPC alone must not leave the last stick value latched.
+            # Stop continuous velocity before starting another body action.
             self.stop_velocity()
         source = self.fsm_state
         source_confirmation = self.body_confirmation
@@ -516,11 +499,11 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         )
 
     def move_velocity(self, vx: float, vy: float, vyaw: float, *, deadman_s: float | None = None) -> dict:
-        """发送速度指令，通过 WIRELESS_CONTROLLER 模拟摇杆输入。
+        """Manual control streams Sport Move; zero input sends StopMove.
 
-        fire-and-forget（不等 ACK），适合摇杆高频实时输入，不阻塞导航循环。
-        坑：连接后不要自动 switch_mode("normal")——实测会让机器狗进入忽略遥控
-        的模式，WIRELESS_CONTROLLER 与 SPORT_MOD Move 都会失效；默认模式即可遥控。
+        Requests do not wait for an ACK. Wireless sticks are mode-dependent:
+        after BalanceStand they can move the body without walking.
+        Autonomous navigation keeps its existing, calibrated wireless channel.
         """
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
@@ -532,10 +515,18 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         if self._command_lock.locked() and any((vx, vy, vyaw)):
             raise CommandBlocked("command_in_flight")
         try:
-            self._conn.datachannel.pub_sub.publish_without_callback(
-                RTC_TOPIC["WIRELESS_CONTROLLER"],
-                data={"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0},
-            )
+            if self._move_control_active:
+                self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
+                self._conn.datachannel.pub_sub.publish_without_callback(
+                    RTC_TOPIC['SPORT_MOD'],
+                    data={'header': {'identity': {'id': self._velocity_request_id,
+                                                 'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}},
+                          'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''},
+                    msg_type=DATA_CHANNEL_TYPE['REQUEST'])
+            else:
+                self._conn.datachannel.pub_sub.publish_without_callback(
+                    RTC_TOPIC['WIRELESS_CONTROLLER'],
+                    data={'lx': -vy, 'ly': vx, 'rx': -vyaw, 'ry': 0})
         except Exception as exc:
             self.is_connected = False
             self.fsm_state = "offline"

@@ -343,17 +343,23 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                                                       text=event["text"], status=status,
                                                       source_event_id=event["event_id"])
                 elif (event_type == "agent_progress" and agent_id == "esp32_desk_led"
-                      and facts.get("stage") in {"planned", "executing", "observed"}
+                      and facts.get("stage") in {"planned", "decision", "executing", "dispatching", "observed"}
                       and facts.get("tool") in {"set_led_state", "set_led_color", "blink_led"}):
                     stage = facts["stage"]
-                    kind = ("action" if stage == "planned" else
-                            "action_progress" if stage == "executing" else
+                    kind = ("action" if stage in {"planned", "decision"} else
+                            "action_progress" if stage in {"executing", "dispatching"} else
                             "action_result" if status in {"ok", "error", "blocked", "cancelled",
                                                            "timeout", "rejected", "unknown"}
                             else "action_progress")
+                    from cloud.esp32.physical_tasks import stable_task_id
+                    physical_task = (stable_task_id(agent_id, run_id, step_id)
+                                     if run_id and step_id else step_id or run_id)
                     get_activity_store().record_event(activity_id, kind, unit_id=agent_id,
                                                       text=event["text"], status=status,
-                                                      action=facts["tool"], task_id=step_id or run_id,
+                                                      action=facts["tool"], task_id=physical_task,
+                                                      trigger_message_id=facts.get("trigger_message_id"),
+                                                      decision_observation=facts.get("decision_observation"),
+                                                      reason=facts.get("reason"),
                                                       source_event_id=event["event_id"])
     if scope == "space":
         _events.emit_space(space_id, event)
@@ -734,6 +740,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             raise HTTPException(status_code=400, detail="set_mode requires axis=autonomy and value")
         return await _internal_request("/api/go2/autonomy", "PUT", session, {"mode": params["value"]})
     if normalized == "chat":
+        from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
         message = str(params.get("message") or "")
         if not message.strip():
             raise HTTPException(status_code=400, detail="chat requires message")
@@ -743,7 +750,8 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         return await _internal_request("/api/go2/chat", "POST", session, {
             "message": message, "task_id": task_id,
             "selection": validate_training_selection(params.get("selection"), session, unit_id="go2"),
-            "deadline": min(float(session["expires_at"]), time.time() + 180),
+            "deadline": min(float(session["expires_at"]), deadline or time.time() + SEARCH_SERVER_TIMEOUT_S,
+                            time.time() + SEARCH_SERVER_TIMEOUT_S),
         })
 
     canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "FIND_OBJECT", "RECOGNIZE_PERSON", "STOP"} else action

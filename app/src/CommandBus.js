@@ -48,7 +48,7 @@ const commandBus = {
   },
 
   async waitForGo2Task(taskId, timeoutMs = 90000) {
-    const deadline = Date.now() + timeoutMs;
+    let deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.min(10000, deadline - Date.now()));
@@ -57,6 +57,9 @@ const commandBus = {
           signal: controller.signal,
         });
         if (result?.result !== 'executing') return result;
+        // The same task can outlive the HTTP window, especially object search.
+        // Follow its absolute server deadline plus result/stop collection time.
+        if (Number.isFinite(result.deadline)) deadline = result.deadline * 1000 + 10000;
       } catch (error) {
         if (error.status === 403 || error.status === 401) {
           return { result: 'error', task_id: taskId, error: error.message };

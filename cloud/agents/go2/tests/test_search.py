@@ -59,6 +59,81 @@ async def run(adapter, **changes):
     return await build_search_graph(adapter).ainvoke(initial(**changes))
 
 
+@pytest.mark.parametrize('actor', ['admin', 'visitor'])
+def test_user_search_scope_is_task_local_and_does_not_enable_exploration(monkeypatch, actor):
+    from cloud.agents.go2.workflows import search
+    from cloud.go2.execution import ExecutionContext
+    monkeypatch.setattr(search, '_configured_scope', None)
+    monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
+    monkeypatch.delenv('GO2_SEARCH_SESSION_ID', raising=False)
+    context = ExecutionContext('user', actor, False)
+    scope = search.resolve_search_scope(context, 'find_object', 'map')
+    assert scope == {'bounds': None, 'mode': 'reachable', 'session_id': 'map', 'source': 'user_task'}
+    assert search.configured_search_scope() is None
+    with pytest.raises(ValueError, match='search_scope_required'):
+        search.resolve_search_scope(context, 'explore', 'map')
+    autonomous = ExecutionContext('agent', 'admin', False, origin_kind='agent_autonomous')
+    with pytest.raises(ValueError, match='search_scope_required'):
+        search.resolve_search_scope(autonomous, 'find_object', 'map')
+
+
+def test_new_search_keeps_rectangles_and_never_reuses_old_coordinates(monkeypatch):
+    from cloud.agents.go2.workflows import search
+    from cloud.go2.execution import ExecutionContext
+    context = ExecutionContext('user', 'admin', False)
+    monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
+    assert search.resolve_search_scope(context, 'find_object', 'map')['bounds'] == [-1., -1., 1., 1.]
+    with pytest.raises(ValueError, match='search_scope_session_mismatch'):
+        search.resolve_search_scope(context, 'find_object', 'new')
+    monkeypatch.setattr(search, '_configured_scope', (None, 'map'))
+    assert search.resolve_search_scope(context, 'find_object', 'new')['session_id'] == 'new'
+    assert search.configured_search_scope()['session_id'] == 'map'
+    monkeypatch.setattr(search, '_configured_scope', None)
+    monkeypatch.setenv('GO2_SEARCH_BOUNDS', 'invalid')
+    with pytest.raises(ValueError, match='search_scope_required'):
+        search.resolve_search_scope(context, 'find_object', 'new')
+
+
+@pytest.mark.asyncio
+async def test_lost_detection_survives_later_navigation_failure():
+    detection = {'found': True, 'frame_id': 1, 'media_ref': '/owl',
+                 'observation': {'proximity': 'far'}}
+    class BlockedAfterSight(Replay):
+        async def navigate(self, state):
+            return {'result': 'blocked', 'reason': 'motion_not_observed'}
+    adapter = BlockedAfterSight([detection, {'found': False, 'frame_id': 2}],
+        choices=[{'target': {'path_cost_m': .8}}, {'target': {'path_cost_m': .8}}])
+    # The first movement succeeds, then the target disappears and the next stalls.
+    original = adapter.navigate
+    async def navigate(state):
+        if not state.get('steps'):
+            return {'result': 'ok', 'distance_m': .8}
+        return await original(state)
+    adapter.navigate = navigate
+    state = await run(adapter)
+    from cloud.agents.go2.workflows.search import describe_search_result
+    result = describe_search_result(state['result'])
+    assert result['outcome'] == 'seen_not_reached'
+    assert result['evidence'] == detection
+    assert result['reason'] == 'motion_not_observed'
+    assert '实际位移' in result['message']
+    assert result['steps'] == 1
+
+
+def test_search_outcomes_never_turn_stop_or_partial_coverage_into_arrival():
+    from cloud.agents.go2.workflows.search import describe_search_result
+    not_started = describe_search_result({'result': 'blocked', 'reason': 'map_session_unavailable'})
+    assert not_started['outcome'] == 'not_started'
+    not_seen = describe_search_result({'result': 'blocked', 'reason': 'coverage_exhausted',
+                                      'coverage': {'observations': 3}})
+    assert not_seen['outcome'] == 'not_seen'
+    assert '不能据此判断室内没有' in not_seen['message']
+    unconfirmed = describe_search_result({'result': 'accepted', 'reason': 'stop_unconfirmed',
+                                         'found': True})
+    assert unconfirmed['outcome'] == 'stop_unconfirmed'
+    assert '还没有确认机身停稳' in unconfirmed['message']
+
+
 @pytest.mark.asyncio
 async def test_nearby_target_is_rechecked_only_before_reporting_completion():
     adapter = Replay([{"found": True, "frame_id": n, 'observation': {'proximity': 'nearby'}}
@@ -182,6 +257,9 @@ async def test_server_owned_search_deadline_and_retry_do_not_replay(monkeypatch,
     assert result['result'] == expected
     assert result['reason'] == ('time_budget_exhausted' if stop_result=='ok' else 'stop_unconfirmed')
     count = len(calls)
+    # A reconnect invalidates coordinates, but querying the same completed task
+    # must return its receipt without another observation, motion or stop.
+    monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='new-map'))
     retry = await search.run_search('owl', context=context, task_id='one', deadline=time.time()+10)
     assert retry['result'] == expected and len(calls) == count
     assert stop.await_count == 1

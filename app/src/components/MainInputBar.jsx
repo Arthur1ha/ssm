@@ -1,5 +1,5 @@
 function MainInputBar({ onSend, thinking, leadingAction, placeholder }) {
-  const [input, setInput] = useState('');
+  const [input, setInput] = React.useState('');
 
   const handleSend = () => {
     const t = input.trim();
@@ -40,19 +40,22 @@ function MainInputBar({ onSend, thinking, leadingAction, placeholder }) {
           </button>
         )}
         <input
+          aria-label="新的安排"
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && !e.isComposing && handleSend()}
           placeholder={thinking ? '处理中…' : (placeholder || '告诉我想要什么…')}
           disabled={thinking}
           style={{
-            flex: 1, background: 'transparent', border: 'none',
+            flex: 1, minWidth: 0, background: 'transparent', border: 'none',
             color: thinking ? 'rgba(255,255,255,0.35)' : '#fff',
             fontSize: 14, fontFamily: 'inherit', outline: 'none',
             WebkitTapHighlightColor: 'transparent',
           }}
         />
         <button
+          type="button"
+          aria-label="发送消息"
           onClick={handleSend}
           disabled={!input.trim() || thinking}
           style={{

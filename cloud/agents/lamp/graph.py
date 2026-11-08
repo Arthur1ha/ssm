@@ -157,6 +157,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             step_id=(step or {}).get("step_id", ""), source=event_source,
             stage=phase, tool=(step or {}).get("tool"),
             step_number=len(run.steps) if step is not None else None,
+            trigger_message_id=run.run_id if context.session_id.startswith("peer_") else None,
             event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
                 f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex,
             **facts,

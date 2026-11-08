@@ -31,6 +31,28 @@ def _evidence(name, payload):
             {"simulated": True, **payload}, ensure_ascii=False, indent=2) + "\n")
 
 
+@pytest.mark.parametrize('skill_id,params', [
+    ('go2_find_object', {'target': '白色猫头鹰'}),
+    ('go2_chat', {'message': '去找下室内的白色猫头鹰'}),
+])
+def test_steward_search_and_natural_chat_preserve_child_budget(monkeypatch, skill_id, params):
+    from cloud.go2.card import _build_go2_card
+    from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
+    monkeypatch.setattr(steward, '_cards', lambda _: {'go2': {**_build_go2_card(), 'online': True}})
+    captured = []
+    def dispatch(endpoint, body, timeout):
+        captured.append(body)
+        return {'result': 'blocked', 'reason': 'simulated'}
+    monkeypatch.setattr(steward.transport, 'do_http_dispatch', dispatch)
+    now = time.time()
+    context = {'session_id': 'user', 'actor': 'visitor', 'persist': False,
+               'origin_kind': 'user_delegated', 'expires_at': now + 600}
+    result = steward._invoke_skill(context, {'unit_id': 'go2', 'skill_id': skill_id,
+        'params': params}, 'search-child', now + 300)
+    assert result['result'] == 'blocked'
+    assert now + SEARCH_SERVER_TIMEOUT_S <= captured[0]['deadline'] <= time.time() + SEARCH_SERVER_TIMEOUT_S
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("skill_id,params,expected_tool,goal", [
     ("go2_chat", {"message": "你好"}, None, "你好"),

@@ -29,7 +29,12 @@ function useActivityTimeline() {
 
   const loadEvents = useCallback(async id => {
     const data = await apiClient.request(`/api/activity/${encodeURIComponent(id)}/events`);
-    if (activityIdRef.current === id) mergeEvents(data.events);
+    if (activityIdRef.current === id) {
+      mergeEvents(data.events);
+      if (data.activity?.activity_id === id) setDisplayActivity(previous =>
+        previous?.activity_id === id && Number(previous.revision) > Number(data.activity.revision)
+          ? previous : data.activity);
+    }
   }, [mergeEvents]);
 
   const refresh = useCallback(async () => {

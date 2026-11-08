@@ -73,7 +73,7 @@ async def test_every_standing_action_waits_for_correct_rise_receipt(robot, sourc
     assert result['result'] == 'accepted'
     assert result['preparation']['result'] == 'ok'
     if command == 'EnterMoveControl':
-        assert robot.sent == [ACTIONS[stand].api_id, ACTIONS['BalanceStand'].api_id, 1027]
+        assert robot.sent == [ACTIONS[stand].api_id, ACTIONS['StopMove'].api_id]
         assert robot.runtime.data['control_mode'] == 'remote'
     else:
         assert robot.sent == [ACTIONS[stand].api_id, ACTIONS[command].api_id]

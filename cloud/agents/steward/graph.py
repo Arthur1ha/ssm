@@ -112,9 +112,11 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         return {"run_id": run_id, "result": "rejected", "error": "run_not_resumable"}
     if route and not resume:
         return {"run_id": run_id, "result": "unknown", "response": "", "steps": []}
-    # A visual target task includes detection, closed-loop travel and a fresh
-    # arrival check. Keep the user session as the hard upper bound.
-    deadline = min(float(context.get("expires_at") or time.time() + 180), time.time() + 180)
+    # Reserve the child search budget plus planning/reply time before selecting
+    # tools. An explicit user/session deadline remains the hard upper bound.
+    from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
+    budget = SEARCH_SERVER_TIMEOUT_S + 30
+    deadline = min(float(context.get("expires_at") or time.time() + budget), time.time() + budget)
     if resume:
         run = previous
         run.attempt += 1

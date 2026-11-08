@@ -200,7 +200,7 @@ async def get_activity_events(activity_id: str, session: dict[str, Any] = Depend
     record = store.get(activity_id)
     if record is None or record.get("space_id") != session["space_id"]:
         raise HTTPException(status_code=404, detail="activity not found")
-    return {"activity_id": activity_id, "events": store.events(activity_id)}
+    return {"activity_id": activity_id, "activity": record, "events": store.events(activity_id)}
 
 
 @router.post("/api/activity/end")

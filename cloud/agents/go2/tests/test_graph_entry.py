@@ -153,6 +153,87 @@ async def test_verified_motion_result_and_reply_shape(entry, monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evidence(entry, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from cloud.agents.go2.workflows import search
+    from cloud.agents.go2.tests.test_search import Replay
+    from cloud.go2 import connection, control, state as device_state
+    from cloud.go2.navigation.navigator import navigator
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': 'go2_find_object',
+            'args': {'target': '白色猫头鹰'}, 'id': 'find-owl'}]),
+        AIMessage(content='我这就继续去找。'),  # No future motion after a terminal.
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(go2_graph.go2, 'is_connected', True)
+    monkeypatch.setattr(device_state, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='new-map'))
+    monkeypatch.setattr(control, 'control_lease', control.ControlLease())
+    monkeypatch.setattr(search, '_configured_scope', None)
+    monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
+    monkeypatch.delenv('GO2_SEARCH_SESSION_ID', raising=False)
+    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'ok'}))
+    monkeypatch.setattr('cloud.go2.mode.free_explore.drive.resume_after_user', lambda: None)
+    adapters = []
+    class SearchDevice(Replay):
+        def __init__(self, context, task_id, bounds, map_session):
+            super().__init__([
+                {'found': False, 'frame_id': 1},
+                {'found': True, 'frame_id': 2, 'media_ref': '/owl-2',
+                 'observation': {'proximity': 'nearby'}},
+                {'found': True, 'frame_id': 3, 'media_ref': '/owl-3',
+                 'observation': {'proximity': 'nearby'}},
+            ], choices=[{'target': {'path_cost_m': .8}}])
+            self.travelled_m = 0.
+            self.context = context
+            self.bounds = bounds
+            adapters.append(self)
+        async def record(self, observation):
+            return {'observations': observation['frame_id'], 'unchecked_known_cells': 10}
+    monkeypatch.setattr(search, 'DeviceSearch', SearchDevice)
+    async def execute(name, params, *, context):
+        assert name == 'go2_find_object'
+        return await search.run_search(params['target'], context=context)
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    now = time.time()
+    context = ExecutionContext('natural-search', 'admin', False, expires_at=int(now + 600))
+    result = await go2_graph.run_go2_loop('natural-search', '去找下室内的白色猫头鹰',
+        context=context, run_id='owl-natural')
+    assert result['result'] == 'ok'
+    receipt = result['tool_results'][0]['result']
+    assert receipt['outcome'] == 'nearby'
+    assert receipt['evidence']['frame_id'] == 3
+    assert receipt['scope'] == {'bounds': None, 'mode': 'reachable',
+        'session_id': 'new-map', 'source': 'user_task'}
+    assert result['response'] == receipt['message']
+    assert adapters[0].context is context and adapters[0].bounds is None
+    assert adapters[0].calls == ['observe', 'select', 'navigate', 'observe', 'observe', 'approach']
+    stored = go2_graph.get_store().get('owl-natural', 'natural-search')
+    assert stored.deadline >= now + search.SEARCH_SERVER_TIMEOUT_S
+    assert search.configured_search_scope() is None
+    repeated = await go2_graph.run_go2_loop('natural-search', '去找下室内的白色猫头鹰',
+        context=context, run_id='owl-natural')
+    assert repeated == result and len(adapters) == 1
+
+
+@pytest.mark.parametrize('reply', [
+    '得先告诉我在哪个房间、哪个范围找？',
+    '搜索范围还没配置好，我这就去看看。',
+    '我已经找到它了。',
+])
+def test_failed_search_reply_does_not_blame_user_or_invent_next_action(reply):
+    from cloud.agents.common.runner import GraphRun
+    from cloud.agents.go2.prompts import valid_search_reply
+    run = GraphRun('failed', 'user', '找猫头鹰', time.time() + 60, status='blocked',
+        steps=[{'tool': 'go2_find_object', 'result': {'result': 'blocked',
+            'reason': 'search_scope_required', 'outcome': 'not_started'}}])
+    assert not valid_search_reply(reply, run)
+    assert valid_search_reply('搜索范围配置尚未就绪，这次还没有开始找。', run)
+
+
+@pytest.mark.asyncio
 async def test_unconfirmed_motion_stops_following_tool(entry, monkeypatch):
     model = ScriptedModel([
         AIMessage(content="", tool_calls=[{"name": "go2_sport",

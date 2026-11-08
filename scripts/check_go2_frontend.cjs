@@ -104,6 +104,19 @@ async function checkCommandResults() {
     assert.equal((await sandbox.bus.command('go2','SPORT',{cmd:'Hello',prepare_standing:true})).result,'accepted');
   }
   assert.deepEqual(taskWaits,['body_preparation','body_preparation']);
+  let clock=Date.now(), polls=0;
+  const searchDeadline=clock/1000+270;
+  const longSearch=vm.createContext({
+    AbortController, Date:{now:()=>clock}, clearTimeout:()=>{},
+    setTimeout:(callback,delay)=>{if(delay===1500){clock+=100000;callback();}return 1;},
+    apiClient:{request:async()=>++polls<3
+      ? {result:'executing',deadline:searchDeadline}
+      : {result:'ok',response:'已在附近'}},
+  });
+  vm.runInContext(read('app/src/CommandBus.js')+'\nthis.bus=commandBus;',longSearch);
+  assert.equal((await longSearch.bus.waitForGo2Task('long-search')).result,'ok',
+    'Browser stopped waiting at 90 seconds while the same search was still running');
+  assert.equal(polls,3);
   console.log('PASS: explicit command outcomes survive legacy accepted flags; new lamp dispatch still waits for its result.');
 }
 
@@ -450,6 +463,7 @@ async function checkInteractions() {
         node.dispatchEvent(new MouseEvent('click',{bubbles:true}));node.dispatchEvent(new MouseEvent('click',{bubbles:true}));
       });
       await page.waitForSelector('.device-remote-controls');
+      assert.equal(await page.$('.device-remote-controls header'),null,'Movement instructions remain above the sticks');
       await page.waitForFunction(()=>document.querySelector('.device-state-board').getAttribute('aria-busy')==='false');
       assert.equal(await page.evaluate(()=>__calls.length),1,'Repeated movement taps dispatched duplicate entry');
       assert.equal(await page.evaluate(()=>__calls[0].action),'EnterMoveControl');

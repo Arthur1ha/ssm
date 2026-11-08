@@ -24,6 +24,28 @@ _DATA_PATH = Path(__file__).parent / "data" / "activity.json"
 _MAX_ACTIVITIES = 4
 _MAX_DETAIL_EVENTS = 100
 _KEY_EVENTS = {"started", "ended", "device_joined", "device_left", "question"}
+_STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state",
+                 "body_confirmation", "body_telemetry_fresh", "autonomy_mode", "ism", "r", "g", "b", "brightness")
+
+
+def _state_at_event(unit_id: str, now: float) -> dict[str, Any]:
+    """Preserve bounded feedback, not a claim that an action caused that state.
+
+    Read the existing card projection; no second live state registry is created.
+    Missing or stale feedback remains explicitly unconfirmed in the journal.
+    """
+    from cloud.cards.registry import get_registry
+    from cloud.space.freshness import state_observed_at
+
+    state = (get_registry().get_card(unit_id) or {}).get("state") or {}
+    observed = state_observed_at(state, now)
+    if observed is None:
+        return {"status": "unknown"}
+    values = {key: state[key] for key in _STATE_FIELDS if key in state
+              and (state[key] is None or isinstance(state[key], (str, bool, int))
+                   or isinstance(state[key], float) and math.isfinite(state[key]))}
+    return {"status": "current" if now - observed <= 60 else "stale",
+            "as_of": observed, "values": values}
 
 
 class ActivityStore:
@@ -295,6 +317,20 @@ class ActivityStore:
                                  "interaction_kind", "game_id",
                                  "question_id", "action", "physical_stop", "reason",
                                  "source", "confidence", "source_event_id", "display"}})
+        trigger = facts.get("trigger_message_id")
+        if isinstance(trigger, str) and 0 < len(trigger) <= 120:
+            event["trigger_message_id"] = trigger
+        if unit_id and event_type in {"action", "action_result"}:
+            event["state_at_event"] = _state_at_event(unit_id, event["ts"])
+        observation = facts.get("decision_observation")
+        if isinstance(observation, dict):
+            # These are the actual bounded sensor facts used in the lamp turn,
+            # not a freshly fetched context or generated explanation after it.
+            event["decision_observation"] = {
+                key: value for key, value in observation.items()
+                if key in {"light_level", "sound_detected", "time_period"}
+                and (isinstance(value, bool) or isinstance(value, str) and len(value) <= 40)
+            }
         if "source" in event:
             event["source"] = str(event["source"])[:64]
         if "confidence" in event and (isinstance(event["confidence"], bool)

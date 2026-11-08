@@ -48,6 +48,46 @@ async def test_find_object_command_keeps_user_deadline_and_uses_long_task(monkey
 
 
 @pytest.mark.asyncio
+async def test_natural_chat_has_search_budget_and_keeps_explicit_deadline(monkeypatch):
+    from cloud.api import intents
+    from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
+    calls = []
+    async def dispatch(path, method, session, body):
+        calls.append(body)
+        return {'result': 'executing'}
+    monkeypatch.setattr(intents, '_internal_request', dispatch)
+    now = time.time()
+    session = {'session_id': 'operator', 'actor': 'admin', 'expires_at': now + 600}
+    await intents._dispatch_go2('chat', {'message': '去找下室内的白色猫头鹰'}, session)
+    assert now + SEARCH_SERVER_TIMEOUT_S <= calls[-1]['deadline'] <= time.time() + SEARCH_SERVER_TIMEOUT_S
+    await intents._dispatch_go2('chat', {'message': '找猫头鹰'}, session, deadline=now + 30)
+    assert calls[-1]['deadline'] == now + 30
+
+
+@pytest.mark.asyncio
+async def test_router_natural_chat_admits_long_search_without_explicit_skill(monkeypatch):
+    from cloud.go2 import router, tasks
+    from cloud.agents.go2 import graph
+    from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
+    from cloud.go2.execution import ExecutionContext
+    from types import SimpleNamespace
+    captured = {}
+    class Registry:
+        def start(self, *args, **kwargs):
+            captured['deadline'] = args[3]
+            return SimpleNamespace(task=None)
+        async def wait(self, record, window):
+            return {'result': 'executing'}
+    monkeypatch.setattr(tasks, 'chat_tasks', Registry())
+    monkeypatch.setattr(router.session_tasks, 'track', lambda *args: None)
+    now = time.time()
+    result = await router.go2_chat(router.ChatRequest(message='找白色猫头鹰', task_id='natural-search'),
+        ExecutionContext('operator', 'admin', False, expires_at=int(now + 600)))
+    assert result.status_code == 202
+    assert now + SEARCH_SERVER_TIMEOUT_S <= captured['deadline'] <= time.time() + SEARCH_SERVER_TIMEOUT_S
+
+
+@pytest.mark.asyncio
 async def test_visitor_cannot_change_search_bounds(monkeypatch):
     from cloud.api import intents
     with pytest.raises(HTTPException) as rejected:

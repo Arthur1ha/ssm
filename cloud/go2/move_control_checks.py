@@ -1,6 +1,7 @@
 """Movement selection activates the firmware; all packets are simulated."""
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cloud.go2.connection.webrtc import Go2Connection
-from unitree_webrtc_connect.constants import RTC_TOPIC
+from unitree_webrtc_connect.constants import RTC_TOPIC, DATA_CHANNEL_TYPE
 
 
 def robot_at_stand():
@@ -40,37 +41,42 @@ async def test_activation_keeps_connection_and_posture_guards(condition):
 
 
 @pytest.mark.asyncio
-async def test_entry_activates_firmware_before_enabling_both_joysticks():
+async def test_entry_prepares_sport_channel_without_entering_balance_stand():
     robot, publish, sticks = robot_at_stand()
     result = await robot.send_command('EnterMoveControl')
     assert result['result'] == 'accepted'
     assert robot.runtime.data['control_mode'] == 'remote'
     assert [call.args[1] for call in publish.await_args_list] == [
-        {'api_id':1002}, {'api_id':1027,'parameter':{'data':True}}]
+        {'api_id':1003}]
     assert all(call.args[0] == RTC_TOPIC['SPORT_MOD'] for call in publish.await_args_list)
     sticks.assert_not_called()  # selecting movement never starts driving
     robot.move_velocity(.2, -.1, .3)
-    sticks.assert_called_once_with(RTC_TOPIC['WIRELESS_CONTROLLER'],
-                                   data={'lx':.1,'ly':.2,'rx':-.3,'ry':0})
+    assert sticks.call_args.args == (RTC_TOPIC['SPORT_MOD'],)
+    packet = sticks.call_args.kwargs['data']
+    assert packet['header']['identity']['api_id'] == 1008
+    assert json.loads(packet['parameter']) == {'x':.2,'y':-.1,'z':.3}
+    assert sticks.call_args.kwargs['msg_type'] == DATA_CHANNEL_TYPE['REQUEST']
     robot.move_velocity(0, 0, 0)
-    assert sticks.call_args.kwargs['data'] == {'lx':0,'ly':0,'rx':0,'ry':0}
+    assert sticks.call_args.kwargs['data']['header']['identity']['api_id'] == 1003
+    assert sticks.call_args.kwargs['data']['parameter'] == ''
+    ids = [call.kwargs['data']['header']['identity']['id'] for call in sticks.call_args_list]
+    assert len(set(ids)) == len(ids)
+    assert all(call.args[0] != RTC_TOPIC['WIRELESS_CONTROLLER'] for call in sticks.call_args_list)
     assert robot.runtime.data['control_mode'] == 'remote'  # releasing is not exiting
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failure_at',[0,1])
 @pytest.mark.parametrize('response',[{}, {'data':{'header':{'status':{'code':7}}}}])
-async def test_unconfirmed_or_rejected_activation_never_enables_control(failure_at,response):
+async def test_unconfirmed_or_rejected_activation_never_enables_control(response):
     robot, publish, sticks = robot_at_stand()
-    good = {'data':{'header':{'status':{'code':0}}}}
-    publish.side_effect = [good] * failure_at + [response]
+    publish.return_value = response
     if response:
         result = await robot.send_command('EnterMoveControl')
         assert result['result'] == 'error'
     else:
         with pytest.raises(ValueError, match='尚未确认'):
             await robot.send_command('EnterMoveControl')
-    assert publish.await_count == failure_at + 1
+    assert publish.await_count == 1
     assert robot.runtime.data['control_mode'] == 'normal'
     sticks.assert_not_called()
 
@@ -108,6 +114,18 @@ async def test_leaving_control_zeros_the_stick_before_body_rpc(command):
     publish.side_effect = body_rpc
     result = await robot.send_command(command, dispatch_only=command != 'StopMove')
     assert result['result'] == 'accepted'
-    assert order[0] == ('stick',{'lx':0,'ly':0,'rx':0,'ry':0})
+    assert order[0][0] == 'stick'
+    assert order[0][1]['header']['identity']['api_id'] == 1003
+    assert order[0][1]['parameter'] == ''
     assert order[1][0] == 'rpc'
     assert robot.runtime.data['control_mode'] == 'normal'
+
+
+@pytest.mark.asyncio
+async def test_missing_stick_heartbeat_sends_native_stopmove():
+    robot, publish, packets = robot_at_stand()
+    await robot.send_command('EnterMoveControl')
+    robot.move_velocity(.2, 0, .3, deadman_s=.01)
+    await asyncio.sleep(.03)
+    assert [call.kwargs['data']['header']['identity']['api_id'] for call in packets.call_args_list] == [1008,1003]
+    assert robot._velocity_command_active is False

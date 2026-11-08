@@ -182,12 +182,15 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if name == "request_peer_skill":
             args["request_id"] = call["id"]
         event(state, "tool.dispatch", tool=name, params=args, tool_call_id=call["id"])
+        observation = {key: state["sense"][key] for key in
+                       ("light_level", "sound_detected", "time_period") if key in state["sense"]}
         if name in PHYSICAL:
             for stage in ("planned", "executing"):
                 publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
                         space_id="main", source="autonomous", status=stage,
                         run_id=state["run_id"], step_id=call["id"],
-                        stage=stage, tool=name, text=_action_text(name, args, stage))
+                        stage=stage, tool=name, text=_action_text(name, args, stage),
+                        decision_observation=observation)
         started = time.monotonic()
         if name in PHYSICAL:
             from cloud.esp32.physical_tasks import stable_task_id
@@ -212,7 +215,9 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
                     space_id="main", source="autonomous",
                     status=result.get("result", "unknown"), run_id=state["run_id"],
-                    step_id=call["id"], stage="observed", tool=name)
+                    step_id=call["id"], stage="observed", tool=name,
+                    decision_observation=observation,
+                    reason=result.get("error") or result.get("reason"))
         status = ("executing" if ok and result.get("result") == "ok"
                   else result.get("result", "error"))
         return {"steps": [*state.get("steps", []), step], "call": None,

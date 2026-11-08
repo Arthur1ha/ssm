@@ -140,6 +140,8 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 
 API 在 `/api/intents` 签名正文加入 `user_revision`，编排器启动活动时必须带原 `event_id` 和该版本调用内部受控入口。用户再次介入后版本递增，旧模型运行的启动请求被拒绝。活动过程通过同空间 `/api/events` SSE 发送 `type=activity` 事件并保留有界记录；每条带 `event_id`、`activity_id`、`ts`、`event_type`，按类型附 `unit_id`、`message_id/conversation_id`、`task_id`、`media_ref`。图片通过 HTTP 数据面取，MQTT 当前状态和设备消息中不嵌原图。
 
+活动动作记录可附 `trigger_message_id`（执行入口明确关联的同伴消息）、`state_at_event`（记录时从现有设备卡投影读取的最近反馈：`status=current|stale|unknown`、`as_of`、有界 `values`），以及灯本轮实际采用的 `decision_observation`（仅光线级别、近期声音、时间段）。这些是历史记录，不是第二套实时设备状态，也不表示单凭对话或相邻时间即可证明动作原因或完成。旧记录缺少这些字段时保持未知。`GET /api/activity/{activity_id}/events` 同时返回活动元数据 `activity`，用于恢复真实退出状态与停止确认结果。
+
 ### 智能体定向消息（内部，非 retained）
 
 | Topic | 发布者 | 格式 |

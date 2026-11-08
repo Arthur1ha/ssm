@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cloud.agents.go2.personality.behavior import decision_persona
@@ -22,10 +23,28 @@ _GRAPH_RULES = (
     "不能把步数猜成距离或时长。工具返回 accepted、executing、timeout、unknown 时"
     "不得继续依赖动作。若工具失败，可选择合法替代工具或如实结束。"
     "不要重复已经成功的动作。最终回复须符合当前性格，不能把未证实的位移说成到达。"
+    "用户要求在室内找物品或找后走到附近时，调用 go2_find_object；它会在本次任务的可达范围内搜索，"
+    "无需追问房间名称或坐标。只有用户明确指定某房间且当前无法确定该房间时才澄清。"
     "用户要求朝摄像头画面里的物体前进时，只调用 go2_navigate_to_visible_target 并传目标描述；"
     "调用工具的这一轮不要写给用户的文字；工具返回视觉结果前，不要声称已经看见目标或即将移动。"
     "只有工具返回 ok 且完成停稳后的视觉雷达复核，才能说已到目标附近。失败后直接报告原因，不用 go2_move 或坐标导航盲走替代。"
 )
+
+
+def valid_search_reply(value: str, run) -> bool:
+    """A terminated search cannot promise to keep moving or ask for a fake fix."""
+    if not run.steps or run.steps[-1].get("tool") != "go2_find_object":
+        return True
+    result = run.steps[-1].get("result") or {}
+    if re.search(r"(?:我会|我将|我这就|这就|马上|接下来|随后).{0,8}(?:找|看|搜|走|移动)", value):
+        return False
+    if result.get("outcome") != "nearby" and re.search(r"(?<!没)(?<!未)(?:已到|已经到|到了|已找到|已经找到|找到了)", value):
+        return False
+    if result.get("reason") == "search_scope_required":
+        return ("配置" in value or "系统" in value) and not re.search(r"(?:告诉我|哪个房间|哪个范围)", value)
+    if result.get("reason") == "search_scope_session_mismatch":
+        return "定位" in value or "会话" in value
+    return True
 
 
 def persona_reply_prompt(run, profile: dict | None = None) -> str:
@@ -43,6 +62,9 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
         "如果只有动作接口成功响应，可说设备确认指令，不能声称独立视觉验证或已经到达。"
         "视觉导航只按工具结果中的 message 描述接近和复核，不把接近说成已经到达目标。"
         "草稿中的未确认事实和未来承诺要删掉。只输出你要说的话。\n"
+        "找物工具的 outcome 和 message 是已核实的任务结论：not_started 表示未启动，not_seen 表示暂未识别到，"
+        "seen_not_reached 表示画面出现过疑似目标但未确认到附近，nearby 才表示接近完成。"
+        "保留具体受阻原因；搜索终态后不能承诺马上继续找，也不能把内部范围配置故障说成用户没提供房间名称。\n"
         "教学草案只表示待用户确认，不表示已保存、已学会或已经执行。"
         + json.dumps(facts, ensure_ascii=False, default=str)
     )

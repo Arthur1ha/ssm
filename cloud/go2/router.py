@@ -347,7 +347,7 @@ async def go2_command_result(request_id: str, context: ExecutionContext = Depend
 
 @router.post("/velocity")
 async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends(require_service_context)):
-    """WIRELESS_CONTROLLER 速度控制，无 ack，适合摇杆实时输入。"""
+    """Sport Move/StopMove 速度控制，无 ack，适合摇杆实时输入。"""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
@@ -410,8 +410,10 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         if not req.task_id or len(req.task_id) > 128:
             raise HTTPException(status_code=400, detail="invalid task_id")
         from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
-        default_timeout = SEARCH_SERVER_TIMEOUT_S if req.skill_id == "go2_find_object" else 180 if req.skill_id == "go2_visual_navigate" else 45
+        # Natural-language CHAT can choose the search skill after admission.
+        default_timeout = SEARCH_SERVER_TIMEOUT_S if req.skill_id in {None, "go2_chat", "go2_find_object"} else 180 if req.skill_id == "go2_visual_navigate" else 45
         deadline = req.deadline if req.deadline is not None else time.time() + default_timeout
+        deadline = min(deadline, context.expires_at or deadline)
         if not isinstance(deadline, (int, float)) or not time.time() < deadline <= time.time() + 300:
             raise HTTPException(status_code=400, detail="invalid deadline")
         if not 0 <= req.sync_window_s <= 30:

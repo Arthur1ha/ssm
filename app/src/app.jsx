@@ -305,7 +305,7 @@ function App({ session, logout, refreshSession }) {
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
-          <ActivityFeed entries={activityLog} agents={agents} activity={displayActivity}
+          <ActivityFeed entries={activityLog} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}
@@ -324,7 +324,7 @@ function App({ session, logout, refreshSession }) {
           flexShrink: 0, background: 'var(--color-bar)',
           borderTop: '1px solid var(--color-border)',
         }}>
-          {activityLog.every(e => e.type !== 'user') && !thinking && (
+          {activityLog.every(e => e.type !== 'user') && !thinking && !currentActivity && (
             <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8, overflowX: 'auto', scrollbarWidth: 'none' }}>
               {suggestions.map(s => (
                 <button key={s} onClick={() => handleSend(s)} style={{
@@ -338,6 +338,7 @@ function App({ session, logout, refreshSession }) {
             </div>
           )}
           {trainingSelection && <div className="training-selection">正在追改所选教导，请输入你的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
+          {currentActivity && <p className="home-activity-input-note">发送新指令将结束当前自由活动</p>}
           <MainInputBar
             onSend={handleSend}
             thinking={thinking}

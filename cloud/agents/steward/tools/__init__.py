@@ -143,7 +143,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                            or f"请执行 {skill_id}：{json.dumps(params, ensure_ascii=False)}",
                 "goal": params.get("goal"), "skill_id": skill_id, "params": params,
                 "task_id": step_id,
-                "deadline": min(deadline, time.time() + (SEARCH_SERVER_TIMEOUT_S if skill_id == "go2_find_object"
+                "deadline": min(deadline, time.time() + (SEARCH_SERVER_TIMEOUT_S if skill_id in {"go2_find_object", "go2_chat"}
                                                         else 160 if skill_id == "go2_visual_navigate" else 90)),
                 "trace_id": correlation.get("trace_id"),
                 "parent_run_id": correlation.get("run_id")}

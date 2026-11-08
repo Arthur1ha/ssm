@@ -275,7 +275,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         const entry = edges.find(edge => edge.active && edge.transition.action === widget.enter_action);
         const reason = entry?.reason || (!entry ? '当前状态不可进入遥控' : '');
         return <section key={widget._index} className="device-remote-controls" aria-label="移动控制">
-          <header><strong>移动</strong><span>{engaged ? '推杆移动，松手停止' : busy ? '正在准备移动…' : reason ? '' : '等待移动就绪'}</span></header>
           {renderWidget(widget)}
           {!engaged && reason && <small role="status">{reason}</small>}
         </section>;

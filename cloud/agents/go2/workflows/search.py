@@ -84,6 +84,72 @@ def search_bounds() -> tuple[float, float, float, float] | None:
         raise ValueError("search_scope_required") from exc
 
 
+def resolve_search_scope(context, mode: str, map_session: str) -> dict:
+    """A user search owns a reachable scope for this task, never a global mode.
+
+    Explicit rectangles remain authoritative and cannot cross odom sessions.
+    Autonomous exploration still requires its separately configured scope.
+    """
+    user_search = mode == "find_object" and context.origin_kind == "user_delegated"
+    configured = configured_search_scope()
+    if configured is not None:
+        if configured["session_id"] == map_session:
+            return {**configured, "source": "configured"}
+        if configured["mode"] != "reachable" or not user_search:
+            raise ValueError("search_scope_session_mismatch")
+    elif "GO2_SEARCH_BOUNDS" in os.environ or "GO2_SEARCH_SESSION_ID" in os.environ:
+        bounds = search_bounds()
+        if os.environ.get("GO2_SEARCH_SESSION_ID") != map_session:
+            raise ValueError("search_scope_session_mismatch")
+        return {"bounds": list(bounds), "mode": "bounded", "session_id": map_session,
+                "source": "environment"}
+    elif not user_search:
+        raise ValueError("search_scope_required")
+    return {"bounds": None, "mode": "reachable", "session_id": map_session,
+            "source": "user_task"}
+
+
+def describe_search_result(result: dict) -> dict:
+    """Keep sightings, arrival, incomplete coverage and stop proof distinct."""
+    result = dict(result)
+    if result.get("mode", "find_object") != "find_object":
+        return result
+    reason = result.get("reason") or result.get("error") or "unknown"
+    seen = bool(result.get("found") or result.get("target_hint")
+                or (result.get("evidence") or {}).get("found"))
+    observed = bool((result.get("coverage") or {}).get("observations")
+                    or result.get("evidence") or result.get("steps"))
+    result["found"] = seen
+    if reason == "stop_unconfirmed":
+        outcome, message = "stop_unconfirmed", "搜索已中止，但还没有确认机身停稳；不能继续移动，也不能算找到并接近了目标。"
+    elif result.get("result") == "ok":
+        outcome, message = "nearby", "连续画面判断目标已在附近，机身已确认停稳；尚无精确目标坐标或距离。"
+    else:
+        outcome = "seen_not_reached" if seen else "not_seen" if observed else "not_started"
+        opening = ("画面中出现过疑似目标，但还没确认已到附近。" if seen else
+                   "已检查部分画面，暂未识别到目标，不能据此判断室内没有。" if observed else
+                   "搜索还没有开始。")
+        reasons = {
+            "search_scope_required": "搜索范围配置尚未就绪。",
+            "search_scope_session_mismatch": "已有搜索边界属于上一次定位，需要重新设置当前会话的边界。",
+            "map_session_unavailable": "当前定位会话尚未就绪。",
+            "map_session_changed": "定位会话已改变，本次搜索已结束。",
+            "localization_unavailable": "定位数据暂不可用。",
+            "motion_not_observed": "发出移动指令后，没有观察到足够的实际位移或转动。",
+            "no_known_free_observation_path": "当前没有可通行的目标接近路径。",
+            "coverage_exhausted": "当前没有新的可达观察点，遮挡区域仍未检查。",
+            "time_budget_exhausted": "本次搜索时间已用尽。",
+            "step_budget_exhausted": "本次搜索步数已用尽。",
+            "distance_budget_exhausted": "本次搜索行程已用尽。",
+            "control_lease_changed": "控制权已交给其他操作。",
+            "cancelled": "本次搜索已取消。",
+            "search_step_failed": "搜索处理发生错误。",
+        }
+        message = opening + reasons.get(reason, f"本次搜索已结束，原因：{reason}。")
+    result.update(outcome=outcome, message=message)
+    return result
+
+
 class SearchState(TypedDict, total=False):
     task_id: str
     mode: str
@@ -103,16 +169,20 @@ class SearchState(TypedDict, total=False):
     target_hint: dict | None
     target_views: list[dict]
     approach_attempts: int
+    scope: dict
+    last_detection: dict
 
 
 def build_search_graph(adapter, *, checkpointer=None):
     """Inject device operations so the exact production graph can be replayed."""
     def terminal(state, reason, status="blocked", **extra):
+        detection = state.get("last_detection") or {}
         return {"phase": "finished", "result": {"result": status, "reason": reason,
                 "target": state.get("target", ""), "task_id": state["task_id"],
                 "coverage": state.get("coverage", {}), "steps": state.get("steps", 0),
                 "distance_m": state.get("distance_m", 0.0),
-                "target_hint": state.get('target_hint'), **extra}}
+                "target_hint": state.get('target_hint'), "found": bool(detection),
+                "evidence": detection, **extra}}
 
     async def guard(state):
         reason = await adapter.guard(state)
@@ -140,6 +210,7 @@ def build_search_graph(adapter, *, checkpointer=None):
         await adapter.progress("search_candidate" if found else "search_observe", state,
                                observation=observation, coverage=summary)
         return {"observation": observation, "coverage": summary,
+                "last_detection": observation if found else state.get("last_detection", {}),
                 "target_hint": observation.get("target_hint") or state.get("target_hint"),
                 # A single detection is sufficient to pursue a direction.
                 # Recheck only when the image says we are already nearby,
@@ -164,7 +235,7 @@ def build_search_graph(adapter, *, checkpointer=None):
         confirmed = dict(confirmed, nearby_confirmed=(
             first.get('observation', {}).get('proximity') == 'nearby'
             and confirmed.get('observation', {}).get('proximity') == 'nearby'))
-        return {"observation": confirmed, "phase": "approach",
+        return {"observation": confirmed, "last_detection": confirmed, "phase": "approach",
                 "target_hint": confirmed.get("target_hint") or state.get("target_hint")}
 
     async def select(state):
@@ -177,8 +248,8 @@ def build_search_graph(adapter, *, checkpointer=None):
             # Even exhausted coverage does not establish absence behind occluders.
             return terminal(state, reason, "ok" if state["mode"] == "explore" and
                             reason == "coverage_exhausted" else "blocked",
-                            found=state['mode'] == 'find_object' and bool(state.get('target_hint')),
-                            evidence=state.get('observation', {}))
+                            found=bool(state.get('last_detection') or state.get('target_hint')),
+                            evidence=state.get('last_detection') or state.get('observation', {}))
         return {"candidate": selected["target"], "phase": "navigate"}
 
     async def navigate(state):
@@ -287,10 +358,10 @@ class DeviceSearch:
         self.progress_sequence = 0
 
     def refresh_scope(self, snapshot=None):
-        """Follow current map extent only after explicit reachable-space authorization.
+        """Follow current map extent within this task's reachable scope.
 
         Extent is a calculation bound, not evidence that its cells are walkable:
-        selector and Navigator still require measured free paths and body clearance.
+        Selector and Navigator still check obstacles and body clearance.
         """
         if not self.reachable_scope:
             return None
@@ -625,18 +696,28 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
                    context.expires_at or math.inf)
     try:
         validate_execution_context(context)
-        bounds = search_bounds()
     except ValueError as exc:
         return {"result": "blocked", "reason": str(exc), "task_id": task_id}
     if mode not in {"explore", "find_object"} or (mode == "find_object" and not target.strip()):
         return {"result": "rejected", "reason": "invalid_search_request"}
+    checkpointer = FileCheckpointSaver()
+    config = {"configurable": {"thread_id": f"go2:search:{context.session_id}:{task_id}"},
+              "recursion_limit": SEARCH_MAX_STEPS * 5 + 20}
+    # Historical results survive reconnects. Reading one never reacquires the
+    # robot or binds its old coordinates to the new localization session.
+    existing = await checkpointer.aget_tuple(config)
+    if existing is not None:
+        values = existing.checkpoint.get("channel_values", {})
+        return values.get("result") or {"result": "blocked", "reason": "search_recovery_requires_new_observation",
+                                        "task_id": task_id}
     session = getattr(go2, "_odom_session_id", None)
     if not session:
         return {"result": "blocked", "reason": "map_session_unavailable"}
-    scope = configured_search_scope()
-    scope_session = scope["session_id"] if scope else os.environ.get("GO2_SEARCH_SESSION_ID")
-    if scope_session != session:
-        return {"result": "blocked", "reason": "search_scope_session_mismatch", "task_id": task_id}
+    try:
+        scope = resolve_search_scope(context, mode, session)
+    except ValueError as exc:
+        return {"result": "blocked", "reason": str(exc), "task_id": task_id}
+    bounds = tuple(scope["bounds"]) if scope["bounds"] is not None else None
     adapter = DeviceSearch(context, task_id, bounds, session)
     if mode == "explore":
         # Segments share bounded coverage until scope or localization changes.
@@ -646,16 +727,6 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
             adapter.coverage = _exploration_coverage[1]
         else:
             _exploration_coverage = (coverage_key, adapter.coverage)
-    checkpointer = FileCheckpointSaver()
-    config = {"configurable": {"thread_id": f"go2:search:{context.session_id}:{task_id}"},
-              "recursion_limit": SEARCH_MAX_STEPS * 5 + 20}
-    # A restarted process cannot certify past physical effects or reuse old
-    # coverage. Reconcile by terminating; never blindly resume a movement node.
-    existing = await checkpointer.aget_tuple(config)
-    if existing is not None:
-        values = existing.checkpoint.get("channel_values", {})
-        return values.get("result") or {"result": "blocked", "reason": "search_recovery_requires_new_observation",
-                                        "task_id": task_id}
     control_lease.acquire(context)
     runtime = runtime_for(go2)
     token = None
@@ -664,7 +735,7 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
     session_tasks.track(context.session_id, asyncio.current_task())
     state = {"task_id": task_id, "mode": mode, "target": target,
              "map_session": session, "phase": "observe", "steps": 0, "distance_m": 0.0,
-             "deadline": deadline, "coverage": {}}
+             "deadline": deadline, "coverage": {}, "scope": scope}
     async def monitor():
         while True:
             reason = await adapter.guard(state)
@@ -707,6 +778,12 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
                   "distance_m": round(adapter.travelled_m, 3)}
         result.setdefault("coverage", state.get("coverage", {}))
         result.setdefault("steps", state.get("steps", 0))
+        result.setdefault("scope", scope)
+        result.setdefault("target", target)
+        result["found"] = bool(result.get("found") or state.get("last_detection"))
+        if state.get("last_detection"):
+            result["evidence"] = state["last_detection"]
+        result = describe_search_result(result)
         if state.get("receipt"):
             result.setdefault("navigation", state["receipt"])
         if result.get("result") in {"accepted", "executing", "unknown"} and runtime:
@@ -770,5 +847,6 @@ async def run_search(target: str = "", *, mode: str = "find_object", context=Non
     task_id = task_id or (requested[0] if requested else "search_" + uuid.uuid4().hex)
     thread_id = f"go2:search:{context.session_id}:{task_id}"
     async with FileCheckpointSaver().async_run_lock(thread_id):
-        return await _run_search(target, mode=mode, context=context,
-                                 task_id=task_id, deadline=deadline)
+        result = await _run_search(target, mode=mode, context=context,
+                                   task_id=task_id, deadline=deadline)
+        return describe_search_result({"target": target, "mode": mode, "task_id": task_id, **result})
