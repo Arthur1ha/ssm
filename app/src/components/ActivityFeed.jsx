@@ -1,6 +1,6 @@
 /* ActivityFeed — 主屏活动流组件 */
 function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
-  onEndActivity, onAnswerActivity, onOpenRules }) {
+  onEndActivity, onAnswerActivity, onOpenRules, training, onReviseRule }) {
   const { useRef, useEffect } = React;
   const bottomRef = useRef(null);
   const currentActivityRef = useRef(null);
@@ -77,6 +77,10 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
   return (
     <div style={{ padding: '0 16px' }}>
       {rows.map(({ entry: e, index: i }) => {
+        if (e.type === 'rule') return <div key={e.id} className="chat-rule-message" style={{maxWidth:420,marginBottom:10}}>
+          <TrainingPreview proposal={e.proposal} error={training?.proposalErrors?.[e.proposal.proposal_id]}
+            onConfirm={training?.confirm} onCancel={training?.cancel} onRevise={onReviseRule}/>
+        </div>;
         if (e.type === 'space_activity') {
           const card = e.card;
           return <div key={`activity-${card.id}`} ref={card === currentCard ? currentActivityRef : null}>
@@ -184,6 +188,7 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
         return null;
       })}
 
+      {training?.error && <p role="alert">{training.error}</p>}
       <div ref={bottomRef}/>
     </div>
   );

@@ -101,6 +101,81 @@ def entry(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('pending', [True, False])
+async def test_rule_revisions_use_existing_graph_and_preserve_rule_reference(entry, monkeypatch, pending):
+    """An arbitrary follow-up revises its selected draft/rule through native tools."""
+    from cloud.agents.common.training import tools as training_tools
+
+    definition = {'transition_ids': ['tr_greeting'], 'origins': ['user_delegated'],
+                  'conditions': [], 'cooldown_s': 45, 'defaults': {}, 'trigger': None}
+    record = {'teaching_id': 'rule_greeting', 'revision': 4,
+              'definition': {**definition, 'cooldown_s': 20}, 'name': '挥手后间隔20秒'}
+    previous = {'proposal_id': 'draft_greeting', 'operation': 'create',
+                'teaching_id': 'draft_rule', 'expected_revision': 0,
+                'confirmed': False, 'after': {'definition': definition}}
+    snapshot = {'catalog': {'hash': 'a' * 64, 'transitions': [
+        {'id': 'tr_greeting', 'src': 'standing', 'dst': 'greeting'}]},
+        'records': [] if pending else [record],
+        'proposals': [previous] if pending else []}
+    selection = {'unit_id': 'go2', 'transition_id': 'tr_greeting',
+                 **({'proposal_id': 'draft_greeting'} if pending else {'teaching_id': 'rule_greeting'})}
+    args = {'operation': 'create' if pending else 'update', 'unit_id': 'go2',
+            'name': '挥手后间隔45秒', 'effect_text': '每次挥手结束后，隔45秒才会再次挥手。',
+            'definition': definition}
+    if not pending:
+        args.update(teaching_id='rule_greeting', base_revision=4)
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': 'list_training',
+            'args': {'unit_id': 'go2'}, 'id': 'read-rule'}]),
+        AIMessage(content='', tool_calls=[{'name': 'propose_training',
+            'args': args, 'id': 'revise-rule'}]),
+        AIMessage(content='按你补充的间隔改好了，请看卡片。'),
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(go2_graph, 'needs_persona_reply', lambda _: False)
+    calls = []
+
+    async def api(path, payload, context, *, method='POST'):
+        calls.append((method, path, payload, context))
+        if method == 'GET':
+            return snapshot
+        return {'proposal_id': 'draft_revised', 'summaryText': payload['name'],
+                'confirmed': False}
+
+    async def no_device(*_args, **_kwargs):
+        pytest.fail('editing a rule must not invoke a physical device tool')
+
+    monkeypatch.setattr(training_tools, 'internal_api_call', api)
+    monkeypatch.setattr(go2_graph, 'execute_tool', no_device)
+    context = ExecutionContext('rule-session', 'admin', True, expires_at=int(time.time() + 60))
+    result = await go2_graph.run_go2_loop('rule-session', '刚才那条间隔用四十五秒',
+        context=context, run_id='rule-followup', selection=selection)
+    assert result['result'] == 'ok'
+    assert result['tool_results'][-1]['result']['proposal_id'] == 'draft_revised'
+    writes = [call for call in calls if call[0] == 'POST']
+    assert len(writes) == 1
+    method, path, payload, trusted = writes[0]
+    assert path == '/api/training/proposals'
+    assert payload['name'] == '挥手后间隔45秒'
+    assert payload['effect_text'] == args['effect_text']
+    assert payload['definition']['cooldown_s'] == 45
+    assert trusted['source_text'] == '刚才那条间隔用四十五秒'
+    assert trusted['selection'] == selection
+    if pending:
+        assert payload['supersedes_proposal_id'] == 'draft_greeting'
+        assert payload['operation'] == 'create'
+        assert payload['expected_revision'] == 0
+    else:
+        assert payload['teaching_id'] == 'rule_greeting'
+        assert payload['operation'] == 'update'
+        assert payload['expected_revision'] == 4
+    assert any('草案引用' in message.content and str(selection) in message.content
+               for message in model.inputs[0])
+    assert 'confirm_training' not in {tool['function']['name'] for tool in model.bound_tools}
+
+
+@pytest.mark.asyncio
 async def test_verified_motion_result_and_reply_shape(entry, monkeypatch, tmp_path):
     model = ScriptedModel([
         AIMessage(content="", tool_calls=[{"name": "go2_sport",
@@ -231,6 +306,76 @@ def test_failed_search_reply_does_not_blame_user_or_invent_next_action(reply):
             'reason': 'search_scope_required', 'outcome': 'not_started'}}])
     assert not valid_search_reply(reply, run)
     assert valid_search_reply('搜索范围配置尚未就绪，这次还没有开始找。', run)
+
+
+@pytest.mark.asyncio
+async def test_measured_move_reply_uses_persona_and_keeps_actual_distance(entry, monkeypatch):
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': 'go2_move',
+            'args': {'direction': 'forward', 'distance_m': 1.}, 'id': 'move-metre'}]),
+        AIMessage(content='指令已经发出，等我看看脚下。'),
+        AIMessage(content='汪，往前走了约0.98米，已经停稳啦！'),
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph.go2, 'is_connected', True)
+    from cloud.agents.go2.prompts import persona_reply_prompt
+    monkeypatch.setattr(go2_graph, 'persona_reply_prompt', persona_reply_prompt)
+    monkeypatch.setattr('cloud.agents.go2.prompts.reply_persona', lambda profile: 'Go2 persona')
+    monkeypatch.setattr('cloud.agents.go2.prompts.agent_names', lambda: {'go2': '测试狗'})
+    message = '向前移动约0.98米，目标1米。已达到本次目标并确认停稳。'
+    async def execute(*args, **kwargs):
+        return {'result': 'ok', 'distance_m': .98, 'requested_distance_m': 1.,
+                'stop': {'result': 'ok'}, 'message': message}
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    context = ExecutionContext('move-reply', 'visitor', False, expires_at=time.time()+60)
+    result = await go2_graph.run_go2_loop('move-reply', '前进1m', context=context, run_id='move-reply')
+    assert result['response'] == '汪，往前走了约0.98米，已经停稳啦！'
+    assert result['result'] == 'ok'
+    assert len(model.inputs) == 3
+    assert 'Go2 persona' in model.inputs[-1][0].content
+    assert go2_graph.get_store().get('move-reply', 'move-reply').reply_source == 'persona_model'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('persona_reply,expected', [
+    ('我往前走了约1.76米，还没到你说的2米呢。后面迈不动了，我已经停稳啦。', 'persona_model'),
+    ('汪，我已经走满2米并停稳啦！', 'runtime'),
+    ('指令已经发出去了，等我看看脚下。', 'runtime'),
+])
+async def test_partial_movement_preserves_persona_without_inventing_completion(entry, monkeypatch, persona_reply, expected):
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': 'go2_move',
+            'args': {'direction': 'forward', 'distance_m': 2.}, 'id': 'move-partial'}]),
+        AIMessage(content='本次未完成'),
+        AIMessage(content=persona_reply),
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph.go2, 'is_connected', True)
+    message = '向前移动约1.76米，目标2米。未完成本次目标，已确认停稳；后续未观察到继续移动。'
+    async def execute(*args, **kwargs):
+        return {'result': 'blocked', 'reason': 'motion_not_observed', 'distance_m': 1.761,
+                'requested_distance_m': 2., 'stop': {'result': 'ok'}, 'message': message}
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    context = ExecutionContext('partial-reply', 'visitor', False, expires_at=time.time()+60)
+    result = await go2_graph.run_go2_loop('partial-reply', '前进两米', context=context, run_id='partial-reply')
+    assert result['result'] == 'blocked'
+    assert result['response'] == (persona_reply if expected == 'persona_model' else message)
+    assert go2_graph.get_store().get('partial-reply', 'partial-reply').reply_source == expected
+
+
+@pytest.mark.parametrize('reply,accepted', [
+    ('我往前走了1.76米，还没到2米，后面迈不动了，已经停稳啦。', True),
+    ('汪，走了176厘米，目标是2米；后面走不动啦，我停下了。', True),
+    ('我往前走了1.76米，还没到2米，已经停稳啦。我这就再走一段。', False),
+    ('我往前走了2米，已经停稳啦！', False),
+])
+def test_move_reply_validation_preserves_measurement_and_no_future_motion(reply, accepted):
+    from cloud.agents.go2.prompts import valid_move_reply
+    from cloud.agents.common.runner import GraphRun
+    run = GraphRun('movement', 'user', '前进两米', time.time()+60, status='partial',
+        steps=[{'tool': 'go2_move', 'result': {'result': 'blocked', 'reason': 'motion_not_observed',
+            'distance_m': 1.761, 'requested_distance_m': 2., 'stop': {'result': 'ok'}}}])
+    assert valid_move_reply(reply, run) is accepted
 
 
 @pytest.mark.asyncio

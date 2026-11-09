@@ -22,7 +22,7 @@ function useHashLocal() {
 function navigate(hash) { window.location.hash = hash; }
 
 function App({ session, logout, refreshSession }) {
-  const { useState, useEffect, useRef } = React;
+  const { useState, useEffect, useRef, useMemo } = React;
   const {
     connected, agents, loadingAgents, hasLoadedAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
@@ -32,7 +32,7 @@ function App({ session, logout, refreshSession }) {
   const { thinking, send } = useSendIntent();
   const currentHash = useHashLocal();
 
-  const [activityLog, setActivityLog] = useState([]);
+  const [activityLog, setActivityLog] = useSessionTranscript(session.session_id, 'home');
   const [activityHistory, setActivityHistory] = useState([]);
   const lastVisibleActivity = useRef(null);
   const seenReplies = useRef(new Set());
@@ -40,7 +40,7 @@ function App({ session, logout, refreshSession }) {
   const completedRequests = useRef(new Set());
   const traceRequests = useRef(new Map());
   const pendingReplies = useRef([]);
-  const nextRequestId = useRef(0);
+  const nextRequestId = useRef(Date.now());
   const [trainingOpen,   setTrainingOpen]   = useState(false);
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [spaceOpen,   setSpaceOpen]   = useState(false);
@@ -49,11 +49,11 @@ function App({ session, logout, refreshSession }) {
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const [deviceNotice, setDeviceNotice] = useState('');
   const [activityQuestion, setActivityQuestion] = useState(null);
-  const [trainingUnit, setTrainingUnit] = useState('');
-  const training = useTraining(trainingUnit);
+  const training = useTraining('', {sessionId:session.session_id,canEdit:session.actor === 'admin'});
+  const chatRows = useMemo(() => trainingTimeline(activityLog, session.actor === 'admin' ? training.proposals : [], 'home'), [activityLog,training.proposals,session.actor]);
+  useEffect(() => { if (session.actor === 'admin') training.loadAll(agents); }, [agents.map(agent => agent.unit_id).join(','), session.session_id]);
   const [trainingSelection, setTrainingSelection] = useState(null);
   const [trainingLocation, setTrainingLocation] = useState(null);
-  const locateTraining = (uid, id) => { setTrainingLocation({unit_id:uid,transition_id:id,nonce:Date.now()}); navigate(`#/devices/${encodeURIComponent(uid)}`); };
   const [, setAgentNamesRevision] = useState(0);
 
   useEffect(() => {
@@ -275,7 +275,7 @@ function App({ session, logout, refreshSession }) {
               <Icon name="scan" size={18}/>
             </button>{deviceNotice && <small className="action-feedback action-feedback--ok" role="status" title={deviceNotice}>{deviceNotice}</small>}</div>}
             {session.actor === 'admin' && <SpaceMenu
-              onShareSpace={() => setInviteOpen(true)} onTraining={() => { setTrainingUnit(agents[0]?.unit_id || ''); setTrainingOpen(true); }}
+              onShareSpace={() => setInviteOpen(true)} onTraining={() => setTrainingOpen(true)}
               onSpaceSettings={() => setSpaceOpen(true)} onOrchestratorSettings={() => setOrchestratorOpen(true)}
               onPeople={() => setPeopleOpen(true)} onExit={logout}/>}
           </div>
@@ -305,7 +305,8 @@ function App({ session, logout, refreshSession }) {
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
-          <ActivityFeed entries={activityLog} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
+          <ActivityFeed entries={chatRows}
+            training={training} onReviseRule={p => setTrainingSelection({unit_id:p.unit_id,transition_id:p.transition_ids?.[0],proposal_id:p.proposal_id})} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}
@@ -314,8 +315,6 @@ function App({ session, logout, refreshSession }) {
               navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
             }}/>
 
-          {session.actor === 'admin' && <TrainingPreview proposal={training.proposal} error={training.error}
-            onConfirm={async () => { const p = training.proposal; if (await training.confirm()) locateTraining(p.unit_id,p.transition_ids?.[0]); }} onCancel={training.cancel} onLocate={locateTraining}/>}
           <div style={{ height: 16 }}/>
         </div>
 
@@ -337,7 +336,7 @@ function App({ session, logout, refreshSession }) {
               ))}
             </div>
           )}
-          {trainingSelection && <div className="training-selection">正在追改所选教导，请输入你的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
+          {trainingSelection && <div className="training-selection">修改规则：请直接输入新的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
           {currentActivity && <p className="home-activity-input-note">发送新指令将结束当前自由活动</p>}
           <MainInputBar
             onSend={handleSend}
@@ -353,12 +352,12 @@ function App({ session, logout, refreshSession }) {
         </>}
 
         {session.actor === 'admin' && trainingOpen && <TrainingDrawer
-          unitId={trainingUnit} training={training} agents={agents} onUnitChange={setTrainingUnit}
+          training={training} agents={agents}
           onClose={() => setTrainingOpen(false)}
-          onLocate={(uid, id) => { setTrainingOpen(false); locateTraining(uid, id); }}
           onRevise={record => {
-            setTrainingSelection({unit_id:trainingUnit,transition_id:record.transition_ids[0],teaching_id:record.teaching_id});
             setTrainingOpen(false);
+            setTrainingLocation({unit_id:record.unit_id,transition_id:record.transition_ids?.[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record),nonce:Date.now()});
+            navigate(`#/devices/${encodeURIComponent(record.unit_id)}`);
           }}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
@@ -389,6 +388,7 @@ function App({ session, logout, refreshSession }) {
             liveState={unitData[displayUid]}
             onBack={() => handleBack(displayUid)}
             actor={session.actor}
+            sessionId={session.session_id}
             activityQuestion={activityQuestion?.unit_id === displayUid &&
               activityQuestion.activity_id === currentActivity?.activity_id ? activityQuestion : null}
           />

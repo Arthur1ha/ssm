@@ -220,12 +220,13 @@ async def test_visitor_cannot_read_long_term_go2_assets(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_session_cleanup_cancels_timed_chat_move_and_stops_robot(monkeypatch):
+async def test_session_cleanup_cancels_relative_chat_move_and_stops_robot(monkeypatch):
     from cloud.agents.go2 import graph as multitask
     from cloud.go2 import router
     from cloud.go2.tools import tools
     from cloud.go2.connection import go2
     from cloud.go2.state import Go2State
+    from cloud.go2.navigation.navigator import navigator
 
     move_started = asyncio.Event()
     commands = []
@@ -238,10 +239,19 @@ async def test_session_cleanup_cancels_timed_chat_move_and_stops_robot(monkeypat
 
     async def fake_run_agent(session_id, message, *, context, **_kwargs):
         with use_context(context):
-            return await tools.go2_move("forward", duration=10)
+            return await tools.go2_move("forward", distance_m=1.)
+
+    async def fake_relative(*args, context, **kwargs):
+        router.control_lease.acquire(context)
+        await fake_send_command('Move')
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await fake_send_command('StopMove')
 
     monkeypatch.setattr(multitask, "run_go2_loop", fake_run_agent)
     monkeypatch.setattr(go2, "send_command", fake_send_command)
+    monkeypatch.setattr(navigator, 'move_relative', fake_relative)
     zero_velocity = MagicMock(return_value={"result": "ok"})
     monkeypatch.setattr(go2, "move_velocity", zero_velocity)
     # Supply a fresh observed standing posture so the real preflight admits the
@@ -256,7 +266,7 @@ async def test_session_cleanup_cancels_timed_chat_move_and_stops_robot(monkeypat
         router.control_lease.release(owner.owner_session_id)
 
     request_task = asyncio.create_task(
-        router.go2_chat(router.ChatRequest(message="向前走十秒"), context=VISITOR_A)
+        router.go2_chat(router.ChatRequest(message="向前走一米"), context=VISITOR_A)
     )
     try:
         await asyncio.wait_for(move_started.wait(), timeout=1)

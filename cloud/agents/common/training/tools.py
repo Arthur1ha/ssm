@@ -12,10 +12,18 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from cloud.agents.common.training.models import Definition
 
-GUIDANCE = ('长期教导先用 list_training 读取已有教导和转换目录，只提出修改草案。'
-            '定位唯一目标后少追问；多个目标须说明差别并澄清。慢一点、隔久一点等建议必须给出明确数值供用户确认。'
-            '这次闪五次是临时命令；以后默认两次才是长期参数。改成半分钟应修改原教导，不创建竞争教导。'
-            '没有能力时说明缺项，不能声称已经学会。草案须由用户确认，不能声称已保存或执行。')
+GUIDANCE = ('通过现有工具理解任意自然语言行为规则；先用 list_training 读取已有规则、未完成草案和设备转换目录。'
+            '依据用户意图选择真实支持的转换、条件、触发事件和默认值，不依赖特定句式或关键词。'
+            '每次 create/update 都必须重新给出 name：一句简短、完整、用户可读的规则说明，通常20个汉字以内，适合放在状态转换卡片；'
+            '不重复卡片已有的状态名称，不列场景清单，不用技术字段、枚举值或泛泛的标题，也不能截断关键限制来凑字数。'
+            'effect_text 用简短自然语言说明什么情况下会做什么、限制了什么，完整对应结构化定义，不输出参数或 JSON。'
+            '同一要求的补充必须修改原规则；已有草案时使用 supersedes_proposal_id 修订该草案，未确认的新增草案仍为 create。'
+            '唯一目标少追问，多个目标才澄清；区分临时动作与长期约定，模糊数值给出具体建议供确认。'
+            '只约束用户指明的转换和方向；转换自身的起点已确定时，不把它误加为其它转换的全局允许条件。'
+            '用户说仅在某种情境下限制行为，要区别规则何时适用和动作何时允许，不得把其它情境的动作一起禁止。'
+            '制定规则不要求当前已经满足条件；条件未知时不能编造事实，也不能把当前未触发误说成无法制定规则。'
+            '不要在回复中重复解释卡片已经展示的技术过程。草案由用户在对话卡片确认，不能提前声称规则已保存或行为已改变。'
+            '超出设备当前结构化能力时简短说明具体缺项，不编造转换或识别结果。')
 
 class ListTraining(BaseModel):
     """读取设备可训练转换和已有教导。"""
@@ -30,6 +38,8 @@ class ProposeTraining(BaseModel):
     teaching_id: str | None = None
     base_revision: int | None = Field(default=None, ge=1)
     name: str | None = None
+    effect_text: str | None = Field(default=None, min_length=1, max_length=1200)
+    supersedes_proposal_id: str | None = None
     definition: Definition | None = None
 
 SCHEMAS = {'list_training': ListTraining, 'propose_training': ProposeTraining}
@@ -61,28 +71,45 @@ async def propose_training(arguments, context, api_call):
         args['definition'] = validated.definition.model_dump()
     selection = _selection(context, args['unit_id'])
     snapshot = await list_training({'unit_id': args['unit_id']}, context, api_call)
+    selected_proposal = (selection or {}).get('proposal_id')
+    supersedes = args.get('supersedes_proposal_id') or selected_proposal
+    if selected_proposal and supersedes != selected_proposal:
+        raise ValueError('selection_proposal_mismatch')
+    if supersedes:
+        previous = next((p for p in snapshot.get('proposals', []) if p['proposal_id'] == supersedes), None)
+        if previous is None or previous.get('confirmed') or previous.get('cancelled') or previous.get('superseded') or previous.get('expired'):
+            raise ValueError('proposal_not_editable')
+        args['supersedes_proposal_id'] = supersedes
+        args['operation'] = previous['operation']
+        if previous['operation'] != 'create':
+            args['teaching_id'] = previous['teaching_id']
+            args['base_revision'] = previous['expected_revision']
+        else:
+            args.pop('teaching_id', None)
+            args.pop('base_revision', None)
     definition = args.get('definition')
-    if selection and definition and selection['transition_id'] not in definition['transition_ids']:
+    bare_transition = selection and not selection.get('teaching_id') and not selection.get('proposal_id')
+    if bare_transition and definition and selection['transition_id'] not in definition['transition_ids']:
         raise ValueError('selection_transition_mismatch')
     operation = args['operation']
+    if operation in ('create', 'update'):
+        if not args.get('name') or not args['name'].strip():
+            raise ValueError('rule_summary_required: provide a concise name describing the complete updated rule')
+        # Never carry an old explanation over a changed definition. Both texts
+        # are generated in this role Graph turn; an omitted detail uses its new
+        # concise rule sentence rather than an unrelated historical description.
+        args.setdefault('effect_text', args['name'])
     if selection and selection.get('teaching_id') and args.get('teaching_id') != selection['teaching_id']:
         raise ValueError('selection_teaching_mismatch')
     payload = {k: v for k, v in args.items() if k != 'base_revision'}
     payload['capability_hash'] = snapshot['catalog']['hash']
     if operation == 'create':
         payload['expected_revision'] = 0
-        if not payload.get('name'):
-            edges = {edge['id']: edge for edge in snapshot['catalog'].get('transitions', [])}
-            ids = (definition or {}).get('transition_ids') or []
-            if not ids or any(edge_id not in edges for edge_id in ids):
-                raise ValueError('training_name_requires_known_transition')
-            payload['name'] = '、'.join(f"{edges[edge_id]['src']} → {edges[edge_id]['dst']}" for edge_id in ids)[:120]
-
     else:
         record = next((r for r in snapshot['records'] if r['teaching_id'] == args.get('teaching_id')), None)
         if record is None or args.get('base_revision') != record['revision']:
             raise ValueError('teaching_revision_mismatch')
-        if selection and selection['transition_id'] not in record['definition']['transition_ids']:
+        if selection and not selection.get('proposal_id') and selection['transition_id'] not in record['definition']['transition_ids']:
             raise ValueError('selection_transition_mismatch')
         payload['expected_revision'] = args['base_revision']
     return await api_call('/api/training/proposals', payload, context, method='POST')

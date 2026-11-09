@@ -33,9 +33,8 @@ def _evidence(name, payload):
 
 @pytest.mark.parametrize('skill_id,params', [
     ('go2_find_object', {'target': '白色猫头鹰'}),
-    ('go2_chat', {'message': '去找下室内的白色猫头鹰'}),
 ])
-def test_steward_search_and_natural_chat_preserve_child_budget(monkeypatch, skill_id, params):
+def test_steward_search_preserves_child_budget(monkeypatch, skill_id, params):
     from cloud.go2.card import _build_go2_card
     from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
     monkeypatch.setattr(steward, '_cards', lambda _: {'go2': {**_build_go2_card(), 'online': True}})
@@ -89,6 +88,7 @@ async def test_public_entry_resolves_conversation_and_fixed_tools(
     ("go2_chat", {"message": ""}, "invalid_skill_parameters"),
     ("go2_chat", {"message": "hello", "actor": "admin"}, "invalid_skill_parameters"),
     ("go2_sport", {"cmd": "UnsupportedFirmwareAction"}, "invalid_skill_parameters"),
+    ("go2_move", {"direction": "forward", "duration": 3.3}, "invalid_skill_parameters"),
 ])
 async def test_invalid_public_requests_never_register_or_dispatch(monkeypatch, skill_id, params, error):
     class UnusedView:
@@ -99,7 +99,7 @@ async def test_invalid_public_requests_never_register_or_dispatch(monkeypatch, s
         "public-invalid", "request", context=ExecutionContext("public-invalid", "visitor", False),
         view=UnusedView(), skill_id=skill_id, params=params, run_id=None, deadline=None,
         on_step=None, resume=False, trace_id=None, parent_run_id=None,
-        allowed_tools=None, tool_guard=None, task_context=None, publish_reply=False)
+        allowed_tools=None, tool_guard=None, task_context=None, publish_reply=False, selection=None)
     assert result["result"] == "rejected"
     assert result["error"] == error
 
@@ -107,7 +107,7 @@ async def test_invalid_public_requests_never_register_or_dispatch(monkeypatch, s
 def test_shared_policy_preserves_explicit_authority_differences():
     for audience in ("peer", "steward"):
         assert permits_skill("go2", "go2_sport", {"cmd": "Hello"}, "user_delegated", audience=audience)
-        assert not permits_skill("go2", "go2_move", {"direction": "forward", "duration": 2},
+        assert not permits_skill("go2", "go2_move", {"direction": "forward", "distance_m": 1},
                                  "agent_autonomous", audience=audience)
         assert not permits_skill("go2", "go2_chat", {"message": "walk"},
                                  "agent_autonomous", audience=audience)

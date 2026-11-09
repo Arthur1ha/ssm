@@ -43,6 +43,12 @@ Go2 的 `states` 仅声明实际姿态和动作，不声明 `unknown` 或“姿�
 
 灯的云端字段通过 `/api/devices`、设备／Agent Card API 与全局 `/api/events` SSE 的统一展示投影附加到 `state`。`control_ts` 是该投影自己的变化游标，控制事实不变时保持不变；每次配置、让位截止时间或到期状态改变时严格递增。消费者将物理 `ts` 与 `control_ts` 分别合并：新控制事件可复用旧物理时间，后续物理上报也不能清除较新的控制字段。`control_ts` 不刷新物理观测的新鲜度，`online` 仍由 MQTT status/LWT 决定；`ism`、RGB、亮度和原始 `ts` 仍来自边缘。该投影不会成为第二份物理状态存储或写入 `ssm/agents/{unit_id}/state`。
 
+## Go2 相对移动
+
+公开 `go2_move` / `MOVE` 技能使用 `direction`、`distance_m`、`angle_deg` 和可选 `speed`。前进、后退、左移、右移必须提供 `distance_m`（0.1–5 米）；原地左转、右转必须提供 `angle_deg`（5–180 度），两个目标参数互斥。`speed` 是平移速度或转向角速度上限。删除移动的 `duration` 参数，旧定时请求拒绝，不用速度乘时间推测走距；LED 等其他技能的持续时间不变。
+
+控制使用现有 Navigator 的速度循环、地图机身净空和停稳判定，相对目标不自动绕行。平移按初始方向上的里程计投影计算实际距离，默认到量容差 0.05 米；原地转角由朝向反馈计算。到量且停稳才返回 `ok`；受阻保留实际移动量和原因；停止未确认返回 `accepted/stop_unconfirmed`。任务超时只是上限，不是位移完成条件。Go2 最终回复经现有人格层表达，校验保留实测量、未完成的目标量和停车事实，不再承诺额外观察或移动；人格模型不可用或事实校验失败时才回退到原始实测说明。
+
 ## 控件与模式
 
 `widgets[].states=[]` 表示所有状态；`placement` 为 `media` 或 `controls`，`order` 控制同区顺序，`visible=false` 隐藏。`requires_connection` 从 `connection_field` 读连接状态；`preview_only` 仅在预览选中当前态时显示。支持的类型只有：

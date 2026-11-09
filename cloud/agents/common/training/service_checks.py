@@ -70,15 +70,11 @@ def test_proposal_confirm_restore_and_revision_conflict(isolated):
     assert [item[0] for item in events].count('training.updated') == 2
 
 
-def test_owner_preview_blocks_confirmation_without_trusted_provider(isolated, monkeypatch):
+def test_owner_rule_can_be_defined_before_requester_facts_are_available(isolated):
     service, session, request, _, _ = isolated
     request['definition']['conditions'] = [{'field': 'requester_is_owner', 'op': 'eq', 'value': True}]
     proposal = service.propose(request, session)
-    assert proposal['confirmation_allowed'] is False
-    assert proposal['reasons'][0]['code'] == 'requester_identity_capability_unavailable'
-    with pytest.raises(service.TrainingError, match='requester_identity_capability_unavailable'):
-        service.confirm(proposal['proposal_id'], 0, session)
-    monkeypatch.setattr(service, '_owner_capability_available', lambda unit_id: True)
+    assert proposal['confirmation_allowed'] is True
     assert service.confirm(proposal['proposal_id'], 0, session)['revision'] == 1
 
 
@@ -123,6 +119,58 @@ def test_expired_proposal_is_gone(isolated, monkeypatch):
     with pytest.raises(service.TrainingError) as error:
         service.confirm(proposal['proposal_id'], 0, session)
     assert error.value.status_code == 410
+
+
+def test_conversation_history_preserves_terminal_cards_and_session_scope(isolated, monkeypatch):
+    service, session, request, _, _ = isolated
+    confirmed = service.propose(request | {'name': '挥手后等一分钟', 'effect_text': '每次挥手完成后，一分钟内不重复挥手。'}, session)
+    service.confirm(confirmed['proposal_id'], 0, session)
+    cancelled = service.propose(request, session)
+    service.cancel(cancelled['proposal_id'], session)
+    expired = service.propose(request, session)
+    monkeypatch.setattr(service, '_now', lambda: expired['expires_at'] + 1)
+    rows = service.list_proposals(session)['proposals']
+    assert [row['proposal_id'] for row in rows] == [confirmed['proposal_id'], cancelled['proposal_id'], expired['proposal_id']]
+    assert rows[0]['confirmed'] and rows[1]['cancelled'] and rows[2]['expired']
+    assert rows[0]['summaryText'] == '挥手后等一分钟'
+    assert rows[0]['changeText'] == '每次挥手完成后，一分钟内不重复挥手。'
+    assert rows[0]['source_text'] == session['training_source'].text
+    assert service.get_proposal(expired['proposal_id'], session)['confirmation_allowed'] is False
+    assert service.list_proposals(session | {'session_id': 'other'}) == {'proposals': []}
+    with pytest.raises(service.TrainingError, match='proposal_not_found'):
+        service.cancel(cancelled['proposal_id'], session | {'session_id': 'other'})
+
+
+def test_pending_revision_replaces_draft_without_creating_competing_rules(isolated):
+    service, session, request, _, _ = isolated
+    first = service.propose(request | {'name': '挥手后等一分钟'}, session)
+    second = service.propose(request | {'name': '挥手后等两分钟', 'supersedes_proposal_id': first['proposal_id'],
+        'definition': {**request['definition'], 'cooldown_s': 120}}, session)
+    assert second['teaching_id'] == first['teaching_id']
+    assert second['beforeSummaryText'] == first['summaryText']
+    assert service.get_proposal(first['proposal_id'], session)['superseded_by'] == second['proposal_id']
+    with pytest.raises(service.TrainingError, match='proposal_superseded'):
+        service.confirm(first['proposal_id'], 0, session)
+    saved = service.confirm(second['proposal_id'], 0, session)
+    assert saved['definition']['cooldown_s'] == 120
+    assert len(service.snapshot(saved['unit_id'], session)['records']) == 1
+    assert not service.snapshot(saved['unit_id'], session)['proposals']
+    service.cancel(first['proposal_id'], session)
+    with pytest.raises(service.TrainingError, match='proposal_already_confirmed'):
+        service.cancel(second['proposal_id'], session)
+
+
+def test_cancel_is_idempotent_and_never_changes_existing_rule(isolated):
+    service, session, request, _, _ = isolated
+    first = service.propose(request, session)
+    saved = service.confirm(first['proposal_id'], 0, session)
+    update = service.propose(request | {'operation': 'update', 'teaching_id': saved['teaching_id'],
+        'expected_revision': 1, 'name': '新规则'}, session)
+    assert service.cancel(update['proposal_id'], session)['cancelled']
+    assert service.cancel(update['proposal_id'], session)['cancelled']
+    with pytest.raises(service.TrainingError, match='proposal_cancelled'):
+        service.confirm(update['proposal_id'], 1, session)
+    assert list_records(saved['unit_id'], space_id='main')[0]['name'] == saved['name']
 
 
 def test_load_ack_exact_versions_pause_remove_and_redaction(isolated):
@@ -236,8 +284,26 @@ async def test_api_internal_ack_and_errors(api, monkeypatch):
     assert (await client.post(path, json=body, headers=headers)).status_code == 409
     p = (await client.post('/api/training/proposals', json=request | {'user_text': '再教一次'})).json()
     monkeypatch.setattr(service, '_now', lambda: p['expires_at'] + 1)
-    assert (await client.get(f"/api/training/proposals/{p['proposal_id']}")).status_code == 410
+    history = await client.get(f"/api/training/proposals/{p['proposal_id']}")
+    assert history.status_code == 200 and history.json()['expired']
     assert (await client.get('/api/training', params={'unit_id': 'other-device'})).status_code == 404
+
+
+async def test_api_history_and_cancel_follow_session_auth_and_csrf(api):
+    client, login, _, request, _, _ = api
+    p = (await client.post('/api/training/proposals', json=request | {'user_text': '以后这样做'})).json()
+    path = f"/api/training/proposals/{p['proposal_id']}/cancel"
+    login('visitor')
+    assert (await client.get('/api/training/proposals')).status_code == 403
+    assert (await client.post(path)).status_code == 403
+    login(csrf=False)
+    assert (await client.post(path)).status_code == 403
+    login()
+    assert (await client.post(path)).json()['cancelled']
+    history = (await client.get('/api/training/proposals', params={'unit_id': request['unit_id']})).json()
+    assert len(history['proposals']) == 1 and history['proposals'][0]['cancelled']
+    assert (await client.post(f"/api/training/proposals/{p['proposal_id']}/confirm", json={
+        'expected_revision': 0, 'capability_hash': p['capability_hash']})).status_code == 409
 
 
 async def test_internal_proposal_uses_adapter_source_and_cannot_confirm(api):

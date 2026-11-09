@@ -57,6 +57,73 @@ def test_selection_validation(monkeypatch):
             validate_training_selection(selected, session)
 
 
+def test_pending_selection_is_bound_to_session_device_and_transition(monkeypatch):
+    from cloud.api.intents import validate_training_selection
+    from cloud.agents.common.training import service
+    from fastapi import HTTPException
+    monkeypatch.setattr(service, 'snapshot', lambda *_: {
+        'catalog': {'transitions': [{'id': 'tr_1', 'trainable': True}]}, 'records': []})
+    preview = {'unit_id': 'go2', 'teaching_id': 't1', 'transition_ids': ['tr_1']}
+    monkeypatch.setattr(service, 'get_proposal', lambda *_: preview)
+    selection = {'unit_id': 'go2', 'transition_id': 'tr_1', 'proposal_id': 'p1'}
+    session = {'session_id': 's', 'actor': 'admin', 'expires_at': 9999999999}
+    assert validate_training_selection(selection, session) == selection
+    preview['cancelled'] = True
+    with pytest.raises(HTTPException):
+        validate_training_selection(selection, session)
+
+
+@pytest.mark.asyncio
+async def test_pending_create_revision_uses_trusted_selection_and_same_base():
+    calls = []
+    definition = {'transition_ids': ['tr_1'], 'origins': ['agent_autonomous'], 'conditions': [],
+                  'cooldown_s': 120, 'defaults': {}, 'trigger': None}
+    async def api(path, payload, context, *, method='POST'):
+        if method == 'GET':
+            return {'catalog': {'hash': 'a' * 64}, 'records': [], 'proposals': [{
+                'proposal_id': 'p1', 'operation': 'create', 'expected_revision': 0, 'teaching_id': 't1'}]}
+        calls.append(payload)
+        return {'proposal_id': 'p2'}
+    context = {'selection': {'unit_id': 'go2', 'transition_id': 'tr_1', 'proposal_id': 'p1'}}
+    result = await propose_training({'operation': 'create', 'unit_id': 'go2', 'name': '挥手后等两分钟',
+        'effect_text': '两分钟内不重复挥手。', 'definition': definition}, context, api)
+    assert result['proposal_id'] == 'p2'
+    assert calls[0]['expected_revision'] == 0
+    assert calls[0]['supersedes_proposal_id'] == 'p1'
+    assert calls[0]['name'] == '挥手后等两分钟'
+    with pytest.raises(ValueError, match='selection_proposal_mismatch'):
+        await propose_training({'operation': 'create', 'unit_id': 'go2', 'name': 'test',
+            'definition': definition, 'supersedes_proposal_id': 'other'}, context, api)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('pending', [False, True])
+async def test_rule_reference_can_change_action_and_regenerates_presentation(pending):
+    calls = []
+    original = {'teaching_id': 't1', 'revision': 1, 'name': '旧动作规则',
+                'effect_text': '旧动作说明', 'definition': {'transition_ids': ['tr_old']}}
+    async def api(path, payload, context, *, method='POST'):
+        if method == 'GET':
+            return {'catalog': {'hash': 'a' * 64}, 'records': [original], 'proposals': [{
+                'proposal_id': 'p1', 'operation': 'update', 'expected_revision': 1, 'teaching_id': 't1'}]}
+        calls.append(payload)
+        return {'proposal_id': 'p2'}
+    definition = {'transition_ids': ['tr_new'], 'origins': ['agent_autonomous'], 'conditions': [],
+                  'cooldown_s': 120, 'defaults': {}, 'trigger': None}
+    # A pending update may already have changed the original saved target. Its
+    # selection points to the draft's new target, not the saved definition.
+    selection = {'unit_id': 'go2', 'transition_id': 'tr_pending' if pending else 'tr_old',
+                 **({'proposal_id': 'p1'} if pending else {'teaching_id': 't1'})}
+    arguments = {'operation': 'update', 'unit_id': 'go2', 'teaching_id': 't1',
+                 'base_revision': 1, 'definition': definition}
+    with pytest.raises(ValueError, match='rule_summary_required'):
+        await propose_training(arguments, {'selection': selection}, api)
+    await propose_training({**arguments, 'name': '改成新动作后等两分钟'}, {'selection': selection}, api)
+    assert calls[0]['definition']['transition_ids'] == ['tr_new']
+    assert calls[0]['name'] == calls[0]['effect_text'] == '改成新动作后等两分钟'
+    assert calls[0].get('supersedes_proposal_id') == ('p1' if pending else None)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('role', ['steward', 'lamp', 'go2'])
 async def test_scripted_model_uses_role_schemas_and_proposal_only(role, tmp_path, monkeypatch):
@@ -105,7 +172,7 @@ async def test_scripted_model_uses_role_schemas_and_proposal_only(role, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_create_derives_name_and_rejects_wrong_selection():
+async def test_create_requires_readable_summary_and_rejects_wrong_bare_selection():
     calls = []
     async def api(path, payload, context, *, method='POST'):
         calls.append((method, payload))
@@ -115,13 +182,16 @@ async def test_create_derives_name_and_rejects_wrong_selection():
     definition = {'transition_ids': ['tr_1'], 'origins': ['agent_autonomous'], 'conditions': [],
                   'cooldown_s': None, 'defaults': {}, 'trigger': None}
     context = {'selection': {'unit_id': 'go2', 'transition_id': 'tr_1'}, 'source_text': '以后这样'}
-    await propose_training({'operation': 'create', 'unit_id': 'go2', 'definition': definition}, context, api)
-    assert calls[-1][1]['name'] == 'standing → greeting'
+    with pytest.raises(ValueError, match='rule_summary_required'):
+        await propose_training({'operation': 'create', 'unit_id': 'go2', 'definition': definition}, context, api)
+    await propose_training({'operation': 'create', 'unit_id': 'go2', 'name': '挥手后等两分钟', 'definition': definition}, context, api)
+    assert calls[-1][1]['name'] == '挥手后等两分钟'
+    assert calls[-1][1]['effect_text'] == '挥手后等两分钟'
     assert calls[-1][1]['expected_revision'] == 0
     assert calls[-1][1]['definition']['cooldown_s'] is None
     assert calls[-1][1]['definition']['trigger'] is None
     # Runner's exclude_none removes required nullable nested fields.
-    await propose_training({'operation': 'create', 'unit_id': 'go2', 'definition': {k: v for k, v in definition.items() if v is not None}}, context, api)
+    await propose_training({'operation': 'create', 'unit_id': 'go2', 'name': '挥手后等两分钟', 'definition': {k: v for k, v in definition.items() if v is not None}}, context, api)
     assert calls[-1][1]['definition']['trigger'] is None
     with pytest.raises(ValueError):
         await propose_training({'operation': 'create', 'unit_id': 'go2', 'definition': definition},

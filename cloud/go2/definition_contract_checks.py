@@ -96,16 +96,18 @@ def test_reconnect_resets_mode_in_the_fact_store():
 
 
 @pytest.mark.asyncio
-async def test_timed_move_omitted_speed_uses_the_changed_declaration(monkeypatch):
+async def test_relative_move_omitted_speed_uses_the_changed_declaration(monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from cloud.go2.tools import tools, executor
+    from cloud.go2.navigation.navigator import navigator
     monkeypatch.setitem(actions.VELOCITY_LIMITS, "x", .2)
     monkeypatch.setattr(tools, "go2", SimpleNamespace(is_connected=True))
-    send = AsyncMock(return_value={"result": "accepted"})
-    monkeypatch.setattr(executor, "execute_action", send)
-    monkeypatch.setattr(tools, "control_lease", SimpleNamespace(snapshot=lambda: None))
-    result = await tools.go2_move("forward", duration=.001)
-    assert send.await_args_list[0].args == ("Move", {"x": .2, "y": 0.0, "z": 0.0})
-    assert send.await_args_list[1].args == ("StopMove",)
-    assert result["result"] == "accepted"
+    move = AsyncMock(return_value={"result": "ok", "distance_m": 1.})
+    monkeypatch.setattr(navigator, "move_relative", move)
+    result = await tools.go2_move("forward", distance_m=1.)
+    assert move.await_args.args == ("forward",)
+    assert move.await_args.kwargs['speed'] == .2
+    assert move.await_args.kwargs['distance_m'] == 1.
+    assert 'duration' not in get_card_skill('go2_move')['params_schema']['properties']
+    assert result["result"] == "ok"

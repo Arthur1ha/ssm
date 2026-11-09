@@ -1,6 +1,6 @@
 /* Card-owned spatial layout. State clicks delegate actions; edges inspect rules. */
 function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', views = {},
-  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram, trainingEdges = [] }) {
+  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
   const svgRef = useRef(null);
@@ -148,7 +148,6 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
           const automatic = rules.every(rule => !rule.transition.action);
           const running = pendingCommand && rules.some(rule => [rule.transition.trigger,rule.transition.action].includes(pendingCommand));
           const path = routes.get(edge.id);
-          const trained = edge.directions.some(d => d.edges.some(e => trainingEdges.some(a => a.transition_id === e.transition.id && a.teachings?.some(t => t.desired_status !== 'removed'))));
           const focused = selectedState && (edge.src === selectedState || edge.dst === selectedState);
           const emphasized = selected || focused || (!selectedState && !selectedLink && points[direction.src]?.node.current && !disabled);
           const title = edge.directions.length > 1 ? `${source.node.label} ↔ ${target.node.label}`
@@ -168,7 +167,6 @@ function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', v
             <path d={path} className="fsm-whiteboard__line"
               markerStart={reverse ? `url(#${marker.current})` : undefined}
               markerEnd={reverse ? undefined : `url(#${marker.current})`}/>
-            {trained && <g className="training-edge-badge" transform={`translate(${(source.x+target.x)/2} ${(source.y+target.y)/2})`}><circle r="12"/><text textAnchor="middle" dy="4">教</text></g>}
           </g>;
         })}
         {graphNodes.map(node => {

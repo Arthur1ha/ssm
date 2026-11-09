@@ -155,6 +155,18 @@ async function checkInteractions() {
     Go2AssetsDrawer: () => null, apiErrorText: error => error.message,
   });
   for (const file of files) vm.runInContext(compile(file), ui, { filename: file });
+  const originalRows = [
+    {role:'user',text:'重复要求',runId:'run-old',requestKey:'old'},
+    {role:'assistant',text:'原回复',requestKey:'old'},
+    {role:'user',text:'重复要求',runId:'run-new',requestKey:'new'},
+  ];
+  const cardRows = ui.window.trainingTimeline(originalRows,[
+    {proposal_id:'p-old',source_run_id:'run-old',source_text:'重复要求',created_at:1},
+    {proposal_id:'p-next',source_run_id:'run-old',source_text:'重复要求',created_at:2},
+  ]);
+  assert.deepEqual(Array.from(cardRows,row=>row.role==='rule' ? row.proposal.proposal_id : row.runId || row.text),
+    ['run-old','原回复','p-old','p-next','run-new'], 'Rule cards must anchor exact source runs and preserve chronological order');
+
   const sm = { state_field: 'fsm_state', connection_field: 'connected', states: ['standing', 'sitting'],
     transitions: [], views: { standing: {label:'站立'}, sitting: {label:'坐下'} },
     regions: [{ id:'body', label:'身体', state_field:'body_state', states:['standing','sitting'], views:{} }] };
@@ -284,16 +296,25 @@ async function checkInteractions() {
       await page.addScriptTag({ content: fs.readFileSync(process.env.GO2_PREVIEW_REACT_DOM, 'utf8') });
     } else await page.addScriptTag({ content: runtime });
     console.log('Browser React runtime:', await page.evaluate(() => React.version));
-    await page.addScriptTag({ content: `window.__calls=[]; window.__sources=[];window.__velocities=[];
+    await page.addScriptTag({ content: `if(!crypto.randomUUID)crypto.randomUUID=()=>('test-'+Math.random()).replace('.','');
+      window.__calls=[]; window.__sources=[];window.__velocities=[];
       window.__teachings=[];window.__teachingReads=[];
       const listeners=new EventTarget();
       window.__emit=detail=>listeners.dispatchEvent(new CustomEvent('server-event',{detail}));
-      window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;
+      window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;window.__proposals=[];
       window.apiClient={addEventListener:(...a)=>listeners.addEventListener(...a),removeEventListener:(...a)=>listeners.removeEventListener(...a),async request(url,options={}){
         __requests.push({url,options});
-        if(url.startsWith('/api/training/proposals/') && url.endsWith('/confirm')){if(window.__conflict) throw Object.assign(new Error('conflict'),{status:409});return {saved:true};}
-        if(url.startsWith('/api/training/proposals/'))return __proposal;
-        if(url==='/api/training/proposals')return __proposal;
+        if(url.startsWith('/api/training/proposals/') && url.endsWith('/confirm')){
+          if(window.__conflict) throw Object.assign(new Error('conflict'),{status:409});
+          const p=__proposals.find(p=>url.includes('/'+p.proposal_id+'/'));p.confirmed=true;
+          if(p.operation==='remove')__training.records=__training.records.filter(r=>r.teaching_id!==p.teaching_id);
+          return {saved:true};}
+        if(url.startsWith('/api/training/proposals/') && url.endsWith('/cancel')){const p=__proposals.find(p=>url.includes('/'+p.proposal_id+'/'));p.cancelled=true;return p;}
+        if(url.startsWith('/api/training/proposals/'))return structuredClone(__proposals.find(p=>url.endsWith('/'+p.proposal_id)) || __proposal);
+        if(url.startsWith('/api/training/proposals') && options.method!=='POST')return {proposals:structuredClone(__proposals)};
+        if(url==='/api/training/proposals'){
+          __proposal={...__proposal,proposal_id:'remove1',superseded_by:null,superseded:false,cancelled:false,operation:'remove',teaching_id:options.body.teaching_id,created_at:Date.now()/1000,confirmed:false};
+          __proposals.push(__proposal);return __proposal;}
         if(url.startsWith('/api/training/') && options.method==='PUT')return {};
         if(url.startsWith('/api/teachings')){__teachingReads.push(url);return __teachings;}
         if(url.includes('/training'))return __training;
@@ -308,13 +329,14 @@ async function checkInteractions() {
         React.createElement('p',null,'浏览器验证 · 模拟状态，不连接真机'),
         React.createElement('textarea',{placeholder:props.placeholder,disabled:props.disabled,'aria-label':'设备对话',style:{marginTop:18,width:'100%',height:60,background:'#17171b',color:'#ccc',border:'1px solid #333',borderRadius:10,padding:12}}));` });
     for (const name of files) await page.addScriptTag({ content: compile(name) });
+    if (process.argv.includes('--training-only')) await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
     await page.addScriptTag({ content: `window.__velocitySchema=${JSON.stringify(velocitySchema)};window.__lampCard=${JSON.stringify(lampCard)};window.__sm=${JSON.stringify(sm)};
       window.__state={state_schema_version:2,epoch:'a',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',body_confirmation:'observed',control_mode:'normal',autonomy_mode:'manual',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore']};
       window.__manualCommands=__sm.regions.find(region=>region.id==='body').transitions.filter(t=>t.dispatch_only).map(t=>t.action);
       __state.available_manual_actions=__manualCommands;
       window.__card={unit_id:'go2',device_id:'go2',name:'Go2 机器狗',agent_type:'robot',_online:true,state_machine:__sm,transport:{state_stream:'/api/go2/connection/stream'},widgets:[],modes:[],skills:[]};
       const appRoot=ReactDOM.createRoot(document.getElementById('root'));
-      window.__renderState=(next,card=__card,actor='admin')=>{__state=next;appRoot.render(React.createElement(FsmDevicePage,{unitId:card.unit_id,device:card,liveState:{state:next},actor,onBack(){}}));};
+      window.__renderState=(next,card=__card,actor='admin')=>{__state=next;appRoot.render(React.createElement(FsmDevicePage,{unitId:card.unit_id,device:card,liveState:{state:next},actor,sessionId:'simulated_session',onBack(){}}));};
       __renderState(__state);` });
 
     await page.waitForSelector('.device-state-board');
@@ -371,48 +393,90 @@ async function checkInteractions() {
         const edge=__sm.regions.find(r=>r.id==='body').transitions.find(t=>t.action==='Sit' && t.src==='standing');
         edge.id='tr_sit'; edge.training_fixed_params=[];
         __training.catalog.transitions=[{id:'tr_sit',trainable:true}];
-        __training.records=[{teaching_id:'teach1',revision:1,transition_ids:['tr_sit'],source_text:'坐下前等三秒',transitionLabel:'站立 → 坐下',changeText:'完成后冷却 3 秒',scopeText:'用户委托请求',desired_status:'enabled',load_status:'loaded',execution_reasons:[]}];
+        __training.records=[{unit_id:'go2',teaching_id:'teach1',revision:1,transition_ids:['tr_sit'],name:'坐下后至少间隔三秒再坐',summaryText:'坐下后至少间隔三秒再坐',source_text:'坐下前等三秒',desired_status:'enabled'}];
         __training.edge_annotations=[{transition_id:'tr_sit',teachings:[{desired_status:'enabled'}]}];
         __renderState(__state);
         __emit({type:'training.updated',unit_id:'go2',cursor:1});
       });
-      await page.waitForSelector('.training-edge-badge');
+      await page.waitForFunction(()=>__requests.some(r=>r.url.includes('/api/devices/go2/training')));
+      assert.equal(await page.$('.training-edge-badge'),null,'Rules must not add badges to graph lines');
       const count=await page.evaluate(()=>__calls.length);
       await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
       await page.waitForSelector('.training-inspector');
+      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('坐下后至少间隔三秒再坐'));
       assert.equal(await page.evaluate(()=>__calls.length),count,'Line inspection sent a command');
-      assert.equal(await page.$eval('.training-inspector',e=>e.textContent.includes('冷却 3 秒')),true);
-      await page.click('.training-inspector button');
-      assert.equal(await page.$eval('.training-selection',e=>e.textContent.includes('所选转换')),true);
+      assert.equal(await page.$('.training-inspector button'),null,'Line details must not expose a teaching entry');
+      await page.keyboard.press('Escape');
+      await page.type('.device-page__chat input','以后坐下后等三秒才能再次坐下');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(()=>__calls.some(r=>r.action==='chat'));
       await page.evaluate(()=>{
-        __proposal={proposal_id:'p1',unit_id:'go2',expected_revision:1,capability_hash:'hash',transition_ids:['tr_sit'],transitionLabel:'站立 → 坐下',changeText:'完成后冷却 3 秒',scopeText:'用户委托请求',confirmation_allowed:true,after:{source_text:'坐下前等三秒'}};
+        const call=__calls.find(r=>r.action==='chat');
+        __proposal={proposal_id:'p1',unit_id:'go2',operation:'create',source_run_id:call.params.task_id,source_text:call.params.message,created_at:1,expected_revision:0,capability_hash:'hash',transition_ids:['tr_sit'],summaryText:'坐下后至少间隔三秒再坐',changeText:'坐下完成后，三秒内不重复坐下。',confirmation_allowed:true,after:{name:'坐下后至少间隔三秒再坐',source_text:call.params.message}};
+        __proposals.push(__proposal);
         __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p1'});
       });
-      await page.waitForSelector('.training-change');
-      await page.click('.training-change .training-actions button:last-child');
-      await page.waitForFunction(()=>__requests.some(r=>r.url.endsWith('/confirm')));
-      assert.deepEqual(await page.evaluate(()=>__requests.find(r=>r.url.endsWith('/confirm')).options.body),{expected_revision:1,capability_hash:'hash'});
-      assert.equal(await page.evaluate(()=>__calls.length),count,'Confirmation sent a device command');
-      await page.click('.device-header__settings');
-      await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('伙伴训练')).click());
-      await page.waitForSelector('.training-drawer');
-      await page.click('.training-record .training-actions button:nth-child(2)');
-      await page.waitForFunction(()=>__requests.some(r=>r.options.method==='PUT'));
-      assert.deepEqual(await page.evaluate(()=>__requests.find(r=>r.options.method==='PUT').options.body),{enabled:false,expected_revision:1});
-      await page.click('.training-record .training-actions button:last-child');
-      await page.waitForSelector('.training-change');
-      assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/proposals' && r.options.body.operation==='remove')),true);
+      await page.waitForSelector('.chat-messages .training-change');
+      assert.equal(await page.$eval('.chat-messages',node=>node.textContent.split('以后坐下后等三秒才能再次坐下').length-1),1,'Proposal duplicated the original user message');
+      assert.equal(await page.$eval('.training-change',node=>/待确认|用户委托|已加载|JSON/.test(node.textContent)),false);
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='继续修改').click());
+      await page.type('.device-page__chat input','改成五秒');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(()=>__calls.filter(r=>r.action==='chat').length===2);
+      assert.equal(await page.evaluate(()=>__calls.filter(r=>r.action==='chat')[1].params.selection.proposal_id),'p1','Draft revision lost its selected proposal');
+      await page.evaluate(()=>{
+        const call=__calls.filter(r=>r.action==='chat')[1];
+        __proposals[0].superseded_by='p2';
+        __proposals.push({...__proposal,proposal_id:'p2',superseded_by:null,source_run_id:call.params.task_id,source_text:call.params.message,created_at:2,summaryText:'坐下后至少间隔五秒再坐',changeText:'坐下完成后，五秒内不重复坐下。',before:{name:__proposal.summaryText},beforeSummaryText:__proposal.summaryText});
+        __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p2'});
+      });
+      await page.waitForFunction(()=>document.querySelectorAll('.chat-messages .training-change').length===2);
+      await page.waitForFunction(()=>[...document.querySelectorAll('.training-change')].some(node=>node.textContent.includes('原来：坐下后至少间隔三秒再坐')));
       await page.evaluate(()=>window.__conflict=true);
-      await page.click('.training-change .training-actions button:last-child');
-      await page.waitForFunction(()=>document.querySelector('.training-change')?.textContent.includes('草稿仍保留'));
-      assert.equal(await page.evaluate(()=>__calls.length),count,'Removal preview or conflict dispatched a device command');
-      await page.click('.training-change .training-actions button:first-child');
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='就这样').click());
+      await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('规则已经变化'));
+      await page.evaluate(()=>window.__conflict=false);
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='就这样').click());
+      await page.waitForFunction(()=>__proposals.find(p=>p.proposal_id==='p2').confirmed);
+      await page.waitForFunction(()=>document.querySelectorAll('.training-change .training-actions').length===0);
+      assert.equal(await page.$$('.chat-messages .training-change').then(nodes=>nodes.length),2,'Confirmation removed the history card');
+      assert.equal(await page.evaluate(()=>__calls.filter(r=>r.action!=='chat').length),0,'Confirmation sent a device action');
+      await page.evaluate(()=>{
+        __proposals.push({...__proposal,proposal_id:'p3',superseded_by:null,source_text:'另一条规则',created_at:3});
+        __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p3'});
+      });
+      await page.waitForFunction(()=>document.querySelectorAll('.training-change').length===3);
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='取消').click());
+      await page.waitForFunction(()=>__proposals.find(p=>p.proposal_id==='p3').cancelled);
+      await page.click('.device-header__settings');
+      await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备规则')).click());
+      await page.waitForSelector('.training-drawer');
+      assert.equal(await page.$eval('.training-drawer',node=>/已加载|暂停|启用|伙伴训练/.test(node.textContent)),false);
+      await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='在对话中修改').click());
+      await page.waitForSelector('.training-selection');
+      assert.equal(await page.$eval('.training-selection',node=>node.textContent.includes('坐下后至少间隔三秒再坐')),true);
+      await page.click('.training-selection button');
+      await page.click('.device-header__settings');
+      await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备规则')).click());
+      await page.waitForSelector('.training-drawer');
+      await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='删除').click());
+      await page.waitForFunction(()=>document.querySelectorAll('.training-record').length===0);
+      assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/proposals' && r.options.body.operation==='remove')),true);
+      await page.keyboard.press('Escape');
+      await page.evaluate(()=>{
+        __renderState({...__state},__lampCard);
+      });
+      await page.waitForFunction(()=>!document.querySelector('.device-header')?.textContent.includes('Go2'));
+      await page.evaluate(()=>__renderState({...__state},__card));
+      await page.waitForFunction(()=>document.querySelectorAll('.chat-messages .training-change').length>=3);
+      assert.equal(await page.$eval('.chat-messages',node=>node.textContent.includes('改成五秒')),true,'Returning to device lost the rule conversation');
       for (const width of [768,1440,390]) {
         await page.setViewport({width,height:844,deviceScaleFactor:1,hasTouch:true,isMobile:true});
         assert.equal(await page.$eval('.fsm-whiteboard__viewport',e=>e.getBoundingClientRect().width>0),true);
       }
+      await page.screenshot({path:'/tmp/ssm-rule-chat-preview.png',fullPage:true});
       assert.deepEqual(errors,[]);
-      console.log('PASS: simulated edge inspection, confirmation without hardware dispatch, pause, removal preview, conflict preservation and responsive viewport.');
+      console.log('PASS: concise edge details without teaching entry, in-chat rule cards, draft revision and before/after, conflict preservation, confirmation/cancellation history, direct deletion, transcript restoration and responsive viewport.');
       return;
     }
     if (process.argv.includes('--reachability-only')) {

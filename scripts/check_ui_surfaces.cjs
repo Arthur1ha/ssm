@@ -49,7 +49,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
       await page.addStyleTag({ content: ':root{--font-sans:SurfaceCheckCJK,sans-serif;--font-mono:SurfaceCheckCJK,monospace}button,input,select{font-family:var(--font-sans)}' });
     }
     await page.addScriptTag({ content: `
-      window.getAgentDisplayName = () => '空间管家';
+      window.getAgentDisplayName = id => ({go2:'呆呆狗',lamp:'皮皮灯'}[typeof id === 'string' ? id : id.unit_id] || '空间管家');
       window.AgentPersonalitySettings = () => React.createElement('p', null, '人格设置预览');
       const fixtures = {
         '/api/admin/space': {name:'测试空间',device_ids:[]},
@@ -62,6 +62,12 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
       };
       function SurfaceHarness() {
         const [active, setActive] = React.useState('');
+        const [rules, setRules] = React.useState([
+          {unit_id:'go2',teaching_id:'wave',desired_status:'enabled',summaryText:'每次挥手后间隔十秒'},
+          {unit_id:'lamp',teaching_id:'blink',desired_status:'enabled',summaryText:'听到声音时闪两次'},
+          {unit_id:'go2',teaching_id:'old',desired_status:'removed',summaryText:'已经删除的规则'},
+        ]);
+        const loadAll = React.useCallback(async () => {}, []);
         const close = () => setActive('');
         return React.createElement(React.Fragment, null,
           React.createElement(SpaceMenu, {
@@ -69,7 +75,11 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
             onSpaceSettings:()=>setActive('space'),onOrchestratorSettings:()=>setActive('agent'),
             onPeople:()=>setActive('people'),onExit:close,
           }),
-          active === 'training' && React.createElement(TrainingDrawer,{unitId:'go2',training:{records:[]},onClose:close}),
+          active === 'training' && React.createElement(TrainingDrawer,{
+            unitId:'',agents:[{unit_id:'go2'},{unit_id:'lamp'}],
+            training:{records:[],allRecords:rules,loadAll,remove:async record=>setRules(previous=>previous.filter(item=>item.teaching_id!==record.teaching_id))},
+            onRevise:record=>{window.__revised=record;close();},onClose:close,
+          }),
           ...[[AdminInviteDrawer,'invite'],[AdminSpaceDrawer,'space'],
             [OrchestratorSettingsDrawer,'agent'],[SpacePeopleDrawer,'people']].map(([Component,key]) =>
               React.createElement(Component,{key,open:active===key,onClose:close})),
@@ -119,7 +129,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
     };
     const drawers = [
       ['分享空间', '.invite-drawer', '分享空间'],
-      ['伙伴训练', '.training-drawer', '伙伴训练'],
+      ['设备规则', '.training-drawer', '设备规则'],
       ['空间管理', '[aria-labelledby="space-drawer-title"]', '空间管理'],
       ['空间管家', '.orchestrator-settings-drawer', '空间管家管理'],
       ['人员库', '[aria-labelledby="space-people-title"]', '空间人员库'],
@@ -145,7 +155,13 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
         await page.waitForSelector(close, { visible: true });
         await assertClosed();
         await assertLayout(selector);
-        await screenshot(`${menuText === '伙伴训练' ? 'training' : selector.includes('people') ? 'people' : menuText === '分享空间' ? 'invite' : menuText === '空间管理' ? 'space' : 'agent'}-${width}`);
+        if (menuText === '设备规则') {
+          assert.deepEqual(await page.$$eval('.training-device-group h3', nodes => nodes.map(node=>node.textContent)), ['呆呆狗','皮皮灯']);
+          assert.equal(await page.$$eval('.training-record', nodes => nodes.length), 2);
+          assert.equal(await page.$('.training-device-select'), null, 'Rules should be grouped without a device selector');
+          assert.equal(await page.$eval(selector, node => /待确认|未应用|已保存|已加载|暂停|追改|教它/.test(node.textContent)), false);
+        }
+        await screenshot(`${menuText === '设备规则' ? 'training' : selector.includes('people') ? 'people' : menuText === '分享空间' ? 'invite' : menuText === '空间管理' ? 'space' : 'agent'}-${width}`);
         await page.click(close);
         await page.waitForFunction(selector => !document.querySelector(selector) || getComputedStyle(document.querySelector(selector)).visibility === 'hidden', {}, selector);
       }
@@ -156,6 +172,15 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
         assert.equal(await page.evaluate(() => Boolean(document.activeElement.closest('.space-drawer,.invite-drawer'))), false);
       }
     }
+    await page.click('.space-menu__trigger');
+    await page.evaluate(() => [...document.querySelectorAll('.space-menu__item')].find(button=>button.textContent.includes('设备规则')).click());
+    await page.waitForSelector('.training-record');
+    await page.click('.training-record .training-actions button:last-child');
+    await page.waitForFunction(()=>document.querySelectorAll('.training-record').length===1);
+    assert.equal(await page.$eval('.training-drawer', node=>node.textContent.includes('每次挥手后间隔十秒')), false, 'Deleted rule remained visible');
+    await page.click('.training-record .training-actions button:first-child');
+    await page.waitForFunction(()=>!document.querySelector('.training-drawer'));
+    assert.equal(await page.evaluate(()=>window.__revised.unit_id), 'lamp', 'Revision lost the selected device');
     assert.deepEqual(errors, []);
     console.log('PASS: real closed drawers do not paint or receive focus; management menu and five drawers open/close; 320/390/1280px layout; no network or browser errors.');
   } finally { await browser.close(); }

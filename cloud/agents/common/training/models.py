@@ -49,6 +49,7 @@ class Revision(StrictModel):
     unit_id: Identifier
     space_id: Identifier
     name: StrictStr = Field(min_length=1, max_length=120)
+    effect_text: StrictStr | None = Field(default=None, min_length=1, max_length=1200)
     source_text: StrictStr = Field(min_length=1, max_length=4000)
     revision: StrictInt = Field(ge=1)
     definition: Definition
@@ -86,6 +87,8 @@ class ProposalRequest(StrictModel):
     operation: Literal['create', 'update', 'remove']
     teaching_id: Identifier | None = None
     name: StrictStr | None = Field(default=None, min_length=1, max_length=120)
+    effect_text: StrictStr | None = Field(default=None, min_length=1, max_length=1200)
+    supersedes_proposal_id: Identifier | None = None
     definition: Definition | None = None
     expected_revision: StrictInt = Field(ge=0)
     capability_hash: CapabilityHash
@@ -99,7 +102,7 @@ class ProposalRequest(StrictModel):
             raise ValueError('update/remove requires teaching_id and positive expected_revision')
         if self.operation == 'update' and self.definition is None:
             raise ValueError('update requires definition')
-        if self.operation == 'remove' and (self.definition is not None or self.name is not None):
+        if self.operation == 'remove' and (self.definition is not None or self.name is not None or self.effect_text is not None):
             raise ValueError('remove cannot change name or definition')
         return self
 
@@ -117,6 +120,8 @@ class Proposal(StrictModel):
     record: Record
     created_at: Timestamp
     expires_at: Timestamp
+    cancelled_at: Timestamp | None = None
+    superseded_by: Identifier | None = None
 
     @model_validator(mode='after')
     def valid_binding(self):

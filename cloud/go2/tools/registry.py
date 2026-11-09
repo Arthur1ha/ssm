@@ -36,7 +36,7 @@ class ToolSpec:
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     s.name: s for s in (
         ToolSpec("go2_sport", sport_description(), sport_tool_schema(), motion=True, timeout_s=max(ACTIONS[cmd].timeout_s for cmd in SPORT_COMMANDS) + 10, result_rule="device"),
-        ToolSpec("go2_move", "按方向、速度和时长定时移动；实际位移未确认", move_tool_schema(), motion=True, timeout_s=35, result_rule="device"),
+        ToolSpec("go2_move", "按里程计闭环执行相对移动：前进、后退、左移或右移提供 distance_m；原地左转或右转提供 angle_deg。speed 是可选速度上限。到量后停稳才完成，受阻返回实际位移和原因；不接受 duration，不把米数换算成时间，不把步数猜成米数", move_tool_schema(), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_observe", "用摄像头回答当前画面问题", _schema({"question": _string(default="描述你看到的场景")}), timeout_s=32),
         ToolSpec("go2_life", "休息保持连接和姿态；唤醒回待命；开启探索需管理员，停止探索不重放旧任务", life_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_status", "查询设备连接和姿态", _schema({}), timeout_s=3),
@@ -141,7 +141,7 @@ CARD_SKILLS = {
     },
     "go2_move": {
         "tool_name": "go2_move",
-        "name": "短距离定时移动",
+        "name": "按距离移动或按角度转向",
         "tags": ["motion", "robot"],
         "invoke": {"action": "MOVE"},
     },

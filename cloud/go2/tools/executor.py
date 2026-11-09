@@ -308,8 +308,7 @@ async def execute_action(command: str, params: dict | None = None, *,
 
 
 def check_motion_preconditions(name: str, params: dict, context: ExecutionContext) -> None:
-    # Navigation and timed movement require the Move source states; their own
-    # tool schema has already validated goal/direction parameters.
+    # Navigation and relative movement require the Move source states.
     command = params.get("cmd") if name == "go2_sport" else "Move"
     check_direct_motion(command, {}, context)
 
@@ -340,6 +339,9 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
         return _audit(name, context, {"result": "error", "error": "unknown_tool", "message": f"未知工具: {name}"})
     try:
         params = validate_params(spec.params_schema, params if params is not None else {})
+        if name == "go2_move":
+            from cloud.go2.actions import validate_move_goal
+            validate_move_goal(params)
     except ValueError as exc:
         return _audit(name, context, {"result": "rejected", "error": "invalid_params", "message": str(exc)})
     if context.actor not in spec.roles:
@@ -348,7 +350,7 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
         return _audit(name, context, {"result": "rejected", "error": "visitor_persistence_denied"})
     try:
         validate_execution_context(context)
-        if spec.motion and name not in {"go2_sport", "go2_move"}:
+        if spec.motion and name != "go2_sport":
             _check_motion_owner(None, context)
             if context.origin_kind != 'agent_autonomous':
                 from cloud.go2.service import prepare_user_interaction

@@ -2,7 +2,7 @@
 const { useState, useEffect, useRef } = React;
 
 function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAgentName, deviceName,
-                     onSend, placeholder, variant, disabled, open, children }) {
+                     onSend, placeholder, variant, disabled, open, children, training, onReviseRule, focusKey }) {
   const [input,  setInput]  = useState('');
   const msgsRef  = useRef(null);
   const inputRef = useRef(null);
@@ -18,6 +18,8 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
       setTimeout(() => inputRef.current?.focus(), 360);
     }
   }, [open, variant]);
+
+  useEffect(() => { if (focusKey) inputRef.current?.focus(); }, [focusKey]);
 
   const handleSend = () => {
     const t = input.trim();
@@ -37,6 +39,10 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
           const displayName = defaultAgentNames[m.agent] ? getAgentDisplayName(m.agent)
             : m.agentName || (m.agent === thinkingAgent && deviceName)
             || getAgentDisplayName(m.agent);
+          if (m.role === 'rule') return <div key={m.id} className="chat-rule-message" style={{alignSelf:'flex-start',width:'100%',maxWidth:420}}>
+            <TrainingPreview proposal={m.proposal} error={training?.proposalErrors?.[m.proposal.proposal_id]}
+              onConfirm={training?.confirm} onCancel={training?.cancel} onRevise={onReviseRule}/>
+          </div>;
           if (m.role === 'process') {
             const previous = messages[i - 1];
             const startsGroup = previous?.role !== 'process' || previous.requestKey !== m.requestKey
@@ -112,6 +118,7 @@ function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAg
             </div>
           );
         })()}
+        {training?.error && <p role="alert">{training.error}</p>}
         <div/>
       </div>
 

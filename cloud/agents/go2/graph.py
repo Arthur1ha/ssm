@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
 from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
-from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt, valid_search_reply
+from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt, valid_search_reply, valid_move_reply
 from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
 from cloud.agents.go2.tools.declarations import READ_ONLY_TOOLS, tool_schemas
 from cloud.agents.common.replies import needs_persona_reply, valid_persona_reply, factual_fallback
@@ -152,7 +152,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         messages = go2_messages(current, supplement=supplemental,
                                 memory=remembered.text if remembered.fragments else "")
         if selection:
-            messages.append(HumanMessage(content="选中的可信转换：" + str(selection)))
+            messages.append(HumanMessage(content="本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(selection)))
         if task_context is not None:
             messages.append(HumanMessage(content="【本轮可信任务状态】\n" + str(task_context())))
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
@@ -276,7 +276,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 def invoke_text(prompt):
                     from cloud.go2.models import get_text_llm as fresh_model
                     return asyncio.run(fresh_model().ainvoke([HumanMessage(content=prompt)])).content
-                if (step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object"}
+                if (step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
                         and status in {"ok", "blocked", "cancelled"}
                         and isinstance(result.get("message"), str)):
                     return
@@ -303,7 +303,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                      run_id=current.run_id, agent_id="go2", session_id=session_id,
                                      output=getattr(response, "content", ""))
                     if (not valid_persona_reply(response.content, current)
-                            or not valid_search_reply(response.content, current)):
+                            or not valid_search_reply(response.content, current)
+                            or not valid_move_reply(response.content, current)):
                         raise ValueError("invalid_persona_reply")
                     current.response = response.content.strip()
                     current.reply_source = "persona_model"
@@ -315,7 +316,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                    current.run_id, type(exc).__name__)
                     last_step = current.steps[-1] if current.steps else {}
                     last_result = last_step.get("result") or {}
-                    if (last_step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object"}
+                    if (last_step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
                             and isinstance(last_result.get("message"), str)
                             and last_result["message"].strip()):
                         current.response = last_result["message"]

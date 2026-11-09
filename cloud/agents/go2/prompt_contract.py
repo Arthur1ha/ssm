@@ -27,8 +27,8 @@ _TASK_RULES = {
         "逐步推进当前目标。每轮只输出一个 JSON 对象："
         "{\"tool\":\"工具名\",\"params\":{...}} 或 {\"final\":\"回复\"}。"
         "不能一次规划或同时下发多个动作；每轮先看上一工具的真实结果。"
-        "缺少方向、时长等必需信息时调用 ask_user，参数为 question 字符串；"
-        "不能把步数猜成距离或时长。工具 accepted、executing、timeout 时不能继续依赖动作。"
+        "缺少移动距离或转向角度时调用 ask_user，参数为 question 字符串；"
+        "不能把步数猜成距离；移动不使用 duration。工具 accepted、executing、timeout 时不能继续依赖动作。"
         "若工具失败，可选择合法替代工具或如实结束。不要重复已经成功的动作。"
     ),
     "free_explore": (

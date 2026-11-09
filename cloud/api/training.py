@@ -82,6 +82,11 @@ def propose_training(request: BrowserProposal | ProposalRequest, session: dict =
     return _call(service.propose, request.model_dump(exclude={'user_text'}), context)
 
 
+@router.get('/api/training/proposals')
+def proposal_history(unit_id: str | None = None, session: dict = Depends(require_admin)):
+    return _call(service.list_proposals, session, unit_id=unit_id)
+
+
 @router.get('/api/training/proposals/{proposal_id}')
 def get_proposal(proposal_id: str, session: dict = Depends(require_admin)):
     return _call(service.get_proposal, proposal_id, session)
@@ -91,6 +96,11 @@ def get_proposal(proposal_id: str, session: dict = Depends(require_admin)):
 def confirm_training(proposal_id: str, request: ConfirmRequest, session: dict = Depends(require_admin_csrf)):
     return _call(service.confirm, proposal_id, request.expected_revision, session,
                  capability_hash=request.capability_hash)
+
+
+@router.post('/api/training/proposals/{proposal_id}/cancel')
+def cancel_training(proposal_id: str, session: dict = Depends(require_admin_csrf)):
+    return _call(service.cancel, proposal_id, session)
 
 
 @router.put('/api/training/{teaching_id}/enabled')

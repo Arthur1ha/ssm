@@ -30,10 +30,12 @@ def permits_skill(target: str, skill_id: str, params: dict, origin: str, *,
         if skill_id == "go2_move":
             from cloud.go2.tools.registry import get_tool_spec
             from cloud.go2.tools.executor import validate_params
-            if not delegated or "duration" not in params:
+            if not delegated:
                 return False
             try:
                 validate_params(get_tool_spec("go2_move").params_schema, params)
+                from cloud.go2.actions import validate_move_goal
+                validate_move_goal(params)
             except ValueError:
                 return False
             return True

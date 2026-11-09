@@ -69,7 +69,7 @@ function SpaceMenu({ onShareSpace, onTraining, onSpaceSettings, onOrchestratorSe
               </button>
               <button type="button" className="space-menu__item" onClick={() => select(onTraining)}>
                 <span className="space-menu__item-icon"><Icon name="list" size={18}/></span>
-                <span className="space-menu__item-copy"><strong>伙伴训练</strong><small>查看、调整或暂停已保存的训练</small></span>
+                <span className="space-menu__item-copy"><strong>设备规则</strong><small>按设备查看和修改你制定的规则</small></span>
                 <Icon name="arrow" size={16}/>
               </button>
               <button type="button" className="space-menu__item" onClick={() => select(onSpaceSettings)}>

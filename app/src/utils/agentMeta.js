@@ -126,10 +126,10 @@ function describeRunProgress(event, compact = false) {
     start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
     clear_space_constraints: '撤销空间里的共同要求' })[actionId] || '处理当前请求';
   // Raw light settings belong in the device detail view, not conversational progress.
-  const argumentLabels = { duration: '时长', duration_s: '时长', speed: '速度' };
+  const argumentLabels = { duration: '时长', duration_s: '时长', speed: '速度', distance_m: '距离', angle_deg: '转角' };
   const args = Object.entries(event.arguments || {}).filter(([key, value]) =>
     argumentLabels[key] && typeof value === 'number' && Number.isFinite(value))
-    .map(([key, value]) => `${argumentLabels[key]} ${value}${key.startsWith('duration') ? ' 秒' : ''}`);
+    .map(([key, value]) => `${argumentLabels[key]} ${value}${key.startsWith('duration') ? ' 秒' : key === 'distance_m' ? ' 米' : key === 'angle_deg' ? ' 度' : ''}`);
   const detailArgs = args.length ? `（${args.join('，')}）` : '';
   const state = event.arguments?.state;
   const cmd = event.arguments?.cmd;

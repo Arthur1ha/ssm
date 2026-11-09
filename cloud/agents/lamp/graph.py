@@ -267,7 +267,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             tool_schemas=visible_schemas(lighting_only=lighting_only,
                                         card=cards.get_registry().get_card(unit_id)),
             build_messages=lambda current: decision_messages(
-                current, agent=agent, unit_id=unit_id, supplement=(text if resume else "") + ("\n选中转换：" + str(selection) if selection else "")),
+                current, agent=agent, unit_id=unit_id, supplement=(text if resume else "") + ("\n本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(selection) if selection else "")),
             execute=execute, reconcile_effect=reconcile,
             finalize=finalize, checkpointer=saver, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",

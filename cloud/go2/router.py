@@ -412,6 +412,9 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
         from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
         # Natural-language CHAT can choose the search skill after admission.
         default_timeout = SEARCH_SERVER_TIMEOUT_S if req.skill_id in {None, "go2_chat", "go2_find_object"} else 180 if req.skill_id == "go2_visual_navigate" else 45
+        if req.skill_id == "go2_move":
+            from cloud.go2.tools.registry import get_tool_spec
+            default_timeout = get_tool_spec("go2_move").timeout_s + 10
         deadline = req.deadline if req.deadline is not None else time.time() + default_timeout
         deadline = min(deadline, context.expires_at or deadline)
         if not isinstance(deadline, (int, float)) or not time.time() < deadline <= time.time() + 300:
@@ -1010,8 +1013,8 @@ def cleanup_session_resources(session_id: str) -> dict:
     motion_stopped = False
     if owns_motion and go2.is_connected:
         try:
-            # Cancellation of a timed chat move also reaches its StopMove
-            # finally block.  Send a synchronous zero-velocity packet here as
+            # Cancellation of relative motion also reaches navigation cleanup.
+            # Send a synchronous zero-velocity packet here as
             # the immediate safety boundary, without waiting for task teardown.
             go2.stop_velocity()
             motion_stopped = True

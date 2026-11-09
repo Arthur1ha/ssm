@@ -6,7 +6,6 @@ partition lock and revalidate each reservation against the current definition.
 """
 from copy import deepcopy
 from dataclasses import dataclass
-import json
 import time
 from typing import Callable
 from uuid import uuid4
@@ -87,17 +86,10 @@ def _target(unit_id, space_id):
     return card
 
 
-def _owner_capability_available(unit_id):
-    # No trusted requester identity provider exists yet. Admin is NOT owner.
-    # Isolated tests may replace this capability probe; request data may not.
-    return False
-
-
 def _definition_reasons(record):
-    if record['desired_status'] != 'removed' and any(
-        c['field'] == 'requester_is_owner' for c in record['definition']['conditions']
-    ) and not _owner_capability_available(record['unit_id']):
-        return [{'code': 'requester_identity_capability_unavailable', 'field': 'requester_is_owner'}]
+    # A persistent rule describes future requests. Availability of an identity
+    # observation now is not a property of that definition. The executor checks
+    # fresh, server-owned requester facts on every matching action instead.
     return []
 
 
@@ -133,31 +125,15 @@ def _explain(record, catalog):
     edges = {edge['id']: edge for edge in catalog['transitions']}
     selected = [edges[key] for key in record['definition']['transition_ids'] if key in edges]
     definition = record['definition']
-    changes = []
     trigger = definition['trigger']
-    display = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
-    if trigger:
-        event = next((event for event in catalog['events'] if event['id'] == trigger['event_id']), {})
-        event_text = event.get('name', trigger['event_id'])
-        filters = trigger['where']
-        changes.append('触发条件：' + event_text + ('' if filters == {'detected': True} else ' ' + display(filters)))
-        if trigger['params']:
-            changes.append('事件动作参数：' + ('闪烁 %s 次' % trigger['params']['count'] if set(trigger['params']) == {'count'} else display(trigger['params'])))
-    for condition in definition['conditions']:
-        if condition['field'] == 'requester_is_owner' and condition['op'] == 'eq' and condition['value'] is True:
-            changes.append('允许条件：仅主人可发起')
-            continue
-        label = '请求者是主人' if condition['field'] == 'requester_is_owner' else condition['field']
-        operator = '等于' if condition['op'] == 'eq' else '属于'
-        changes.append(f"允许条件：{label} {operator} {display(condition['value'])}")
-    if definition['defaults']:
-        changes.append('默认参数：' + ('闪烁 %s 次' % definition['defaults']['count'] if set(definition['defaults']) == {'count'} else display(definition['defaults'])))
-    if definition['cooldown_s'] is not None:
-        changes.append(f"完成后冷却 {definition['cooldown_s']} 秒")
-    if record['desired_status'] == 'removed':
-        changes = ['撤销此教导；保留原话和历史']
+    # The existing role Graph supplies these presentation strings alongside the
+    # structured definition. They never participate in execution or permission
+    # checks. Old records retain their own user-facing name without exposing JSON.
+    summary = record['name']
     return {'transitionLabel': '、'.join(f"{edge.get('source_label', edge['src'])} → {edge.get('destination_label', edge['dst'])}" for edge in selected) or '目标转换能力已变化',
-            'changeText': '；'.join(changes) or '使用已有转换条件和参数',
+            'summaryText': summary,
+            'changeText': ('删除这条规则：' + summary if record['desired_status'] == 'removed'
+                           else record.get('effect_text') or summary),
             'scopeText': '仅此事件触发的请求' if trigger else '、'.join(
                 {'user_delegated': '用户委托请求', 'agent_autonomous': '自主请求'}[origin]
                 for origin in definition['origins']),
@@ -168,7 +144,14 @@ def _preview(proposal, data, catalog):
     record = deepcopy(proposal['record'])
     reasons = _definition_reasons(record)
     current = data['records'].get(record['teaching_id'])
-    if proposal['proposal_id'] not in data['confirmed_proposals']:
+    confirmed = proposal['proposal_id'] in data['confirmed_proposals']
+    cancelled = proposal.get('cancelled_at') is not None
+    superseded = bool(proposal.get('superseded_by'))
+    expired = proposal['expires_at'] <= _now() and not confirmed
+    if not confirmed:
+        for inactive, code in ((cancelled, 'proposal_cancelled'), (superseded, 'proposal_superseded'), (expired, 'proposal_expired')):
+            if inactive:
+                reasons.append({'code': code})
         if record['capability_hash'] != catalog['hash']:
             reasons.append({'code': 'capability_changed'})
         if (current['revision'] if current else 0) != proposal['request']['expected_revision']:
@@ -178,12 +161,20 @@ def _preview(proposal, data, catalog):
     if current and current['revision'] > proposal['request']['expected_revision']:
         base = proposal['request']['expected_revision']
         before = deepcopy(current['history'][base - 1]) if base else None
+    previous = data['proposals'].get(proposal['request'].get('supersedes_proposal_id'))
+    if previous:
+        before = deepcopy(previous['record'])
     return {'proposal_id': proposal['proposal_id'], 'operation': proposal['request']['operation'],
             'unit_id': record['unit_id'], 'teaching_id': record['teaching_id'],
             'expected_revision': proposal['request']['expected_revision'],
             'capability_hash': record['capability_hash'], 'expires_at': proposal['expires_at'],
             'before': before, 'after': record, 'confirmation_allowed': not reasons,
-            'reasons': reasons, 'confirmed': proposal['proposal_id'] in data['confirmed_proposals'],
+            'beforeSummaryText': before['name'] if before else None,
+            'afterSummaryText': record['name'],
+            'source_text': record['source_text'], 'source_run_id': proposal.get('source_run_id'),
+            'created_at': proposal['created_at'],
+            'reasons': reasons, 'confirmed': confirmed, 'cancelled': cancelled,
+            'superseded': superseded, 'superseded_by': proposal.get('superseded_by'), 'expired': expired,
             **_explain(record, catalog)}
 
 
@@ -199,6 +190,14 @@ def propose(request: dict, session: dict) -> dict:
         raise TrainingError('capability_changed', 409)
     now = _now()
     with store.partition_lock(req['unit_id'], space_id=session['space_id'], write=True) as data:
+        previous = None
+        if req['supersedes_proposal_id']:
+            previous = _proposal(data, req['supersedes_proposal_id'], session)
+            if req['supersedes_proposal_id'] in data['confirmed_proposals']:
+                raise TrainingError('proposal_already_confirmed', 409)
+            old = previous['request']
+            if (req['teaching_id'], req['expected_revision']) != (old['teaching_id'], old['expected_revision']):
+                raise TrainingError('proposal_base_mismatch', 409)
         current = data['records'].get(req['teaching_id'])
         if req['operation'] != 'create':
             if current is None:
@@ -214,9 +213,11 @@ def propose(request: dict, session: dict) -> dict:
                 record['desired_status'] = 'removed'
             else:
                 record['definition'] = req['definition']
+                record['effect_text'] = req['effect_text']
         else:
-            record = {'schema_version': 1, 'teaching_id': 'trn_' + uuid4().hex,
+            record = {'schema_version': 1, 'teaching_id': previous['record']['teaching_id'] if previous else 'trn_' + uuid4().hex,
                       'unit_id': req['unit_id'], 'space_id': session['space_id'], 'name': req['name'],
+                      'effect_text': req['effect_text'],
                       'source_text': source.text, 'revision': 1, 'definition': req['definition'],
                       'desired_status': 'enabled', 'capability_hash': catalog['hash'],
                       'loaded_revision': None, 'history': [], 'created_at': now, 'updated_at': now}
@@ -229,7 +230,8 @@ def propose(request: dict, session: dict) -> dict:
         # Expired drafts cannot execute, but retain them for a meaningful 410.
         # Bounded draft capacity refuses growth rather than silently evicting.
         pending = [p for key, p in data['proposals'].items()
-                   if key not in data['confirmed_proposals'] and p['expires_at'] > now]
+                   if key not in data['confirmed_proposals'] and p['expires_at'] > now
+                   and not p.get('cancelled_at') and not p.get('superseded_by')]
         if len(pending) >= 500:
             raise TrainingError('pending_proposal_limit')
         # Keep expired IDs as tombstones via the proposal itself, bounded by
@@ -237,6 +239,8 @@ def propose(request: dict, session: dict) -> dict:
         if len(data['proposals']) >= 51000:
             raise TrainingError('proposal_storage_limit')
         data['proposals'][proposal['proposal_id']] = proposal
+        if previous:
+            previous['superseded_by'] = proposal['proposal_id']
         preview = _preview(proposal, data, catalog)
     _emit('training.proposed', space_id=session['space_id'], unit_id=req['unit_id'],
           proposal_id=proposal['proposal_id'], session_id=session['session_id'])
@@ -253,12 +257,17 @@ def _find_proposal(proposal_id, session):
     raise TrainingError('proposal_not_found', 404)
 
 
-def _proposal(data, proposal_id, session):
+def _proposal(data, proposal_id, session, *, active=True):
     p = data['proposals'].get(proposal_id)
     if p is None or p['session_id'] != session['session_id']:
         raise TrainingError('proposal_not_found', 404)
-    if p['expires_at'] <= _now() and proposal_id not in data['confirmed_proposals']:
-        raise TrainingError('proposal_expired', 410)
+    if active and proposal_id not in data['confirmed_proposals']:
+        if p.get('cancelled_at') is not None:
+            raise TrainingError('proposal_cancelled', 409)
+        if p.get('superseded_by'):
+            raise TrainingError('proposal_superseded', 409)
+        if p['expires_at'] <= _now():
+            raise TrainingError('proposal_expired', 410)
     return p
 
 
@@ -266,7 +275,35 @@ def get_proposal(proposal_id: str, session: dict) -> dict:
     _session(session, admin=True)
     unit_id = _find_proposal(proposal_id, session)
     with store.partition_lock(unit_id, space_id=session['space_id']) as data:
-        return _preview(_proposal(data, proposal_id, session), data, catalog_for(_target(unit_id, session['space_id'])))
+        return _preview(_proposal(data, proposal_id, session, active=False), data, catalog_for(_target(unit_id, session['space_id'])))
+
+
+def list_proposals(session: dict, *, unit_id: str | None = None) -> dict:
+    """Restore conversation cards, including drafts that can no longer commit."""
+    _session(session, admin=True)
+    cards = {unit_id: _target(unit_id, session['space_id'])} if unit_id else _targets(session['space_id'])
+    previews = []
+    for uid, card in cards.items():
+        catalog = catalog_for(card)
+        with store.partition_lock(uid, space_id=session['space_id']) as data:
+            previews.extend(_preview(p, data, catalog) for p in data['proposals'].values()
+                            if p['session_id'] == session['session_id'])
+    return {'proposals': sorted(previews, key=lambda p: (p['created_at'], p['proposal_id']))}
+
+
+def cancel(proposal_id: str, session: dict) -> dict:
+    _session(session, admin=True)
+    unit_id = _find_proposal(proposal_id, session)
+    with store.partition_lock(unit_id, space_id=session['space_id'], write=True) as data:
+        proposal = _proposal(data, proposal_id, session, active=False)
+        if proposal_id in data['confirmed_proposals']:
+            raise TrainingError('proposal_already_confirmed', 409)
+        if proposal.get('cancelled_at') is None:
+            proposal['cancelled_at'] = _now()
+        preview = _preview(proposal, data, catalog_for(_target(unit_id, session['space_id'])))
+    _emit('training.updated', space_id=session['space_id'], unit_id=unit_id,
+          proposal_id=proposal_id, session_id=session['session_id'])
+    return preview
 
 
 def confirm(proposal_id: str, expected_revision: int, session: dict, *, capability_hash: str | None = None) -> dict:
@@ -367,6 +404,11 @@ def snapshot(unit_id: str, viewer: dict) -> dict:
             projected.append(record)
         return {'unit_id': unit_id, 'space_id': viewer['space_id'], 'catalog': catalog,
                 'cursor': data['cursor'], 'records': projected,
+                'proposals': [_preview(p, data, catalog) for p in data['proposals'].values()
+                              if viewer['actor'] == 'admin' and p['session_id'] == viewer['session_id']
+                              and p['proposal_id'] not in data['confirmed_proposals']
+                              and p.get('cancelled_at') is None and not p.get('superseded_by')
+                              and p['expires_at'] > _now()],
                 'edge_annotations': [{'transition_id': key, 'teachings': value} for key, value in annotations.items()]}
 
 

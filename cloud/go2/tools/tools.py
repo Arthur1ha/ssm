@@ -1,15 +1,12 @@
-import asyncio
 import json
 import time
-import math
-import uuid
 from dataclasses import asdict, is_dataclass
 
 from langchain_core.messages import HumanMessage
 
 from cloud.go2.connection import go2
-from cloud.go2.actions import (SPORT_COMMANDS, VELOCITY_LIMITS, move_tool_schema,
-                               MOVE_MAX_DURATION, MOVE_DIRECTIONS,
+from cloud.go2.actions import (SPORT_COMMANDS, move_tool_schema,
+                               validate_move_goal,
                                LED_DEFAULT_COLOR, LED_DEFAULT_DURATION)
 from cloud.go2.control import control_lease
 from cloud.go2.execution import current_context, require_admin, require_persist
@@ -31,17 +28,6 @@ def _normalize_sport_action(action: str) -> str | None:
     if a.lower().startswith("go2_sport"):
         a = a[len("go2_sport"):].strip()
     return _SPORT_CMD_BY_LOWER.get(a.lower())
-
-_DIRECTION_MAP = {
-    "forward":    lambda s: {"x":  s, "y":  0, "z":  0},
-    "backward":   lambda s: {"x": -s, "y":  0, "z":  0},
-    "left":       lambda s: {"x":  0, "y":  s, "z":  0},
-    "right":      lambda s: {"x":  0, "y": -s, "z":  0},
-    "turn_left":  lambda s: {"x":  0, "y":  0, "z":  s},
-    "turn_right": lambda s: {"x":  0, "y":  0, "z": -s},
-}
-assert tuple(_DIRECTION_MAP) == MOVE_DIRECTIONS
-
 
 async def go2_sport(cmd: str) -> dict | str:
     if not go2.is_connected:
@@ -66,43 +52,18 @@ async def go2_sport(cmd: str) -> dict | str:
     return payload
 
 
-async def go2_move(direction: str, speed: float | None = None, duration: float | None = None) -> str:
-    declared = move_tool_schema()["properties"]
-    speed = declared["speed"]["default"] if speed is None else speed
-    duration = declared["duration"]["default"] if duration is None else duration
-    if not go2.is_connected:
-        return "Go2 未连接，请先建立连接"
-    if direction not in _DIRECTION_MAP:
-        return f"未知方向 {direction}，支持: {', '.join(_DIRECTION_MAP)}"
-    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not math.isfinite(speed) or not 0 < speed <= min(VELOCITY_LIMITS.values()):
-        raise ValueError(f"speed must be in (0, {min(VELOCITY_LIMITS.values())}]")
-    if not math.isfinite(duration) or not 0 < duration <= MOVE_MAX_DURATION:
-        raise ValueError(f"duration must be in (0, {MOVE_MAX_DURATION}] seconds")
-    from cloud.go2.tools.executor import execute_action
-    task_id = uuid.uuid4().hex
-    params = _DIRECTION_MAP[direction](speed)
-    started = await execute_action("Move", params, context=current_context())
-    if not isinstance(started, dict) or started.get("result") not in ("ok", "accepted"):
-        return {"result": "error", "task_id": task_id, "action": "Move", "start": started,
-                "error": "move_not_accepted"}
-    try:
-        await asyncio.sleep(duration)
-    finally:
-        owner = control_lease.snapshot()
-        if owner is not None and owner.owner_session_id != current_context().session_id:
-            stopped = {"result": "error", "error": "lease_transferred"}
-        else:
-            try:
-                stopped = await execute_action("StopMove", context=current_context())
-            except Exception as exc:
-                stopped = {"result": "error", "error": type(exc).__name__}
-    stop_status = stopped.get("result") if isinstance(stopped, dict) else None
-    if stop_status not in ("ok", "accepted"):
-        return {"result": "timeout" if stop_status == "timeout" else "error",
-                "task_id": task_id, "action": "Move", "start": started, "stop": stopped,
-                "error": "stop_not_confirmed", "message": "停止指令未确认，需检查设备状态"}
-    return {"result": "accepted", "task_id": task_id, "action": "Move", "start": started, "stop": stopped,
-            "message": "定时移动和停止指令已发送，实际位移未确认"}
+async def go2_move(direction: str, distance_m: float | None = None,
+                   angle_deg: float | None = None, speed: float | None = None) -> dict:
+    from cloud.go2.tools.executor import validate_params
+    from cloud.go2.navigation.navigator import navigator
+    params = {"direction": direction, **{key: value for key, value in {
+        "distance_m": distance_m, "angle_deg": angle_deg, "speed": speed}.items()
+        if value is not None}}
+    validate_params(move_tool_schema(), params)
+    validate_move_goal(params)
+    speed = move_tool_schema()["properties"]["speed"]["default"] if speed is None else speed
+    return await navigator.move_relative(direction, distance_m=distance_m,
+        angle_deg=angle_deg, speed=speed, context=current_context())
 
 
 _OBSERVE_SYSTEM_PROMPT = (

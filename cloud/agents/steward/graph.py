@@ -228,7 +228,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                       session_id=session_id, origin_kind=run.origin_kind):
         asyncio.run(run_role_graph(
             run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
-            build_messages=lambda current: build_messages(current, supplemental, history) + ([HumanMessage(content="选中的可信转换：" + str(context["selection"]))] if context.get("selection") else []), execute=execute,
+            build_messages=lambda current: build_messages(current, supplemental, history) + ([HumanMessage(content="本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(context["selection"]))] if context.get("selection") else []), execute=execute,
             on_step=on_step, on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
             effectful=lambda name: name in {"invoke_skill", "propose_training", "send_message", "start_activity",

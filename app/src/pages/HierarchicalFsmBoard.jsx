@@ -55,7 +55,7 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
 
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
 function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, connected,
-  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, feedback, card, training, onTeach, locateTransition }) {
+  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, feedback, card, training, locateTransition }) {
   const { useState, useEffect, useRef, useCallback } = React;
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLinkId, setSelectedLinkId] = useState(null);
@@ -229,7 +229,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
         selectedLink={selectedLinkId} selectedDirection={selectedDirection?.id} onSelectState={select} onInspectTransition={inspectEdge}
         onDismiss={clearSelection}
-        color={color} pendingCommand={pendingExecution?.command} trainingEdges={training?.edges || []}/>
+        color={color} pendingCommand={pendingExecution?.command}/>
         : <p className="device-state-note">等待设备状态机</p>}
       {selected && (selectedActions.length > 1 || selected.region.until_field && liveState[selected.region.until_field])
         && !remoteControls.some(widget => selected.value === widget.node_state) && <StateBoardPopover
@@ -253,8 +253,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
           {selectedDirection.edges.map(edge => <TransitionInspector key={edge.id}
             selection={{label:stateTransitionLabel(edge.transition)}}
-            projection={records.filter(record => record.transition_ids?.includes(edge.transition.id))}
-            onTeach={actor === 'admin' && training?.catalog?.transitions?.some(t => t.id === edge.transition.id && t.trainable) ? record => { onTeach?.(edge.transition.id,record); closePopover(); } : null}/>) }
+            projection={records.filter(record => record.transition_ids?.includes(edge.transition.id))}/>) }
         </div>
       </StateBoardPopover>}
     </div>

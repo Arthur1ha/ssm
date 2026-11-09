@@ -49,6 +49,15 @@ function SessionGate({ children }) {
     return applySession(data);
   }, [applySession]);
 
+  const leaveSession = useCallback(notice => {
+    apiClient.closeEvents();
+    apiClient.setCsrfToken('');
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    setSession(null);
+    setError('');
+    setSessionNotice(notice);
+  }, []);
+
   useEffect(() => {
     let active = true;
     const boot = async () => {
@@ -91,31 +100,23 @@ function SessionGate({ children }) {
     };
     boot();
     const unauthorized = () => {
-      apiClient.closeEvents();
-      apiClient.setCsrfToken('');
-      setSession(null);
-      setError('');
-      setSessionNotice('会话已结束');
+      leaveSession('会话已结束，请重新进入');
     };
     apiClient.addEventListener('unauthorized', unauthorized);
     return () => {
       active = false;
       apiClient.removeEventListener('unauthorized', unauthorized);
     };
-  }, [applySession, bootAttempt]);
+  }, [applySession, bootAttempt, leaveSession]);
 
   useEffect(() => {
     if (!session?.expires_at) return;
     const delay = Math.max(0, session.expires_at * 1000 - Date.now());
     const timer = setTimeout(() => {
-      apiClient.closeEvents();
-      apiClient.setCsrfToken('');
-      setSession(null);
-      setError('');
-      setSessionNotice('会话已过期');
+      leaveSession('会话已过期，请重新进入');
     }, delay);
     return () => clearTimeout(timer);
-  }, [session?.expires_at]);
+  }, [session?.expires_at, leaveSession]);
 
   const adminLogin = async () => {
     const data = await apiClient.request('/api/admin/session', {
@@ -137,11 +138,7 @@ function SessionGate({ children }) {
   const logout = async () => {
     try { await apiClient.request('/api/session', { method: 'DELETE' }); }
     finally {
-      apiClient.closeEvents();
-      apiClient.setCsrfToken('');
-      setSession(null);
-      setError('');
-      setSessionNotice('');
+      leaveSession('');
     }
   };
 
@@ -192,10 +189,12 @@ function EntryNotice({ title, children, isError = false }) {
 
 function SessionEntry({ error, sessionNotice, onAdminLogin, onVisitorJoin }) {
   const [showJoin, setShowJoin] = React.useState(false);
+  const [showOtherWays, setShowOtherWays] = React.useState(false);
   const [showPaste, setShowPaste] = React.useState(false);
   const [inviteValue, setInviteValue] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState(error || '');
+  const showResume = Boolean(sessionNotice) && !showOtherWays;
 
   React.useEffect(() => setMessage(error || ''), [error]);
 
@@ -245,15 +244,15 @@ function SessionEntry({ error, sessionNotice, onAdminLogin, onVisitorJoin }) {
 
   return (
     <main className="session-entry">
-      <section className="session-entry__panel">
+      <section className={`session-entry__panel${showResume && !showJoin ? ' session-entry__panel--resume' : ''}`}>
         <div className="session-entry__brand">
           <span>SSM</span>
         </div>
 
         {!showJoin && (message ? (
           <EntryNotice title="暂时无法进入" isError>{message}</EntryNotice>
-        ) : sessionNotice && (
-          <EntryNotice title={sessionNotice}>请选择下方入口重新进入；通过邀请加入的访客，请重新扫码。</EntryNotice>
+        ) : showResume && (
+          <p className="session-entry__notice" role="status">{sessionNotice}</p>
         ))}
 
         {showJoin ? (
@@ -276,11 +275,20 @@ function SessionEntry({ error, sessionNotice, onAdminLogin, onVisitorJoin }) {
             </form>}
             <button type="button" className="btn entry-subflow__back" onClick={backToChoices}>返回</button>
           </section>
+        ) : showResume ? (
+          <div className="session-entry__resume">
+            <button type="button" className="btn btn--accent" onClick={enterSpace} disabled={busy}>
+              {busy ? '正在进入…' : '重新进入空间'}
+            </button>
+            <button type="button" className="session-entry__other" onClick={() => { setShowOtherWays(true); setMessage(''); }} disabled={busy}>
+              其他进入方式
+            </button>
+          </div>
         ) : (
           <div className="session-entry__choices">
             <button className="entry-choice entry-choice--create" onClick={enterSpace} disabled={busy}>
               <span className="entry-choice__icon"><Icon name="settings" size={20}/></span>
-              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : sessionNotice ? '重新进入空间' : '创建空间'}</strong></span>
+              <span className="entry-choice__copy"><strong>{busy ? '正在进入…' : '创建空间'}</strong></span>
               <Icon name="arrow" size={17}/>
             </button>
             <button className="entry-choice entry-choice--join" onClick={() => { setShowJoin(true); setMessage(''); }}>

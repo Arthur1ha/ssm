@@ -166,6 +166,7 @@ class TrainingSelection(BaseModel):
     unit_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
     transition_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
     teaching_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    proposal_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def validate_training_selection(selection, session, *, unit_id=None):
@@ -183,6 +184,13 @@ def validate_training_selection(selection, session, *, unit_id=None):
             r['teaching_id'] == selected['teaching_id'] and selected['transition_id'] in r['definition']['transition_ids']
             for r in snapshot['records']):
             raise ValueError('invalid_selection_teaching')
+        if selected.get('proposal_id'):
+            proposal = service.get_proposal(selected['proposal_id'], {**session, 'space_id': session.get('space_id', DEFAULT_SPACE_ID)})
+            if (proposal['unit_id'] != selected['unit_id']
+                    or selected['transition_id'] not in proposal['transition_ids']
+                    or any(proposal.get(flag) for flag in ('confirmed', 'cancelled', 'superseded', 'expired'))
+                    or selected.get('teaching_id') not in (None, proposal['teaching_id'])):
+                raise ValueError('invalid_selection_proposal')
         return selected
     except Exception as exc:
         raise HTTPException(status_code=422, detail='invalid_training_selection') from exc

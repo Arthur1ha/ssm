@@ -228,17 +228,20 @@ async def test_activity_shutdown_requires_fresh_second_preflight(device, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_timed_move_keeps_interaction_owned_through_stop_request(device):
+async def test_relative_move_keeps_interaction_owned_through_stop_confirmation(device, monkeypatch):
     from cloud.go2.tools.executor import execute_tool
     robot, _ = device
     observed = []
-    async def send(command, params=None):
-        observed.append((command, robot.runtime.data['life_state'], robot.runtime.data['life_owner']))
-        return {'result': 'accepted', 'confirmation_scope': 'request'}
-    robot.send_command.side_effect = send
-    result = await execute_tool('go2_move', {'direction': 'forward', 'duration': .01}, context=USER)
-    assert result['result'] == 'accepted'
-    assert observed == [('Move', 'play', USER.session_id), ('StopMove', 'play', USER.session_id)]
+    from cloud.go2.navigation.navigator import navigator
+    async def move(*args, **kwargs):
+        for stage in ('moving', 'stop_confirmed'):
+            observed.append((stage, robot.runtime.data['life_state'], robot.runtime.data['life_owner']))
+            await asyncio.sleep(0)
+        return {'result': 'ok', 'distance_m': 1., 'stop': {'result': 'ok'}}
+    monkeypatch.setattr(navigator, 'move_relative', move)
+    result = await execute_tool('go2_move', {'direction': 'forward', 'distance_m': 1.}, context=USER)
+    assert result['result'] == 'ok'
+    assert observed == [('moving', 'play', USER.session_id), ('stop_confirmed', 'play', USER.session_id)]
     assert robot.runtime.data['life_state'] == 'idle'
 
 

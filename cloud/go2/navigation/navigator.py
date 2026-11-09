@@ -15,6 +15,8 @@ from cloud.go2.connection import go2
 from cloud.agents.go2.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
 from cloud.go2.control import control_lease, LeaseConflict
+from cloud.go2.actions import (VELOCITY_LIMITS, MOVE_DEFAULT_SPEED,
+    MOVE_DISTANCE_TOLERANCE_M, MOVE_ANGLE_TOLERANCE_RAD)
 from cloud.observability import emit_agent_event
 
 logger = logging.getLogger(__name__)
@@ -161,6 +163,85 @@ class Navigator:
         self._begin(name, owner_session_id, asyncio.current_task())
         return await self._run_to(name)
 
+    async def move_relative(self, direction: str, *, distance_m: float | None = None,
+                            angle_deg: float | None = None, speed: float = MOVE_DEFAULT_SPEED,
+                            context) -> dict:
+        """Reuse navigation's velocity loop and stop proof for an odom goal."""
+        from cloud.go2.tools.executor import validate_execution_context
+        validate_execution_context(context)
+        snapshot, reason = self.snapshot()
+        if reason:
+            return {"result": "blocked", "reason": reason,
+                    "message": "定位或地图尚未就绪，未开始移动。"}
+        start = snapshot[0].copy()
+        session = getattr(go2, "_odom_session_id", None)
+        if (not session or start.get("session_id") != session
+                or not all(type(start.get(k)) in (int, float) and math.isfinite(start[k])
+                           for k in ("x", "y", "heading"))):
+            return {"result": "blocked", "reason": "localization_unavailable",
+                    "message": "缺少当前定位会话的可靠位置，未开始移动。"}
+        turning = direction in {"turn_left", "turn_right"}
+        offsets = {"forward": 0., "backward": math.pi, "left": math.pi/2, "right": -math.pi/2}
+        axis = start["heading"] + offsets.get(direction, 0.)
+        sign = -1 if direction == "turn_right" else 1
+        heading = _normalize_angle(start["heading"] + sign * math.radians(angle_deg)) if turning else start["heading"]
+        x = start["x"] if turning else start["x"] + distance_m * math.cos(axis)
+        y = start["y"] if turning else start["y"] + distance_m * math.sin(axis)
+        loc = {"name": "相对移动", "x": x, "y": y, "heading": heading,
+               "session_id": session, "frame_id": "odom", "relative_motion": True,
+               "speed_limit": speed, "holonomic": True,
+               "arrival_tolerance_m": MOVE_DISTANCE_TOLERANCE_M,
+               "context": context}
+        control_lease.acquire(context)
+        task = asyncio.current_task()
+        self._begin("相对移动", context.session_id, task)
+        receipt = await self._run_to("相对移动", loc)
+        owner = control_lease.snapshot()
+        if (owner is None or owner.owner_session_id != context.session_id
+                or getattr(go2, "_odom_session_id", None) != session):
+            stop = {"result": "accepted", "reason": "control_or_session_changed"}
+        else:
+            stop = await self.stop_and_confirm(owner_session_id=context.session_id)
+        final = self.last_trusted_pose if stop.get("result") == "ok" else receipt.get("last_trusted_pose")
+        if not final or final.get("session_id") != session:
+            final = None
+        distance = ((final["x"] - start["x"]) * math.cos(axis)
+                    + (final["y"] - start["y"]) * math.sin(axis)) if final else None
+        angle = sign * math.degrees(_normalize_angle(final["heading"] - start["heading"])) if final else None
+        if turning and angle is not None and angle < -90 and angle_deg > 90:
+            angle += 360
+        measured = angle if turning else distance
+        requested = angle_deg if turning else distance_m
+        tolerance = math.degrees(MOVE_ANGLE_TOLERANCE_RAD) if turning else MOVE_DISTANCE_TOLERANCE_M
+        completed = (receipt["status"] == "succeeded" and stop.get("result") == "ok"
+                     and measured is not None and abs(measured - requested) <= tolerance)
+        status = "ok" if completed else "cancelled" if receipt["status"] == "cancelled" else "blocked"
+        reason = None if completed else receipt.get("reason") or "distance_not_reached"
+        if stop.get("result") != "ok":
+            status, reason = "accepted", "stop_unconfirmed"
+        labels = {"forward": "向前移动", "backward": "向后移动", "left": "向左移动",
+                  "right": "向右移动", "turn_left": "向左转", "turn_right": "向右转"}
+        unit = "度" if turning else "米"
+        message = (f"{labels[direction]}约{measured:.2f}{unit}，目标{requested:g}{unit}。"
+                   if measured is not None else "未取得可靠的实际位移反馈。")
+        if completed:
+            message += "已达到本次目标并确认停稳。"
+        elif stop.get("result") != "ok":
+            message += "尚未确认机身停稳，不能算完成。"
+        else:
+            detail = ("后续未观察到继续移动" if reason == "motion_not_observed"
+                      and measured is not None and measured > tolerance else receipt.get('message') or reason)
+            message += f"未完成本次目标，已确认停稳；{detail}。"
+        result = {"result": status, "reason": reason, "message": message,
+                  "task_id": receipt.get("task_id"), "direction": direction,
+                  "requested_distance_m": distance_m, "distance_m": round(distance, 3) if distance is not None else None,
+                  "requested_angle_deg": angle_deg, "angle_deg": round(angle, 2) if turning and angle is not None else None,
+                  "start_pose": start, "last_trusted_pose": final, "stop": stop,
+                  "navigation": receipt, "confirmation": "odometry_and_stop" if completed else None}
+        if task.cancelling():
+            raise asyncio.CancelledError
+        return result
+
     async def go_to_coordinate(self, x: float, y: float, owner_session_id: str = "system",
                                heading: float | None = None,
                                keepout: tuple[float, float, float] | None = None,
@@ -212,7 +293,8 @@ class Navigator:
             speed_limit = loc.get("speed_limit")
             if speed_limit is not None and (not isinstance(speed_limit, (int, float))
                                             or not math.isfinite(speed_limit)
-                                            or not MIN_LINEAR_VEL <= speed_limit <= WALK_SPEED):
+                                            or not MIN_LINEAR_VEL <= speed_limit <= (
+                                                min(VELOCITY_LIMITS.values()) if loc.get("relative_motion") else WALK_SPEED)):
                 return self._finish("blocked", "invalid_speed_limit", "导航速度限制无效", task_id)
             precise_tolerance = loc.get("arrival_tolerance_m")
             if precise_tolerance is not None and (type(precise_tolerance) not in (int, float)
@@ -227,7 +309,9 @@ class Navigator:
             self.status = "executing"
             if task_id in self.task_records:
                 self.task_records[task_id]["status"] = "executing"
-            deadline = time.monotonic() + NAV_TIMEOUT
+            context = loc.get("context")
+            deadline = time.monotonic() + min(NAV_TIMEOUT,
+                max(0., context.expires_at - time.time()) if context and context.expires_at else NAV_TIMEOUT)
             last_replan = 0.0
             replan_count = 0
             path = None
@@ -240,9 +324,25 @@ class Navigator:
             progress = _MotionProgress()
             avoided_points = []
 
-            def send_motion(vx, vy, yaw, pose):
+            motion_started = False
+            async def send_motion(vx, vy, yaw, pose):
                 """Require progress in the dimension actually being commanded."""
-                nonlocal last_command
+                nonlocal last_command, motion_started
+                if loc.get("relative_motion") and not motion_started:
+                    from cloud.go2.tools.executor import execute_action
+                    ready = await execute_action("EnterMoveControl", context=context)
+                    if ready.get("result") not in {"ok", "accepted"}:
+                        return {"reason": ready.get("error") or "motion_start_rejected", "start": ready}
+                    started = await execute_action("Move", {"x": vx, "y": vy, "z": yaw}, context=context)
+                    if started.get("result") not in {"ok", "accepted"}:
+                        return {"reason": started.get("error") or "motion_start_rejected", "start": started}
+                    motion_started = True
+                    # Gateway calls yield; recheck sensor and task ownership
+                    # before beginning the periodic stream of this same action.
+                    _, changed = self._snapshot()
+                    if changed or loc['session_id'] != getattr(go2, '_odom_session_id', None):
+                        return {"reason": changed or "map_mismatch"}
+                    control_lease.heartbeat_session(self.owner_session_id)
                 stalled = progress.observe(pose, vx, vy, time.monotonic())
                 if stalled:
                     return {**stalled, 'last_command': last_command}
@@ -298,6 +398,8 @@ class Navigator:
                 if loc["session_id"] != getattr(go2, "_odom_session_id", None):
                     return self._finish("blocked", "map_mismatch", "定位会话已变化，导航已停止", task_id)
                 odom, fresh_grid = snapshot
+                if loc.get("relative_motion") and odom.get("session_id") != loc["session_id"]:
+                    return self._finish("blocked", "map_mismatch", "定位会话已变化，移动已停止", task_id)
                 if start_pose is None:
                     start_pose = odom.copy()
                 keepout = loc.get("keepout")
@@ -385,15 +487,18 @@ class Navigator:
                 if dist < arrival_tolerance:
                     if loc.get("heading") is not None:
                         heading_error = _normalize_angle(loc["heading"] - odom["heading"])
-                        if abs(heading_error) > HEADING_THRESHOLD:
+                        heading_tolerance = MOVE_ANGLE_TOLERANCE_RAD if loc.get("relative_motion") else HEADING_THRESHOLD
+                        if abs(heading_error) > heading_tolerance:
                             details = self._turn_details(fresh_grid, odom, loc["heading"])
                             if not details["clear"]:
                                 return self._finish("blocked", "turn_clearance_unavailable",
                                                     "转向扫掠空间未确认，已停止", task_id,
                                                     diagnostics=details)
-                            stalled = send_motion(0, 0, max(-TURN_SPEED, min(TURN_SPEED, KP_YAW * heading_error)), odom)
+                            turn_limit = min(TURN_SPEED, speed_limit) if loc.get("relative_motion") else TURN_SPEED
+                            stalled = await send_motion(0, 0, max(-turn_limit, min(turn_limit, KP_YAW * heading_error)), odom)
                             if stalled:
-                                return self._finish("blocked", "motion_not_observed",
+                                return self._finish("blocked", stalled.get("reason") or "motion_not_observed",
+                                                    "设备约束拒绝启动转向" if stalled.get("reason") else
                                                     "转向指令未产生可确认的转动，已停止", task_id,
                                                     diagnostics=stalled)
                             await asyncio.sleep(0.1)
@@ -410,6 +515,8 @@ class Navigator:
                 lx, ly = _find_lookahead_on_path(path, grid_obj, odom["x"], odom["y"], odom["heading"],
                                                   {"x": goal[0], "y": goal[1]},
                                                   front_only=not loc.get("holonomic", False))
+                if loc.get("relative_motion"):
+                    lx, ly = loc["x"], loc["y"]
                 heading_error = _normalize_angle(math.atan2(ly - odom["y"], lx - odom["x"]) - odom["heading"])
                 if loc.get("holonomic"):
                     speed = min(speed_limit or WALK_SPEED, max(command_floor, dist * 0.8))
@@ -425,7 +532,8 @@ class Navigator:
                                 vx, vy = 0., math.copysign(speed, vy)
                     face_target = loc.get("face_target")
                     if face_target is None:
-                        yaw = 0.0
+                        yaw = (max(-TURN_SPEED, min(TURN_SPEED, KP_YAW * _normalize_angle(
+                            loc["heading"] - odom["heading"]))) if loc.get("relative_motion") else 0.0)
                     else:
                         bias = loc.get("face_target_bias_rad", 0.0)
                         if callable(bias):
@@ -478,7 +586,7 @@ class Navigator:
                             reroute=bool(blocked_cell is not None and blocked_cell != current_cell
                                          and blocked_cell not in previous_cells),
                         )
-                        if (blocked_cell is not None and blocked_cell != current_cell
+                        if (not loc.get("relative_motion") and blocked_cell is not None and blocked_cell != current_cell
                                 and blocked_cell not in previous_cells):
                             go2.move_velocity(0, 0, 0)
                             progress.reset()
@@ -487,9 +595,10 @@ class Navigator:
                             continue
                         return self._finish("blocked", "body_clearance_unavailable",
                                             "地图未确认下一步机身可通行空间，已停止", task_id)
-                stalled = send_motion(vx, vy, yaw, odom)
+                stalled = await send_motion(vx, vy, yaw, odom)
                 if stalled:
-                    return self._finish("blocked", "motion_not_observed",
+                    return self._finish("blocked", stalled.get("reason") or "motion_not_observed",
+                                        "设备约束拒绝启动移动" if stalled.get("reason") else
                                         "运动指令未产生可确认的位移，已停止", task_id,
                                         diagnostics=stalled)
                 await asyncio.sleep(0.1)
@@ -511,7 +620,11 @@ class Navigator:
             return self._finish("failed", "control_error", "控制连接异常，已停止", task_id)
         finally:
             try:
-                go2.move_velocity(0, 0, 0)
+                owner = control_lease.snapshot() if loc and loc.get("relative_motion") else None
+                if not loc or not loc.get("relative_motion") or (
+                        owner and owner.owner_session_id == self.owner_session_id
+                        and loc["session_id"] == getattr(go2, "_odom_session_id", None)):
+                    go2.move_velocity(0, 0, 0)
             except (RuntimeError, ValueError):
                 logger.warning("[Go2/Nav] stop packet could not be sent")
             if self._task is task:
@@ -565,14 +678,16 @@ class Navigator:
                 "blockers": ["turn_evidence_unavailable"]}
 
     def _snapshot(self):
-        now = time.monotonic()
         if not getattr(go2, "is_connected", False):
             return None, "disconnected"
         pose_age = getattr(go2, "odom_received_at", None)
         map_age = getattr(go2, "voxel_received_at", None)
-        if pose_age is None or now - pose_age > POSE_STALE_S:
+        now = time.monotonic()
+        if (type(pose_age) not in (int, float) or not math.isfinite(pose_age)
+                or not 0 <= now - pose_age <= POSE_STALE_S):
             return None, "localization_unavailable"
-        if map_age is None or now - map_age > MAP_STALE_S:
+        if (type(map_age) not in (int, float) or not math.isfinite(map_age)
+                or not 0 <= now - map_age <= MAP_STALE_S):
             logger.info("[Go2/Nav] map unavailable: %s",
                         "no_voxel_packet" if map_age is None else
                         "voxel_stale age=%.1fs" % (now - map_age))
@@ -582,7 +697,8 @@ class Navigator:
         if not pose_frame or not map_frame or pose_frame != map_frame or pose_frame != "odom":
             return None, "frame_mismatch"
         odom = go2.odom
-        if not odom or not all(k in odom for k in ("x", "y", "heading")):
+        if not odom or not all(type(odom.get(k)) in (int, float) and math.isfinite(odom[k])
+                               for k in ("x", "y", "heading")):
             return None, "localization_unavailable"
         try:
             grid = go2.occupancy_grid
@@ -610,6 +726,12 @@ class Navigator:
             return None
         if not grid_obj.is_free(*start):
             return None
+        if loc.get("relative_motion"):
+            # A relative direction request follows a straight segment and its
+            # exact odom endpoint; never round it to a cell or detour sideways.
+            if not grid_obj.is_free(*raw_goal):
+                return None
+            return [start, raw_goal], grid_obj, (loc["x"], loc["y"], False)
         keepout = loc.get("keepout")
         path_grid = grid_obj.grid
         bounds = loc.get("bounds")

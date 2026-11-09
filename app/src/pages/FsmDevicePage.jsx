@@ -2,8 +2,8 @@
  * 标题显示连接状态，白板统一展示状态与转移，富控件和对话按需呈现。
  * 核心控制由 Agent Card 的 transport / state_machine 驱动。
  */
-function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuestion, trainingLocation }) {
-  const { useState, useEffect, useRef } = React;
+function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, activityQuestion, trainingLocation }) {
+  const { useState, useEffect, useRef, useMemo } = React;
 
   /* Card from /api/devices and SSE is authoritative. Fetch only fills a missing snapshot. */
   const [fetchedCard, setFetchedCard] = useState(null);
@@ -30,12 +30,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       apiClient.removeEventListener('devices-synced', synced);
     };
   }, []);
-  const training = useTraining(unitId);
+  const training = useTraining(unitId, {sessionId,canEdit:actor === 'admin'});
   const [trainingOpen, setTrainingOpen] = useState(false);
   const [trainingSelection, setTrainingSelection] = useState(null);
-  const [locateTransition, setLocateTransition] = useState(null);
-  useEffect(() => { if (trainingLocation?.transition_id) setLocateTransition({id:trainingLocation.transition_id,nonce:trainingLocation.nonce}); }, [trainingLocation]);
-  const locate = id => setLocateTransition({id,nonce:Date.now()});
+  useEffect(() => {
+    if (trainingLocation?.teaching_id) {
+      setTrainingSelection({unit_id:unitId,transition_id:trainingLocation.transition_id,teaching_id:trainingLocation.teaching_id,summaryText:trainingLocation.summaryText});
+    }
+  }, [trainingLocation]);
   const [controlBusy, setControlBusy] = useState(false);
   const controlPending = useRef(false);
   const snapshotCursor = useRef({ unitId, state: null, retired: new Set() });
@@ -56,7 +58,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     id: 'welcome', role: 'assistant', agent: unitId,
     text: greeting,
   };
-  const [messages, setMessages] = useState([initialMsg]);
+  const [messages, setMessages] = useSessionTranscript(sessionId, `device:${unitId}`, [initialMsg]);
+  const chatRows = useMemo(() => trainingTimeline(messages, actor === 'admin' ? training.proposals : []), [messages,training.proposals,actor]);
   useEffect(() => {
     setMessages(previous => {
       if (previous[0]?.id !== 'welcome' || previous[0].text === greeting) return previous;
@@ -69,7 +72,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
   const seenReplies = useRef(new Set());
   const activeRun = useRef(null);
   const pendingRuns = useRef(new Map());
-  const nextRequestId = useRef(0);
+  const nextRequestId = useRef(Date.now());
   const nextProcessId = useRef(0);
   const forgetRun = runId => {
     clearTimeout(pendingRuns.current.get(runId)?.timer);
@@ -301,7 +304,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
       crypto.randomUUID().replaceAll('-', '');
     if (pendingRuns.current.has(runId)) forgetRun(runId);
     const requestKey = `chat:${++nextRequestId.current}`;
-    setMessages(prev => [...prev, { id: `${requestKey}:user`, role: 'user', text },
+    setMessages(prev => [...prev, { id: `${requestKey}:user`, role: 'user', text, requestKey, runId },
       { id: `${requestKey}:initial`, role: 'process', agent: unitId, requestKey,
         text: '已收到请求', eventId: `initial:${requestKey}` }]);
     setSending(true);
@@ -310,7 +313,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
     const answerText = activityQuestion && unitId === 'go2'
       ? `回答你刚才的问题「${activityQuestion.text}」（${activityQuestion.question_id || activityQuestion.event_id}）：${text}`
       : text;
-    const params = { message: answerText, ...(trainingSelection ? {selection:trainingSelection} : {}), ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
+    const selectedRule = trainingSelection;
+    const selection = selectedRule && Object.fromEntries(Object.entries(selectedRule).filter(([key]) => key !== 'summaryText'));
+    const params = { message: answerText, ...(selection ? {selection} : {}), ...(unitId === 'go2' ? { task_id: runId } : { run_id: runId }) };
     if (pendingRunId) {
       if (unitId === 'go2') params.resume_run_id = pendingRunId;
       else { params.run_id = pendingRunId; params.resume = true; }
@@ -407,8 +412,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
             actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth} feedback={execution}
-            onTransition={dispatchTransition} report={reportExecution} training={training} locateTransition={locateTransition}
-            onTeach={(transitionId,record) => { setTrainingSelection({unit_id:unitId,transition_id:transitionId,...(record ? {teaching_id:record.teaching_id} : {})}); setTrainingOpen(false); }} />
+            onTransition={dispatchTransition} report={reportExecution} training={training} />
         </div>
       )}
 
@@ -419,8 +423,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
-      {trainingSelection && <div className="training-selection" role="status">正在教导所选转换，请在下方输入你的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
-      <TrainingPreview proposal={training.proposal?.unit_id === unitId ? training.proposal : null} error={training.error} onConfirm={async () => { const id = training.proposal?.transition_ids?.[0]; if (await training.confirm()) locate(id); }} onCancel={training.cancel} onLocate={(_,id) => locate(id)}/>
+      {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
       {activityQuestion && <div className="device-activity-question">
         <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
         <span>{activityQuestion.text}</span>
@@ -428,7 +431,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
           target="_blank" rel="noopener noreferrer">查看截图</a>}
       </div>}
       <ChatPanel
-        messages={messages}
+        messages={chatRows}
+        training={training}
+        onReviseRule={p => setTrainingSelection({unit_id:unitId,transition_id:p.transition_ids?.[0],proposal_id:p.proposal_id,summaryText:p.summaryText})}
+        focusKey={trainingSelection}
         thinking={false}
         thinkingText=""
         thinkingAgent={unitId}
@@ -459,7 +465,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, activityQuest
         )}
       </ChatPanel>
       </div>
-      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onLocate={(_,id) => {locate(id); setTrainingOpen(false);}} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:record.transition_ids[0],teaching_id:record.teaching_id}); setTrainingOpen(false);}}/>}
+      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:record.transition_ids[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)}); setTrainingOpen(false);}}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         card={card}
         modes={modes} modeVals={effectiveModeVals} onSwitchMode={switchMode}
@@ -592,7 +598,7 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
         <span><strong>灯智能体管理</strong><small>人设与记忆</small></span><Icon name="arrow" size={15}/>
       </button>}
       {actor === 'admin' && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onTraining(); }}>
-        <span><strong>伙伴训练</strong><small>查看、调整或暂停已保存的训练</small></span><Icon name="arrow" size={15}/>
+        <span><strong>设备规则</strong><small>查看和修改设备规则</small></span><Icon name="arrow" size={15}/>
       </button>}
       <button type="button" className="device-settings-go2" onClick={() => { onClose(); onCapabilities(); }}>
         <span><strong>设备能力与技能</strong><small>查看观察条件与公开技能</small></span><Icon name="arrow" size={15}/>
