@@ -62,7 +62,7 @@ window.ActivityFeed = ActivityFeed;
 
 function activityEventKind(event = {}) {
   const type = String(event.event_type || '').toLowerCase();
-  if (type.includes('question') || type.includes('ask_user')) return 'question';
+  if (type.includes('question')) return 'question';
   if (type.includes('observation') || type.includes('observed') || type === 'person_identified') return 'observation';
   if (type.includes('message') || type.includes('proposal') || type.includes('reply')) return 'message';
   return 'status';

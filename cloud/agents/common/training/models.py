@@ -26,6 +26,8 @@ class Definition(StrictModel):
     cooldown_s: StrictInt | StrictFloat | None
     defaults: dict[str, Any]
     trigger: Trigger | None
+    # Interpreted by the role Graph, never used as a global device guard.
+    situation: StrictStr | None = Field(default=None, min_length=1, max_length=2000)
 
 
 class Draft(StrictModel):
@@ -41,6 +43,14 @@ class Confirmation(StrictModel):
 Identifier = Annotated[StrictStr, Field(min_length=1, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')]
 CapabilityHash = Annotated[StrictStr, Field(pattern=r'^[a-f0-9]{64}$')]
 Timestamp = Annotated[StrictInt | StrictFloat, Field(ge=0, allow_inf_nan=False)]
+
+
+class ApplyTraining(StrictModel):
+    """Use a saved configuration with only this request's explicit overrides."""
+    unit_id: Identifier
+    teaching_id: Identifier
+    revision: StrictInt = Field(ge=1)
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class Revision(StrictModel):

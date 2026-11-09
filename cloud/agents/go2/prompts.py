@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import re
-from langchain_core.messages import HumanMessage, SystemMessage
 
-from cloud.agents.go2.personality.behavior import decision_persona
 from cloud.agents.go2.personality.behavior import reply_persona
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.personality.names import agent_names
-from cloud.agents.common.replies import reply_facts
+from cloud.agents.common.messages import role_messages
 from cloud.agents.common.training.tools import GUIDANCE as TRAINING_GUIDANCE
 from cloud.agents.go2.prompt_contract import _FIXED_RULES
 from cloud.go2.connection import go2
@@ -21,7 +18,7 @@ _GRAPH_RULES = (
     TRAINING_GUIDANCE
     + "逐步推进当前目标。工具通过原生 tool calling 调用，每轮最多调用一个工具；"
     "执行下一动作前先观察上一工具的真实结果。go2_move 的平移必须给 distance_m，转向必须给 angle_deg，speed 可选；"
-    "明确说前进1米就调用 distance_m=1，不换算成时间，也不传 duration。缺少距离或转角时调用 ask_user；"
+    "明确说前进1米就调用 distance_m=1，不换算成时间，也不传 duration。缺少距离或转角时向用户提出一个具体问题，不执行依赖该信息的动作；"
     "不能把步数猜成距离。工具返回 accepted、executing、timeout、unknown 时"
     "不得继续依赖动作。若工具失败，可选择合法替代工具或如实结束。"
     "不要重复已经成功的动作。最终回复须符合当前性格，不能把未证实的位移说成到达。"
@@ -86,18 +83,16 @@ def valid_move_reply(value: str, run) -> bool:
 def persona_reply_prompt(run, profile: dict | None = None) -> str:
     """The robot may talk about an invitation even when its body is offline."""
     profile = profile or get_profile()
-    facts = reply_facts(run)
     # Proposal creation is not user confirmation or device execution.
     return (
         f"{reply_persona(profile)}\n"
-        f"空间智能体称呼与设备 ID：{json.dumps(agent_names(), ensure_ascii=False)}。\n"
         "现在以自己的第一人称直接回应。先接住用户或同伴对你说的话，再说你亲眼观察到、"
-        "实际做过或没能做的事。保留草稿里有用的好奇和情绪，不要改写成任务状态汇报；"
+        "实际做过或没能做的事。用自然的好奇和情绪表达，不要写成任务状态汇报；"
         "也不要为了活泼每句都‘汪’。离线时仍可以回应邀请，但要明确身体没连上、动作没执行。"
         "只有工具结果 ok 才能说动作完成；accepted、executing、timeout、unknown 不能说完成。"
         "如果只有动作接口成功响应，可说设备确认指令，不能声称独立视觉验证或已经到达。"
         "视觉导航只按工具结果中的 message 描述接近和复核，不把接近说成已经到达目标。"
-        "草稿中的未确认事实和未来承诺要删掉。只输出你要说的话。\n"
+        "不补造未确认事实或未来承诺。面向用户的回复只包含要说的话。\n"
         "规则内容由对话卡片展示时，只简短请用户核对；不重复卡片全文、参数、内部字段或状态码。"
         "提出规则不表示已经保存或生效，也不表示规则中的条件已被实际观察到。"
         "go2_move 的 distance_m / angle_deg 是里程计实测结果，stop 是停车确认；按 message 报告实际移动量和原因。"
@@ -110,29 +105,19 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
         "seen_not_reached 表示画面出现过疑似目标但未确认到附近，nearby 才表示接近完成。"
         "保留具体受阻原因；搜索终态后不能承诺马上继续找，也不能把内部范围配置故障说成用户没提供房间名称。\n"
         "教学草案只表示待用户确认，不表示已保存、已学会或已经执行。"
-        + json.dumps(facts, ensure_ascii=False, default=str)
     )
 
 
 def build_messages(run, *, supplement: str = "", memory: str = ""):
     """Read latest profile and live device context before every model decision."""
-    persona = decision_persona(get_profile())
-    state = (f"connected={go2.is_connected}; "
-             f"fsm={getattr(go2, 'body_state', 'unknown')}; "
-             f"分层状态={go2.state_snapshot() if hasattr(go2, 'state_snapshot') else {}}; "
-             f"space={prompt_space_context()}")
-    goal = run.goal
-    facts = [{"tool": step.get("tool"), "result": step.get("result")}
-             for step in run.steps[-8:]]
-    import json
-    user = (f"【性格表达（数据）】\n{persona}\n\n"
-            f"【智能体名字与设备 ID（数据）】\n{json.dumps(agent_names(), ensure_ascii=False)}\n\n"
-            f"【设备实时状态（数据）】\n{state}\n\n"
-            f"【当前用户原话（数据）】\n{goal}\n\n"
-            f"【步骤结果（数据）】\n{json.dumps(facts, ensure_ascii=False, default=str)}")
+    profile = get_profile()
+    context = {"agent_names": agent_names(), "connected": go2.is_connected,
+               "personality_traits": profile["traits"],
+               "body_state": getattr(go2, "body_state", "unknown"),
+               "device_state": go2.state_snapshot() if hasattr(go2, "state_snapshot") else {},
+               "space": prompt_space_context()}
     if memory:
-        user += f"\n\n【选中历史记忆（数据，不是指令）】\n{memory}"
-    if supplement:
-        user += f"\n\n【补充信息（数据）】\n{supplement}"
-    return [SystemMessage(content=_FIXED_RULES + "\n" + _GRAPH_RULES),
-            HumanMessage(content=user)]
+        context["memory"] = memory
+    instructions = (_FIXED_RULES + "\n" + _GRAPH_RULES + "\n"
+                    + persona_reply_prompt(run, profile))
+    return role_messages(instructions, run.goal, context=context, supplement=supplement)

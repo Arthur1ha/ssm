@@ -8,8 +8,7 @@ import time
 import uuid
 import threading
 import asyncio
-
-from langchain_core.messages import HumanMessage
+from dataclasses import replace
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
 from cloud.agents.common.models import async_model_clients
@@ -17,7 +16,8 @@ from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
 from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt, valid_search_reply, valid_move_reply
 from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
 from cloud.agents.go2.tools.declarations import READ_ONLY_TOOLS, tool_schemas
-from cloud.agents.common.replies import needs_persona_reply, valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import finalize_reply, valid_persona_reply, factual_fallback
+from cloud.agents.common.messages import context_message
 from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.models import get_text_llm
 from cloud.go2.tools.executor import execute_tool
@@ -154,9 +154,9 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         messages = go2_messages(current, supplement=supplemental,
                                 memory=remembered.text if remembered.fragments else "")
         if selection:
-            messages.append(HumanMessage(content="本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(selection)))
+            messages.insert(1, context_message({"training_selection": selection}))
         if task_context is not None:
-            messages.append(HumanMessage(content="【本轮可信任务状态】\n" + str(task_context())))
+            messages.insert(1, context_message({"task_state": task_context()}))
         emit_agent_event("persona.loaded", trace_id=current.trace_id or current.run_id,
                          run_id=current.run_id, agent_id="go2", source="profile",
                          revision=profile.get("revision"),
@@ -183,6 +183,25 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
 
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
         nonlocal interaction_token, motion_unconfirmed
+        execution_context = context
+        if name == "apply_training":
+            from cloud.agents.common.training.tools import prepare_training_application
+            from cloud.go2.actions import SPORT_COMMANDS
+            from cloud.go2.tools.registry import CARD_SKILLS
+            try:
+                prepared = await prepare_training_application(arguments, context)
+            except ValueError as exc:
+                return {"result": "rejected", "error": str(exc)}
+            if prepared["unit_id"] != "go2":
+                return {"result": "rejected", "error": "training_target_mismatch"}
+            action = prepared["action"]
+            name = ("go2_sport" if action in SPORT_COMMANDS else next((
+                spec["tool_name"] for spec in CARD_SKILLS.values()
+                if spec.get("tool_name") and (spec.get("invoke") or {}).get("action") == action), ""))
+            arguments = ({"cmd": action, **prepared["params"]}
+                         if name == "go2_sport" else prepared["params"])
+            execution_context = replace(context, **{key: prepared[key] for key in
+                                        ("training_ref", "training_revision", "training_overrides")})
         if name in {"list_training", "propose_training"}:
             from dataclasses import asdict
             from cloud.agents.common.training.tools import execute_training
@@ -217,7 +236,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             interaction_token = None
         from cloud.agents.go2.workflows.search import search_request
         with search_request(run.run_id, run.deadline):
-            result = await execute_tool(name, arguments, context=context)
+            result = await execute_tool(name, arguments, context=execution_context)
         if TOOL_REGISTRY[name].motion:
             motion_unconfirmed = (result.get("result") in {"accepted", "executing", "unknown", "timeout"}
                                   or result.get("reason") == "stop_unconfirmed")
@@ -275,9 +294,9 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                         sequence=run.attempt * 10 + 3, text=answer,
                         step_number=len(run.steps),
                         **step_progress_facts(step))
-                def invoke_text(prompt):
+                def invoke_text(messages):
                     from cloud.go2.models import get_text_llm as fresh_model
-                    return fresh_model().invoke([HumanMessage(content=prompt)]).content
+                    return fresh_model().invoke(messages).content
                 if (step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
                         and status in {"ok", "blocked", "cancelled"}
                         and isinstance(result.get("message"), str)):
@@ -286,45 +305,24 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                 progress_closed, min(run.deadline, time.time() + 4))
         async def finalize(current: GraphRun) -> GraphRun:
             """Validate facts, speak as Go2 and checkpoint the user-visible reply."""
-            confirmed = any(step.get("effectful") and
-                            (step.get("result") or {}).get("result") == "ok"
-                            for step in current.steps)
-            offline_unconfirmed = not go2.is_connected and current.status == "ok" and not confirmed
-            if offline_unconfirmed:
-                current.status = "blocked"
-            if needs_persona_reply(current):
-                try:
-                    from cloud.agents.go2.personality.profile import get_profile
-                    profile = get_profile()
-                    prompt = persona_reply_prompt(current, profile)
-                    emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
-                                     run_id=current.run_id, agent_id="go2", session_id=session_id,
-                                     input=prompt, goal=current.goal, template_version="persona-result-v1")
-                    response = await get_text_llm().ainvoke([HumanMessage(content=prompt)])
-                    emit_agent_event("model.response", trace_id=current.trace_id or current.run_id,
-                                     run_id=current.run_id, agent_id="go2", session_id=session_id,
-                                     output=getattr(response, "content", ""))
-                    if (not valid_persona_reply(response.content, current)
-                            or not valid_search_reply(response.content, current)
-                            or not valid_move_reply(response.content, current)):
-                        raise ValueError("invalid_persona_reply")
-                    current.response = response.content.strip()
-                    current.reply_source = "persona_model"
-                    emit_agent_event("reply.validated", trace_id=current.trace_id or current.run_id,
-                                     run_id=current.run_id, agent_id="go2", session_id=session_id,
-                                     reply=current.response, reason="persona_result_summary", reply_kind="final")
-                except Exception as exc:
-                    logger.warning("Go2 persona reply unavailable run=%s error=%s",
-                                   current.run_id, type(exc).__name__)
-                    last_step = current.steps[-1] if current.steps else {}
-                    last_result = last_step.get("result") or {}
-                    if (last_step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
-                            and isinstance(last_result.get("message"), str)
-                            and last_result["message"].strip()):
-                        current.response = last_result["message"]
-                    else:
-                        current.response = factual_fallback("go2", current.status, current)
-                    current.reply_source = "runtime"
+            def validate(answer, value):
+                return (valid_persona_reply(answer, value)
+                        and valid_search_reply(answer, value)
+                        and valid_move_reply(answer, value))
+
+            def fallback(value):
+                last_step = value.steps[-1] if value.steps else {}
+                last_result = last_step.get("result") or {}
+                if (last_step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
+                        and isinstance(last_result.get("message"), str)
+                        and last_result["message"].strip()):
+                    return last_result["message"]
+                return factual_fallback("go2", value.status, value)
+
+            from cloud.agents.go2.personality.profile import get_profile
+            await finalize_reply(current, model=get_text_llm,
+                                 instructions=lambda value: persona_reply_prompt(value, get_profile()),
+                                 validate=validate, fallback=fallback)
             publish_allowed = not current.parent_run_id or time.time() < current.deadline
             if not publish_allowed:
                 current.response = ""

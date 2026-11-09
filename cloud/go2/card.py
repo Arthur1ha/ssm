@@ -218,7 +218,7 @@ def _build_go2_card() -> dict:
             "label": "自主性",
             "state_field": "autonomy_mode",
             "options": [
-                {"value": "manual",       "label": "完全遥控", "description": "由用户/编排器遥控决定行动"},
+                {"value": "manual",       "label": "待命", "description": "不自主巡游，仍响应用户命令和已教导的事件动作"},
                 {"value": "free_explore", "label": "允许自主探索", "description": "允许现有自主策略发起探索，当前生活状态另行显示；休息和显式停止后不会自动重放任务"},
             ],
             "get": "/api/go2/autonomy",

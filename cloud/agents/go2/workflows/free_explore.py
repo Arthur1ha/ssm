@@ -6,6 +6,7 @@ stage, next step and last receipt across short invocations.
 
 from __future__ import annotations
 
+import json
 from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,10 +32,12 @@ class MotivationState(TypedDict, total=False):
     profile_revision: int
     pending_event: dict
     space_summary: str
+    device_state: dict
     current_goal: dict
     last_tool_result: dict
     event_decision: str
     decision_reason: str
+    selected_teaching_id: str | None
     task_update: dict
     task_stage: str
     next_action: str
@@ -44,6 +47,7 @@ class MotivationState(TypedDict, total=False):
 class EventDecision(BaseModel):
     choice: str = Field(description="accept, defer or decline")
     reason: str = Field(description="Brief reason based on current facts")
+    teaching_id: str | None = Field(default=None, description='Selected training candidate ID, when applicable')
 
 
 def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: Any = None):
@@ -85,11 +89,46 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
         event = state.get("pending_event") or {}
         if event:
             if event.get("kind") == "training_event":
+                candidates = event.get('candidates') or [event]
+                selected_id = candidates[0].get('teaching_id') if len(candidates) == 1 else None
+                choice, reason = 'accept', 'enabled_teaching'
+                if len(candidates) > 1 or candidates[0].get('situation'):
+                    choice, reason = 'defer', 'situation_unconfirmed'
+                    if model is not None:
+                        try:
+                            raw = await model.with_structured_output(
+                                EventDecision, method='function_calling').ainvoke([
+                                    SystemMessage(content=(
+                                        '从已保存的教导候选中选择当前适用的一条。'
+                                        '情境由用户自由描述，按语义理解，不要求预定义场景或特定句式。'
+                                        '用户明确表达的当前情境即可作为事实，不要求另有传感器识别。'
+                                        '已有事实支持时选择 accept，不符时 decline，缺少事实时 defer。'
+                                        '有多个候选时必须返回其中一个 teaching_id；无法唯一选择时 defer。'
+                                        '教导原话描述未来要求，不证明条件现在已经发生。'
+                                        '只判断适用性，不改动绑定动作或参数。')),
+                                    HumanMessage(content=json.dumps({
+                                        'teachings': candidates,
+                                        'observation': event.get('observation'),
+                                        'space': state.get('space_summary'),
+                                        'device': state.get('device_state'),
+                                    }, ensure_ascii=False, default=str)),
+                                ])
+                            decision = EventDecision.model_validate(raw)
+                            if decision.choice in {'accept', 'decline', 'defer'}:
+                                choice, reason = decision.choice, decision.reason[:200]
+                                selected_id = decision.teaching_id or selected_id
+                                if choice == 'accept' and selected_id not in {
+                                        candidate.get('teaching_id') for candidate in candidates}:
+                                    choice, reason = 'defer', 'teaching_selection_unconfirmed'
+                        except Exception:
+                            reason = 'situation_judgment_unavailable'
                 return {"should_explore": False, "should_social": False,
-                        "event_decision": "accept", "decision_reason": "enabled_teaching",
+                        "event_decision": choice, "decision_reason": reason,
+                        "selected_teaching_id": selected_id if choice == 'accept' else None,
                         "current_goal": {"kind": "teaching", "event_id": event.get("event_id"),
                                          "deadline": event.get("deadline")},
-                        "task_stage": "accepted", "next_action": "execute_teaching"}
+                        "task_stage": "accepted" if choice == 'accept' else 'blocked',
+                        "next_action": "execute_teaching" if choice == 'accept' else 'none'}
             if event.get("kind") == "peer_message":
                 if model is None:
                     return {"should_explore": False, "event_decision": "defer",

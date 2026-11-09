@@ -7,8 +7,7 @@ import logging
 import threading
 import time
 import uuid
-
-from langchain_core.messages import HumanMessage
+from dataclasses import replace
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
 from cloud.agents.common.models import async_model_clients
@@ -24,7 +23,8 @@ from cloud.agents.lamp.tools.execute import execute_lamp_tool
 from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
-from cloud.agents.common.replies import factual_fallback, needs_persona_reply
+from cloud.agents.common.replies import finalize_reply
+from cloud.agents.common.messages import context_message
 from cloud.agents.lamp.personality.profile import get_profile
 from cloud.personality.store import render_identity
 from cloud.esp32.physical_tasks import get as get_physical_task, stable_task_id
@@ -179,14 +179,30 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                     sequence=run.attempt * 10 + 3, text=answer,
                     step_number=len(run.steps), **step_progress_facts(step))
 
-            def invoke_text(prompt):
-                return get_text_llm(ChatOpenAI).invoke([HumanMessage(content=prompt)]).content
+            def invoke_text(messages):
+                model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+                return model.invoke(messages).content
 
             submit_progress(persona + "\n进展只用自然语言，不展示 RGB、亮度或色温数值。",
                             run.goal, step, invoke_text, publish_text,
                             progress_closed, min(run.deadline, time.time() + 4))
 
     async def execute(name, params, step_id):
+        if name == "apply_training":
+            from cloud.agents.common.training.tools import prepare_training_application
+            from cloud.esp32.tool_registry import PHYSICAL_ACTIONS
+            try:
+                prepared = await prepare_training_application(params, context)
+            except ValueError as exc:
+                return {"result": "rejected", "error": str(exc)}
+            if prepared["unit_id"] != unit_id or prepared["action"] not in PHYSICAL_ACTIONS:
+                return {"result": "rejected", "error": "training_target_mismatch"}
+            execution = replace(context, **{key: prepared[key] for key in
+                                ("training_ref", "training_revision", "training_overrides")})
+            return execute_lamp_tool(PHYSICAL_ACTIONS[prepared["action"]]["tool"],
+                                     prepared["params"], step_id, agent=agent, unit_id=unit_id,
+                                     context=execution, dispatch=dispatch,
+                                     lighting_only=lighting_only, run_id=run.run_id)
         if name in {"list_training", "propose_training"}:
             from dataclasses import asdict
             from cloud.agents.common.training.tools import execute_training
@@ -205,36 +221,9 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                  unit_id=unit_id, session_id=context.session_id)
 
     async def finalize(current: GraphRun) -> GraphRun:
-        if current.status == "error" and not current.steps:
-            # The decision model failed before dispatch. There is no device
-            # receipt for a second model to interpret or invent.
-            current.response = factual_fallback(unit_id, current.status, current)
-            current.reply_source = "runtime"
-        elif needs_persona_reply(current) and (not current.parent_run_id or time.time() < current.deadline):
-            try:
-                prompt = persona_reply_prompt(current, get_profile())
-                emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
-                                 run_id=current.run_id, agent_id=unit_id, session_id=current.session_id,
-                                 input=prompt, goal=current.goal,
-                                 model=str(getattr(run_model, "model_name", "unknown")),
-                                 template_version="persona-result-v1")
-                response = await run_model.ainvoke([HumanMessage(content=prompt)])
-                emit_agent_event("model.response", trace_id=current.trace_id or current.run_id,
-                                 run_id=current.run_id, agent_id=unit_id, session_id=current.session_id,
-                                 output=getattr(response, "content", ""))
-                if not valid_lamp_reply(response.content, current):
-                    raise ValueError("invalid_persona_reply")
-                current.response = response.content.strip()
-                current.reply_source = "persona_model"
-                emit_agent_event("reply.validated", trace_id=current.trace_id or current.run_id,
-                                 run_id=current.run_id, agent_id=unit_id,
-                                 session_id=current.session_id, reply=current.response,
-                                 reason="persona_result_summary", reply_kind="final")
-            except Exception as exc:
-                logger.warning("lamp persona reply unavailable run=%s error=%s",
-                               current.run_id, type(exc).__name__)
-                current.response = factual_fallback(unit_id, current.status, current)
-                current.reply_source = "runtime"
+        await finalize_reply(current, model=run_model,
+                             instructions=lambda value: persona_reply_prompt(value, get_profile()),
+                             validate=valid_lamp_reply)
         if current.parent_run_id and time.time() >= current.deadline:
             current.response = ""
             current.reply_source = "runtime"
@@ -260,6 +249,13 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                     parent_run_id=current.parent_run_id, source=event_source)
         return current
 
+    def messages_for(current: GraphRun):
+        messages = decision_messages(current, agent=agent, unit_id=unit_id,
+                                     supplement=text if resume else "")
+        if selection:
+            messages.insert(1, context_message({"training_selection": selection}))
+        return messages
+
     @async_model_clients()
     async def invoke_graph():
         nonlocal run_model
@@ -268,8 +264,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             run, model=run_model,
             tool_schemas=visible_schemas(lighting_only=lighting_only,
                                         card=cards.get_registry().get_card(unit_id)),
-            build_messages=lambda current: decision_messages(
-                current, agent=agent, unit_id=unit_id, supplement=(text if resume else "") + ("\n本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(selection) if selection else "")),
+            build_messages=messages_for,
             execute=execute, reconcile_effect=reconcile,
             finalize=finalize, checkpointer=saver, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",

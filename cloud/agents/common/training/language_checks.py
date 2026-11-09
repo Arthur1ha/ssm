@@ -1,5 +1,6 @@
 import pytest
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.training.tools import propose_training, list_training
 
 
@@ -139,7 +140,7 @@ async def test_scripted_model_uses_role_schemas_and_proposal_only(role, tmp_path
     declarations = {'steward': STEWARD_TOOL_SCHEMAS,
                     'lamp': visible_schemas(lighting_only=False),
                     'go2': {**tool_schemas(), **SCHEMAS}}[role]
-    class ScriptedModel:
+    class ScriptedModel(JsonReplyModel):
         def __init__(self): self.calls = 0
         def bind_tools(self, tools, **kwargs):
             self.names = {t['function']['name'] for t in tools}

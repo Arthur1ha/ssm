@@ -7,13 +7,23 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, is_dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from cloud.agents.common.training.models import Definition
+from cloud.agents.common.training.models import ApplyTraining, Definition
+from cloud.agents.common.training.policy import application_parameters
+from cloud.space.execution import ExecutionContext
 
 GUIDANCE = ('通过现有工具理解任意自然语言行为规则；先用 list_training 读取已有规则、未完成草案和设备转换目录。'
-            '依据用户意图选择真实支持的转换、条件、触发事件和默认值，不依赖特定句式或关键词。'
+            '由你结合用户原话、历史与事实理解情境和规则适用性，不依赖特定句式、关键词或预设场景清单。'
+            'situation 是开放的自然语言适用情境，不是传感器事件；用户直接表达当前情境即可使用，不要求设备自动识别。'
+            '依据用户意图选择真实支持的动作转换与参数；conditions 只放适用后必须遵守的明确限制。'
+            '用户说以后某场景用现在这档颜色时，把真实当前 RGB 和亮度保存到 defaults，情境保存到 situation；'
+            '不要改成所有开灯或调色都使用这档，也不新增硬件场景状态。'
+            '用户只指定情境与动作而未限制起始状态时，绑定该动作在各合法起始状态的等价转换；不要仅因当前状态固化适用起点。'
+            '用户表达进入某情境时，语义选择对应已保存规则并用 apply_training 按 ID 和当前版本调用；'
+            'overrides 只放用户本次明确修改的参数，不重填或猜测保存的整组颜色。'
+            '用户说以后都这样时修订原规则；只说这次时使用本次 overrides，不改变保存配置。'
             '每次 create/update 都必须重新给出 name：一句简短、完整、用户可读的规则说明，通常20个汉字以内，适合放在状态转换卡片；'
             '不重复卡片已有的状态名称，不列场景清单，不用技术字段、枚举值或泛泛的标题，也不能截断关键限制来凑字数。'
             'effect_text 用简短自然语言说明什么情况下会做什么、限制了什么，完整对应结构化定义，不输出参数或 JSON。'
@@ -42,7 +52,8 @@ class ProposeTraining(BaseModel):
     supersedes_proposal_id: str | None = None
     definition: Definition | None = None
 
-SCHEMAS = {'list_training': ListTraining, 'propose_training': ProposeTraining}
+SCHEMAS = {'list_training': ListTraining, 'propose_training': ProposeTraining,
+           'apply_training': ApplyTraining}
 
 def _selection(context, unit_id):
     selection = context.get('selection')
@@ -138,9 +149,43 @@ async def internal_api_call(path, payload, context, *, method='POST'):
             return json.load(response)
     return await asyncio.to_thread(request)
 
+async def prepare_training_application(
+        arguments: dict, context: ExecutionContext | dict,
+        api_call: Callable | None = None) -> dict:
+    """Read saved parameters; the caller still owns actual device execution.
+
+    Bind the returned reference and overrides to ExecutionContext before calling
+    the original executor, which rechecks the record under its dispatch lock.
+    """
+    args = ApplyTraining.model_validate(arguments).model_dump()
+    context = asdict(context) if is_dataclass(context) else context
+    snapshot = await list_training({'unit_id': args['unit_id']}, context,
+                                   api_call or internal_api_call)
+    record = next((row for row in snapshot['records']
+                   if row['teaching_id'] == args['teaching_id']), None)
+    if record is None or record.get('desired_status') != 'enabled':
+        raise ValueError('training_not_enabled')
+    if record['revision'] != args['revision']:
+        raise ValueError('training_revision_changed')
+    if record.get('unit_id') != args['unit_id']:
+        raise ValueError('training_target_mismatch')
+    if record.get('capability_hash') != snapshot['catalog']['hash']:
+        raise ValueError('capability_changed')
+    if context.get('origin_kind', 'user_delegated') not in record['definition']['origins']:
+        raise ValueError('training_origin_mismatch')
+    action, params = application_parameters(record, snapshot['catalog'], args['overrides'])
+    return {'unit_id': args['unit_id'], 'action': action, 'params': params,
+            'training_ref': record['teaching_id'], 'training_revision': record['revision'],
+            'training_overrides': args['overrides']}
+
+
 async def execute_training(name, arguments, context):
     try:
-        value = await (list_training if name == 'list_training' else propose_training)(arguments, context, internal_api_call)
-        return {'result': 'ok', **value}
+        adapters = {'list_training': list_training, 'propose_training': propose_training}
+        if name not in adapters:
+            raise ValueError('unknown_training_tool')
+        value = await adapters[name](arguments, context, internal_api_call)
+        return {'result': 'ok', 'result_kind': ('training_query' if name == 'list_training'
+                                               else 'training_proposal'), **value}
     except Exception as exc:
         return {'result': 'rejected', 'error': str(exc)[:300]}

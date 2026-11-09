@@ -81,7 +81,11 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
         execution = ExecutionContext(
             context["session_id"], context.get("actor", "visitor"), bool(context.get("persist")),
             context.get("space_id", "main"), context.get("origin_kind", "user_delegated"),
-            context.get("expires_at") or 0)
+            context.get("expires_at") or 0,
+            requester=context.get("requester"),
+            training_ref=context.get("training_ref"),
+            training_revision=context.get("training_revision"),
+            training_overrides=context.get("training_overrides"))
 
         def dispatch(uid, action, physical_params, trusted, source, *, task_id):
             transport.do_publish_task(uid, task_id, action, physical_params,
@@ -143,6 +147,12 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                                                         else 160 if skill_id == "go2_visual_navigate" else 90)),
                 "trace_id": correlation.get("trace_id"),
                 "parent_run_id": correlation.get("run_id")}
+        if context.get("training_ref"):
+            body["training"] = {
+                "unit_id": unit_id, "teaching_id": context["training_ref"],
+                "revision": context["training_revision"],
+                "overrides": context.get("training_overrides") or {},
+            }
         timeout = (max(1, deadline - time.time()) if unit_id == "go2" or skill_id == "adjust_lighting"
                    else min(http_timeout_for(card, skill_id), max(1, deadline - time.time())))
         try:
@@ -197,17 +207,13 @@ class SetSpaceConstraint(_Args):
 class ClearSpaceConstraints(_Args):
     """撤销本会话空间要求。"""
 
-class AskUser(_Args):
-    """暂停执行，向用户追问必要信息。"""
-    question: str
-
 STEWARD_TOOL_SCHEMAS = {
     "list_agents": ListAgents, "get_space_context": GetSpaceContext,
     "read_state": ReadState, "invoke_skill": InvokeSkill,
     "await_result": AwaitResult,
     "send_message": SendMessage, "start_activity": StartActivity,
     "set_space_constraint": SetSpaceConstraint,
-    "clear_space_constraints": ClearSpaceConstraints, "ask_user": AskUser,
+    "clear_space_constraints": ClearSpaceConstraints,
 }
 
 
@@ -215,21 +221,42 @@ def make_executor(run, context: dict, resume: bool = False):
     """Bind the trusted context and domain services to one Graph tool call."""
     run_id, session_id = run.run_id, run.session_id
     async def execute(name: str, args: dict, step_id: str) -> dict:
-        if name in {"list_training", "propose_training"}:
-            from cloud.agents.common.training.tools import execute_training
-            if run.parent_run_id or context.get("peer_request_id"):
-                return {"result": "rejected", "error": "direct_user_request_required"}
-            return await execute_training(name, args, {**context, "run_id": run_id})
         if context.get("peer_request_id") and peer_coordination_cancelled(context["peer_request_id"]):
             return {"result": "cancelled", "error": "higher_priority_user_request"}
         if context.get("expires_at") and context["expires_at"] <= time.time():
             return {"result": "timeout", "error": "session_expired"}
-        if name in {"invoke_skill", "set_space_constraint",
+        if name in {"invoke_skill", "apply_training", "set_space_constraint",
                     "clear_space_constraints"} and any(
                         step.get("tool") == "start_activity" and
                         (step.get("result") or {}).get("result") == "ok"
                         for step in run.steps):
             return {"result": "rejected", "error": "activity_started_for_this_intent"}
+        if name == "apply_training":
+            from cloud.agents.common.training.tools import prepare_training_application
+            from cloud.go2.actions import SPORT_COMMANDS
+            try:
+                prepared = await prepare_training_application(args, context)
+            except ValueError as exc:
+                return {"result": "rejected", "error": str(exc)}
+            unit_id, action = prepared["unit_id"], prepared["action"]
+            card = _cards(context).get(unit_id) or {}
+            invoke_action = "SPORT" if card.get("agent_type") == "robot" and action in SPORT_COMMANDS else action
+            params = ({"cmd": action, **prepared["params"]} if invoke_action == "SPORT" else prepared["params"])
+            skill = next((item for item in card.get("skills", [])
+                          if (item.get("invoke") or {}).get("action") == invoke_action), None)
+            if skill is None:
+                return {"result": "rejected", "error": "training_action_unavailable"}
+            trusted = {**context, **{key: prepared[key] for key in
+                       ("training_ref", "training_revision", "training_overrides")}}
+            return await invoke_blocking(_invoke_skill, trusted, {
+                "unit_id": unit_id, "skill_id": skill["id"], "params": params,
+                "message": run.goal,
+            }, step_id, run.deadline)
+        if name in {"list_training", "propose_training"}:
+            from cloud.agents.common.training.tools import execute_training
+            if run.parent_run_id or context.get("peer_request_id"):
+                return {"result": "rejected", "error": "direct_user_request_required"}
+            return await execute_training(name, args, {**context, "run_id": run_id})
         if name == "list_agents":
             return {"result": "ok", "agents": _public_view(_cards(context))}
         if name == "get_space_context":

@@ -17,30 +17,36 @@ def test_person_match_requires_fresh_standing_and_current_revision():
 
 
 @pytest.mark.asyncio
-async def test_runtime_graph_delivers_one_bound_action(monkeypatch):
-    from cloud.go2.mode import free_explore as mod
-    from cloud.agents.common.training import store, service
-    from cloud.go2 import card
+async def test_runtime_graph_delivers_one_bound_action(monkeypatch, tmp_path):
+    from cloud.go2 import training_events as mod
     f = person_greeting_fixture()
     now = time.time()
+    monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path / 'checkpoints'))
     monkeypatch.setattr(mod, 'runtime_for', lambda _: None)
     monkeypatch.setattr(mod.go2, 'is_connected', True)
     monkeypatch.setattr(mod.go2, 'state_snapshot', lambda: {'body_state': 'standing', 'body_telemetry_fresh': True})
-    monkeypatch.setattr(card, '_build_go2_card', lambda: {'unit_id': 'go2'})
-    monkeypatch.setattr('cloud.agents.common.training.catalog.catalog_for', lambda _: f['catalog'])
-    monkeypatch.setattr(store, 'list_records', lambda *a, **k: f['records'])
-    monkeypatch.setattr(service, 'load_runtime', lambda *a: True)
+    monkeypatch.setattr(mod, '_build_go2_card', lambda: {'unit_id': 'go2'})
+    monkeypatch.setattr(mod, 'catalog_for', lambda _: f['catalog'])
+    monkeypatch.setattr(mod, 'list_records', lambda *a, **k: f['records'])
+    monkeypatch.setattr(mod, 'load_runtime', lambda *a: True)
+    monkeypatch.setattr(mod, '_emit', lambda *a, **k: None)
+    monkeypatch.setattr(mod, 'get_profile', lambda: {})
     calls = []
-    async def execute(name, params, *, context):
+    async def execute(name, params, *, context, request_id):
         calls.append((name, params, context))
         return {'result': 'accepted'}
     monkeypatch.setattr(mod, 'execute_tool', execute)
-    drive = mod.Drive()
-    from cloud.space.execution import ExecutionContext
-    drive._context = ExecutionContext('auto', 'visitor', False, origin_kind='agent_autonomous')
+    listener = mod.PersonTeachingListener()
+    listener.configure(connected=True)
+    listener._presence = True
+    listener._frame_ts = now
+    monkeypatch.setattr(listener, '_blocked', lambda _: False)
+    from dataclasses import replace
+    context = replace(listener._context, trigger_mode_epoch=listener._generation,
+                      expires_at=int(now + 5))
     event = {'event_id': 'frame:1', 'kind': 'training_event', 'ts': now, 'deadline': now + 5}
-    await drive._handle_event(event, None, None, None)
+    await listener.handle_event(event, context)
     assert len(calls) == 1 and calls[0][1] == {'cmd': 'Hello'}
     assert calls[0][2].trigger_ref == f['records'][0]['teaching_id']
     assert calls[0][2].actor == 'visitor'
-    assert drive._last_tool_result['result'] == 'accepted'
+    assert listener.last_result['result'] == 'accepted'

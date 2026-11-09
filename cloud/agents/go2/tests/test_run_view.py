@@ -5,8 +5,8 @@ from multiprocessing import get_context
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.tools import tool
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.effects import FileEffectLedger
 from cloud.agents.common.run_index import FileRunIndex
@@ -25,13 +25,7 @@ def _acquire_admission(root, acquired):
         acquired.set()
 
 
-@tool
-def ask_user(question: str) -> str:
-    """Ask a clarifying question."""
-    return question
-
-
-class Model:
+class Model(JsonReplyModel):
     def __init__(self, answer):
         self.answer = answer
 
@@ -69,9 +63,8 @@ async def test_clarification_is_visible_and_resumable_from_new_view(tmp_path, mo
     writer = Go2RunView(checkpointer=FileCheckpointSaver(checkpoints), index=FileRunIndex(index))
     writer.register("go2-run-2", "session-2")
     run = GraphRun("go2-run-2", "session-2", "go somewhere", time.time() + 30, agent_id="go2")
-    model = Model(AIMessage(content="", tool_calls=[
-        {"name": "ask_user", "args": {"question": "去哪里？"}, "id": "q1"}]))
-    await run_role_graph(run, model=model, tool_schemas={"ask_user": ask_user},
+    model = Model(AIMessage(content='{"kind":"question","text":"去哪里？"}'))
+    await run_role_graph(run, model=model, tool_schemas={},
                          build_messages=lambda current: [HumanMessage(content=current.goal)],
                          execute=lambda *_args: {"result": "ok"},
                          checkpointer=writer.checkpointer, effect_ledger=FileEffectLedger(effects))

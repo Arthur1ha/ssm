@@ -74,7 +74,9 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const nodeCommandPending = useRef(false);
   const primary = primaryStateRegion(sm);
   const stale = streamHealth === 'reconnecting';
-  const topology = stateBoardTopology(sm, liveState);
+  const taughtTransitionIds = new Set(records.filter(record => record.desired_status === 'enabled')
+    .flatMap(record => record.transition_ids || []));
+  const topology = stateBoardTopology(sm, liveState, taughtTransitionIds);
   const pendingExecution = liveState[sm?.execution_field];
   const execution = pendingExecution || liveState[sm?.last_execution_field];
   const awaitingFeedback = connected && primary?.state_field && liveState[primary.state_field] == null;
@@ -86,7 +88,9 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       && item.enter_action === edge.transition.action);
     const target = widget && topology.nodes.find(node => node.value === widget.node_state
       && node.region.state_field === (widget.state_field || primary?.state_field));
-    return {...edge,dst:target?.id || edge.dst,reason:!edge.transition.action
+    return {...edge,dst:target?.id || edge.dst,
+      hasTeaching:taughtTransitionIds.has(edge.transition.id),
+      reason:!edge.transition.action
       ? offline ? '请先连接设备' : stale ? '状态同步中' : ''
       : widget && remoteActive(widget) ? '已进入遥控' : edge.active
       ? stateActionReason(sm,edge.region,edge.transition,liveState,{offline,busy,actor,stale})

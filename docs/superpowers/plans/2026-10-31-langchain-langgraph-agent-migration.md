@@ -113,7 +113,7 @@ cloud/
 
 一个有物理效果的模型轮次最多下发一个动作，然后观察真实结果再决定下一步。先用当前 Ark `deepseek-v4-flash/pro` 做**原生 tool calling、单调用约束、结构化输出及流式事件**探针；若模型不能稳定满足，不再写一套严格 JSON 动作解析器，应调整框架模型配置/选用兼容模型，并用框架工具节点前的确定性安全门拒绝多动作派发。不能让 `ToolNode` 默认并行执行多个物理动作。
 
-模型要求补充信息时，由无副作用的 `ask_user` 工具或澄清节点调用 `interrupt()`；API 用原 `run_id` 找到相同 Graph thread，再用 `Command(resume=...)` 续接。`interrupt` 所在节点可能重跑，因此澄清节点前不做物理动作。[官方明确要求中断前副作用可幂等](https://docs.langchain.com/oss/python/langgraph/interrupts)。
+模型要求补充信息时，通过 LangChain 校验的结构化回复标记待回答问题，再由无副作用的澄清节点调用 LangGraph 原生 `interrupt()`；API 用原 `run_id` 找到相同 Graph thread，再用 `Command(resume=...)` 续接。`interrupt` 所在节点可能重跑，因此澄清节点前不做物理动作。[官方明确要求中断前副作用可幂等](https://docs.langchain.com/oss/python/langgraph/interrupts)。
 
 Graph 检查点**不等于设备恰好执行一次**。ESP32 MQTT QoS 1、HTTP 超时、Go2 运动都仍以稳定 `tool_call_id → task_id/request_id`、目标任务账本和实体回执为准。派发后到结果写入前宕机时，恢复先查询原 ID；无法确认则显示 `unknown/timeout` 并停下依赖步骤，绝不能换 ID 再发。`ok`、`accepted`、`executing`、`timeout`、`cancelled` 等现有结果含义不变。
 

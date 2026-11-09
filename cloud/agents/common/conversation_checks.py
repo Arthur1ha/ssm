@@ -5,6 +5,7 @@ import time
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.conversation import legacy_dialogue, trim_dialogue
@@ -12,7 +13,7 @@ from cloud.agents.common.effects import FileEffectLedger
 from cloud.agents.common.runner import GraphRun, run_role_graph
 
 
-class Model:
+class Model(JsonReplyModel):
     def __init__(self):
         self.inputs = []
 
@@ -106,7 +107,7 @@ async def test_go2_recovery_preserves_previous_dialogue(tmp_path, monkeypatch):
 
     entered = asyncio.Event()
 
-    class CancelledModel:
+    class CancelledModel(JsonReplyModel):
         async def ainvoke(self, _messages):
             entered.set()
             await asyncio.Event().wait()

@@ -12,7 +12,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -30,6 +30,7 @@ from cloud.space.execution import (
 from cloud.go2.card import (
     _publish_go2_card, _publish_go2_status, _publish_go2_state,
 )
+from cloud.agents.common.training.models import ApplyTraining
 
 from cloud.go2.service import (
     prepare_user_interaction, perform_life_control, get_autonomy_mode,
@@ -136,7 +137,7 @@ async def go2_connect(context: ExecutionContext = Depends(require_intervening_se
         _publish_go2_state()
         _publish_go2_status()
 
-        # 默认完全遥控，但已启用的身份消费者仍保持视觉检测。
+        # 默认待命，人物教导与已启用的身份消费者仍保持视觉检测。
         clear_activity_mode_owner()
         if identity_skill.enabled:
             asyncio.create_task(_initialize_identity_vision())
@@ -374,6 +375,18 @@ class ChatRequest(BaseModel):
     sync_window_s: float = 8.0
     trace_id: str | None = None
     parent_run_id: str | None = None
+    training: ApplyTraining | None = None
+
+
+def _training_context(req: ChatRequest, context: ExecutionContext) -> ExecutionContext:
+    """Carry a versioned configuration through the authenticated HTTP adapter."""
+    if req.training is None:
+        return context
+    if req.training.unit_id != "go2":
+        raise HTTPException(status_code=422, detail="training_target_mismatch")
+    return replace(context, training_ref=req.training.teaching_id,
+                   training_revision=req.training.revision,
+                   training_overrides=req.training.overrides)
 
 
 async def _stop_task_motion(context: ExecutionContext) -> dict:
@@ -394,7 +407,7 @@ async def _stop_task_motion(context: ExecutionContext) -> dict:
 @router.post("/chat")
 async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.agents.go2.graph import run_go2_loop
-    context = _normalize_context(context)
+    context = _training_context(req, _normalize_context(context))
     from dataclasses import asdict
     from cloud.api.intents import validate_training_selection
     selection = validate_training_selection(req.selection, asdict(context), unit_id="go2")
@@ -421,6 +434,7 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
             raise HTTPException(status_code=400, detail="invalid sync_window_s")
         fingerprint = hashlib.sha256(json.dumps({
             "message": req.message, "skill_id": req.skill_id, "params": req.params, "selection": selection,
+            "training": req.training.model_dump() if req.training else None,
         }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
         async def run_task():
@@ -511,7 +525,7 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
     """SSE 流：逐步推送规划、工具执行、最终回复事件。"""
     from cloud.agents.go2.graph import run_go2_loop
 
-    context = _normalize_context(context)
+    context = _training_context(req, _normalize_context(context))
     from dataclasses import asdict
     from cloud.api.intents import validate_training_selection
     selection = validate_training_selection(req.selection, asdict(context), unit_id="go2")
@@ -524,6 +538,7 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
             queue = asyncio.Queue()
             task = asyncio.create_task(run_go2_loop(
                 context.session_id, req.message, context=context,
+                skill_id=req.skill_id, params=req.params,
                 run_id=req.task_id, deadline=req.deadline,
                 trace_id=req.trace_id, parent_run_id=req.parent_run_id, selection=selection,
                 on_step=lambda step: queue.put_nowait({"type": "tool_done", "tool": step["tool"],
@@ -860,7 +875,7 @@ async def go2_autonomy_set(req: AutonomyRequest, context: ExecutionContext = Dep
         return {"ok": True, "mode": get_autonomy_mode()}
 
     if req.mode == "manual":
-        logging.info("[Go2] 自主模式 → 完全遥控")
+        logging.info("[Go2] 自主模式 → 待命")
     else:  # free_explore
         logging.info("[Go2] 自主模式 → 自由探索")
 

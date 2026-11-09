@@ -1,7 +1,7 @@
-"""Isolated LangGraph path for one lamp sensor or activity opportunity.
+"""Lamp sensor and activity decisions through the original execution boundary.
 
-The production sensor listener still uses its existing path. This graph uses
-the same gate and domain executor, but native tool calls instead of JSON text.
+The listener supplies observations; this LangGraph selects saved teachings or
+uses native tool calls for ordinary reactive decisions.
 """
 
 from __future__ import annotations
@@ -11,12 +11,14 @@ import time
 import uuid
 from typing import TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, ConfigDict
 
 from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.common.replies import factual_fallback
+from cloud.agents.common.messages import observed_tool_messages, reply_messages, role_messages
 from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.observability import emit_agent_event
 
@@ -47,7 +49,14 @@ class ReactiveState(TypedDict, total=False):
     autonomy_epoch: int
 
 
-def _prompt(agent, state: ReactiveState) -> str:
+class TrainingEventSelection(BaseModel):
+    """Select a saved candidate using the current event's semantic context."""
+    model_config = ConfigDict(extra='forbid')
+    teaching_id: str | None = None
+    reason: str = ''
+
+
+def _prompt(agent, state: ReactiveState):
     from cloud.agents.lamp.personality.profile import get_profile
     from cloud.personality.store import render_identity
     from cloud.personality.names import agent_names
@@ -72,7 +81,7 @@ def _prompt(agent, state: ReactiveState) -> str:
             f"{item.get('context', '')}（执行了：{'、'.join(item.get('actions', [])) or '无动作'}）"
             for item in agent._belief_history[-3:]
         )
-    return (
+    instructions = (
         f"{render_identity(profile)}\n"
         "你负责桌面灯的自主判断。一次最多调用一个工具；看到真实结果后才决定下一步。"
         "只有 lighting_eligible 为 true 才能调用物理灯光工具；入场本身不是调光理由。"
@@ -87,17 +96,18 @@ def _prompt(agent, state: ReactiveState) -> str:
         "仍可选择普通交流或不发消息，同伴也可拒绝。邀请不等于游戏完成。"
         "判断游戏输赢只看本局目标导航回执；狗之后自由探索到达别处，不等于找到游戏目标。"
         "观测中的 training_intent 是本次唯一允许的绑定动作；若不执行，应说明原因。"
+        "training_intent.situation 若存在，是用户教导的语义适用情境，须结合真实当前上下文理解。"
+        "事件出现不代表该情境已成立；当前不适用时说明原因并不执行。"
         "仍须遵守用户让位和真实执行回执。"
         f"社交主动性：{profile['traits']['social_initiative']}/100；"
         f"调光敏感度：{profile['traits']['adjustment_sensitivity']}/100，"
         "它只影响重新评估机会，不直接映射颜色。\n"
-        f"观测：{json.dumps(state['sense'], ensure_ascii=False, default=str)}\n"
-        f"空间：{json.dumps(space, ensure_ascii=False, default=str)}\n"
-        f"同伴名字与设备 ID：{json.dumps(agent_names(), ensure_ascii=False)}\n"
-        f"当前可玩玩法：{json.dumps(games, ensure_ascii=False)}\n"
-        f"{history}\n"
-        f"已观察结果：{json.dumps(state.get('steps', []), ensure_ascii=False, default=str)}"
     )
+    return role_messages(instructions, "根据本次自主机会决定下一步。",
+                         context={"observations": state["sense"], "space": space,
+                                  "agent_names": agent_names(), "games": games,
+                                  "history": history}) + observed_tool_messages(state.get("steps", []))
+
 
 
 def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
@@ -131,7 +141,37 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         return {"status": "executing"}
 
     def route_gate(state):
-        return "plan" if state["status"] == "executing" else END
+        if state["status"] != "executing":
+            return END
+        return "select_training" if (state['sense'].get('training_candidates')
+                                      or state['sense'].get('training_intent')) else "plan"
+
+    def select_training(state):
+        candidates = state['sense'].get('training_candidates') or [state['sense']['training_intent']]
+        selected = candidates[0] if len(candidates) == 1 and not candidates[0].get('situation') else None
+        if selected is None:
+            from cloud.space.context import get_space_context
+            messages = role_messages(
+                "依据本次真实观测和当前空间上下文，语义判断哪一条教导适用。"
+                "情境是开放描述，不按关键词匹配；事件出现不代表该情境已成立。"
+                "只选择候选中当前适用的一条 teaching_id；无法确认或均不适用时返回 null。",
+                "选择本次观察适用的教导。", context={
+                    'candidates': candidates, 'observations': state['sense'],
+                    'space': get_space_context(agent._find_led_unit(), state=agent._state)})
+            event(state, 'model.request', stage='lamp_training_selection', input=messages)
+            try:
+                answer = model.with_structured_output(TrainingEventSelection, method='function_calling').invoke(messages)
+                answer = TrainingEventSelection.model_validate(answer)
+                selected = next((item for item in candidates if item['teaching_id'] == answer.teaching_id), None)
+                event(state, 'model.response', stage='lamp_training_selection', output=answer.model_dump())
+            except Exception as exc:
+                event(state, 'model.error', stage='lamp_training_selection', error=type(exc).__name__)
+                return {'status': 'error', 'call': None}
+        if selected is None or time.time() >= selected['deadline']:
+            return {'status': 'blocked', 'call': None}
+        return {'sense': {**state['sense'], 'training_intent': selected}, 'turns': 1,
+                'call': {'name': 'blink_led', 'args': dict(selected['params']),
+                         'id': 'training_' + selected['event_id']}}
 
     def plan(state):
         if state.get("turns", 0) >= 4:
@@ -142,7 +182,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         prompt = _prompt(agent, state)
         event(state, "model.request", stage="lamp_reactive", input=prompt)
         try:
-            response = bound.invoke([HumanMessage(content=prompt)])
+            response = bound.invoke(prompt)
             if not isinstance(response, AIMessage):
                 raise TypeError("invalid_model_message")
         except Exception as exc:
@@ -195,8 +235,13 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if name in PHYSICAL:
             from cloud.esp32.physical_tasks import stable_task_id
             task_id = stable_task_id(agent._find_led_unit(), state["run_id"], call["id"])
+            intent = state['sense'].get('training_intent')
+            # The model selected the exact bound action after interpreting the
+            # candidate's situation against this event's current context.
+            confirmed_intent = ({**intent, 'situation_confirmed': bool(intent.get('situation'))}
+                                if intent else None)
             ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id,
-                                      training_intent=state['sense'].get('training_intent'))
+                                      training_intent=confirmed_intent)
         else:
             ok = agent._dispatch_tool(name, args, agent._find_led_unit())
         result = getattr(agent, "_last_reactive_tool_result", {"result": "unknown"})
@@ -218,7 +263,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                     step_id=call["id"], stage="observed", tool=name,
                     decision_observation=observation,
                     reason=result.get("error") or result.get("reason"))
-        status = ("executing" if ok and result.get("result") == "ok"
+        status = ("ok" if intent and ok and result.get("result") == "ok" else
+                  "executing" if ok and result.get("result") == "ok"
                   else result.get("result", "error"))
         return {"steps": [*state.get("steps", []), step], "call": None,
                 "status": status}
@@ -254,7 +300,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             agent_id=agent._find_led_unit(), origin_kind="agent_autonomous")
         prompt = persona_reply_prompt(run, get_profile())
         try:
-            answer = model.invoke([HumanMessage(content=prompt)]).content
+            answer = model.invoke(reply_messages(prompt, run)).content
             if not valid_lamp_reply(answer, run):
                 raise ValueError("invalid_fact_claim")
         except Exception:
@@ -289,10 +335,11 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             lines = [f"{time.strftime('%H:%M', time.localtime(item['ts']))}: "
                      f"{item['context']} → {'、'.join(item['actions']) or '无动作'}"
                      for item in recent]
-            prompt = "以下是最近桌面空间状态记录，用一句话总结规律（20字以内）：\n" + "\n".join(lines)
+            prompt = role_messages("用一句话总结历史记录中实际出现的规律，20字以内。",
+                                   "总结最近桌面空间记录的规律。", context={"records": lines})
             event(state, "model.request", stage="lamp_belief_summary", input=prompt)
             try:
-                answer = model.invoke([HumanMessage(content=prompt)]).content
+                answer = model.invoke(prompt).content
                 agent._belief_summary = str(answer).strip()[:100]
                 event(state, "model.response", stage="lamp_belief_summary",
                       output=agent._belief_summary)
@@ -304,11 +351,12 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         return {}
 
     graph = StateGraph(ReactiveState)
-    for name, node in (("gate", gate), ("plan", plan), ("act", act),
+    for name, node in (("gate", gate), ("select_training", select_training), ("plan", plan), ("act", act),
                        ("reply", reply), ("remember", remember)):
         graph.add_node(name, node)
     graph.add_edge(START, "gate")
-    graph.add_conditional_edges("gate", route_gate, {"plan": "plan", END: END})
+    graph.add_conditional_edges("gate", route_gate, {"plan": "plan", "select_training": "select_training", END: END})
+    graph.add_conditional_edges("select_training", route_plan, {"act": "act", "reply": "reply"})
     graph.add_conditional_edges("plan", route_plan, {"act": "act", "reply": "reply"})
     graph.add_conditional_edges("act", route_act, {"plan": "plan", "reply": "reply"})
     graph.add_edge("reply", "remember")
@@ -365,9 +413,10 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         observation = {"id": "sensor.light_changed", "values": {"level": payload["level"]},
                        "source": unit, "ts": payload.get("ts", 0)}
     intent = None
+    candidates = []
     if observation and observation['id'] == 'sensor.sound_detected':
         from cloud.agents.common.training.catalog import catalog_for
-        from cloud.agents.common.training.policy import training_event_intent
+        from cloud.agents.common.training.policy import training_event_candidates
         from cloud.agents.common.training.store import list_records
         from cloud.agents.common.training.service import load_runtime
         from cloud.cards.registry import get_registry
@@ -383,19 +432,21 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         if card:
             from cloud.space.execution import ExecutionContext
             load_runtime(card, ExecutionContext('agent_auto', 'agent', False, 'main', 'agent_autonomous'))
-            intent = training_event_intent({**observation, 'event_id': event_id},
+            candidates = training_event_candidates({**observation, 'event_id': event_id},
                 list_records(agent._find_led_unit(), space_id='main'), catalog_for(card),
                 {'state': received, 'state_fresh': type(received.get('_received_at')) in (int, float)
                  and 0 <= now - received['_received_at'] <= 30}, now=now)
-        if intent:
+        if candidates:
             seen.add(event_id)
             if len(seen) > 256:
                 seen.clear()
                 seen.add(event_id)
-            intent['deadline'] = ts + 5
-            intent['autonomy_epoch'] = agent._autonomy_epoch
-            sense['training_intent'] = intent
-    if not intent and unit and now - last_events.get(unit, 0) < 5:
+            candidates = [{**item, 'deadline': ts + 5, 'autonomy_epoch': agent._autonomy_epoch}
+                          for item in candidates]
+            sense['training_candidates'] = candidates
+            if len(candidates) == 1:
+                intent = sense['training_intent'] = candidates[0]
+    if not candidates and unit and now - last_events.get(unit, 0) < 5:
         return None
     if unit:
         last_events[unit] = now
@@ -414,7 +465,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     agent._autonomy_light_missing = not sense.get("light_available", False)
     # Entering reactive mode is only a baseline observation. A lighting action
     # needs a subsequent material trigger and a fresh light reading.
-    sense["lighting_eligible"] = bool(intent or
+    sense["lighting_eligible"] = bool(candidates or
                                       sense.get("light_available") and sense["proactive_hints"])
     space = get_space_context(agent._find_led_unit(), state=agent._state)
     activity, eligible = activity_peers(agent._find_led_unit(), space["peers"])
@@ -423,7 +474,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         profile["traits"]["social_initiative"], unit_id=agent._find_led_unit())
     if opportunity:
         sense["social_opportunity"] = opportunity
-    rule_sig = intent['event_id'] if intent else None
+    rule_sig = candidates[0]['event_id'] if candidates else None
     try:
         peers = list_visible_peers(agent._find_led_unit())
     except Exception:
@@ -437,21 +488,21 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         (opportunity["kind"], tuple(opportunity["event_ids"]), int(now // 300))
         if opportunity else None,
     )
-    if not intent and (signature == agent._last_reason_sig or now - agent._last_reason_ts < 10):
+    if not candidates and (signature == agent._last_reason_sig or now - agent._last_reason_ts < 10):
         return None
     return sense, signature
 
 
 def run_reactive_sensor_event(agent, event: dict, *, now: float | None = None,
                               **kwargs) -> ReactiveState | None:
-    """One event-driven Graph run, ready for a future listener switch."""
+    """Process one listener observation through the lamp's sensor Graph."""
     prepared = prepare_sensor_event(agent, event, now=now)
     if prepared is None:
         return None
     sense, signature = prepared
     agent._last_reason_ts = time.time() if now is None else now
     result = run_reactive_event(agent, sense, **kwargs)
-    intent = sense.get('training_intent')
+    intent = result.get('sense', sense).get('training_intent')
     if intent and not result.get('steps'):
         from cloud.agents.common.training.service import _emit
         reason = ('event_expired' if time.time() >= intent['deadline'] else

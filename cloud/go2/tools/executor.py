@@ -156,10 +156,8 @@ async def _training_preflight(command, params, context, *, reserve=False, dispat
     async with go2._command_lock:
         with store.partition_lock('go2', space_id=context.space_id) as data:
             if context.trigger_ref and context.trigger_mode_epoch is not None:
-                from cloud.go2.service import drive
-                if (context.expires_at <= time.time() or context.trigger_mode_epoch != drive._generation
-                        or drive.user_interrupt or drive._pending_question_id
-                        or drive._task is None or drive._task.done()):
+                from cloud.go2.training_events import person_teachings
+                if not person_teachings.allows(context):
                     return {'allowed': False, 'params': params, 'training_refs': [],
                             'transition_id': None, 'reasons': [{'code': 'autonomy_unavailable'}]}
             current = go2.state_snapshot()
@@ -238,6 +236,9 @@ async def execute_action(command: str, params: dict | None = None, *,
     # Reject malformed velocity before interrupting navigation.
     if command == "Move":
         go2._validate_velocity(**{axis: params.get(axis, 0.0) for axis in ("x", "y", "z")})
+    if command == 'StopMove' and context.origin_kind == 'user_delegated':
+        from cloud.go2.training_events import person_teachings
+        person_teachings.interrupt()
     checked = await _training_preflight(command, params, context, dispatch_only=dispatch_only)
     if not checked['allowed']:
         return {'result': 'blocked', 'error': 'training_blocked', **_training_result(checked)}
@@ -272,6 +273,10 @@ async def execute_action(command: str, params: dict | None = None, *,
         token = runtime.begin_life('play', context.session_id, life_task_id or 'command_' + uuid.uuid4().hex)
     dispatch_epoch = runtime.data['epoch'] if runtime is not None else None
     dispatch_life_id = runtime.data['life_task_id'] if runtime is not None else None
+    lease = (control_lease.snapshot() if context.trigger_ref and
+             context.origin_kind == 'agent_autonomous' and context.session_id == 'go2-teachings' else None)
+    teaching_lease = ({'session_id': lease.owner_session_id, 'generation': lease.generation}
+                      if lease is not None and lease.owner_session_id == context.session_id else None)
     try:
         with use_context(context):
             if life_task_id is not None:
@@ -284,7 +289,10 @@ async def execute_action(command: str, params: dict | None = None, *,
                 raw = await go2.send_command(command, params) if params else await go2.send_command(command)
         result = normalize_result("go2_sport", raw)
         result = {**result, "action": command, "device_epoch": dispatch_epoch, **_training_result(checked)}
-        from cloud.go2.tasks import track_command_result
+        from cloud.go2.tasks import release_teaching_lease, track_command_result
+        release_teaching_lease(result, teaching_lease)
+        if teaching_lease is not None and result.get('result') in {'accepted', 'executing', 'timeout', 'unknown'}:
+            result['teaching_lease'] = teaching_lease
         ledger, identity = current_effect()
         if identity[2] != 'direct-command':
             track_command_result(go2, ledger, identity, result, context=context)
@@ -298,6 +306,7 @@ async def execute_action(command: str, params: dict | None = None, *,
                 track_command_result(go2, ledger, identity, {
                     'result': 'accepted', 'error': 'command_result_unconfirmed',
                     'request_id': pending.get('request_id'), 'device_epoch': dispatch_epoch,
+                    'teaching_lease': teaching_lease,
                     **_training_result(checked)}, context=context)
         raise
     finally:
@@ -376,6 +385,10 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
                 from cloud.go2.service import perform_life_control
                 raw = await asyncio.wait_for(perform_life_control(params['action'], context, request_id=request_id),
                                              timeout=spec.timeout_s)
+            elif name == 'go2_sport' and request_id is not None:
+                raw = await asyncio.wait_for(execute_command_request(
+                    params['cmd'], {}, context=context, request_id=request_id),
+                    timeout=spec.timeout_s)
             elif inspect.iscoroutinefunction(fn):
                 raw = await asyncio.wait_for(fn(**params), timeout=spec.timeout_s)
             elif spec.motion:

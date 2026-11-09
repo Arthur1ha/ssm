@@ -6,16 +6,14 @@ import asyncio
 import time
 from typing import Any, TypedDict
 
-from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.models import async_model_clients
-from cloud.agents.common.replies import factual_fallback
+from cloud.agents.common.replies import factual_fallback, finalize_reply
 from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.lamp.personality.profile import get_profile
-from cloud.observability import emit_agent_event
 
 
 class ReplyState(TypedDict, total=False):
@@ -70,27 +68,11 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
             parent_run_id=state["parent_run_id"], agent_id=state["unit_id"],
             origin_kind="user_delegated",
         )
-        try:
-            profile = get_profile()
-            prompt = persona_reply_prompt(run, profile)
-            emit_agent_event("model.request", agent_id=state["unit_id"],
-                             run_id=state["task_id"], trace_id=state["trace_id"],
-                             input=prompt, stage="physical_reply")
-            model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
-            reply = await model.ainvoke([HumanMessage(content=prompt)])
-            answer = reply.content
-            emit_agent_event("model.response", agent_id=state["unit_id"],
-                             run_id=state["task_id"], trace_id=state["trace_id"],
-                             output=answer, stage="physical_reply")
-            if not valid_lamp_reply(answer, run):
-                raise ValueError("invalid_persona_reply")
-            return {"response": answer.strip()}
-        except Exception as exc:
-            emit_agent_event("model.error", agent_id=state["unit_id"],
-                             run_id=state["task_id"], trace_id=state["trace_id"],
-                             error=type(exc).__name__, stage="physical_reply")
-            return {"response": factual_fallback(state["unit_id"], status, run),
-                    "persona_error": True}
+        model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+        await finalize_reply(run, model=model,
+                             instructions=lambda value: persona_reply_prompt(value, get_profile()),
+                             validate=valid_lamp_reply)
+        return {"response": run.response, "persona_error": run.reply_source == "runtime"}
 
     async def publish_node(state: ReplyState) -> ReplyState:
         facts = dict(agent_id=state["unit_id"], session_id=state["session_id"],

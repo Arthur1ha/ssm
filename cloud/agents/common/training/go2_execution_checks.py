@@ -1,6 +1,7 @@
 """Isolated Go2 teaching enforcement using existing receipt and request ledgers."""
 import time
 import pytest
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.go2.command_request_checks import device
 from cloud.space.execution import ExecutionContext
 from cloud.agents.common.training import store, service
@@ -201,7 +202,7 @@ async def test_runner_propagates_existing_effect_identity_to_device(trained, tmp
     from cloud.go2.tools.executor import execute_tool
     robot, _ = trained
     seen = []
-    class Model:
+    class Model(JsonReplyModel):
         def bind_tools(self, tools, **kwargs):
             return self
         async def ainvoke(self, messages):

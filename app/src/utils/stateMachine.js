@@ -95,7 +95,7 @@ function stateNodeControl(node, edges) {
 function stateGraphLinks(edges) {
   const links = new Map();
   for (const edge of edges) {
-    if (edge.src === edge.dst) continue;
+    if (edge.src === edge.dst && !edge.hasTeaching) continue;
     const [src,dst] = [edge.src,edge.dst].sort();
     const id = JSON.stringify([src,dst]);
     if (!links.has(id)) links.set(id,{id,src,dst,directions:[]});
@@ -125,7 +125,7 @@ function stateGraphDimensions(nodeCount, diagram) {
 
 /* Fold presentation-only parents into an observed child. Commands and gating
  * still belong to their original region; connection stays in the page header. */
-function stateBoardTopology(machine, state = {}) {
+function stateBoardTopology(machine, state = {}, visibleTransitionIds = new Set()) {
   const all = stateMachineRegions(machine);
   const regions = all.filter(region => region.id !== 'connection' && region.state_field !== 'connection_state');
   const primary = primaryStateRegion(machine);
@@ -147,7 +147,8 @@ function stateBoardTopology(machine, state = {}) {
       retained:state[region.state_field] === value && region.retain_when_inactive && !stateRegionActive(region, all, state)})));
   const ids = new Set(nodes.map(node => node.id));
   const edges = regions.flatMap(region => (region.transitions || [])
-    .filter(edge => !edge.safety && !edge.graph_hidden && stateActionVisible(region, edge, state))
+    .filter(edge => !edge.safety && (!edge.graph_hidden || visibleTransitionIds.has(edge.id))
+      && stateActionVisible(region, edge, state))
     .map((transition,index) => ({id:`${region.id}:${index}`,region,transition,
       src:anchor(region,transition.src),dst:anchor(region,transition.dst),
       // Manual dispatch changes how we wait for results, not the source pose.

@@ -5,12 +5,11 @@ from __future__ import annotations
 import time
 from typing import Any, TypedDict
 
-from langchain_core.messages import HumanMessage
 from langgraph.graph import START, END, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.runner import GraphRun
-from cloud.agents.common.replies import valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import valid_persona_reply, factual_fallback, finalize_reply
 from cloud.agents.go2.prompts import persona_reply_prompt
 from cloud.agents.go2.personality.behavior import reply_persona
 
@@ -36,29 +35,28 @@ async def run_autonomous_reply_graph(*, run_id: str, action: str, reason: str,
                        steps=[{"step_id": state["run_id"], "tool": state["action"],
                                "params": state["params"], "result": state["result"]}],
                        status=status, agent_id="go2", origin_kind="agent_autonomous")
-        try:
-            profile = profile_loader()
-            if state.get("observation"):
-                prompt = (
-                    f"{reply_persona(profile)}\n"
-                    "你是刚观察完周围的机器狗。用第一人称和自己的性格说一句简短发现，"
-                    "像自然聊天，不要照抄观察报告或使用项目符号。只谈下面观察中确实提到的东西；"
-                    "画面不能确认的身份、距离和安全性不要补造。不要说已到「探索点」。"
-                    "只输出要说的话。\n观察：" + state["observation"])
-            else:
-                prompt = persona_reply_prompt(run, profile)
-            response = await model.ainvoke([HumanMessage(content=prompt)])
-            answer = response.content
-            if (not valid_persona_reply(answer, run)
-                    or (state.get("observation") and
-                        (len(answer) > 160 or "\n" in answer or "**" in answer
-                         or "场景描述" in answer or "值得记录" in answer
-                         or "探索点" in answer or "exploration target" in answer))):
-                raise ValueError("invalid_persona_reply")
-        except Exception:
-            answer = ("我刚看了看：" + state["observation"].split("；", 1)[0].rstrip("。") + "。"
-                      if state.get("observation") else factual_fallback("go2", status, run))
-        return {"answer": answer}
+        observation = state.get("observation") or ""
+        profile = profile_loader()
+        instructions = (f"{reply_persona(profile)}\n"
+            "你是刚观察完周围的机器狗。用第一人称和自己的性格说一句简短发现，"
+            "像自然聊天，不要照抄观察报告或使用项目符号。只谈观测中确实提到的东西；"
+            "画面不能确认的身份、距离和安全性不要补造。不要说已到「探索点」。"
+            "只输出要说的话。" if observation else persona_reply_prompt(run, profile))
+
+        def validate(answer, value):
+            return (valid_persona_reply(answer, value) and (not observation or
+                (len(answer) <= 160 and "\n" not in answer and "**" not in answer
+                 and not any(term in answer for term in
+                             ("场景描述", "值得记录", "探索点", "exploration target")))))
+
+        def fallback(value):
+            return ("我刚看了看：" + observation.split("；", 1)[0].rstrip("。") + "。"
+                    if observation else factual_fallback("go2", status, value))
+
+        await finalize_reply(run, model=model, instructions=instructions,
+                             validate=validate, fallback=fallback,
+                             context={"observation": observation} if observation else None)
+        return {"answer": run.response}
 
     graph = StateGraph(ReplyState)
     graph.add_node("reply", reply)

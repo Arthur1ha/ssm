@@ -41,8 +41,6 @@ class Drive:
         self._state           = MotivationalState.IDLE
         self._curiosity       = 0
         self._person_present   = False   # HOG 检测到人体（含远处背景人）
-        self._training_presence = None
-        self._training_frame_ts = 0.0
         self._person_engaging  = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
         self._last_person_ts   = 0.0
         self._last_action_ts   = 0.0
@@ -452,20 +450,8 @@ class Drive:
         _person_engaging：人脸检测到，表示对方近距且面向镜头，判定为主动互动意图
         人脸检测可能误判，不能让它独占自由探索或中断地图导航。
         """
-        now = time.time()
         persons = frame.get('persons') or {}
-        ts = frame.get('ts')
         detected = persons.get('detected')
-        if (type(detected) is bool and type(ts) in (int, float)
-                and self._training_frame_ts < ts <= now + 1 and now - ts <= 5
-                and frame.get('frame_id') is not None):
-            previous = self._training_presence
-            self._training_presence = detected
-            self._training_frame_ts = ts
-            if detected and previous is False and not self.user_interrupt and not self._pending_question_id:
-                self.submit_event({'event_id': 'person:%s:%s' % (ts, frame['frame_id']),
-                    'kind': 'training_event', 'source': 'go2.camera', 'ts': ts,
-                    'deadline': ts + 5})
         if type(detected) is not bool or not isinstance(frame.get('faces'), dict):
             return
         currently_present  = detected
@@ -501,12 +487,8 @@ class Drive:
                 "activity_id": self._activity_id()})
 
     def on_identity_event(self, event) -> None:
-        """Only confirmed fresh identity can trigger an enabled teaching."""
+        """Keep identity as social context; person teachings have their own consumer."""
         self._identity = event.current
-        current, previous = event.current, event.previous
-        if (current.status != "recognized" or current.role != "owner" or
-                previous.status == "recognized" and previous.person_id == current.person_id):
-            return
 
     def _identity_context(self) -> str:
         current = self._identity
@@ -533,7 +515,6 @@ class Drive:
                 pass
             self._wake.clear()
             if self.user_interrupt or self._pending_question_id or time.time() < self._vision_retry_after:
-                self._events = deque((event for event in self._events if event.get('kind') != 'training_event'), maxlen=32)
                 continue
             if self._events:
                 event = self._events.popleft()
@@ -599,7 +580,7 @@ class Drive:
 
     async def _interrupt_for_event(self) -> bool:
         event = self._events[0]
-        if event.get("kind") not in {"peer_message", "teaching"}:
+        if event.get("kind") != "peer_message":
             return False
         decision = await self._decide_event(event)
         event["decision"] = decision
@@ -658,37 +639,6 @@ class Drive:
                 event["messenger"].send_result(event["message_id"], "cancelled", reason="message_expired")
             return
         decision = event.get("decision") or await self._decide_event(event, graph, saver, thread_id)
-        if event["kind"] == "training_event":
-            if decision["choice"] != "accept" or self.user_interrupt:
-                return
-            from cloud.agents.common.training.catalog import catalog_for
-            from cloud.agents.common.training.policy import training_event_intent
-            from cloud.agents.common.training.store import list_records
-            from cloud.agents.common.training.service import load_runtime
-            from cloud.go2.card import _build_go2_card
-            card = _build_go2_card()
-            from cloud.agents.common.runner import invoke_blocking
-            await invoke_blocking(load_runtime, card, self._context)
-            snapshot = go2.state_snapshot()
-            intent = training_event_intent(
-                {'id': 'vision.person_presence', 'event_id': event['event_id'],
-                 'ts': event['ts'], 'values': {'detected': True}},
-                list_records('go2', space_id=self._context.space_id), catalog_for(card),
-                {'state': snapshot, 'state_fresh': snapshot.get('body_telemetry_fresh') is True}, now=time.time())
-            if not intent or self.user_interrupt or time.time() >= event['deadline']:
-                return
-            context = replace(self._context, actor='visitor', persist=False,
-                              trigger_ref=intent['teaching_id'], trigger_revision=intent['revision'],
-                              trigger_transition_id=intent['transition_id'], trigger_mode_epoch=self._generation,
-                              expires_at=int(event['deadline']))
-            result = await execute_tool('go2_sport', {'cmd': 'Hello', **intent['params']}, context=context)
-            self._last_tool_result = result
-            from cloud.agents.common.training.service import _emit
-            _emit('training.applied', space_id=context.space_id, unit_id='go2',
-                  teaching_id=intent['teaching_id'], revision=intent['revision'],
-                  transition_id=intent['transition_id'], status=result.get('result', 'unknown'),
-                  reasons=result.get('reasons', []))
-            return
         if event["kind"] == "social":
             await self._do_social()
             return
@@ -917,8 +867,6 @@ class Drive:
         self._state            = MotivationalState.IDLE
         self._curiosity        = 0
         self._person_present   = False
-        self._training_presence = None
-        self._training_frame_ts = 0.0
         self._person_engaging  = False
         self._task             = asyncio.create_task(self._run_loop())
         self._loop = asyncio.get_running_loop()

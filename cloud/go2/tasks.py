@@ -162,6 +162,16 @@ def command_result(record: dict, request_id: str) -> dict:
     return result
 
 
+def release_teaching_lease(result: dict, token: dict | None) -> None:
+    """A confirmed automatic action releases only the lease it acquired."""
+    if (result.get('result') != 'ok' or result.get('confirmation_scope') != 'completion'
+            or not isinstance(token, dict) or token.get('session_id') != 'go2-teachings'
+            or type(token.get('generation')) is not int):
+        return
+    from cloud.go2.control import control_lease
+    control_lease.release(token['session_id'], generation=token['generation'])
+
+
 def observe_command_results(robot) -> None:
     """Capture terminal device facts before a later action replaces last_action.
 
@@ -200,6 +210,7 @@ def observe_command_results(robot) -> None:
             logging.exception("[Go2/Command] failed to persist physical receipt")
         else:
             observed.add(phase)
+            release_teaching_lease(result, metadata.get('teaching_lease'))
             from cloud.observability import emit_agent_event
             origin, session = metadata['origin_kind'], metadata['session_id']
             emit_agent_event("device.result", trace_id=result.get("trace_id"), agent_id="go2",
@@ -218,7 +229,7 @@ def observe_command_results(robot) -> None:
 def track_command_result(robot, ledger, identity, result, *, context) -> None:
     if result.get('dispatch_only'):
         return
-    if result.get("result") not in {"accepted", "executing", "timeout"}:
+    if result.get("result") not in {"accepted", "executing", "timeout", "unknown"}:
         return
     physical_id = result.get("request_id") or (result.get("pending_action") or {}).get("request_id")
     epoch = result.get("device_epoch")
@@ -228,8 +239,11 @@ def track_command_result(robot, ledger, identity, result, *, context) -> None:
     if records is None:
         records = robot._command_result_records = {}
     origin, session = context.origin_kind, context.session_id
+    previous = records.get((epoch, physical_id))
+    token = result.get('teaching_lease') or (previous[4].get('teaching_lease') if previous else None)
     records[(epoch, physical_id)] = (ledger, identity, dict(result), set(),
-                                   {'origin_kind': origin, 'session_id': session})
+                                   {'origin_kind': origin, 'session_id': session,
+                                    'teaching_lease': token})
     robot._command_result_callback = lambda: observe_command_results(robot)
     observe_command_results(robot)
 

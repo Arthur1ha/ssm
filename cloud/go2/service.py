@@ -16,6 +16,7 @@ from cloud.agents.go2.memory.episode import EventType, episode_memory
 from cloud.go2.control import control_lease
 from cloud.space.execution import ExecutionContext, SYSTEM_CONTEXT, current_context, use_context
 from cloud.go2.card import _publish_go2_card
+from cloud.go2.training_events import person_teachings
 
 _active_rule_cb = None
 _active_drive_cb = None
@@ -174,7 +175,7 @@ async def _initialize_identity_vision() -> None:
 
 
 def _configure_vision_consumers(mode: str, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
-    """统一重配视觉消费者；身份在两种 autonomy 模式下都可保持运行。"""
+    """教学与身份独立于巡游模式，只有 Drive 消费者跟随自由探索。"""
     global _active_rule_cb, _active_drive_cb, _active_identity_cb
     drive.stop()
     runtime = runtime_for(go2)
@@ -184,11 +185,14 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
         if callback is not None:
             vision_loop.remove_callback(callback)
     _active_rule_cb = _active_drive_cb = _active_identity_cb = None
+    person_teachings.configure(connected=go2.is_connected, owner_session_id=owner_session_id)
 
     if not go2.is_connected:
         vision_loop.stop()
         identity_skill.clear_transient()
         return
+    _active_rule_cb = person_teachings.on_vision_frame
+    vision_loop.add_callback(_active_rule_cb)
     if identity_skill.enabled:
         _active_identity_cb = _on_identity_vision_frame
         vision_loop.add_callback(_active_identity_cb)
@@ -205,6 +209,7 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
 
 async def prepare_user_interaction(context: ExecutionContext):
     """Cancel owned motion, finish its cleanup, then observe a fresh stop."""
+    person_teachings.interrupt()
     runtime = runtime_for(go2)
     if runtime is None:
         return
@@ -327,6 +332,8 @@ async def _perform_life_control(action: str, context: ExecutionContext):
         snapshot, navigation_reason = navigator._snapshot()
         if snapshot is None:
             raise ValueError(navigation_reason or 'navigation_unavailable')
+    if context.origin_kind == 'user_delegated':
+        person_teachings.interrupt()
     control_lease.acquire(context)
     if action == 'request_rest':
         runtime.request_rest(navigation_busy=(navigator.mode.value != 'idle' or

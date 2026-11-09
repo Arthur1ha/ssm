@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.go2 import graph
@@ -35,7 +36,6 @@ async def test_new_action_acceptance_pauses_graph_and_does_not_replay(
                         [HumanMessage(content="perform the requested action, then dance")])
     monkeypatch.setattr("cloud.agents.go2.personality.profile.get_profile",
                         lambda: {"prompt": "Go2", "revision": 1})
-    monkeypatch.setattr(graph, "needs_persona_reply", lambda _run: False)
     monkeypatch.setattr(graph, "emit_agent_event", lambda *_a, **_k: None)
     monkeypatch.setattr("cloud.agents.common.runner.emit_agent_event", lambda *_a, **_k: None)
     monkeypatch.setattr("cloud.api.intents.publish_agent_event", lambda *_a, **_k: {})
@@ -43,7 +43,7 @@ async def test_new_action_acceptance_pauses_graph_and_does_not_replay(
 
     model_calls = []
 
-    class Model:
+    class Model(JsonReplyModel):
         def bind_tools(self, _tools, **kwargs):
             assert kwargs["parallel_tool_calls"] is False
             return self

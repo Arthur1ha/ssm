@@ -21,12 +21,6 @@ def tool_schemas(context: ExecutionContext | None = None) -> dict[str, dict]:
         if context is None or (context.actor in spec.roles and
                                (not spec.persists or context.persist))
     }
-    declarations["ask_user"] = {
-        "name": "ask_user",
-        "description": "缺少必要信息时暂停当前任务，向用户追问一个具体问题。",
-        "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
-                       "required": ["question"], "additionalProperties": False},
-    }
     return declarations
 
 

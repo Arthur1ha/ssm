@@ -23,6 +23,7 @@ class LeaseSnapshot:
     owner_session_id: str
     owner_actor: str
     expires_at: float
+    generation: int = 0
 
 
 class ControlLease:
@@ -31,6 +32,7 @@ class ControlLease:
         self._owner_session_id = ""
         self._owner_actor = ""
         self._expires_at = 0.0
+        self._generation = 0
         self._lock = threading.RLock()
 
     @property
@@ -58,6 +60,7 @@ class ControlLease:
             self._owner_session_id = context.session_id
             self._owner_actor = context.actor
             self._expires_at = now + self.ttl_s
+            self._generation += 1
             return self._snapshot_unlocked()
 
     def heartbeat(self, context: ExecutionContext, now: float | None = None) -> LeaseSnapshot:
@@ -79,10 +82,11 @@ class ControlLease:
             self._expires_at = now + self.ttl_s
             return self._snapshot_unlocked()
 
-    def release(self, session_id: str) -> bool:
+    def release(self, session_id: str, *, generation: int | None = None) -> bool:
         with self._lock:
             self._expire_unlocked(time.time())
-            if self._owner_session_id != session_id:
+            if (self._owner_session_id != session_id
+                    or generation is not None and generation != self._generation):
                 return False
             self._owner_session_id = ""
             self._owner_actor = ""
@@ -95,7 +99,8 @@ class ControlLease:
             return self._snapshot_unlocked() if self._owner_session_id else None
 
     def _snapshot_unlocked(self) -> LeaseSnapshot:
-        return LeaseSnapshot(self._owner_session_id, self._owner_actor, self._expires_at)
+        return LeaseSnapshot(self._owner_session_id, self._owner_actor, self._expires_at,
+                             self._generation)
 
 
 class SessionTasks:

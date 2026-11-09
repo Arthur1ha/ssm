@@ -7,20 +7,6 @@ def exploration_interval(curiosity: int) -> int:
     """Seconds between idle frontier evaluations (70 keeps the old 10s cadence)."""
     return max(7, min(17, 17 - curiosity // 10))
 
-
-
-
-def decision_persona(profile: dict) -> str:
-    traits = profile["traits"]
-    return (
-        f"{render_identity(profile)}\n"
-        f"好奇心 {traits['curiosity']}/100 只影响空闲探索评估机会；"
-        f"外向性 {traits['extraversion']}/100 影响有人互动时表达和同伴交流机会；"
-        f"大胆程度 {traits['boldness']}/100 只影响已允许的互动候选偏好。"
-        "这些数值不授予运动权限，也不能覆盖地图、避障和用户停止。"
-    )
-
-
 def reply_persona(profile: dict) -> str:
     """Give the reply model an observable speaking preference from extraversion."""
     extraversion = profile["traits"]["extraversion"]

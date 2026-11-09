@@ -1,12 +1,14 @@
 """Go2's prospective Graph entry preserves result and event contracts in isolation."""
 
 import asyncio
+import json
 import time
 from datetime import date
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.go2 import graph as go2_graph
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.run_index import FileRunIndex
@@ -15,7 +17,7 @@ from cloud.agents.go2.memory.episode import EpisodeMemory, EventType, read_day
 from cloud.space.execution import ExecutionContext
 
 
-class ScriptedModel:
+class ScriptedModel(JsonReplyModel):
     def __init__(self, replies):
         self.replies = iter(replies)
         self.inputs = []
@@ -39,7 +41,6 @@ async def test_cancelled_entry_is_durable_and_new_run_does_not_replay(entry, mon
     ])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
     monkeypatch.setattr(go2_graph, "runtime_for", lambda _: None)
-    monkeypatch.setattr(go2_graph, "needs_persona_reply", lambda _: False)
     monkeypatch.setattr(go2_graph.go2, "is_connected", True)
     entered = asyncio.Event()
     dispatched = []
@@ -133,7 +134,6 @@ async def test_rule_revisions_use_existing_graph_and_preserve_rule_reference(ent
     ])
     monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
     monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
-    monkeypatch.setattr(go2_graph, 'needs_persona_reply', lambda _: False)
     calls = []
 
     async def api(path, payload, context, *, method='POST'):
@@ -170,7 +170,8 @@ async def test_rule_revisions_use_existing_graph_and_preserve_rule_reference(ent
         assert payload['teaching_id'] == 'rule_greeting'
         assert payload['operation'] == 'update'
         assert payload['expected_revision'] == 4
-    assert any('草案引用' in message.content and str(selection) in message.content
+    assert any(message.name == 'context'
+               and json.loads(message.content.split('\n', 1)[1]).get('training_selection') == selection
                for message in model.inputs[0])
     assert 'confirm_training' not in {tool['function']['name'] for tool in model.bound_tools}
 
@@ -180,7 +181,6 @@ async def test_verified_motion_result_and_reply_shape(entry, monkeypatch, tmp_pa
     model = ScriptedModel([
         AIMessage(content="", tool_calls=[{"name": "go2_sport",
                                               "args": {"cmd": "Hello"}, "id": "tool-1"}]),
-        AIMessage(content="动作结束"),
         AIMessage(content="汪！招呼打完啦。"),
     ])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
@@ -198,6 +198,7 @@ async def test_verified_motion_result_and_reply_shape(entry, monkeypatch, tmp_pa
                                           run_id="go2-test-verified", on_step=streamed_steps.append)
     assert result["result"] == "ok"
     assert result["response"] == "汪！招呼打完啦。"
+    assert len(model.inputs) == 2
     dialogues = read_day(date.today().isoformat(), go2_graph.episode_memory.episodes_dir)
     assert len(dialogues) == 1
     assert dialogues[0]["event_type"] == EventType.DIALOGUE.value
@@ -313,7 +314,6 @@ async def test_measured_move_reply_uses_persona_and_keeps_actual_distance(entry,
     model = ScriptedModel([
         AIMessage(content='', tool_calls=[{'name': 'go2_move',
             'args': {'direction': 'forward', 'distance_m': 1.}, 'id': 'move-metre'}]),
-        AIMessage(content='指令已经发出，等我看看脚下。'),
         AIMessage(content='汪，往前走了约0.98米，已经停稳啦！'),
     ])
     monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
@@ -331,14 +331,13 @@ async def test_measured_move_reply_uses_persona_and_keeps_actual_distance(entry,
     result = await go2_graph.run_go2_loop('move-reply', '前进1m', context=context, run_id='move-reply')
     assert result['response'] == '汪，往前走了约0.98米，已经停稳啦！'
     assert result['result'] == 'ok'
-    assert len(model.inputs) == 3
-    assert 'Go2 persona' in model.inputs[-1][0].content
-    assert go2_graph.get_store().get('move-reply', 'move-reply').reply_source == 'persona_model'
+    assert len(model.inputs) == 2
+    assert go2_graph.get_store().get('move-reply', 'move-reply').reply_source == 'decision_model'
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('persona_reply,expected', [
-    ('我往前走了约1.76米，还没到你说的2米呢。后面迈不动了，我已经停稳啦。', 'persona_model'),
+    ('我往前走了约1.76米，还没到你说的2米呢。后面迈不动了，我已经停稳啦。', 'decision_model'),
     ('汪，我已经走满2米并停稳啦！', 'runtime'),
     ('指令已经发出去了，等我看看脚下。', 'runtime'),
 ])
@@ -346,7 +345,6 @@ async def test_partial_movement_preserves_persona_without_inventing_completion(e
     model = ScriptedModel([
         AIMessage(content='', tool_calls=[{'name': 'go2_move',
             'args': {'direction': 'forward', 'distance_m': 2.}, 'id': 'move-partial'}]),
-        AIMessage(content='本次未完成'),
         AIMessage(content=persona_reply),
     ])
     monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
@@ -359,7 +357,7 @@ async def test_partial_movement_preserves_persona_without_inventing_completion(e
     context = ExecutionContext('partial-reply', 'visitor', False, expires_at=time.time()+60)
     result = await go2_graph.run_go2_loop('partial-reply', '前进两米', context=context, run_id='partial-reply')
     assert result['result'] == 'blocked'
-    assert result['response'] == (persona_reply if expected == 'persona_model' else message)
+    assert result['response'] == (persona_reply if expected == 'decision_model' else message)
     assert go2_graph.get_store().get('partial-reply', 'partial-reply').reply_source == expected
 
 
@@ -398,7 +396,8 @@ async def test_unconfirmed_motion_stops_following_tool(entry, monkeypatch):
                                           run_id="go2-test-accepted")
     assert result["result"] == "accepted"
     assert dispatched == ["go2_sport"]
-    assert model.inputs[0][0].content == "[]"
+    assert any(isinstance(message, HumanMessage) and message.content == "[]"
+               for message in model.inputs[0])
     assert result["actions_taken"] == []
 
 
@@ -408,7 +407,6 @@ async def test_visitor_cannot_dispatch_admin_tool_from_model(entry, monkeypatch)
         {"name": "go2_list_people", "args": {}, "id": "tool-forged"},
     ])])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
-    monkeypatch.setattr(go2_graph, "needs_persona_reply", lambda _run: False)
     dispatched = []
 
     async def execute(name, params, *, context):
@@ -425,7 +423,6 @@ async def test_visitor_cannot_dispatch_admin_tool_from_model(entry, monkeypatch)
     assert not read_day(date.today().isoformat(), go2_graph.episode_memory.episodes_dir)
     names = {tool["function"]["name"] for tool in model.bound_tools}
     assert "go2_list_people" not in names
-    assert "ask_user" in names
 
 
 @pytest.mark.asyncio
@@ -435,7 +432,6 @@ async def test_game_graph_exposes_only_allowed_tools_and_checks_live_guard(entry
          "id": "game-visual"},
     ])])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
-    monkeypatch.setattr(go2_graph, "needs_persona_reply", lambda _run: False)
     dispatched = []
 
     async def execute(name, params, *, context):
@@ -466,7 +462,6 @@ async def test_two_motion_calls_in_one_model_turn_execute_neither(entry, monkeyp
         {"name": "go2_sport", "args": {"cmd": "Dance1"}, "id": "two"},
     ])])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
-    monkeypatch.setattr(go2_graph, "needs_persona_reply", lambda _run: False)
     dispatched = []
 
     async def execute(name, params, *, context):
@@ -486,9 +481,7 @@ async def test_two_motion_calls_in_one_model_turn_execute_neither(entry, monkeyp
 @pytest.mark.asyncio
 async def test_clarification_resumes_from_reopened_checkpoint(entry, monkeypatch, tmp_path):
     model = ScriptedModel([
-        AIMessage(content="", tool_calls=[{"name": "ask_user",
-                                              "args": {"question": "去哪里？"}, "id": "question-1"}]),
-        AIMessage(content="明白了，去客厅"),
+        AIMessage(content='{"kind":"question","text":"去哪里？"}'),
         AIMessage(content="汪，去客厅呀！"),
     ])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)

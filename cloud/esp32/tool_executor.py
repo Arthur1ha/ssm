@@ -47,6 +47,8 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
 
     if action not in PHYSICAL_ACTIONS or not isinstance(params, dict):
         return {"result": "rejected", "error": "invalid_lamp_action"}
+    if context.training_ref and card is None:
+        return {"result": "blocked", "error": "training_unavailable"}
     if (context.space_id != "main" or context.actor not in {"admin", "visitor", "agent"}
             or context.origin_kind not in {"user_delegated", "agent_autonomous"}):
         return {"result": "rejected", "error": "invalid_context"}
@@ -124,6 +126,9 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                                 training={'transition_id': training['transition_id'],
                                           'teaching_ids': [ref['teaching_id'] for ref in training['training_refs']],
                                           'trigger_ref': context.trigger_ref,
+                                          'training_ref': context.training_ref,
+                                          'training_revision': context.training_revision,
+                                          'training_overrides': context.training_overrides,
                                           'training_refs': training['training_refs'],
                                           'reasons': training['reasons']})
                 if not first:

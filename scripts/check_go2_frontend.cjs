@@ -26,6 +26,8 @@ const grouped = context.window.stateGraphLinks([
 assert.equal(grouped.length,1,'A node pair must have one line');
 assert.equal(grouped[0].directions.length,2);
 assert.equal(grouped[0].directions[0].edges.length,2,'Automatic rule was discarded behind a manual rule');
+assert.equal(context.window.stateGraphLinks([{src:'on',dst:'on',hasTeaching:true,transition:{action:'SET_COLOR'}}]).length,1,
+  'A taught parameter change disappeared because its physical state stays the same');
 assert.equal(context.window.stateTransitionLabel({trigger:'action_completed',label:'动作完成并确认姿态'}),'动作执行完毕');
 const sittingNode = {id:'body:sitting',label:'坐下',current:false};
 const sitEdge = {dst:'body:sitting',active:true,reason:'',transition:{action:'Sit',params:{}}};
@@ -518,6 +520,22 @@ async function checkInteractions() {
         assert.equal(await page.$eval('.fsm-whiteboard__viewport',e=>e.getBoundingClientRect().width>0),true);
       }
       await page.screenshot({path:'/tmp/ssm-rule-chat-preview.png',fullPage:true});
+      await page.evaluate(() => {
+        const edge=__lampCard.state_machine.regions.find(region=>region.id==='device').transitions
+          .find(edge=>edge.src==='ON' && edge.dst==='ON' && edge.action==='SET_COLOR');
+        __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'reading',desired_status:'enabled',
+          name:'阅读灯光',transition_ids:[edge.id],definition:{situation:'准备看书时',defaults:{r:255,g:236,b:210,brightness:200}}}];
+        __renderState({ism:'ON',ts:Date.now()/1000},__lampCard);
+        __emit({type:'training.updated',unit_id:__lampCard.unit_id});
+      });
+      const loopSelector='.fsm-whiteboard__edge[data-source="device:ON"][data-target="device:ON"]';
+      await page.waitForSelector(loopSelector);
+      const callsBeforeInspect=await page.evaluate(()=>__calls.length);
+      await page.$eval(loopSelector,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('255, 236, 210'));
+      assert.equal(await page.$eval('.training-inspector',node=>/已保存|已加载|已应用/.test(node.textContent)),false);
+      assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect,'Parameter inspection executed an action');
+      await page.screenshot({path:'/tmp/ssm-lamp-teaching-preview.png',fullPage:true});
       assert.deepEqual(errors,[]);
       console.log('PASS: concise edge details without teaching entry, in-chat rule cards, draft revision and before/after, conflict preservation, confirmation/cancellation history, direct deletion, transcript restoration and responsive viewport.');
       return;

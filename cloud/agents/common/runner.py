@@ -9,25 +9,27 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
-import json
 import threading
 import time
 import uuid
 from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
-from typing import Annotated, Any, Callable, TypedDict
+from typing import Annotated, Any, Callable, Literal, TypedDict
 
+from langchain_core.exceptions import OutputParserException
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AnyMessage, RemoveMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Command, interrupt
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.effects import FileEffectLedger, use_effect
 from cloud.agents.common.conversation import dialogue_turn, legacy_dialogue, trim_dialogue
+from cloud.agents.common.messages import observed_tool_messages
 from cloud.observability import emit_agent_event
 
 UNCERTAIN = {"accepted", "executing", "timeout", "unknown"}
@@ -62,6 +64,14 @@ class _State(TypedDict):
     turns: int
     effects: int
     messages: Annotated[list[AnyMessage], add_messages]
+
+
+class DialogueResponse(BaseModel):
+    """A conversational decision; human input is handled by the Graph itself."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["final", "question"]
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 def _schema(name: str, declaration: Any) -> dict:
@@ -129,6 +139,19 @@ async def run_role_graph(
         raise ValueError("GraphRun.agent_id is required")
     tools = [_schema(name, value) for name, value in tool_schemas.items()]
     bound_model = model.bind_tools(tools, parallel_tool_calls=False) if tools else model
+    # Let the provider enforce JSON mode and LangChain validate the reply.
+    # Passing this through the SDK's auto-parser would require strict schemas
+    # for every business tool, changing their existing optional parameters.
+    bound_model = bound_model.bind(extra_body={"response_format": {"type": "json_object"}})
+    response_parser = PydanticOutputParser(pydantic_object=DialogueResponse)
+    response_policy = SystemMessage(content=(
+        "每轮最多调用一个业务工具；需要用户补充必要信息或确认时，停止依赖该信息的动作，"
+        "返回 JSON：{\"kind\":\"question\",\"text\":\"向用户提出的一个具体问题\"}，"
+        "由运行图暂停并等待用户回答。已有信息足够时不要反复确认。"
+        "无需调用工具且可以结束本轮时，返回 JSON：{\"kind\":\"final\",\"text\":\"以当前人格直接给用户的最终回复\"}。"
+        "普通闲聊、反问和可选的后续建议不属于必须等待回答的追问。\n"
+        + response_parser.get_format_instructions()
+    ))
     saver = checkpointer or FileCheckpointSaver()
     ledger = effect_ledger or FileEffectLedger()
     # Root graphs persist in LangGraph's default namespace. The run ID stays in
@@ -170,17 +193,9 @@ async def run_role_graph(
                 "以下是同一智能体、同一会话的历史对话，用于理解偏好和承接语。"
                 "历史回复不是当前设备状态、执行回执或新的动作授权；以本轮真实观测为准。"
             )), *history]
-        for step in current.steps[-8:]:
-            if step.get("dispatch_status") != "observed":
-                continue
-            call_id = step.get("tool_call_id") or step.get("step_id")
-            messages.append(AIMessage(content="", tool_calls=[{
-                "name": step["tool"], "args": step.get("params") or {}, "id": call_id,
-            }]))
-            messages.append(ToolMessage(
-                content=json.dumps(step.get("result") or {}, ensure_ascii=False, default=str),
-                tool_call_id=call_id,
-            ))
+        messages.extend(observed_tool_messages(step for step in current.steps[-8:]
+                                              if step.get("dispatch_status") == "observed"))
+        messages.insert(0, response_policy)
         emit("model.request", turn=turns, input=messages)
         started = time.monotonic()
         try:
@@ -199,7 +214,7 @@ async def run_role_graph(
         if not calls and (not isinstance(content, str) or not content.strip()) and time.time() < current.deadline - 1:
             emit("model.empty_retry", turn=turns)
             try:
-                response = await asyncio.wait_for(bound_model.ainvoke(messages + [HumanMessage(
+                response = await asyncio.wait_for(bound_model.ainvoke(messages + [SystemMessage(
                     content="上一轮没有返回内容或工具调用。请根据原请求调用一个合适的工具，或明确回答。"
                 )]), timeout=max(0.1, current.deadline - time.time()))
             except Exception as exc:
@@ -217,9 +232,19 @@ async def run_role_graph(
             if not isinstance(content, str) or not content.strip():
                 current.status, current.response = "error", "模型返回空内容，未执行新动作。"
             else:
+                try:
+                    dialogue = response_parser.invoke(response)
+                except OutputParserException as exc:
+                    emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc))
+                    current.status, current.response = "error", "模型回复格式无效，未执行新动作。"
+                    return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
+                if dialogue.kind == "question":
+                    return {"run": asdict(current),
+                            "decision": {"kind": "ask", "question": dialogue.text[:500]}, "turns": turns}
                 current.status = "partial" if any((s.get("result") or {}).get("result") != "ok" for s in current.steps) else "ok"
-                current.decision_draft = content.strip()
-                current.response = ""
+                current.decision_draft = dialogue.text
+                current.response = dialogue.text
+                current.reply_source = "decision_model"
                 emit("reply.draft", turn=turns, reply=current.decision_draft)
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         call = calls[0]
@@ -238,12 +263,6 @@ async def run_role_graph(
             except ValidationError:
                 current.status, current.response = "rejected", "工具参数未通过校验，未执行动作。"
                 return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        if name == "ask_user":
-            question = args.get("question")
-            if not isinstance(question, str) or not question.strip():
-                current.status, current.response = "error", "追问内容无效。"
-                return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-            return {"run": asdict(current), "decision": {"kind": "ask", "question": question[:500]}, "turns": turns}
         if effectful(name) and state["effects"] >= max_effects:
             current.status, current.response = "blocked", "任务动作次数已达上限；其余步骤未执行。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
@@ -393,7 +412,7 @@ async def run_role_graph(
     if "__interrupt__" in output:
         payload = output["__interrupt__"][0].value
         run.status, run.question, run.response = "needs_clarification", payload["question"], payload["question"]
-        emit("run.paused", reason="ask_user", question=run.question)
+        emit("run.paused", reason="human_input", question=run.question)
     else:
         updated = GraphRun(**output["run"])
         run.__dict__.update(updated.__dict__)

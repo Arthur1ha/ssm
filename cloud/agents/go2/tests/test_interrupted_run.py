@@ -7,6 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.effects import FileEffectLedger
@@ -21,13 +22,7 @@ def motion() -> str:
     raise AssertionError("declaration only")
 
 
-@tool
-def ask_user(question: str) -> str:
-    """Ask a question."""
-    return question
-
-
-class Model:
+class Model(JsonReplyModel):
     def __init__(self, message=None):
         self.message = message
 
@@ -138,9 +133,8 @@ async def test_clarification_remains_busy_until_deadline(view, monkeypatch):
     now = time.time()
     run = GraphRun("question", "session", "where", now + 60, agent_id="go2")
     view.register("question", "session")
-    await run_role_graph(run, model=Model(AIMessage(content="", tool_calls=[
-        {"name": "ask_user", "args": {"question": "where?"}, "id": "q"}])),
-        tool_schemas={"ask_user": ask_user}, build_messages=lambda _: [],
+    await run_role_graph(run, model=Model(AIMessage(content='{"kind":"question","text":"where?"}')),
+        tool_schemas={}, build_messages=lambda _: [],
         execute=lambda *_a: pytest.fail("unexpected dispatch"), checkpointer=view.checkpointer)
     async with view.index.async_session_lock("go2", "session"):
         assert await view.reconcile_interrupted("session") is None

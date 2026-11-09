@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.go2.connection.webrtc import Go2Connection
 from cloud.go2.connection.fsm import CommandBlocked
 from cloud.go2.state import Go2State
@@ -194,7 +195,6 @@ def graph_runtime(tmp_path, monkeypatch, model):
     monkeypatch.setattr(graph, 'episode_memory', EpisodeMemory(tmp_path / 'episodes'))
     monkeypatch.setattr(graph, 'recall_memory', lambda *_a, **_k: SimpleNamespace(fragments=[], text=''))
     monkeypatch.setattr(graph, 'go2_messages', lambda *_a, **_k: [HumanMessage(content='请与我聊一会儿')])
-    monkeypatch.setattr(graph, 'needs_persona_reply', lambda _run: False)
     monkeypatch.setattr(graph, 'emit_agent_event', lambda *_a, **_k: None)
     monkeypatch.setattr('cloud.agents.go2.personality.profile.get_profile', lambda: {'prompt': 'Go2', 'revision': 1})
     monkeypatch.setattr('cloud.agents.common.runner.emit_agent_event', lambda *_a, **_k: None)
@@ -208,7 +208,7 @@ def graph_runtime(tmp_path, monkeypatch, model):
 async def test_real_graph_owns_play_while_waiting_and_releases_on_terminal(tmp_path, monkeypatch, cancel):
     from langchain_core.messages import AIMessage
     entered, proceed = asyncio.Event(), asyncio.Event()
-    class Model:
+    class Model(JsonReplyModel):
         def bind_tools(self, *_a, **_k):
             return self
         async def ainvoke(self, _messages):
@@ -237,13 +237,13 @@ async def test_real_graph_owns_play_while_waiting_and_releases_on_terminal(tmp_p
 async def test_clarification_releases_play_and_resume_reacquires_same_run(tmp_path, monkeypatch):
     from langchain_core.messages import AIMessage
     entered, proceed = asyncio.Event(), asyncio.Event()
-    class Model:
+    class Model(JsonReplyModel):
         resumed = False
         def bind_tools(self, *_a, **_k):
             return self
         async def ainvoke(self, _messages):
             if not self.resumed:
-                return AIMessage(content='', tool_calls=[{'name': 'ask_user', 'args': {'question': '你想聊什么？'}, 'id': 'ask'}])
+                return AIMessage(content='{"kind":"question","text":"你想聊什么？"}')
             entered.set()
             await proceed.wait()
             return AIMessage(content='好呀。')

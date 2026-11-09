@@ -12,7 +12,7 @@ def _partial_params(schema, params):
 
 
 def validate_definition(definition: dict, catalog: dict) -> dict:
-    definition = Definition.model_validate(definition).model_dump()
+    definition = Definition.model_validate(definition).model_dump(exclude_unset=True)
     edges = {e['id']: e for e in catalog['transitions']}
     ids = definition['transition_ids']
     if len(set(ids)) != len(ids) or len(set(definition['origins'])) != len(definition['origins']):
@@ -52,6 +52,27 @@ def validate_definition(definition: dict, catalog: dict) -> dict:
     return definition
 
 
+def application_parameters(record: dict, catalog: dict, overrides: dict) -> tuple[str, dict]:
+    """Resolve one saved action across its legal source-state transitions."""
+    definition = validate_definition(record['definition'], catalog)
+    if definition['trigger']:
+        raise ValueError('event_training_requires_event')
+    edges = [edge for edge in catalog['transitions']
+             if edge['id'] in definition['transition_ids']]
+    first = edges[0]
+    action, fixed = first['action'], first['selector_params']
+    if any(edge['action'] != action or edge['selector_params'] != fixed for edge in edges):
+        raise ValueError('training_action_ambiguous')
+    for edge in edges:
+        if set(overrides) & set(edge['fixed_params']):
+            raise ValueError('cannot override fixed transition parameters')
+        _partial_params(edge['params_schema'], overrides)
+    params = {**definition['defaults'], **fixed, **overrides}
+    for edge in edges:
+        _validate_schema(edge['params_schema'], params)
+    return action, params
+
+
 def conflicts(definition: dict, records: list[dict]) -> list[dict]:
     found = []
     for record in records:
@@ -61,16 +82,18 @@ def conflicts(definition: dict, records: list[dict]) -> list[dict]:
         if not set(definition['transition_ids']) & set(other['transition_ids']):
             continue
         a, b = definition['trigger'], other['trigger']
-        if a and b and a['event_id'] == b['event_id']:
+        # Situational configurations are selected explicitly by the role Graph.
+        same_scope = definition.get('situation') == other.get('situation')
+        if same_scope and a and b and a['event_id'] == b['event_id']:
             found.append({'code': 'event_overlap', 'teaching_id': record['teaching_id']})
-        if (not a or not b or a['event_id'] == b['event_id']) and set(definition['origins']) & set(other['origins']):
+        if same_scope and (not a or not b or a['event_id'] == b['event_id']) and set(definition['origins']) & set(other['origins']):
             if any(k in other['defaults'] and v != other['defaults'][k] for k, v in definition['defaults'].items()):
                 found.append({'code': 'default_conflict', 'teaching_id': record['teaching_id']})
     return found
 
 
 def evaluate(records: list[dict], request: dict, facts: dict, *, now: float) -> dict:
-    reasons, refs, defaults = [], [], {}
+    reasons, refs, defaults, selected_defaults = [], [], {}, {}
     for record in records:
         if record.get('desired_status') != 'enabled' or record.get('loaded_revision') != record.get('revision'):
             continue
@@ -79,6 +102,12 @@ def evaluate(records: list[dict], request: dict, facts: dict, *, now: float) -> 
             continue
         if d['trigger'] and request.get('trigger_ref') != record['teaching_id']:
             continue
+        if (d.get('situation') and not d['trigger']
+                and request.get('training_ref') != record['teaching_id']):
+            continue
+        if (d.get('situation') and d['trigger']
+                and request.get('trigger_situation_confirmed') is not True):
+            reasons.append({'code': 'situation_not_confirmed'})
         refs.append({'teaching_id': record['teaching_id'], 'revision': record['revision']})
         for condition in d['conditions']:
             field = condition['field']
@@ -97,20 +126,25 @@ def evaluate(records: list[dict], request: dict, facts: dict, *, now: float) -> 
             reasons.append({'code': 'completion_history_unknown'})
         elif cooldown is not None and last is not None and now - last < cooldown:
             reasons.append({'code': 'cooldown', 'remaining_s': cooldown - (now - last)})
+        if record['teaching_id'] == request.get('training_ref'):
+            selected_defaults.update(d['defaults'])
+            continue
         for key, value in d['defaults'].items():
             if key in defaults and defaults[key] != value:
                 reasons.append({'code': 'default_conflict', 'field': key})
             defaults[key] = value
-    return {'allowed': not reasons, 'params': {**defaults, **request['params']}, 'reasons': reasons, 'teaching_refs': refs}
+    return {'allowed': not reasons,
+            'params': {**defaults, **selected_defaults, **request['params']},
+            'reasons': reasons, 'teaching_refs': refs}
 
 
-def training_event_intent(event, records, catalog, facts, *, now):
-    """Match one fresh server-owned event to one existing loaded transition."""
+def training_event_candidates(event, records, catalog, facts, *, now) -> list[dict]:
+    """Find current event candidates; their semantic situations still need the Graph."""
     ts = event.get('ts')
     if (type(ts) not in (int, float) or not math.isfinite(ts)
             or not 0 <= now - ts <= 5 or not event.get('event_id')
             or facts.get('state_fresh') is not True):
-        return None
+        return []
     matches = []
     for record in records:
         definition = record.get('definition') or {}
@@ -127,7 +161,15 @@ def training_event_intent(event, records, catalog, facts, *, now):
         if edge:
             matches.append({'teaching_id': record['teaching_id'], 'revision': record['revision'],
                             'transition_id': edge['id'], 'event_id': event['event_id'],
+                            'situation': definition.get('situation'),
+                            'name': record.get('name', ''), 'source_text': record.get('source_text', ''),
                             'params': {**edge['selector_params'], **trigger['params']}})
+    return matches
+
+
+def training_event_intent(event, records, catalog, facts, *, now):
+    """Compatibility projection for callers that only support an unambiguous event."""
+    matches = training_event_candidates(event, records, catalog, facts, now=now)
     return matches[0] if len(matches) == 1 else None
 
 

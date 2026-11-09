@@ -54,11 +54,6 @@ class SendMessage(BaseModel):
     game_id: str | None = None
 
 
-class AskUser(BaseModel):
-    """缺少必要信息时暂停并向用户追问。"""
-    question: str = Field(min_length=1, max_length=500)
-
-
 SCHEMAS = {
     "set_led_state": SetLedState,
     "set_led_color": SetLedColor,
@@ -67,14 +62,13 @@ SCHEMAS = {
     "get_space_context": GetSpaceContext,
     "request_peer_skill": RequestPeerSkill,
     "send_message": SendMessage,
-    "ask_user": AskUser,
 }
 
 
 def visible_schemas(*, lighting_only: bool, card: dict | None = None) -> dict:
     from cloud.agents.lamp.state import PHYSICAL_TOOLS
 
-    allowed = PHYSICAL_TOOLS | {"ask_user"} if lighting_only else SCHEMAS.keys()
+    allowed = PHYSICAL_TOOLS if lighting_only else SCHEMAS.keys()
     schemas = {name: schema for name, schema in SCHEMAS.items() if name in allowed}
     if not lighting_only:
         from cloud.agents.common.training.tools import SCHEMAS as training_schemas

@@ -910,6 +910,12 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 .chat-rule-message .training-change { margin: 4px 0; }
 .training-inspector__rules { margin: 8px 0 0; padding-left: 16px; color: var(--color-text); font-size: 13px; line-height: 1.5; }
 .training-inspector__rules li + li { margin-top: 6px; }
+.training-inspector__action { color: var(--color-text-dim); }
+.training-inspector__params { margin: 6px 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.training-inspector__params > div { display: flex; gap: 12px; margin-top: 4px; }
+.training-inspector__params dt { flex: 0 0 40px; color: var(--color-text-dim); }
+.training-inspector__params dd { display: flex; align-items: center; gap: 6px; margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.training-inspector__color { flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--color-border-strong); }
 .training-change strong, .training-record strong { display: block; margin-top: 5px; }
 .training-change p, .training-record p, .training-inspector p { margin: 6px 0; line-height: 1.5; overflow-wrap: anywhere; }
 .training-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }

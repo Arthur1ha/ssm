@@ -77,6 +77,25 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
   const routes = new Map(visibleEdges.map(edge => {
     const source = points[edge.src], target = points[edge.dst];
     if (!source || !target) return [edge.id,''];
+    if (edge.src === edge.dst) {
+      const at = (angle,radius) => ({x:source.x+Math.cos(angle)*radius,y:source.y+Math.sin(angle)*radius});
+      const obstacles = bounds.filter(point => point !== source);
+      const loop = [-Math.PI/2,0,Math.PI/2,Math.PI].map(angle => {
+        const start=at(angle-.6,source.radius+2), end=at(angle+.6,source.radius+5);
+        const first=at(angle-.75,source.radius+65), second=at(angle+.75,source.radius+65);
+        let score=0;
+        for (let step=1; step<16; step++) {
+          const t=step/16,u=1-t;
+          const x=u*u*u*start.x+3*u*u*t*first.x+3*u*t*t*second.x+t*t*t*end.x;
+          const y=u*u*u*start.y+3*u*u*t*first.y+3*u*t*t*second.y+t*t*t*end.y;
+          if (x<8 || x>width-8 || y<8 || y>height-8) score+=1000;
+          for (const point of obstacles)
+            score+=Math.max(0,point.radius+10-Math.hypot(x-point.x,y-point.y))**2;
+        }
+        return {score,path:`M${start.x} ${start.y}C${first.x} ${first.y} ${second.x} ${second.y} ${end.x} ${end.y}`};
+      }).reduce((best,candidate) => candidate.score<best.score ? candidate : best);
+      return [edge.id,loop.path];
+    }
     const dx = target.x-source.x, dy = target.y-source.y, length = Math.hypot(dx,dy) || 1;
     // Radial links keep separate corridors when straight. Bend only to avoid
     // a node; a mandatory bend can make adjacent spokes cross near their hub.

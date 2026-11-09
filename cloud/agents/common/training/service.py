@@ -445,6 +445,30 @@ def teaching_baseline(record):
                  if version['desired_status'] == 'enabled'), record['created_at'])
 
 
+def _selected_application(records, card, catalog, action, params, context):
+    """Check a Graph-selected configuration using the current locked partition."""
+    from cloud.agents.common.training.policy import application_parameters
+
+    selected_ref = context.training_ref
+    selected_revision = context.training_revision
+    if selected_ref is None and selected_revision is None:
+        return None
+    selected = next((row for row in records if row['teaching_id'] == selected_ref), None)
+    if (selected is None or selected['desired_status'] != 'enabled'
+            or selected['unit_id'] != card['unit_id'] or selected['space_id'] != context.space_id
+            or context.origin_kind not in selected['definition']['origins']
+            or context.trigger_ref):
+        raise TrainingError('training_selection_invalid')
+    if type(selected_revision) is not int or selected['revision'] != selected_revision:
+        raise TrainingError('training_revision_changed', 409)
+    _check_catalog(selected, catalog)
+    selected_action, bound = application_parameters(
+        selected, catalog, context.training_overrides or {})
+    if action != selected_action or params != bound:
+        raise TrainingError('training_parameters_changed')
+    return selected
+
+
 def evaluate_execution(card, current, action, params, context, records, completion_history, *, state_fresh=True):
     """Pure guard/default projection; callers hold their dispatch/partition locks.
 
@@ -456,16 +480,24 @@ def evaluate_execution(card, current, action, params, context, records, completi
     if action in {'STOP', 'StopMove'}:
         return result
     catalog = catalog_for(card)
+    records = list(records)
+    try:
+        selected = _selected_application(records, card, catalog, action, params, context)
+    except (TrainingError, ValueError) as exc:
+        return {**result, 'allowed': False,
+                'reasons': [{'code': getattr(exc, 'code', str(exc))}]}
     action_edges = [edge for edge in catalog['transitions'] if edge['action'] == action]
     resolved = [edge for edge in action_edges if current.get(edge['state_field']) == edge['src']
                 and all(params.get(key) == value for key, value in edge.get('selector_params', {}).items())]
-    if len(resolved) == 1 and not resolved[0]['trainable']:
+    if len(resolved) == 1 and not resolved[0]['trainable'] and selected is None:
         return result
     action_edges = [edge for edge in action_edges if edge['trainable']]
     action_ids = {edge['id'] for edge in action_edges}
     applicable = [record for record in records if record['desired_status'] == 'enabled'
                   and context.origin_kind in record['definition']['origins']
                   and (not record['definition']['trigger'] or context.trigger_ref == record['teaching_id'])
+                  and (not record['definition'].get('situation')
+                       or record['definition']['trigger'] or record['teaching_id'] == context.training_ref)
                   and action_ids.intersection(record['definition']['transition_ids'])]
     candidates = [edge for edge in action_edges if current.get(edge['state_field']) == edge['src']
                   and all(params.get(key) == value for key, value in edge.get('selector_params', {}).items())]
@@ -476,11 +508,13 @@ def evaluate_execution(card, current, action, params, context, records, completi
                 or context.trigger_revision != triggered['revision']):
             result['reasons'].append({'code': 'trigger_authorization_invalid'})
     if len(candidates) != 1:
-        if applicable or context.trigger_ref:
+        if applicable or context.trigger_ref or selected is not None:
             result['reasons'].append({'code': 'transition_unknown' if not candidates else 'transition_ambiguous'})
         result['allowed'] = not result['reasons']
         return result
     edge = candidates[0]
+    if selected is not None and edge['id'] not in selected['definition']['transition_ids']:
+        result['reasons'].append({'code': 'training_transition_mismatch'})
     if context.trigger_ref and triggered is not None:
         bound = {**edge.get('selector_params', {}), **triggered['definition']['trigger']['params']}
         if (edge['id'] != context.trigger_transition_id or edge['id'] not in triggered['definition']['transition_ids']
@@ -491,7 +525,7 @@ def evaluate_execution(card, current, action, params, context, records, completi
     applicable = [record for record in applicable if edge['id'] in record['definition']['transition_ids']]
     if applicable and not state_fresh:
         result['reasons'].append({'code': 'state_unknown'})
-    defaults = {}
+    defaults, selected_defaults = {}, {}
     for record in applicable:
         try:
             _check_catalog(record, catalog)
@@ -501,16 +535,21 @@ def evaluate_execution(card, current, action, params, context, records, completi
         known, last = completion_history(record, edge['id']) if record['definition']['cooldown_s'] is not None else (True, None)
         checked = evaluate([dict(record, loaded_revision=record['revision'])],
                            {'transition_id': edge['id'], 'origin': context.origin_kind,
-                            'params': params, 'trigger_ref': context.trigger_ref},
+                            'params': params, 'trigger_ref': context.trigger_ref,
+                            'training_ref': context.training_ref,
+                            'trigger_situation_confirmed': context.trigger_situation_confirmed},
                            {'state': current, 'state_fresh': state_fresh, 'requester': context.requester,
                             'completion_history_known': known, 'last_completed_at': {edge['id']: last}}, now=time.time())
         result['reasons'].extend(checked['reasons'])
         result['training_refs'].extend(checked['teaching_refs'])
+        if selected is not None and record['teaching_id'] == selected['teaching_id']:
+            selected_defaults.update(record['definition']['defaults'])
+            continue
         for key, value in record['definition']['defaults'].items():
             if key in defaults and defaults[key] != value:
                 result['reasons'].append({'code': 'default_conflict', 'field': key})
             defaults[key] = value
-    result['params'] = {**defaults, **params}
+    result['params'] = {**defaults, **selected_defaults, **params}
     result['allowed'] = not result['reasons']
     return result
 
@@ -609,7 +648,8 @@ def _snapshot_execution_reasons(card, record, viewer, catalog):
     known, last = history(edge['id']) if definition['cooldown_s'] is not None else (True, None)
     checked = evaluate([dict(record, loaded_revision=record['revision'])],
         {'transition_id': edge['id'], 'origin': origin, 'params': edge.get('selector_params', {}),
-         'trigger_ref': record['teaching_id'] if definition['trigger'] else None},
+         'trigger_ref': record['teaching_id'] if definition['trigger'] else None,
+         'training_ref': record['teaching_id'] if definition.get('situation') else None},
         {'state': current, 'state_fresh': fresh, 'requester': None,
          'completion_history_known': known, 'last_completed_at': {edge['id']: last}}, now=time.time())
     reasons.extend(checked['reasons'])

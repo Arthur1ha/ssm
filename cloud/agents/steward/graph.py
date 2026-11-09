@@ -10,8 +10,6 @@ import uuid
 import threading
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage
-
 from cloud.agents.common.runner import GraphRun as Run, run_role_graph
 from cloud.agents.steward.state import build_intent_run_context
 from cloud.agents.steward.prompts import build_messages, reply_prompt
@@ -21,7 +19,8 @@ from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
 from cloud.agents.common.models import get_text_model, async_model_clients
-from cloud.agents.common.replies import needs_persona_reply, valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import finalize_reply
+from cloud.agents.common.messages import context_message
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
 from cloud.observability import bind_context, emit_agent_event
@@ -158,8 +157,8 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                 **step_progress_facts(step))
             if phase == "observed":
                 status = result.get("result", "unknown")
-                def invoke_text(prompt):
-                    return get_text_model("steward").invoke([HumanMessage(content=prompt)]).content
+                def invoke_text(messages):
+                    return get_text_model("steward").invoke(messages).content
                 def publish_text(answer):
                     transport.do_publish_ui_event(session_id, "agent_progress",
                         run_id=run_id, trace_id=run.trace_id or run_id,
@@ -172,33 +171,14 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                                 min(run.deadline, time.time() + 4))
 
     async def finalize(current: Run) -> Run:
-        if not needs_persona_reply(current):
-            return current
-        try:
-            profile = get_profile()
-            prompt = reply_prompt(current, profile)
-            emit_agent_event("model.request", trace_id=current.trace_id or current.run_id,
-                             run_id=current.run_id, agent_id="cloud_orchestrator", session_id=session_id,
-                             input=prompt, goal=current.goal,
-                             model=str(getattr(model, "model_name", "unknown")),
-                             template_version="persona-result-v1")
-            response = await model.ainvoke([HumanMessage(content=prompt)])
-            emit_agent_event("model.response", trace_id=current.trace_id or current.run_id,
-                             run_id=current.run_id, agent_id="cloud_orchestrator", session_id=session_id,
-                             output=getattr(response, "content", ""))
-            if not valid_persona_reply(response.content, current):
-                raise ValueError("invalid_persona_reply")
-            current.response = response.content.strip()
-            current.reply_source = "persona_model"
-            emit_agent_event("reply.validated", trace_id=current.trace_id or current.run_id,
-                             run_id=current.run_id, agent_id="cloud_orchestrator", session_id=session_id,
-                             reply=current.response, reason="persona_result_summary", reply_kind="final")
-        except Exception as exc:
-            logger.warning("orchestrator persona reply unavailable run=%s error=%s",
-                           current.run_id, type(exc).__name__)
-            current.response = factual_fallback("cloud_orchestrator", current.status, current)
-            current.reply_source = "runtime"
-        return current
+        return await finalize_reply(current, model=model,
+                                    instructions=lambda value: reply_prompt(value, get_profile()))
+
+    def messages_for(current: Run):
+        messages = build_messages(current, supplemental)
+        if context.get("selection"):
+            messages.insert(1, context_message({"training_selection": context["selection"]}))
+        return messages
 
     @async_model_clients()
     async def invoke_graph():
@@ -206,10 +186,10 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         model = llm or get_text_model("steward")
         return await run_role_graph(
             run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
-            build_messages=lambda current: build_messages(current, supplemental) + ([HumanMessage(content="本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(context["selection"]))] if context.get("selection") else []), execute=execute,
+            build_messages=messages_for, execute=execute,
             on_step=on_step, on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
-            effectful=lambda name: name in {"invoke_skill", "propose_training", "send_message", "start_activity",
+            effectful=lambda name: name in {"invoke_skill", "apply_training", "propose_training", "send_message", "start_activity",
                                               "set_space_constraint", "clear_space_constraints"},
             resume=resume, resume_value=supplemental)
 
