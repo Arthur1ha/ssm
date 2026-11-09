@@ -54,7 +54,10 @@ TOOL_DECLARATIONS.update({
                                                       "content": {"type": "string", "maxLength": 1000},
                                                       "reply_to": {"type": "string"},
                                                       "interaction_kind": {"type": "string", "enum": ["message", "game_invite"]},
-                                                      "game_id": {"type": "string"}}}},
+                                                      "game_id": {"type": "string"},
+                                                      "decision_reason": {"type": "string", "maxLength": 300},
+                                                      "evidence_refs": {"type": "array", "maxItems": 8,
+                                                                        "items": {"type": "string"}}}}},
 })
 
 def valid_auxiliary_params(tool: str, params: Any) -> bool:
@@ -71,12 +74,18 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
                 and isinstance(params.get("params"), dict)
                 and ("request_id" not in params or isinstance(params["request_id"], str)))
     if tool == "send_message":
-        return (set(params) <= {"target", "content", "reply_to", "interaction_kind", "game_id"}
+        return (set(params) <= {"target", "content", "reply_to", "interaction_kind", "game_id",
+                               "decision_reason", "evidence_refs"}
                 and isinstance(params.get("target"), str)
                 and 0 < len(params["target"]) <= 120
                 and isinstance(params.get("content"), str)
                 and 0 < len(params["content"].strip()) <= 1000
                 and params.get("interaction_kind", "message") in {"message", "game_invite"}
+                and ("decision_reason" not in params or
+                     isinstance(params["decision_reason"], str) and 0 < len(params["decision_reason"].strip()) <= 300)
+                and ("evidence_refs" not in params or
+                     isinstance(params["evidence_refs"], list) and 0 < len(params["evidence_refs"]) <= 8
+                     and all(isinstance(ref, str) and 0 < len(ref) <= 200 for ref in params["evidence_refs"]))
                 and ((params.get("interaction_kind", "message") == "game_invite"
                       and isinstance(params.get("game_id"), str)) or
                      (params.get("interaction_kind", "message") == "message"

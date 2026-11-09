@@ -62,6 +62,44 @@ def test_dialogue_does_not_gain_state_or_trigger_evidence(tmp_path):
     assert store.record_event(activity_id, "action", unit_id="go2") is None
 
 
+def test_decision_evidence_is_bounded_persisted_and_emitted_without_becoming_an_observation(tmp_path):
+    store, activity_id = start(tmp_path)
+    store.set_device(activity_id, "esp32_desk_led", mode="reactive", status="joined")
+    store.set_device(activity_id, "go2", mode="free_explore", status="joined")
+    emitted = []
+    store.configure(emit=emitted.append)
+    basis = {"reason": "刚才有同伴分享观察，想问它是否一起玩。",
+             "evidence": [{"ref": "evt_observation", "kind": "observation", "source": "go2",
+                           "as_of": 100, "summary": "地上有一个白色玩偶。", "prompt": "do not store"}],
+             "private_reasoning": "do not store"}
+    event = store.record_event(activity_id, "message", unit_id="esp32_desk_led",
+                               text="想一起玩找颜色吗？", interaction_kind="game_invite",
+                               decision_basis=basis)
+    assert emitted[-1] == event
+    assert event["decision_basis"] == {
+        "reason": basis["reason"], "evidence": [{key: value for key, value in basis["evidence"][0].items()
+                                               if key != "prompt"}]}
+    basis["evidence"][0]["summary"] = "later mutation"
+    reloaded = ActivityStore(tmp_path / "activity.json")
+    assert reloaded.events(activity_id)[-1] == event
+    assert "do not store" not in json.dumps(reloaded.events(activity_id))
+    # The invitation's basis is a historical citation, never a new perception.
+    assert store.recent_discoveries("go2") == []
+
+
+def test_invalid_decision_snapshot_does_not_create_facts(tmp_path):
+    store, activity_id = start(tmp_path)
+    missing_reason = store.record_event(activity_id, "message", decision_basis={"evidence": []})
+    assert "decision_basis" not in missing_reason
+    event = store.record_event(activity_id, "message", decision_basis={
+        "reason": "r" * 500, "evidence": [{"ref": "x", "kind": "observation", "source": "go2",
+                                             "as_of": float("nan"), "summary": "s" * 500}] * 20})
+    assert len(event["decision_basis"]["reason"]) == 400
+    assert len(event["decision_basis"]["evidence"]) == 8
+    assert all("as_of" not in row for row in event["decision_basis"]["evidence"])
+    assert all(len(row["summary"]) == 240 for row in event["decision_basis"]["evidence"])
+
+
 def test_lamp_progress_keeps_one_physical_task_and_explicit_message_link(monkeypatch):
     from cloud.api import intents
     from cloud.esp32.physical_tasks import stable_task_id

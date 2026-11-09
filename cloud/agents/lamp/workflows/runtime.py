@@ -111,7 +111,9 @@ class ReactiveMind:
 
     def _sense(self) -> dict | None:
         observed = sense_sensors(self._state, self._last_sound_ts)
-        return observed if observed["light_available"] or observed["sound_available"] else None
+        # Social opportunities depend on shared activity evidence even when
+        # local sensors are absent. Lighting keeps its separate freshness gate.
+        return observed
 
     def _find_led_unit(self) -> str:
         """从 actuator 快照中查找 LED 单元 ID，找不到返回默认值。"""
@@ -139,7 +141,7 @@ class ReactiveMind:
         now = time.time()
         if not isinstance(params, dict) or tool_name not in TOOL_DECLARATIONS:
             return False
-        params = dict(params)
+        params = {key: value for key, value in params.items() if value is not None}
 
         if tool_name == "send_message":
             if not valid_auxiliary_params("send_message", params):
@@ -159,7 +161,19 @@ class ReactiveMind:
                 return False
 
         action = TOOL_DECLARATIONS[tool_name].get("action")
+        decision_basis = None
         if action:
+            reason = params.pop("decision_reason", None)
+            refs = params.pop("evidence_refs", None)
+            if reason is not None or refs is not None:
+                from cloud.space.context import get_space_context
+                from cloud.space.decisions import resolve_decision
+                try:
+                    decision_basis = resolve_decision(
+                        get_space_context(led_unit, state=self._state), reason, refs)
+                except ValueError as exc:
+                    self._last_reactive_tool_result = {"result": "rejected", "error": str(exc)}
+                    return False
             from cloud.cards.registry import get_registry
             card = get_registry().get_card(led_unit)
             valid = valid_lamp_params(action, params, card=card)
@@ -224,6 +238,8 @@ class ReactiveMind:
                     source="lamp_reactive", preflight=preflight,
                     card=card,
                 )
+                if decision_basis is not None:
+                    result = {**result, "decision_basis": decision_basis}
                 self._last_reactive_tool_result = result
                 if result.get("result") != "ok":
                     logger.warning("reactive command did not complete: %s", result)

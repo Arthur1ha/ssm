@@ -73,6 +73,9 @@ def get_space_context(
                     if key in current}
     discoveries = (activity_store.recent_discoveries(unit_id, now=instant)
                    if activity and callable(getattr(activity_store, "recent_discoveries", None)) else [])
-    return {"peers": peers, "environment": environment,
-            "constraints": requirements.list_for(unit_id, now=instant),
-            "activity": activity, "recent_discoveries": discoveries}
+    context = {"peers": peers, "environment": environment,
+               "constraints": requirements.list_for(unit_id, now=instant),
+               "activity": activity, "recent_discoveries": discoveries}
+    from cloud.space.decisions import decision_evidence
+    context["decision_evidence"] = decision_evidence(context, now=instant)
+    return context

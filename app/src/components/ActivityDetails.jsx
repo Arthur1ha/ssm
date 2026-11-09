@@ -61,6 +61,12 @@ function ActivityEvidenceDrawer({event, events, agents, getName, onClose}) {
   const before = task.find(item => item.event_type === 'action' && item.state_at_event);
   const after = [...task].reverse().find(item => item.event_type === 'action_result' && item.state_at_event);
   const observation = task.find(item => item.decision_observation)?.decision_observation;
+  // Only direct decision snapshots and explicitly linked tasks are eligible.
+  const decisions = [event, ...task].filter((item, index, rows) =>
+    rows.findIndex(other => other.event_id === item.event_id) === index)
+    .map(item => ({event:item, basis:activityDecisionBasis(item)})).filter(item => item.basis)
+    .filter((item, index, rows) => rows.findIndex(other =>
+      JSON.stringify(other.basis) === JSON.stringify(item.basis)) === index);
   const card = agents.find(agent => agent.unit_id === event.unit_id);
   const describeSnapshot = item => {
     const snapshot = item?.state_at_event;
@@ -73,10 +79,26 @@ function ActivityEvidenceDrawer({event, events, agents, getName, onClose}) {
     <section className="activity-evidence" ref={dialogRef} role="dialog" aria-modal="true"
       aria-labelledby="activity-evidence-title">
       <header><div><small>{getName(event.unit_id)} · {time(event.ts)}</small>
-        <h2 id="activity-evidence-title">{event.event_type === 'message' ? '这条消息的关联进展' : '这次行动的依据'}</h2></div>
+        <h2 id="activity-evidence-title">{decisions.length ? '这次选择的依据'
+          : event.event_type === 'message' ? '这条消息的关联进展' : '这次行动的依据'}</h2></div>
         <button type="button" className="icon-button" onClick={onClose} aria-label="关闭变化依据"><Icon name="x" size={18}/></button>
       </header>
       <div className="activity-evidence__body">
+        <section><h3>为什么这样选择</h3>
+          {decisions.length ? decisions.map(({event:decision, basis}) => <div key={decision.event_id}>
+            {decisions.length > 1 && <small className="activity-evidence__caption">{getName(decision.unit_id)} · {time(decision.ts)}</small>}
+            <p>{basis.reason}</p>
+            {basis.evidence.length ? basis.evidence.map(item => {
+              const evidence = activityDecisionEvidence(item, decision, events);
+              return <blockquote key={item.ref} data-decision-evidence>
+                <small>{evidence.source ? getName(evidence.source) + ' · ' : ''}{evidence.label}
+                  {evidence.recordedAt ? ' · ' + time(evidence.recordedAt) : ''}</small>
+                <p>{evidence.summary}</p>
+                <small>{evidence.notice}{evidence.missingOriginal ? '；来源原记录未保留，以上为当时保存的摘要' : ''}</small>
+              </blockquote>;
+            }) : <p className="activity-evidence__missing">这次记录未保存可核对的依据。</p>}
+          </div>) : <p className="activity-evidence__missing">这次历史记录没有保存选择理由和依据。</p>}
+        </section>
         <section><h3>关联的消息</h3>
           {related.messages.length ? related.messages.map(message => <blockquote key={message.event_id}>
             <small>{getName(message.unit_id)}{message.target_unit_id ? ` → ${getName(message.target_unit_id)}` : ''} · {time(message.ts)}</small>

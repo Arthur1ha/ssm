@@ -14,7 +14,8 @@ for (const file of files) {
   vm.runInContext(compile('app/src/'+file),context);
   Object.assign(context,context.window);
 }
-const {activityMemberView,activityTaskRows,activityRelatedEvents,activityMessageReceipt,activityFeedbackChange,projectActivityEvents} = context;
+const {activityMemberView,activityTaskRows,activityRelatedEvents,activityMessageReceipt,activityFeedbackChange,
+  activityDecisionBasis,activityDecisionText,activityDecisionEvidence,projectActivityEvents} = context;
 const compactEvents=context.compactActiveActivityEvents;
 const replay=process.env.SSM_ACTIVITY_REPLAY ? JSON.parse(fs.readFileSync(process.env.SSM_ACTIVITY_REPLAY,'utf8')) : null;
 const now = Date.now()/1000;
@@ -44,6 +45,25 @@ const result = event('result','action_result',{task_id:'task_game',action:planne
   reason:'stop_unconfirmed',text:'停止结果尚未确认',trigger_message_id:'msg_invite',
   state_at_event:{status:'current',as_of:now-16,values:states.go2.state}});
 const events = [invite,accepted,planned,running,result];
+const decisionBasis = {reason:'呆呆狗现在也没任务，我也有空；刚才它看到了白色玩偶，我想邀请它玩找颜色。',
+  evidence:[{ref:'observation-one',kind:'observation',source:'go2',as_of:now-30,summary:'地上有一个白色猫头鹰玩偶。'}]};
+const groundedInvite={...invite,decision_basis:decisionBasis};
+assert.equal(activityDecisionBasis(groundedInvite).reason,decisionBasis.reason);
+assert.equal(activityDecisionText(groundedInvite,invite.text),decisionBasis.reason+'\n'+invite.text);
+assert.equal(activityDecisionText(groundedInvite,decisionBasis.reason),decisionBasis.reason);
+assert.equal(activityDecisionText(invite,invite.text),invite.text);
+assert.equal(activityDecisionBasis(invite),null,'Old history acquired a fabricated explanation');
+assert.equal(activityDecisionEvidence(decisionBasis.evidence[0],groundedInvite,[],now).missingOriginal,true);
+assert.equal(activityDecisionEvidence(decisionBasis.evidence[0],groundedInvite,
+  [{event_id:'observation-one',unit_id:'go2'}],now).missingOriginal,false);
+const oldEvidence={...decisionBasis.evidence[0],as_of:now-700};
+assert.match(activityDecisionEvidence(oldEvidence,groundedInvite,[],now).notice,/决策时已过期/);
+assert.match(activityDecisionEvidence({...decisionBasis.evidence[0],as_of:now-500},
+  {...groundedInvite,ts:now-400},[],now+200).notice,/当前情况需要重新确认/);
+assert.match(activityDecisionEvidence({...decisionBasis.evidence[0],as_of:null},groundedInvite,[],now).notice,/记录时间未提供/);
+assert.equal(activityDecisionBasis(activityTaskRows([
+  {...planned,decision_basis:decisionBasis},result])[0]).reason,decisionBasis.reason,
+  'An explicitly linked receipt erased the original selection basis');
 assert.equal(activityMessageReceipt(invite,[invite]),'等待对方决定');
 assert.equal(activityMessageReceipt(invite,events),'对方已接受');
 assert.equal(activityMemberView(go2,states.go2.state,{status:'joined'},true,now).label,'玩耍 · 站立');
@@ -169,6 +189,62 @@ async function browserChecks() {
         'Focus was not restored to the evidence button');
       if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`activity-card-${width}.png`),fullPage:true});
     }
+    // A reasoned invitation has evidence before any task or acceptance exists.
+    await page.evaluate(({invite,basis})=>__render({events:[{...invite,decision_basis:basis}]}),
+      {invite:groundedInvite,basis:decisionBasis});
+    await page.waitForSelector('[data-decision-reason]');
+    assert.equal(await page.$eval('[data-decision-reason]',el=>el.textContent),decisionBasis.reason+'\n'+invite.text);
+    assert(await page.$eval('[data-decision-reason]',el=>el.classList.contains('space-activity__bubble')),
+      'The main decision was reduced to a caption instead of agent dialogue');
+    assert.equal(await page.$eval('[data-decision-reason]',el=>
+      el.parentElement.querySelector('.space-activity__speaker').textContent.includes('打算')),false,
+      'A new intention heading changed the existing speaker hierarchy');
+    assert.equal(await page.$$('.space-activity__bubble').then(els=>els.length),1,
+      'A separate reason bubble changed the number of dialogue entries');
+    assert.equal(await page.$$('.space-activity__item').then(els=>els.length),1);
+    assert.equal(await page.$$eval('[data-decision-reason]',els=>els.length),1);
+    await page.click('.space-activity__message-meta .space-activity__evidence-link');
+    await page.waitForSelector('[data-decision-evidence]');
+    assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('白色猫头鹰')));
+    assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('来源原记录未保留')));
+    assert(await page.$eval('.activity-evidence',el=>el.textContent.includes('不能据此确认设备已经行动')));
+    if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'decision-evidence.png'),fullPage:true});
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
+    // Color and candidate reasoning stays in the existing action row with its real receipt.
+    const colorBasis={...decisionBasis,reason:'刚才的观察里有白色玩偶，我想用白色出题，让呆呆狗自己挑一个同色目标。'};
+    const candidateBasis={...decisionBasis,reason:'我刚看到了地上的白色猫头鹰，想先检查能不能安全靠近它。'};
+    await page.evaluate(({lampResult,result,colorBasis,candidateBasis})=>__render({events:[
+      {...lampResult,decision_basis:colorBasis},{...result,status:'executing',decision_basis:candidateBasis}]}),
+      {lampResult,result,colorBasis,candidateBasis});
+    await page.waitForFunction(()=>document.querySelectorAll('[data-decision-reason]').length===2);
+    assert(await page.$$eval('[data-decision-reason]',els=>els.every(el=>el.tagName==='P')));
+    assert(await page.$eval('[data-decision-reason]',el=>el.textContent.startsWith('刚才的观察里有白色玩偶')));
+    assert.equal(await page.$$('.space-activity__bubble').then(els=>els.length),0,
+      'Action reasoning added dialogue layers instead of using the original action line');
+    assert.equal(await page.$$('.space-activity__item').then(els=>els.length),2);
+    assert.equal(await page.$$('.space-activity__action').then(els=>els.length),2);
+    assert(await page.$$eval('[data-decision-reason]',els=>els.every(el=>
+      el.parentElement.classList.contains('space-activity__action'))));
+    // A message that already speaks the reason should not duplicate the bubble.
+    await page.evaluate(({invite,basis})=>__render({events:[{...invite,text:basis.reason,decision_basis:basis}]}),
+      {invite:groundedInvite,basis:decisionBasis});
+    await page.waitForFunction(()=>document.querySelectorAll('[data-decision-reason]').length===1);
+    assert.equal(await page.$$('.space-activity__bubble').then(els=>els.length),1);
+    // Restored historical records retain their evidence, including stale notices.
+    await page.evaluate(({invite,basis})=>__render({activity:{...__props.activity,status:'ended'},
+      events:[{...invite,decision_basis:{...basis,evidence:basis.evidence.map(row=>({...row,as_of:1}))}}]}),
+      {invite:groundedInvite,basis:decisionBasis});
+    await page.click('.space-activity__toggle');
+    await page.waitForSelector('[data-decision-reason]');
+    await page.click('.space-activity__message-meta .space-activity__evidence-link');
+    await page.waitForSelector('[data-decision-evidence]');
+    assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('决策时已过期')));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
+    await page.click('.space-activity__toggle');
+    await page.evaluate(({activity,events})=>__render({activity,events}),{activity,events});
+    await page.waitForSelector('.space-activity__action');
     if(replay){
       await page.setViewport({width:390,height:900});
       await page.evaluate(replay=>{

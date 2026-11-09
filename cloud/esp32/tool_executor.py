@@ -215,7 +215,11 @@ def execute_auxiliary(*, unit_id: str, tool: str, params: dict,
         return messenger.send_message(unit_id, params["target"], params["content"],
                                       reply_to=params.get("reply_to"),
                                       interaction_kind=params.get("interaction_kind", "message"),
-                                      game_id=params.get("game_id"))
+                                      game_id=params.get("game_id"),
+                                      **({"decision_reason": params.get("decision_reason"),
+                                          "evidence_refs": params.get("evidence_refs")}
+                                         if params.get("interaction_kind") == "game_invite"
+                                         or "decision_reason" in params or "evidence_refs" in params else {}))
     try:
         if tool == "list_peers":
             from cloud.peers.gateway import list_visible_peers

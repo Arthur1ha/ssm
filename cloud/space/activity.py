@@ -28,6 +28,36 @@ _STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state
                  "body_confirmation", "body_telemetry_fresh", "autonomy_mode", "ism", "r", "g", "b", "brightness")
 
 
+def _decision_basis_snapshot(value: Any) -> dict[str, Any] | None:
+    """Keep only the bounded public explanation validated by its decision owner.
+
+    The journal preserves historical evidence; it neither invents evidence nor
+    revalidates old references against a later live context.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("reason"), str):
+        return None
+    reason = value["reason"].strip()[:400]
+    if not reason:
+        return None
+    rows = value.get("evidence")
+    evidence = []
+    for item in rows[:8] if isinstance(rows, list) else ():
+        if not isinstance(item, dict):
+            continue
+        if not all(isinstance(item.get(key), str) and item[key].strip()
+                   for key in ("ref", "kind", "source", "summary")):
+            continue
+        entry = {key: item[key][:limit] for key, limit in
+                 (("ref", 180), ("kind", 40), ("source", 120), ("summary", 240))}
+        as_of = item.get("as_of")
+        if type(as_of) in (int, float) and math.isfinite(as_of) and as_of > 0:
+            entry["as_of"] = as_of
+        if item.get("status") in {"current", "stale", "unknown"}:
+            entry["status"] = item["status"]
+        evidence.append(entry)
+    return {"reason": reason, "evidence": evidence}
+
+
 def _state_at_event(unit_id: str, now: float) -> dict[str, Any]:
     """Preserve bounded feedback, not a claim that an action caused that state.
 
@@ -320,6 +350,9 @@ class ActivityStore:
         trigger = facts.get("trigger_message_id")
         if isinstance(trigger, str) and 0 < len(trigger) <= 120:
             event["trigger_message_id"] = trigger
+        basis = _decision_basis_snapshot(facts.get("decision_basis"))
+        if basis is not None:
+            event["decision_basis"] = basis
         if unit_id and event_type in {"action", "action_result"}:
             event["state_at_event"] = _state_at_event(unit_id, event["ts"])
         observation = facts.get("decision_observation")

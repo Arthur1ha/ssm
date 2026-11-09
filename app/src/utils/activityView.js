@@ -91,7 +91,8 @@ function activityTaskRows(events) {
         || ['accepted', 'executing', 'timeout', 'unknown'].includes(previous.status)))) {
       const index = rows.indexOf(previous);
       const merged = {...previous, ...event,
-        trigger_message_id:event.trigger_message_id || previous.trigger_message_id};
+        trigger_message_id:event.trigger_message_id || previous.trigger_message_id,
+        decision_basis:event.decision_basis || previous.decision_basis};
       rows[index] = merged;
       tasks.set(key, merged);
     } else {
@@ -155,9 +156,44 @@ function activityReasonText(event) {
   return /[\u3400-\u9fff]/.test(reason) ? reason : '';
 }
 
+function activityDecisionBasis(event) {
+  const basis = event?.decision_basis;
+  if (!basis || typeof basis.reason !== 'string' || !basis.reason.trim()) return null;
+  return {reason:basis.reason.trim(), evidence:Array.isArray(basis.evidence)
+    ? basis.evidence.filter(item => item && typeof item.summary === 'string' && item.summary.trim()) : []};
+}
+
+function activityDecisionText(event, text) {
+  const original = String(text || '').trim();
+  const reason = activityDecisionBasis(event)?.reason;
+  return reason && original !== reason ? [reason, original].filter(Boolean).join('\n') : original || reason || '';
+}
+
+function activityDecisionEvidence(item, event, events, now = Date.now() / 1000) {
+  const labels = {observation:'环境观察', peer_state:'同伴状态', environment:'环境反馈',
+    activity:'活动情境', constraint:'用户要求', action_result:'动作反馈'};
+  const recordedAt = Number(item.as_of);
+  const hasTime = Number.isFinite(recordedAt) && recordedAt > 0;
+  const maxAge = item.kind === 'observation' ? 600
+    : ['peer_state', 'environment'].includes(item.kind) ? 60 : null;
+  const atDecision = Number(event.ts);
+  const expiredThen = item.status === 'stale' || maxAge !== null && hasTime
+    && Number.isFinite(atDecision) && atDecision - recordedAt > maxAge;
+  const expiredNow = maxAge !== null && hasTime && now - recordedAt > maxAge;
+  const ref = String(item.ref || '').replace(/^event:/, '');
+  const original = item.kind === 'observation' ? events.find(row => row.event_id === ref) : null;
+  return {label:labels[item.kind] || '参考信息', source:item.source || original?.unit_id || '',
+    recordedAt:hasTime ? recordedAt : null, summary:item.summary,
+    notice:item.status === 'unknown' ? '这条依据在决策时尚未确认，不能据此陈述事实'
+      : expiredThen ? '这条依据在决策时已过期，不能据此确认当时情况'
+      : expiredNow ? '这是当时参考的记录，当前情况需要重新确认'
+      : !hasTime ? '记录时间未提供，无法确认信息新鲜度' : '这是决策时参考的记录',
+    missingOriginal:item.kind === 'observation' && !original};
+}
+
 Object.assign(window, {activityStateAge, activityLightColor, activityPhysicalLabel, activityMemberView,
   activityTaskKey, activityTaskRows, activityRelatedEvents, activityMessageReceipt, activityReasonText,
-  isActivityLightingAction});
+  activityDecisionBasis, activityDecisionText, activityDecisionEvidence, isActivityLightingAction});
 window.activityFeedbackChange = activityFeedbackChange;
 
 function activityMediaUrl(event) {

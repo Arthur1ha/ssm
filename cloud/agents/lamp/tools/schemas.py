@@ -22,6 +22,10 @@ def _physical_schema(name: str, tool: str, params_schema: dict | None = None):
         limits = {field: definition[source] for source, field in
                   (("minimum", "ge"), ("maximum", "le")) if source in definition}
         fields[key] = (annotation, Field(default=... if required else None, **limits))
+    fields["decision_reason"] = (str | None, Field(default=None, max_length=300,
+        description="本次选择的简短事实理由；游戏出题必须填写"))
+    fields["evidence_refs"] = (list[str] | None, Field(default=None, max_length=8,
+        description="引用当前 space.decision_evidence 的 ref；游戏出题必须含观察依据"))
     return create_model(name, __doc__=declaration["description"],
                         __config__=ConfigDict(extra="forbid", strict=True), **fields)
 
@@ -57,6 +61,10 @@ class SendMessage(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
     interaction_kind: Literal["message", "game_invite"] = "message"
     game_id: str | None = Field(default=None, description="邀请时填写 playable_games 中的 ID，仅供工具使用")
+    decision_reason: str | None = Field(default=None, max_length=300,
+        description="游戏邀请必填：依据当前情境说明为什么此时邀请")
+    evidence_refs: list[str] | None = Field(default=None, max_length=8,
+        description="游戏邀请必填：引用当前 space.decision_evidence 中的 ref")
 
 
 SCHEMAS = {

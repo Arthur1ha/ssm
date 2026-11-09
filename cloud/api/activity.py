@@ -183,8 +183,6 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
             await _end_locked("superseded_user_request")
             raise HTTPException(status_code=409, detail="activity request was superseded")
         active = store.activate(activity_id) or store.get(activity_id) or record
-        from cloud.peers.games import invite_color_hunt_after_join
-        asyncio.create_task(invite_color_hunt_after_join(activity_id))
         return active
 
 

@@ -159,6 +159,7 @@ function compactActiveActivityEvents(events) {
     if (lighting(event) && lighting(previous) && event.unit_id === previous.unit_id
       && event.trigger_message_id && event.trigger_message_id === previous.trigger_message_id) {
       compact[compact.length - 1] = {...event, lighting_summary:true,
+        decision_basis:event.decision_basis || previous.decision_basis,
         related_task_ids:[...new Set([...(previous.related_task_ids || [previous.task_id]), event.task_id].filter(Boolean))]};
     } else compact.push(event);
   }
@@ -290,6 +291,7 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
         const text = event.text || '';
         const receipt = kind === 'message' ? activityMessageReceipt(event, events) : '';
         const linkedTask = kind === 'message' && activityRelatedEvents(event, events).task.length > 0;
+        const basis = activityDecisionBasis(event);
         const actionEvent = ['action', 'action_progress', 'action_result'].includes(event.event_type);
         const change = actionEvent ? activityFeedbackChange(event, events,
           agents.find(agent => agent.unit_id === unitId)) : '';
@@ -301,12 +303,13 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
             {showSpeaker && <div className="space-activity__speaker">{name}{target ? ` → ${getName(target)}` : ''}
               {event.reply_to ? ' · 回应' : ''}</div>}
             {kind === 'message' || kind === 'question' ? <>
-              <div className="space-activity__bubble">{text || (kind === 'question' ? '需要你帮忙看一下。' : '发送了一条消息')}
+              <div className="space-activity__bubble" data-decision-reason={basis ? true : undefined}>{activityDecisionText(event,
+                text || (kind === 'question' ? '需要你帮忙看一下。' : '发送了一条消息'))}
                 {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
               </div>
-              {(receipt || linkedTask) && <div className="space-activity__message-meta">
+              {(receipt || linkedTask || basis) && <div className="space-activity__message-meta">
                 {receipt && <span className="space-activity__receipt">{receipt}</span>}
-                {linkedTask && <button type="button" className="space-activity__evidence-link"
+                {(linkedTask || basis) && <button type="button" className="space-activity__evidence-link"
                   onClick={() => setSelectedEvent(event)}>查看进展<Icon name="arrow" size={12}/></button>}
               </div>}
               {kind === 'question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>
@@ -317,7 +320,7 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
               {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
             </div> : <div className={actionEvent ? 'space-activity__action' : 'space-activity__status'}
               data-outcome={actionEvent ? event.status || 'executing' : undefined}>
-              <p>{activityStatusText(event, name, true)}</p>
+              <p data-decision-reason={basis ? true : undefined}>{activityDecisionText(event, activityStatusText(event, name, true))}</p>
               {change && <span className="space-activity__feedback-change">{change}</span>}
               {actionEvent && <button type="button" className="space-activity__evidence-link"
                 onClick={() => setSelectedEvent(event)}>查看变化依据<Icon name="arrow" size={12}/></button>}

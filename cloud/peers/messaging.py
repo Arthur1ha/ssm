@@ -88,12 +88,24 @@ class AgentMessenger:
         except (MqttSignatureError, ValueError, TypeError, OSError):
             return False
 
+    def _decision_context(self, sender: str) -> dict:
+        from cloud.api.main import _esp32_state
+        from cloud.space.context import get_space_context
+        return get_space_context(sender, state=_esp32_state,
+                                 registry=self._registry)
+
+    def _resolve_decision(self, sender: str, reason, refs) -> dict:
+        from cloud.space.decisions import resolve_decision
+        return resolve_decision(self._decision_context(sender), reason, refs)
+
     def send_message(
         self, sender: str, target: str, content: str, reply_to: str | None = None,
         *, conversation_id: str | None = None, deadline: float | None = None,
         reply_kind: str = "reply", interaction_kind: str = "message",
         game_id: str | None = None,
         activity_id: str | None = None,
+        decision_reason: str | None = None,
+        evidence_refs: list[str] | None = None,
     ) -> dict:
         now = self._now()
         if sender not in self._local_ids:
@@ -160,6 +172,11 @@ class AgentMessenger:
                     payload["content"] = get_game(game_id).invitation
                 payload["interaction_kind"] = interaction_kind
                 payload["game_id"] = game_id
+            if interaction_kind == "game_invite" or decision_reason is not None or evidence_refs is not None:
+                try:
+                    payload["decision_basis"] = self._resolve_decision(sender, decision_reason, evidence_refs)
+                except ValueError as exc:
+                    return {"result": "rejected", "error": str(exc)}
             if not self._publish(payload):
                 return {"result": "error", "error": "mqtt_publish_failed"}
             self._outgoing[message_id] = {**payload, "state": "waiting_reply", "received": False,
@@ -172,7 +189,9 @@ class AgentMessenger:
                     text=payload["content"], target_unit_id=target,
                     message_id=message_id, conversation_id=payload["conversation_id"],
                     reply_to=reply_to, reply_kind=reply_kind,
-                    interaction_kind=interaction_kind, game_id=game_id)
+                    interaction_kind=interaction_kind, game_id=game_id,
+                    **({"decision_basis": payload["decision_basis"]}
+                       if "decision_basis" in payload else {}))
             if activity_event is None and self._on_visible_message is not None:
                 self._on_visible_message(dict(payload))
         return {"result": "accepted", "message_id": message_id,
@@ -242,7 +261,7 @@ class AgentMessenger:
             return {key: item.get(key) for key in (
                 "message_id", "conversation_id", "sender", "target", "state", "received",
                 "task_id", "result", "deadline", "updated_at",
-                "interaction_kind", "game_id", "activity_id")}
+                "interaction_kind", "game_id", "activity_id", "decision_basis")}
 
     def handle_message(self, topic: str, raw: bytes | str) -> bool:
         """Return whether this topic is an agent message, even if rejected."""
@@ -255,7 +274,7 @@ class AgentMessenger:
         try:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
-            if len(raw) > 5000:
+            if len(raw) > 12000:
                 return True
             payload = json.loads(raw)
             if not isinstance(payload, dict):
@@ -301,6 +320,18 @@ class AgentMessenger:
                             or game is None or (sender, target) != game.participants
                             or not activity_allows(payload.get("activity_id"), sender, target)):
                         return True
+                if interaction_kind == "game_invite" or "decision_basis" in payload:
+                    basis = payload.get("decision_basis")
+                    if (not isinstance(basis, dict) or not isinstance(basis.get("evidence"), list)
+                            or not all(isinstance(item, dict) for item in basis["evidence"])):
+                        return True
+                    try:
+                        # Validate against current facts, while preserving the
+                        # signed evidence the sender actually used to decide.
+                        self._resolve_decision(
+                            sender, basis.get("reason"), [item.get("ref") for item in basis["evidence"]])
+                    except ValueError:
+                        return True
                 if message_id in self._seen:
                     return True
                 if reply_to:
@@ -326,7 +357,9 @@ class AgentMessenger:
                         text=content.strip(), target_unit_id=target,
                         message_id=message_id, conversation_id=conversation_id,
                         reply_to=reply_to, reply_kind=payload["reply_kind"],
-                        interaction_kind=interaction_kind, game_id=game_id)
+                        interaction_kind=interaction_kind, game_id=game_id,
+                        **({"decision_basis": payload["decision_basis"]}
+                           if "decision_basis" in payload else {}))
                 if (sender not in self._local_ids and activity_event is None
                         and self._on_visible_message is not None):
                     self._on_visible_message(dict(payload))

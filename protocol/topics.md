@@ -145,6 +145,8 @@ API 在 `/api/intents` 签名正文加入 `user_revision`，编排器启动活�
 
 活动动作记录可附 `trigger_message_id`（执行入口明确关联的同伴消息）、`state_at_event`（记录时从现有设备卡投影读取的最近反馈：`status=current|stale|unknown`、`as_of`、有界 `values`），以及灯本轮实际采用的 `decision_observation`（仅光线级别、近期声音、时间段）。这些是历史记录，不是第二套实时设备状态，也不表示单凭对话或相邻时间即可证明动作原因或完成。旧记录缺少这些字段时保持未知。`GET /api/activity/{activity_id}/events` 同时返回活动元数据 `activity`，用于恢复真实退出状态与停止确认结果。
 
+活动消息与动作还可附 `decision_basis={reason,evidence:[{ref,kind,source,as_of,summary,status?}]}`。`reason` 是最多 400 字的选择摘要，`evidence` 最多 8 条；摘要由当前共享上下文或真实工具观察生成，不接受模型自填的观察事实。模型通过工具参数 `decision_reason` 与 `evidence_refs` 引用 `space.decision_evidence`，发送或执行前重新校验引用；未知、过期和跨活动的观察不能支持新动作。物理工具剥离这些解释参数后才下发硬件。PWA 展示当时保存的来源、时间和摘要；历史依据不因当前已过期而丢失，也不代表当前状态。
+
 ### 智能体定向消息（内部，非 retained）
 
 | Topic | 发布者 | 格式 |
@@ -152,6 +154,8 @@ API 在 `/api/intents` 签名正文加入 `user_revision`，编排器启动活�
 | `ssm/agents/{target_unit_id}/message` | 灯、Go2、编排器所在云端进程 | HMAC 签名 JSON；正文消息含 `kind=message`、`message_id`、`conversation_id`、`reply_to`、`reply_kind`、`sender`、`target`、`content`、`deadline`、`round`，活动期间另带 `activity_id`。旧普通消息可省略 `interaction_kind`，按 `message` 处理；玩法邀请附加 `interaction_kind=game_invite` 与已登记的 `game_id`，收发两端均核对同一当前活动及双方已加入，邀请本身不启动设备动作。同一主题的 `received`、`progress`、`result` 消息引用原 `message_id`；进度带 `task_id`，最终结果带 `result` 与可选 `reason`。收信端校验签名、同空间成员、目标在线、截止时间、长度和重放。QoS 1；投递成功仅表示发出，不表示目标答应或动作完成。 |
 
 运行期按消息 ID 跟踪 `waiting_reply`、`waiting_start`、`waiting_result` 与最终结果。接收者受理物理任务后必须回传原 `task_id`，完成后回传最终结果。结果丢失时按原任务 ID 查询，不重新发布动作。消息不走 `request_peer_skill` 的任务网关，也不授予设备或用户权限。
+
+`game_invite` 必须包含经发送端校验的 `decision_basis`，该字段纳入同一 HMAC 签名；接收端按发送者当前可见上下文重新核对引用。普通消息可以省略该字段。进入活动不再安排固定延迟的游戏邀请，由设备现有自主 Graph 在社交机会中判断是否发起。`color_hunt` 接受后，灯依据本活动内新鲜的环境观察自行选色，开灯和设色前均须引用真实观察；没有依据就如实结束。狗重新观察并自行选候选目标，仅视觉导航返回 `ok` 且 `confirmation=odom_stopped_and_visual_recheck` 才确认找到；游戏不安排后续变色、返航、关灯或姿态剧情。
 
 ### 智能体同伴协调请求（内部，非 retained）
 

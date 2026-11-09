@@ -18,4 +18,6 @@ def prompt_space_context() -> str:
     context["environment"] = context["environment"][:12]
     context["constraints"] = context["constraints"][:8]
     context["recent_discoveries"] = context["recent_discoveries"][-6:]
+    from cloud.space.decisions import decision_evidence
+    context["decision_evidence"] = decision_evidence(context)
     return json.dumps(context, ensure_ascii=False, default=str)

@@ -123,8 +123,8 @@ async def go2_navigate_to_coordinate(x: float, y: float) -> dict:
             "error" if result["status"] == "failed" else result["status"], **result}
 
 
-async def go2_navigate_to_visible_target(target: str) -> dict:
-    """Fuse the visual target with LiDAR and navigate to a mapped stop cell."""
+async def go2_navigate_to_visible_target(target: str, decision_reason: str | None = None) -> dict:
+    """Navigate a target; decision narration never changes physical parameters."""
     from cloud.go2.navigation.target_approach import navigate_to_visible_target
     return await navigate_to_visible_target(target)
 

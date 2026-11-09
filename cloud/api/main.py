@@ -223,6 +223,9 @@ async def lifespan(app):
             "message_id": message["message_id"], "sender": message["sender"],
             "target": message["target"], "text": message["content"],
             "reply_to": message.get("reply_to"), "ts": time.time(),
+            **{key: message[key] for key in
+               ("activity_id", "interaction_kind", "game_id", "decision_basis")
+               if key in message},
         })
 
     peer_gateway.init(_esp32_mqtt_client, _esp32_state)

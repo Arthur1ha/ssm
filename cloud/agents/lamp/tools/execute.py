@@ -36,15 +36,54 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
             social.sent(target, topic)
         return result
     if declaration.get("action"):
+        decision_basis = None
+        reason = params.pop("decision_reason", None)
+        refs = params.pop("evidence_refs", None)
+        game_setup = context.session_id.startswith("peer_game_color_")
+        decision_space = None
+        if game_setup or reason is not None or refs is not None:
+            from cloud.space.context import get_space_context
+            from cloud.space.decisions import resolve_decision
+            try:
+                decision_space = get_space_context(unit_id, state=agent._state)
+                decision_basis = resolve_decision(
+                    decision_space, reason, refs,
+                    require_observation=game_setup)
+            except ValueError as exc:
+                return {"result": "rejected", "error": str(exc)}
         from cloud.cards.registry import get_registry
         card = get_registry().get_card(unit_id)
         if not card:
             return {"result": "blocked", "error": "lamp_unavailable"}
-        return execute_physical(
+        task_id = stable_task_id(unit_id, run_id, step_id)
+        if game_setup:
+            from cloud.peers.games import activity_allows
+            from cloud.space.activity import get_activity_store
+            store = get_activity_store()
+            activity = store.current()
+            activity_id = (decision_space.get("activity") or {}).get("activity_id")
+            if (not activity_id or (activity or {}).get("activity_id") != activity_id
+                    or not activity_allows(activity_id, unit_id, "go2")
+                    or not agent._should_act() or not agent._device_online()):
+                return {"result": "blocked", "error": "game_activity_unavailable"}
+            intent = ("我准备开灯，亮出这局的题目颜色。" if name == "set_led_state"
+                      else "我准备亮出这局的题目颜色。")
+            announced = store.record_event(
+                activity_id, "action", unit_id=unit_id, text=intent,
+                source_event_id="decision_" + task_id,
+                action=name, task_id=task_id, game_id="color_hunt",
+                trigger_message_id=context.session_id.removeprefix("peer_game_color_"),
+                decision_basis=decision_basis, status="executing")
+            if announced is None:
+                return {"result": "cancelled", "error": "activity_ended"}
+        result = execute_physical(
             state=agent._state, unit_id=unit_id,
             action=declaration["action"], params=params,
             context=context, dispatch=dispatch,
             source="lamp_semantic" if lighting_only else "lamp_chat",
-            task_id=stable_task_id(unit_id, run_id, step_id), card=card,
+            task_id=task_id, card=card,
         )
+        if decision_basis is not None:
+            result = {**result, "decision_basis": decision_basis}
+        return result
     return execute_auxiliary(unit_id=unit_id, tool=name, params=params, context=context)
