@@ -5,9 +5,12 @@ from __future__ import annotations
 import uuid
 import time
 from dataclasses import asdict
-from typing import TypedDict
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import AnyMessage
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.effects import FileEffectLedger
@@ -22,6 +25,7 @@ class _RecoveryState(TypedDict):
     decision: dict
     turns: int
     effects: int
+    messages: Annotated[list[AnyMessage], add_messages]
 
 
 def stable_reply_event_id(run_id: str, *, session_id: str = "",

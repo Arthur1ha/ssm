@@ -20,7 +20,7 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
-from cloud.agents.common.models import get_text_model
+from cloud.agents.common.models import get_text_model, async_model_clients
 from cloud.agents.common.replies import needs_persona_reply, valid_persona_reply, factual_fallback
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
@@ -48,28 +48,6 @@ def _checkpoint_run(saver: FileCheckpointSaver, thread_id: str, run_id: str) -> 
             run.response = run.question
         return run
     return None
-
-
-def _recent_session_history(saver: FileCheckpointSaver, thread_id: str,
-                            current_run_id: str, limit: int = 4) -> list[dict]:
-    """Return completed user turns from this session, newest last."""
-    history = []
-    seen = {current_run_id}
-    for item in saver.list({"configurable": {"thread_id": thread_id}}, limit=120):
-        data = item.checkpoint.get("channel_values", {}).get("run")
-        if not isinstance(data, dict):
-            continue
-        run_id = data.get("run_id")
-        if not run_id or run_id in seen or data.get("status") in {"executing", "needs_clarification"}:
-            continue
-        seen.add(run_id)
-        goal = data.get("goal")
-        response = data.get("response") or data.get("decision_draft")
-        if isinstance(goal, str) and goal.strip() and isinstance(response, str) and response.strip():
-            history.append({"user": goal[:1000], "assistant": response[:1000]})
-            if len(history) >= limit:
-                break
-    return list(reversed(history))
 
 
 
@@ -145,8 +123,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
     context = {**context, "source_text": supplemental if resume else context["user_msg"]}
     if resume:
         context = {**context, "user_msg": run.goal}
-    history = _recent_session_history(saver, thread_id, run_id)
-    model = llm or get_text_model("steward")
+    model = None
     execute = make_executor(run, context, resume)
     transport.do_publish_feedback(session_id, "planning", "正在理解并执行目标…", run_id=run_id)
 
@@ -223,17 +200,23 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
             current.reply_source = "runtime"
         return current
 
-    with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
-                      parent_run_id=run.parent_run_id or None, agent_id="cloud_orchestrator",
-                      session_id=session_id, origin_kind=run.origin_kind):
-        asyncio.run(run_role_graph(
+    @async_model_clients()
+    async def invoke_graph():
+        nonlocal model
+        model = llm or get_text_model("steward")
+        return await run_role_graph(
             run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
-            build_messages=lambda current: build_messages(current, supplemental, history) + ([HumanMessage(content="本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(context["selection"]))] if context.get("selection") else []), execute=execute,
+            build_messages=lambda current: build_messages(current, supplemental) + ([HumanMessage(content="本轮修改的规则或草案引用（服务端已校验；先用 list_training 读取内容）：" + str(context["selection"]))] if context.get("selection") else []), execute=execute,
             on_step=on_step, on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
             effectful=lambda name: name in {"invoke_skill", "propose_training", "send_message", "start_activity",
                                               "set_space_constraint", "clear_space_constraints"},
-            resume=resume, resume_value=supplemental))
+            resume=resume, resume_value=supplemental)
+
+    with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
+                      parent_run_id=run.parent_run_id or None, agent_id="cloud_orchestrator",
+                      session_id=session_id, origin_kind=run.origin_kind):
+        asyncio.run(invoke_graph())
     if run.status != "needs_clarification":
         pin_completed_run(run_id, session_id, agent_id, index=index, checkpointer=saver)
     stage = ("question" if run.status == "needs_clarification" else

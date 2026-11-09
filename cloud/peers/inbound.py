@@ -74,7 +74,7 @@ def _publish_go2_reply_ack(messenger, message: dict) -> None:
     confirmed = status.get("state") == "ok"
     from cloud.agents.go2.personality.profile import get_profile
     from cloud.personality.store import render_identity
-    from cloud.agents.common.models import get_text_model
+    from cloud.agents.common.models import get_text_model, async_model_clients
     from langchain_core.messages import HumanMessage
 
     persona = render_identity(get_profile())
@@ -87,9 +87,13 @@ def _publish_go2_reply_ack(messenger, message: dict) -> None:
         f"灯的执行结果：{'已由消息回执确认成功' if confirmed else '尚未确认'}。"
         "只输出一句中文，不超过 80 字。"
     )
+    @async_model_clients()
+    async def acknowledge():
+        return await asyncio.wait_for(
+            get_text_model("go2").ainvoke([HumanMessage(content=prompt)]), timeout=8)
+
     try:
-        response = asyncio.run(asyncio.wait_for(
-            get_text_model("go2").ainvoke([HumanMessage(content=prompt)]), timeout=8))
+        response = asyncio.run(acknowledge())
         reply = str(response.content).strip()
         if not reply or len(reply) > 120 or "\n" in reply:
             raise ValueError("invalid_peer_ack")

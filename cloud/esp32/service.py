@@ -146,5 +146,5 @@ class ESP32Agent(ReactiveMind):
         return get_text_model("lamp")
 
     def _llm_for_run(self):
-        """Use a fresh async client for each run's event loop."""
+        """Build inside async_model_clients so HTTP belongs to this run's loop."""
         return self._llm if self._llm_injected else self._make_llm()

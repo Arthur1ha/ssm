@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
+from cloud.agents.common.models import async_model_clients
 from cloud.agents.common.replies import factual_fallback
 from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
 from cloud.agents.common.runner import GraphRun
@@ -113,6 +114,7 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
     return graph.compile(checkpointer=checkpointer)
 
 
+@async_model_clients()
 async def run_physical_reply(*, task_id: str, goal: str, action: str,
                              params: dict, trace_id: str, parent_run_id: str,
                              unit_id: str, session_id: str,

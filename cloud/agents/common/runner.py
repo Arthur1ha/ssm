@@ -15,17 +15,19 @@ import time
 import uuid
 from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, TypedDict
+from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ValidationError
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.effects import FileEffectLedger, use_effect
+from cloud.agents.common.conversation import dialogue_turn, legacy_dialogue, trim_dialogue
 from cloud.observability import emit_agent_event
 
 UNCERTAIN = {"accepted", "executing", "timeout", "unknown"}
@@ -59,6 +61,7 @@ class _State(TypedDict):
     decision: dict
     turns: int
     effects: int
+    messages: Annotated[list[AnyMessage], add_messages]
 
 
 def _schema(name: str, declaration: Any) -> dict:
@@ -156,6 +159,17 @@ async def run_role_graph(
         if on_progress:
             on_progress("considering" if current.steps else "planning", current.steps[-1] if current.steps else None)
         messages = await _await(build_messages(current))
+        history = trim_dialogue(state.get("messages", []))
+        if history:
+            # Keep role policy first and the current request last. History is
+            # conversational context, never a receipt or permission to act.
+            prefix = 0
+            while prefix < len(messages) and isinstance(messages[prefix], SystemMessage):
+                prefix += 1
+            messages[prefix:prefix] = [SystemMessage(content=(
+                "以下是同一智能体、同一会话的历史对话，用于理解偏好和承接语。"
+                "历史回复不是当前设备状态、执行回执或新的动作授权；以本轮真实观测为准。"
+            )), *history]
         for step in current.steps[-8:]:
             if step.get("dispatch_status") != "observed":
                 continue
@@ -173,7 +187,9 @@ async def run_role_graph(
             response = await asyncio.wait_for(bound_model.ainvoke(messages),
                                               timeout=max(0.1, current.deadline - time.time()))
         except Exception as exc:
-            emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc))
+            emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc),
+                 cause=type(exc.__cause__).__name__ if exc.__cause__ else None,
+                 cause_message=str(exc.__cause__) if exc.__cause__ else None)
             current.status, current.response = "error", "暂时无法可靠理解下一步；已执行的动作不会重发。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         calls = getattr(response, "tool_calls", None) or []
@@ -327,7 +343,9 @@ async def run_role_graph(
             updated = await _await(finalize(current))
             if isinstance(updated, GraphRun):
                 current = updated
-        return {"run": asdict(current)}
+        history = trim_dialogue([*state.get("messages", []), *dialogue_turn(current)])
+        return {"run": asdict(current),
+                "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *history]}
 
     async def ask_node(state: _State) -> dict:
         question = state["decision"]["question"]
@@ -363,7 +381,12 @@ async def run_role_graph(
                     raise ValueError("initial_tool_not_allowed")
                 first = {"kind": "tool", "name": name, "params": params,
                          "step_id": f"{run.run_id}:initial"}
+            head = saver.get_tuple(config)
+            values = head.checkpoint.get("channel_values", {}) if head else {}
+            seed = (legacy_dialogue(saver, config, run.run_id)
+                    if "messages" not in values else [])
             output = await compiled.ainvoke({"run": asdict(run), "decision": first,
+                                             "messages": seed,
                                              "turns": len(run.steps),
                                              "effects": sum(bool(s.get("effectful")) for s in run.steps)},
                                             config, durability="sync")

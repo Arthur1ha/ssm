@@ -33,7 +33,7 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
     """Report observed results when a role's reply model is unavailable."""
     role = "go2" if agent_id == "go2" else ("lamp" if agent_id.startswith("esp32") else "orchestrator")
     if role == "lamp" and status == "error" and run is not None and not run.steps:
-        return "哼，这回是我没接住你的话。我还没做任何动作；再说一次，我重新试。"
+        return "哼，这回我处理请求出了问题，还没做任何动作。稍后再试。"
     if run is not None and run.steps:
         results = [(step, step.get("result") or {}) for step in run.steps]
         completed = [step for step, result in results

@@ -12,6 +12,7 @@ import asyncio
 from langchain_core.messages import HumanMessage
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
+from cloud.agents.common.models import async_model_clients
 from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
 from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt, valid_search_reply, valid_move_reply
 from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
@@ -73,6 +74,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             publish_reply=publish_reply, selection=selection)
 
 
+@async_model_clients()
 async def _run_go2_loop_locked(session_id: str, message: str, *, context: ExecutionContext,
                                view: Go2RunView, skill_id: str | None,
                                params: dict | None, run_id: str | None,
@@ -275,7 +277,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                         **step_progress_facts(step))
                 def invoke_text(prompt):
                     from cloud.go2.models import get_text_llm as fresh_model
-                    return asyncio.run(fresh_model().ainvoke([HumanMessage(content=prompt)])).content
+                    return fresh_model().invoke([HumanMessage(content=prompt)]).content
                 if (step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
                         and status in {"ok", "blocked", "cancelled"}
                         and isinstance(result.get("message"), str)):

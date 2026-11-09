@@ -18,7 +18,7 @@ from .logging_config import write_agent_event
 
 EVENTS = frozenset({
     "task.received", "run.started", "persona.loaded", "persona.changed",
-    "model.request", "model.response", "model.decision", "model.error",
+    "model.request", "model.response", "model.decision", "model.error", "model.empty_retry",
     "tool.dispatch", "tool.result", "peer.dispatch", "peer.result",
     "device.command", "device.result", "reply.draft", "reply.validated",
     "reply.fallback", "reply.emitted", "run.paused", "run.resumed",

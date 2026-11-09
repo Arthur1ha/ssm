@@ -1,8 +1,49 @@
 """Model construction preserving each role's existing environment policy."""
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+
+import httpx
 
 from langchain_openai import ChatOpenAI
+
+
+_async_client: ContextVar[tuple | None] = ContextVar("agent_model_http_client", default=None)
+
+
+@asynccontextmanager
+async def async_model_clients():
+    """Own HTTP connections inside the event loop that uses and closes them.
+
+    ChatOpenAI's default client cache is process-wide, so constructing a fresh
+    model does not isolate successive asyncio.run() calls. Nested workflows in
+    the same loop share this scope; another loop always gets its own client.
+    """
+    loop = asyncio.get_running_loop()
+    existing = _async_client.get()
+    if existing and existing[0] is loop and not existing[1].is_closed:
+        yield
+        return
+    async with httpx.AsyncClient() as client:
+        token = _async_client.set((loop, client))
+        try:
+            yield
+        finally:
+            _async_client.reset(token)
+
+
+def _async_client_options() -> dict:
+    scope = _async_client.get()
+    if scope:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return {}
+        if scope[0] is loop and not scope[1].is_closed:
+            return {"http_async_client": scope[1]}
+    return {}
 
 
 def _int_env(name: str, default: int) -> int:
@@ -19,6 +60,7 @@ def get_text_model(role: str, model_class=None):
         "base_url": os.getenv("OPENAI_BASE_URL"),
         "api_key": os.getenv("OPENAI_API_KEY"),
         "temperature": 0,
+        **_async_client_options(),
     }
     if role == "steward":
         models = [m.strip() for m in os.getenv("MODEL_LIST", os.getenv("MODEL", "")).split(",") if m.strip()]
@@ -42,4 +84,5 @@ def get_vision_model(model_class=None):
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0,
         timeout=30,
+        **_async_client_options(),
     )

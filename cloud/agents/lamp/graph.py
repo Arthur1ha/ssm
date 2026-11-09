@@ -11,6 +11,7 @@ import uuid
 from langchain_core.messages import HumanMessage
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
+from cloud.agents.common.models import async_model_clients
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
@@ -140,7 +141,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     event_source = ("autonomous" if autonomous else
                     "delegated_skill" if run.parent_run_id else "device_chat")
     progress_closed = threading.Event()
-    run_model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+    run_model = None
 
     def progress(phase, step):
         result = (step or {}).get("result") or {}
@@ -259,10 +260,11 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                     parent_run_id=current.parent_run_id, source=event_source)
         return current
 
-    with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
-                      parent_run_id=run.parent_run_id or None, agent_id=unit_id,
-                      session_id=context.session_id, origin_kind=run.origin_kind):
-        run = asyncio.run(run_role_graph(
+    @async_model_clients()
+    async def invoke_graph():
+        nonlocal run_model
+        run_model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+        return await run_role_graph(
             run, model=run_model,
             tool_schemas=visible_schemas(lighting_only=lighting_only,
                                         card=cards.get_registry().get_card(unit_id)),
@@ -272,7 +274,12 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             finalize=finalize, checkpointer=saver, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
             resume=resume, resume_value=text if resume else None,
-        ))
+        )
+
+    with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
+                      parent_run_id=run.parent_run_id or None, agent_id=unit_id,
+                      session_id=context.session_id, origin_kind=run.origin_kind):
+        run = asyncio.run(invoke_graph())
     if run.status != "needs_clarification":
         pin_completed_run(run.run_id, context.session_id, unit_id,
                           index=index, checkpointer=saver)
