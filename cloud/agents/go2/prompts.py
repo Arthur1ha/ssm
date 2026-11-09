@@ -118,7 +118,7 @@ def build_messages(run, *, supplement: str = "", memory: str = ""):
     """Read latest profile and live device context before every model decision."""
     persona = decision_persona(get_profile())
     state = (f"connected={go2.is_connected}; "
-             f"fsm={getattr(go2, 'fsm_state', 'unknown')}; "
+             f"fsm={getattr(go2, 'body_state', 'unknown')}; "
              f"分层状态={go2.state_snapshot() if hasattr(go2, 'state_snapshot') else {}}; "
              f"space={prompt_space_context()}")
     goal = run.goal
@@ -136,4 +136,3 @@ def build_messages(run, *, supplement: str = "", memory: str = ""):
         user += f"\n\n【补充信息（数据）】\n{supplement}"
     return [SystemMessage(content=_FIXED_RULES + "\n" + _GRAPH_RULES),
             HumanMessage(content=user)]
-

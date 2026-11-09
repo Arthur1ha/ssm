@@ -336,7 +336,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     """Apply the listener's debounce, opportunity and material-change gates."""
     from cloud.agents.lamp.personality.behavior import settled_light_level
     from cloud.agents.lamp.personality.profile import get_profile
-    from cloud.esp32 import tools as lamp_tools
+    from cloud.peers.gateway import list_visible_peers
     from cloud.peers.social import activity_peers
     from cloud.space.context import get_space_context
 
@@ -425,7 +425,7 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         sense["social_opportunity"] = opportunity
     rule_sig = intent['event_id'] if intent else None
     try:
-        peers = lamp_tools.list_peers(agent._find_led_unit())
+        peers = list_visible_peers(agent._find_led_unit())
     except Exception:
         peers = []
     peer_sig = tuple((peer.get("unit_id"), peer.get("online"),

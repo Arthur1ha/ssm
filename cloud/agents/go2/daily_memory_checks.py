@@ -11,7 +11,7 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.go2.memory.episode import EpisodeMemory, EventType, read_day
 from cloud.agents.go2.memory.recall import recall_memory
 from cloud.agents.go2.workflows import daily_maintenance, daily_summary, evolution
-from cloud.go2.execution import ExecutionContext, use_context
+from cloud.space.execution import ExecutionContext, use_context
 
 
 def test_completed_admin_dialogue_is_private_and_idempotent(tmp_path):

@@ -23,7 +23,7 @@ from cloud.go2.tools.executor import execute_tool
 from cloud.go2.tools.registry import TOOL_REGISTRY
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 from cloud.agents.go2.memory.episode import episode_memory
 from cloud.agents.go2.memory.recall import recall_memory
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_store() -> Go2RunView:
-    """Compatibility name for task-status callers; state lives in checkpoints."""
+    """Return the checkpoint-backed view used by task status and recovery."""
     global _view
     if _view is None:
         _view = Go2RunView()
@@ -221,12 +221,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                   or result.get("reason") == "stop_unconfirmed")
         if name in {"go2_sport", "go2_move", "go2_set_led", "go2_observe"}:
             result = {**result, "device_connected": bool(go2.is_connected),
-                      "device_fsm": getattr(go2, "fsm_state", None)}
+                      "device_fsm": getattr(go2, "body_state", None)}
             emit_agent_event("device.result", trace_id=run.trace_id or run.run_id,
                              run_id=run.run_id, agent_id="go2", task_id=step_id,
                              status=result.get("result"), result=result,
                              device_connected=bool(go2.is_connected),
-                             device_fsm=getattr(go2, "fsm_state", None),
+                             device_fsm=getattr(go2, "body_state", None),
                              device_snapshot_at=time.time(),
                              completion_basis=(result.get("confirmation") or "webrtc_result")
                              if result.get("result") == "ok" else "tool_boundary")

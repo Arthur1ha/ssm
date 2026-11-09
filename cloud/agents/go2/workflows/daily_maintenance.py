@@ -10,7 +10,7 @@ from cloud.agents.go2.memory import daily_summary
 from cloud.agents.go2.personality import profile
 from cloud.agents.go2.workflows.evolution import run_evolution_graph
 from cloud.go2.models import get_text_llm
-from cloud.go2.execution import SYSTEM_CONTEXT, use_context
+from cloud.space.execution import SYSTEM_CONTEXT, use_context
 
 logger = logging.getLogger(__name__)
 

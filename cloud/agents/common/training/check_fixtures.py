@@ -21,7 +21,7 @@ def hello_cooldown(seconds):
 def blink_defaults(count):
     from cloud.cards.builder import build_card_from_manifest
     from edge.lamp_contract import FSM_VERSION, capabilities
-    card = build_card_from_manifest({'unit_id': 'test_led', 'agent_type': 'actuator', 'fsm': 'led',
+    card = build_card_from_manifest({'name': '测试灯', 'firmware_ver': '0.3.0', 'unit_id': 'test_led', 'agent_type': 'actuator', 'fsm': 'led',
                                      'fsm_version': FSM_VERSION, 'capabilities': capabilities()})
     catalog = catalog_for(card)
     edges = [e['id'] for e in catalog['transitions'] if e['action'] == 'BLINK' and e['trainable']]
@@ -47,7 +47,7 @@ def lamp_sound_fixture():
     record = blink_defaults(2)
     from cloud.cards.builder import build_card_from_manifest
     from edge.lamp_contract import FSM_VERSION, capabilities
-    card = build_card_from_manifest({'unit_id': 'test_led', 'agent_type': 'actuator', 'fsm': 'led', 'fsm_version': FSM_VERSION, 'capabilities': capabilities()})
+    card = build_card_from_manifest({'name': '测试灯', 'firmware_ver': '0.3.0', 'unit_id': 'test_led', 'agent_type': 'actuator', 'fsm': 'led', 'fsm_version': FSM_VERSION, 'capabilities': capabilities()})
     catalog = catalog_for(card)
     edge = next(e for e in catalog['transitions'] if e['action'] == 'BLINK' and e['src'] == 'OFF')
     record['definition'].update(transition_ids=[edge['id']], defaults={}, trigger={'event_id': 'sensor.sound_detected', 'where': {'detected': True}, 'params': {'count': 2}})

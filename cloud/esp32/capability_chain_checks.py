@@ -28,11 +28,10 @@ from edge.lamp_contract import ACTION_SCHEMAS, FSM_VERSION, capabilities
 UNIT = "esp32_desk_led"
 
 
-def card(*, legacy=False):
-    manifest = {"unit_id": UNIT, "agent_type": "actuator", "fsm": "led",
+def card():
+    manifest = {'name': '测试灯', "unit_id": UNIT, "agent_type": "actuator", "fsm": "led",
                 "firmware_ver": "0.3.0", "capabilities": capabilities()}
-    if not legacy:
-        manifest["fsm_version"] = FSM_VERSION
+    manifest["fsm_version"] = FSM_VERSION
     result = build_card_from_manifest(manifest)
     result["online"] = True
     return result
@@ -71,11 +70,11 @@ def test_current_manifest_card_and_tool_schemas_have_one_source():
         assert skills[action]["params_schema"] == capability["params_schema"]
         assert skills[action]["params_schema"] == TOOL_DECLARATIONS[LAMP_SKILLS[action]["tool"]]["params_schema"]
     topology = {(edge["src"], edge["trigger"], edge["dst"])
-                for edge in current["state_machine"]["transitions"]}
+                for edge in current["state_machine"]["regions"][0]["transitions"]}
     expected = {(src, trigger, dst) for (src, trigger), dst in ism.LED_TABLE.items()}
     expected.update(("BLINKING", "BLINK_DONE", target) for target in ism.BLINK_DONE_TARGETS)
     assert topology == expected
-    assert current["widgets"][0]["params_schema"] == ACTION_SCHEMAS["SET_COLOR"]
+    assert "params_schema" not in current["widgets"][0]
 
 
 def test_parameter_change_propagates_to_card_model_and_receiver(monkeypatch):
@@ -85,25 +84,22 @@ def test_parameter_change_propagates_to_card_model_and_receiver(monkeypatch):
     assert next(skill for skill in current["skills"] if skill["id"] == "blink_light")["params_schema"]["properties"]["count"]["maximum"] == 7
     assert valid_lamp_params("BLINK", {"count": 7})
     assert not valid_lamp_params("BLINK", {"count": 8})
-    assert valid_lamp_params("BLINK", {"count": 20}, allow_legacy=True)
-    assert next(skill for skill in card(legacy=True)["skills"] if skill["id"] == "blink_light")["params_schema"]["properties"]["count"]["maximum"] == 20
     model = _physical_schema("BlinkContractProbe", "blink_led")
     assert model(count=7).count == 7
     with pytest.raises(ValidationError):
         model(count=8)
 
 
-def test_old_firmware_keeps_its_own_states_and_model_parameters():
-    old = card(legacy=True)
-    assert old["state_machine"]["states"] == ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK", "ERROR"]
-    schema = visible_schemas(lighting_only=True, card=old)["set_led_state"]
-    assert schema(state="DIM").state == "DIM"
-    with pytest.raises(ValidationError):
-        schema(state="ON")
+@pytest.mark.parametrize("version", [None, 1, 2])
+def test_old_firmware_is_not_advertised(version):
+    with pytest.raises(ValueError, match="unsupported lamp fsm_version"):
+        build_card_from_manifest({"unit_id": UNIT, "name": "灯", "agent_type": "actuator",
+                                  "firmware_ver": "0.3.0", "fsm_version": version,
+                                  "capabilities": capabilities()})
 
 
 def test_mismatched_or_unknown_firmware_contract_is_not_advertised():
-    manifest = {"unit_id": UNIT, "fsm": "led", "fsm_version": FSM_VERSION,
+    manifest = {'name': '测试灯', 'firmware_ver': '0.3.0', "unit_id": UNIT, "fsm": "led", "fsm_version": FSM_VERSION,
                 "agent_type": "actuator", "capabilities": deepcopy(capabilities())}
     manifest["capabilities"][0]["params_schema"]["properties"]["r"]["maximum"] = 999
     with pytest.raises(ValueError, match="parameter contract"):
@@ -147,30 +143,8 @@ def test_blink_defaults_to_continuous_and_keeps_explicit_cycles(boundary):
     assert boundary.calls[-1]["params"] == {"count": 0}
     assert boundary.run("BLINK", {"count": 3}, task_id="finite")["result"] == "accepted"
     assert boundary.calls[-1]["params"] == {"count": 3}
-    transitions = card()["state_machine"]["transitions"]
+    transitions = card()["state_machine"]["regions"][0]["transitions"]
     assert all(edge["params"] == {"count": 0} for edge in transitions if edge.get("action") == "BLINK")
-
-
-def test_v2_firmware_keeps_finite_contract_and_rejects_continuous_before_publish(boundary):
-    from cloud.esp32.tool_registry import V2_ACTION_SCHEMAS, blink_default
-    old = build_card_from_manifest({
-        "unit_id": UNIT, "agent_type": "actuator", "fsm": "led", "fsm_version": 2,
-        "capabilities": [{"action": action, "params_schema": schema}
-                         for action, schema in V2_ACTION_SCHEMAS.items()],
-    })
-    assert old["state_machine"]["states"] == ["OFF", "ON", "BLINKING"]
-    assert blink_default(old) == 3
-    assert not valid_lamp_params("BLINK", {"count": 0}, card=old)
-    model = visible_schemas(lighting_only=True, card=old)["blink_led"]
-    with pytest.raises(ValidationError):
-        model(count=0)
-    assert all(edge["params"]["count"] == 3 for edge in old["state_machine"]["transitions"]
-               if edge.get("action") == "BLINK")
-    result = execute_physical(state=boundary.state, unit_id=UNIT, action="BLINK",
-                              params={"count": 0}, context=boundary.context,
-                              dispatch=boundary.dispatch, card=old, wait=False)
-    assert result["result"] == "rejected"
-    assert boundary.calls == []
 
 
 def test_rejection_happens_before_reservation_or_publish(boundary):
@@ -217,8 +191,6 @@ def test_api_ingress_rejects_foreign_results_before_terminal_cache(boundary, mon
     monkeypatch.setattr(main, "get_activity_store", lambda: noop)
     monkeypatch.setattr(main, "_agent_messenger", None)
     monkeypatch.setattr(main.peer_gateway, "handle_peer_result", lambda *_args: False)
-    monkeypatch.setattr(intents, "_lamp_task_owners", {})
-    monkeypatch.setattr(intents, "_lamp_task_results", {})
 
     def receive(payload, *, unit=UNIT, task="request_one"):
         main._on_esp32_message(None, None, SimpleNamespace(
@@ -234,12 +206,6 @@ def test_api_ingress_rejects_foreign_results_before_terminal_cache(boundary, mon
     assert boundary.state.get_task_result("request_one")["result"] == "ok"
     receive({"result": "error", "session_id": "session_one"})
     assert boundary.state.get_task_result("request_one")["result"] == "ok"
-    # Preserve legitimately registered requests sent before this migration.
-    intents._lamp_task_owners["legacy"] = (UNIT, "legacy_session")
-    receive({"result": "ok", "session_id": "wrong"}, task="legacy")
-    assert boundary.state.get_task_result("legacy") is None
-    receive({"result": "ok"}, task="legacy")
-    assert boundary.state.get_task_result("legacy")["result"] == "ok"
     receive({"result": "ok"}, task="unregistered")
     assert boundary.state.get_task_result("unregistered") is None
 
@@ -269,14 +235,11 @@ def test_coordinator_ingress_persists_after_restart_without_replaying(boundary):
     assert boundary.run()["result"] == "unknown"
     receive("request_one", {"result": "ok", "session_id": "session_one"})
     assert boundary.run()["result"] == "ok"
+    assert physical_tasks.observed_result("request_one")["result"] == "ok"
     assert len(boundary.calls) == 1
-    fresh_state.register_task("legacy", "legacy_session")
-    receive("legacy", {"result": "ok", "task_id": "wrong"})
-    assert fresh_state.get_task_result("legacy") is None
-    receive("legacy", {"result": "ok", "session_id": "legacy_session"})
-    assert fresh_state.get_task_result("legacy")["result"] == "ok"
     receive("unregistered", {"result": "ok"})
-    assert fresh_state.get_task_result("unregistered") is None
+    assert physical_tasks.get("unregistered", unit_id=UNIT, session_id="session_one") is None
+    assert physical_tasks.observed_result("unregistered") is None
 
 
 def test_executing_and_timeout_do_not_mean_blink_completed(boundary):

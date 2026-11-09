@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -140,6 +141,17 @@ async def require_session(request: Request) -> dict[str, Any]:
     if not value:
         raise HTTPException(status_code=401, detail="authentication required")
     session = decode_session(value)
+    # The browser chooses a conversation nonce, never an authenticated identity.
+    # Bind it to the signed login so another login cannot address this context.
+    chat_id = request.headers.get("X-SSM-Chat-Id")
+    if request.url.path == "/api/events":
+        chat_id = chat_id or request.query_params.get("chat_id")
+    if chat_id is not None:
+        if not re.fullmatch(r"[a-f0-9]{32}", chat_id):
+            raise HTTPException(status_code=400, detail="invalid chat id")
+        login_id = session["session_id"]
+        digest = hashlib.sha256(f"{login_id}:{chat_id}".encode()).hexdigest()[:40]
+        session = {**session, "login_session_id": login_id, "session_id": "chat_" + digest}
     # Sessions are stateless cookies, so a process restart loses the in-memory
     # expiry watcher created at login.  Re-register it on every authenticated
     # request (the scheduler is idempotent) so an old, still-valid cookie
@@ -210,7 +222,7 @@ def check_rate_limit(request: Request, bucket: str) -> None:
 
 def public_session(session: dict[str, Any]) -> dict[str, Any]:
     return {
-        "session_id": session["session_id"],
+        "session_id": session.get("login_session_id", session["session_id"]),
         "actor": session["actor"],
         "space_id": DEFAULT_SPACE_ID,
         "space_name": get_space_registry().get_space()["name"],

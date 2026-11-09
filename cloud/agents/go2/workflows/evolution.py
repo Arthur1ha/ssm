@@ -14,7 +14,7 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.go2.personality.profile import (
     evolve_profile, get_evolution_metadata, get_profile,
 )
-from cloud.go2.execution import require_persist
+from cloud.space.execution import require_persist
 from cloud.observability import emit_agent_event
 
 

@@ -1,9 +1,7 @@
-/* ActivityFeed — 主屏活动流组件 */
+/* Space activity placement; conversation rendering lives in ChatMessages. */
 function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
-  onEndActivity, onAnswerActivity, onOpenRules, training, onReviseRule }) {
-  const { useRef, useEffect } = React;
-  const bottomRef = useRef(null);
-  const currentActivityRef = useRef(null);
+  onEndActivity, onAnswerActivity, training, onReviseRule }) {
+  const currentActivityRef = React.useRef(null);
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
   const currentCard = hasActivity ? {
@@ -25,9 +23,6 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     const finalIndex = entries.findIndex(entry => entry.type === 'ai'
       && entry.requestId === requestId && entry.final);
     if (finalIndex >= 0) return finalIndex + 1;
-    const terminalIndex = entries.findIndex(entry => entry.type === 'process'
-      && entry.requestId === requestId && entry.terminal);
-    if (terminalIndex >= 0) return terminalIndex + 1;
     for (let index = entries.length - 1; index >= 0; index--) {
       if (entries[index].requestId === requestId) return index + 1;
     }
@@ -41,188 +36,29 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     const position = anchor >= 0 ? anchor : card === currentCard ? entries.length : 0;
     cardsAt.set(position, [...(cardsAt.get(position) || []), card]);
   });
-  const rows = [];
+  const rows = [{ type: 'ai', agent: 'cloud_orchestrator',
+    text: getAgentOpeningLine('cloud_orchestrator'), eventId: 'welcome' }];
   for (let index = 0; index <= entries.length; index++) {
-    (cardsAt.get(index) || []).forEach(card => rows.push({ entry: { type: 'space_activity', card }, index: -1 }));
-    if (index >= entries.length) continue;
-    const entry = entries[index];
-    const previous = rows[rows.length - 1]?.entry;
-    if (entry.type === 'process' && previous?.type === 'process_group'
-      && previous.requestId === entry.requestId) {
-      previous.items.push(entry);
-    } else if (entry.type === 'process') {
-      rows.push({ entry: { type: 'process_group', requestId: entry.requestId,
-        items: [entry] }, index });
-    } else {
-      rows.push({ entry, index });
-    }
+    (cardsAt.get(index) || []).forEach(card => rows.push({ type: 'space_activity', card }));
+    if (index < entries.length) rows.push(entries[index]);
   }
-  rows.unshift({ entry: { type: 'ai', agent: 'cloud_orchestrator',
-    text: getAgentOpeningLine('cloud_orchestrator'), eventId: 'welcome' }, index: 'welcome' });
-
-  useEffect(() => {
-    if (!entries.length) return;
-    if (activity?.activity_id) {
-      currentActivityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    } else {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [entries, activity?.activity_id]);
-  useEffect(() => {
-    if (activity?.activity_id) {
-      currentActivityRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }, [activity?.activity_id]);
-
-  return (
-    <div style={{ padding: '0 16px' }}>
-      {rows.map(({ entry: e, index: i }) => {
-        if (e.type === 'rule') return <div key={e.id} className="chat-rule-message" style={{maxWidth:420,marginBottom:10}}>
-          <TrainingPreview proposal={e.proposal} error={training?.proposalErrors?.[e.proposal.proposal_id]}
-            onConfirm={training?.confirm} onCancel={training?.cancel} onRevise={onReviseRule}/>
+  return <ChatMessages entries={rows} agents={agents} training={training} onReviseRule={onReviseRule}
+    scrollTargetRef={activity?.activity_id ? currentActivityRef : null} scrollKey={activity?.activity_id} scrollTrigger={entries}
+    autoScroll={Boolean(entries.length || activity?.activity_id)}
+    renderEntry={e => {
+      if (e.type === 'space_activity') {
+        const card = e.card;
+        return <div key={`activity-${card.id}`} ref={card === currentCard ? currentActivityRef : null}>
+          <SpaceActivityFeed
+            activity={card.activity} events={card.events} ending={card.ending}
+            error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
+            getName={getName} agents={agents} unitData={unitData} connected={connected}/>
         </div>;
-        if (e.type === 'space_activity') {
-          const card = e.card;
-          return <div key={`activity-${card.id}`} ref={card === currentCard ? currentActivityRef : null}>
-            <SpaceActivityFeed
-              activity={card.activity} events={card.events} ending={card.ending}
-              error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
-              getName={getName} agents={agents} unitData={unitData} connected={connected}/>
-          </div>;
-        }
-        if (e.type === 'process_group') {
-          const finished = entries.some(item => item.requestId === e.requestId
-            && item.type === 'ai' && item.final);
-          const latest = e.items[e.items.length - 1];
-          return <details key={`process-${e.requestId}-${i}`} className="run-process-summary"
-            open={!finished && latest.stage?.startsWith('search_') ? true : undefined}>
-            <summary>
-              <span className="run-process-summary__marker" aria-hidden="true"/>
-              <span className="run-process-summary__text">{finished
-                ? `处理过程 · ${e.items.length} 条记录` : `正在处理 · ${latest.text}`}</span>
-              <span className="run-process-summary__toggle" aria-hidden="true"/>
-            </summary>
-            <div className="run-process-summary__list">
-              {e.items.map((item, itemIndex) => <div key={item.eventId || itemIndex}
-                className="run-process-summary__item">
-                <span>{getName(item.agent || 'cloud_orchestrator')}</span>
-                <p>{item.text}</p>
-                {activityMediaUrl(item) && <img src={activityMediaUrl(item)} alt="搜索观察照片"
-                  loading="lazy" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8 }}/>}
-              </div>)}
-              {!finished && latest.taskId && latest.stage?.startsWith('search_')
-                && latest.stage !== 'search_finished' && <SearchTaskStop taskId={latest.taskId}/>}
-            </div>
-          </details>;
-        }
-        if (e.type === 'user') {
-          return (
-            <div key={i} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-              <div style={{ maxWidth: '78%', display: 'flex', flexDirection: 'column',
-                alignItems: 'flex-end', gap: 4 }}>
-                <div style={{ fontSize: 10, paddingRight: 4, color: 'var(--color-accent)',
-                  opacity: 0.75, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>你</div>
-                <div style={{
-                  padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
-                  borderRadius: 'var(--radius-card)',
-                  background: 'var(--color-accent)', color: 'var(--color-bg)',
-                }}>{e.text}</div>
-              </div>
-            </div>
-          );
-        }
-        if (e.type === 'ai' || e.type === 'peer_message') {
-          const agent = e.sender || e.agent || 'orchestrator';
-          const oc = getAgentBubbleColor(agent);
-          return (
-            <div key={e.eventId || `${e.type}-${i}`} style={{ display: 'flex', justifyContent: 'flex-start',
-              marginBottom: 8 }}>
-              <div style={{ maxWidth: '88%', minWidth: 0, display: 'flex',
-                flexDirection: 'column', gap: 4 }}>
-                <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
-                  fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                  {getName(agent)}{e.type === 'peer_message' && e.target
-                    ? ` → ${getName(e.target)}${e.replyTo ? ' · 回应' : ''}` : ''}
-                </div>
-                <div style={{
-                  padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
-                  borderRadius: 'var(--radius-card)',
-                  background: `${oc}10`,
-                  border: `1px solid ${oc}25`,
-                  color: 'var(--color-text)',
-                }}>{e.text}</div>
-              </div>
-            </div>
-          );
-        }
-        if (e.type === 'event') {
-          /* 设备状态变化：居中的低存在感小药丸，明显区别于左右对话气泡，不抢戏 */
-          return (
-            <div key={i} style={{ display: 'flex', justifyContent: 'center', marginBottom: 8 }}>
-              <span style={{
-                fontSize: 10.5, color: 'var(--color-text-dim)',
-                fontFamily: 'var(--font-mono)', letterSpacing: '0.02em',
-                background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
-                borderRadius: 999, padding: '3px 10px', opacity: 0.85,
-              }}>
-                {e.text}
-                <span style={{ marginLeft: 6, opacity: 0.6 }}>
-                  {new Date(e.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
-                </span>
-              </span>
-            </div>
-          );
-        }
-        if (e.type === 'system') {
-          return (
-            <div key={i} style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ flex: 1, height: 1, background: 'var(--color-border)' }}/>
-              <span style={{
-                fontSize: 11, color: 'var(--color-text-dim)',
-                fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
-              }}>{e.text}</span>
-              <div style={{ flex: 1, height: 1, background: 'var(--color-border)' }}/>
-            </div>
-          );
-        }
-        return null;
-      })}
-
-      {training?.error && <p role="alert">{training.error}</p>}
-      <div ref={bottomRef}/>
-    </div>
-  );
+      }
+      return null;
+    }}/>;
 }
-
 window.ActivityFeed = ActivityFeed;
-
-function SearchTaskStop({ taskId }) {
-  const [pending, setPending] = React.useState(false);
-  const [message, setMessage] = React.useState('');
-  const stop = async () => {
-    if (pending) return;
-    setPending(true);
-    try {
-      const result = await apiClient.request(`/api/commands/go2/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
-      setMessage(result.result === 'cancelled' ? '搜索已取消，设备已确认停止'
-        : '已请求停止，尚未确认设备停稳');
-    } catch (error) {
-      setMessage(apiErrorText(error, '停止请求未确认，请使用设备急停'));
-    } finally {
-      setPending(false);
-    }
-  };
-  return <div><button type="button" disabled={pending} onClick={stop}>
-    {pending ? '正在请求停止…' : '停止搜索'}</button>
-    {message && <p role="status">{message}</p>}</div>;
-}
-
-function activityMediaUrl(event) {
-  const candidate = event.media_ref || event.media_url;
-  const path = typeof candidate === 'string' ? candidate : candidate?.url;
-  if (typeof path !== 'string' || !path.startsWith('/api/')) return '';
-  return path;
-}
 
 function activityEventKind(event = {}) {
   const type = String(event.event_type || '').toLowerCase();

@@ -91,7 +91,7 @@ async def run_body_action(command, *, context, request_id, trace_id, deadline, e
         if (result.get('result') != 'ok' or robot.runtime.data['epoch'] != epoch
                 or last.get('request_id') != result.get('request_id')
                 or last.get('result') != 'ok' or robot.body_ready_reason()
-                or robot.fsm_state != 'standing'):
+                or robot.body_state != 'standing'):
             return {'result': {'result': result['result'] if result['result'] not in {'ok', 'accepted', 'executing'} else 'blocked',
                                'error': '起身尚未确认，未执行后续动作', 'preparation': result}}
         return {'ready': True, 'preparation': result, 'motion_epoch': robot._motion_epoch}

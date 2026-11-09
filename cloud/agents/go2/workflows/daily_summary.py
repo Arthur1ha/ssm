@@ -18,7 +18,7 @@ from cloud.agents.go2.memory.episode import EventType, read_day
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.agents.go2.prompt_contract import build_prompt
 from cloud.personality.store import render_identity
-from cloud.go2.execution import require_persist
+from cloud.space.execution import require_persist
 from cloud.observability import emit_agent_event
 
 

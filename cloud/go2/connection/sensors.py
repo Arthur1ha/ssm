@@ -103,9 +103,6 @@ class Go2Sensors:
                 self._body_fresh_timer = None
         raw_progress = inner.get("progress")
         progress = raw_progress if type(raw_progress) in (int, float) and math.isfinite(raw_progress) else None
-        if progress is not None:
-            self._fsm_on_progress(progress)
-        self._fsm_on_posture(inner.get("body_height"))
         self._fsm_on_velocity(inner.get("velocity"), inner.get("yaw_speed"))
         self._robot_state = {
             "mode":        inner.get("mode"),
@@ -113,7 +110,7 @@ class Go2Sensors:
             "body_height": inner.get("body_height"),
             "velocity":    inner.get("velocity"),
             "yaw_speed":   inner.get("yaw_speed"),
-            "fsm_state":   self.fsm_state,
+            "body_state":   self.body_state,
             "body_confirmation": self.body_confirmation,
             "pending_action": self.pending_action.copy() if self.pending_action else None,
         }

@@ -14,7 +14,7 @@ from cloud.agents.go2.run_view import Go2RunView
 from cloud.go2.actions import ACTIONS
 from cloud.go2.connection import go2
 from cloud.go2.control import control_lease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 @pytest.mark.asyncio

@@ -31,8 +31,8 @@ def get_agent() -> Optional["ESP32Agent"]:
 
 class ESP32Agent(ReactiveMind):
     def __init__(self, state: ESP32State, llm=None):
-        from cloud.agents.lamp.personality.soul import ensure_personality_profile
-        ensure_personality_profile()
+        from cloud.agents.lamp.personality.profile import get_profile
+        get_profile()
         self._state = state
         self._llm_injected = llm is not None
         self._llm   = llm if llm is not None else self._make_llm()

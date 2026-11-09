@@ -80,11 +80,6 @@ class PhysicalReplyRequest(BaseModel):
     parent_run_id: str
 
 
-class PersonalityRequest(BaseModel):
-    prompt: str
-    social_initiative: int | None = None
-
-
 @router.get("/autonomy")
 async def esp32_autonomy_get(_session: dict = Depends(require_session)):
     """返回灯智能体当前自主模式（manual / reactive）。"""
@@ -135,27 +130,6 @@ async def esp32_memory(unit_id: str, _session: dict = Depends(require_admin)):
                                "user_delegated", int(_session["expires_at"]))
     return {"belief_summary": belief,
             "episodes": recent(context), "daily_summary": summarize_day()}
-
-
-@router.get("/{unit_id}/personality")
-async def esp32_personality_get(unit_id: str, _session: dict = Depends(require_admin)):
-    _require_led_unit(unit_id)
-    from cloud.agents.lamp.personality.soul import get_personality_view
-    return get_personality_view()
-
-
-@router.post("/{unit_id}/personality")
-async def esp32_personality_set(unit_id: str, req: PersonalityRequest,
-                                 session: dict = Depends(require_admin_csrf)):
-    _require_led_unit(unit_id)
-    from cloud.agents.lamp.personality.soul import set_personality, get_personality_view
-    context = ExecutionContext(session["session_id"], "admin", True, "main",
-                               "user_delegated", int(session["expires_at"]))
-    try:
-        set_personality(req.prompt, context, req.social_initiative)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return get_personality_view()
 
 
 @internal_router.post("/{unit_id}/agent/tasks", include_in_schema=False)

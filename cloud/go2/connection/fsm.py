@@ -2,7 +2,7 @@ import logging
 import math
 import time
 
-from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, TRANSIENT_STATES, fsm_transitions
+from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, fsm_transitions
 from cloud.go2.state import Go2State, STABLE_BODY_STATES
 
 logger = logging.getLogger(__name__)
@@ -12,9 +12,7 @@ class CommandBlocked(ValueError):
     """A valid command is not allowed in the current device state."""
 
 _FSM_NEXT = fsm_transitions()
-_FSM_AVAILABLE = {"offline": [], "connecting": [],
-                  **{state: list(edges) for state, edges in _FSM_NEXT.items()}}
-_TRANSIENT_STATES = set(TRANSIENT_STATES)
+_FSM_AVAILABLE = {state: list(edges) for state, edges in _FSM_NEXT.items()}
 
 
 class Go2FSM:
@@ -23,7 +21,6 @@ class Go2FSM:
     def __init__(self) -> None:
         super().__init__()
         self.runtime = Go2State(self._state_changed)
-        self._last_progress = 0.0
         self._stationary_samples = 0
         self._motion_observation_enabled = False
         self._last_motor_positions = None
@@ -77,16 +74,12 @@ class Go2FSM:
                 enqueue(q)
 
     @property
-    def fsm_state(self):
-        return self.runtime.snapshot()["fsm_state"]
+    def body_state(self):
+        return self.runtime.data["body_state"]
 
-    @fsm_state.setter
-    def fsm_state(self, new):
-        # Compatibility writes are events into the fact store, never a second state.
-        if new in {"offline", "connecting"}:
-            self.runtime.connection(new)
-        else:
-            self.runtime.body(new)
+    @body_state.setter
+    def body_state(self, new):
+        self.runtime.body(new)
 
     @property
     def is_connected(self):
@@ -179,31 +172,14 @@ class Go2FSM:
             return ['StopMove'] if self.is_connected else []
         if self.pending_action is not None:
             action = ACTIONS[self.pending_action["command"]]
-            return ["StopMove"] if action.interruptible and self.fsm_state not in {"offline", "connecting"} else []
+            return ["StopMove"] if action.interruptible and self.is_connected else []
         if self.body_ready_reason(refresh=False):
             return ['StopMove'] if self.is_connected else []
-        return _FSM_AVAILABLE.get(self.fsm_state, [])
+        return _FSM_AVAILABLE.get(self.body_state, [])
 
     def fsm_next(self, cmd: str) -> str | None:
         """查询在当前状态下执行 cmd 后的目标状态，无对应转移返回 None。"""
-        return _FSM_NEXT.get(self.fsm_state, {}).get(cmd)
-
-    def _fsm_on_progress(self, progress: float) -> None:
-        """Record uncorrelated telemetry without completing a body command.
-
-        Sport state does not carry the command request ID. A falling sample may
-        belong to an earlier action; the probe records also show progress=0 for
-        visibly executed actions. It cannot authorize a dependent action.
-        """
-        if type(progress) in (int, float) and math.isfinite(progress):
-            self._last_progress = progress
-
-    def _fsm_on_posture(self, body_height: object) -> None:
-        """Height alone cannot distinguish the real robot's sitting/standing.
-
-        Kept as a callback boundary for older adapters. Completion is handled
-        only by the combined fresh LOW/SPORT observation below.
-        """
+        return _FSM_NEXT.get(self.body_state, {}).get(cmd)
 
     def _fsm_on_velocity(self, velocity, yaw_speed=None):
         if not self._motion_observation_enabled or self.pending_action or not self.is_connected:
@@ -337,5 +313,5 @@ class Go2FSM:
             self._action_deadline = None
         if waiter is not None and not waiter.done():
             waiter.set_result({'result': result, 'confirmation': 'joint_posture',
-                               'confirmation_scope': 'physical', 'fsm_state': body,
+                               'confirmation_scope': 'physical', 'body_state': body,
                                'request_id': pending['request_id']})

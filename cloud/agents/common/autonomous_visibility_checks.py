@@ -78,14 +78,14 @@ def test_device_replies_need_completion_attention_or_material_change():
 def test_lamp_ignores_raw_light_and_own_led_changes(monkeypatch):
     from cloud.agents.lamp.workflows import reactive
     from cloud.agents.lamp.personality import profile as lamp_profile
-    from cloud.esp32 import tools as lamp_tools
+    from cloud.peers import gateway
     from cloud.peers import social
     from cloud.space import context as space_context
 
     monkeypatch.setattr(lamp_profile, "get_profile", lambda: {
         "revision": 1, "traits": {"adjustment_sensitivity": 50,
                                    "social_initiative": 70}})
-    monkeypatch.setattr(lamp_tools, "list_peers", lambda _unit: [])
+    monkeypatch.setattr(gateway, "list_visible_peers", lambda _unit: [])
     monkeypatch.setattr(space_context, "get_space_context", lambda *_args, **_kwargs: {
         "peers": [], "recent_discoveries": []})
     monkeypatch.setattr(social, "activity_peers", lambda *_args: (None, []))
@@ -94,7 +94,7 @@ def test_lamp_ignores_raw_light_and_own_led_changes(monkeypatch):
                 "time_period": "上午", "sound_detected": False,
                 "led_state": "OFF", "led_config": {"brightness": 0}}
     agent = SimpleNamespace(
-        _state=None, _last_reason_sig=None, _last_reason_ts=0,
+        _state=None, _last_reason_sig=None, _last_reason_ts=0, _autonomy_epoch=0,
         _last_light_level="", _last_proactive_ts=0, _work_start_ts=0,
         _last_act_ts=0, _stable_light_level="", _pending_light_level="",
         _social_state=SimpleNamespace(opportunity=lambda *_args, **_kwargs: None),

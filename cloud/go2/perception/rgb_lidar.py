@@ -142,12 +142,6 @@ def bbox_mask(pixels: np.ndarray, bbox_1000: list,
             & (pixels[:, 1] <= bottom * height / 1000))
 
 
-def bbox_depths(pixels: np.ndarray, depth: np.ndarray, bbox_1000: list,
-                width: int, height: int) -> np.ndarray:
-    """Collect projected LiDAR depths under one visual target box."""
-    if len(pixels) != len(depth):
-        raise ValueError("pixel and depth arrays differ")
-    return depth[bbox_mask(pixels, bbox_1000, width, height)]
 
 
 def object_returns_in_box(world_points: np.ndarray, in_box: np.ndarray,

@@ -14,7 +14,7 @@ from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.go2.run_view import Go2RunView, _RecoveryState
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 from cloud.go2.tasks import ChatTaskRegistry
 
 

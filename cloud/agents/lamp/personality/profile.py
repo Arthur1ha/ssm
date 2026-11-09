@@ -1,9 +1,7 @@
-"""Lamp personality profile with idempotent migration from soul/personality.json."""
-
-import json
+"""The current versioned personality profile for the lamp."""
 
 from cloud.personality.store import ProfileStore
-from cloud.esp32.paths import DATA_DIR, PERSONALITY_FILE
+from cloud.esp32.paths import DATA_DIR
 
 PROFILE_FILE = DATA_DIR / "personality" / "profile.json"
 DEFAULT_PROMPT = (
@@ -23,19 +21,8 @@ TRAIT_SPECS = {
 }
 
 
-def _migrate() -> dict:
-    try:
-        old = json.loads(PERSONALITY_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-    if not isinstance(old, dict):
-        return {}
-    return {"prompt": old.get("prompt"),
-            "traits": {"social_initiative": old.get("social_initiative")}}
-
-
 _store = ProfileStore(agent_id="esp32_desk_led", path=PROFILE_FILE,
-                      name="皮皮灯", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS, migration=_migrate)
+                      name="皮皮灯", prompt=DEFAULT_PROMPT, trait_specs=TRAIT_SPECS)
 
 
 def get_profile() -> dict:
@@ -44,7 +31,3 @@ def get_profile() -> dict:
 
 def update_profile(changes: dict, context) -> dict:
     return _store.update_profile(changes, context)
-
-
-def get_trait_specs() -> dict:
-    return TRAIT_SPECS

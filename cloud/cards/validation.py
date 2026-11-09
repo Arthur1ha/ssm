@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 _WIDGETS = {"led_color", "color_swatches", "connection", "joystick", "video", "map"}
 _VIEWS = {"light_ring", "robot_pose", "image", "generic"}
-_URL_KEYS = {"endpoint", "command_endpoint", "state_stream", "status_endpoint", "get", "set"}
+_URL_KEYS = {"endpoint", "command_endpoint", "state_stream", "status_endpoint", "get"}
 
 
 def _required_string(value: object, label: str) -> str:
@@ -36,27 +36,12 @@ def _same_origin_asset(value: object, label: str) -> None:
         raise ValueError(f"{label} must be a same-origin absolute path")
 
 
-def _validate_state_machine(sm: dict) -> None:
+def _validate_region(sm: dict) -> None:
     _required_string(sm.get("state_field"), "state_machine.state_field")
-    if "connection_field" in sm:
-        _required_string(sm["connection_field"], "state_machine.connection_field")
     if "diagram_group" in sm:
         _required_string(sm["diagram_group"], "region.diagram_group")
     if "node_radius" in sm and (type(sm["node_radius"]) is not int or sm["node_radius"] <= 0):
         raise ValueError("region.node_radius must be a positive integer")
-    if "diagram" in sm:
-        diagram = sm["diagram"]
-        if not isinstance(diagram, dict) or any(
-                type(diagram.get(key)) not in (int, float) or not math.isfinite(diagram[key]) or diagram[key] <= 0
-                for key in ("width", "height")):
-            raise ValueError("state_machine.diagram requires positive finite dimensions")
-        if not isinstance(diagram.get("sections"), list):
-            raise ValueError("diagram.sections must be an array")
-        for section in diagram["sections"]:
-            if (not isinstance(section, dict) or type(section.get("top")) not in (int, float)
-                    or not math.isfinite(section["top"]) or not 0 <= section["top"] <= diagram["height"]):
-                raise ValueError("diagram section must be positioned inside the canvas")
-            _required_string(section.get("label"), "diagram.section.label")
     states = sm.get("states")
     if not isinstance(states, list) or not states or any(not isinstance(s, str) or not s for s in states) or len(set(states)) != len(states):
         raise ValueError("state_machine.states must contain unique state names")
@@ -79,7 +64,7 @@ def _validate_state_machine(sm: dict) -> None:
         for field in ("graph_hidden", "safety", "available_only", "dispatch_only", "training_disabled"):
             if field in transition and type(transition[field]) is not bool:
                 raise ValueError(f"transition.{field} must be a boolean")
-        for field in ("availability_key", "completion", "description"):
+        for field in ("availability_key", "completion", "trigger_condition"):
             if field in transition:
                 _required_string(transition[field], f"transition.{field}")
         if "required_actor" in transition and transition["required_actor"] not in ("admin", "visitor"):
@@ -104,26 +89,68 @@ def _validate_state_machine(sm: dict) -> None:
         if view["type"] == "image":
             _same_origin_asset(view.get("src"), f"state_machine.views.{state}.src")
 
-def normalize_card(payload: dict) -> dict:
-    """Return a detached v0/v1 card; reject malformed v1 critical fields.
+def _validate_state_machine(sm: dict) -> None:
+    if any(key in sm for key in ("state_field", "states", "transitions", "views", "layout", "initial")):
+        raise ValueError("state_machine topology must be declared only in regions")
+    for field in ("connection_field", "execution_field", "last_execution_field", "freshness_field"):
+        if field in sm:
+            _required_string(sm[field], f"state_machine.{field}")
+    if "diagram" in sm:
+        diagram = sm["diagram"]
+        if not isinstance(diagram, dict) or any(
+                type(diagram.get(key)) not in (int, float) or not math.isfinite(diagram[key]) or diagram[key] <= 0
+                for key in ("width", "height")):
+            raise ValueError("state_machine.diagram requires positive finite dimensions")
+        if not isinstance(diagram.get("sections"), list):
+            raise ValueError("diagram.sections must be an array")
+        for section in diagram["sections"]:
+            if (not isinstance(section, dict) or type(section.get("top")) not in (int, float)
+                    or not math.isfinite(section["top"]) or not 0 <= section["top"] <= diagram["height"]):
+                raise ValueError("diagram section must be positioned inside the canvas")
+            _required_string(section.get("label"), "diagram.section.label")
+    regions = sm.get("regions")
+    if not isinstance(regions, list) or not regions:
+        raise ValueError("state_machine.regions must be a nonempty array")
+    by_id = {}
+    for region in regions:
+        if not isinstance(region, dict):
+            raise ValueError("state region must be an object")
+        region_id = _required_string(region.get("id"), "region.id")
+        _required_string(region.get("label"), "region.label")
+        if region_id in by_id:
+            raise ValueError("state region IDs must be unique")
+        _validate_region(region)
+        if "retain_when_inactive" in region and type(region["retain_when_inactive"]) is not bool:
+            raise ValueError("region.retain_when_inactive must be a boolean")
+        by_id[region_id] = region
+    _required_string(sm.get("primary_region"), "state_machine.primary_region")
+    if sm["primary_region"] not in by_id:
+        raise ValueError("state_machine.primary_region must reference a declared region")
+    for region in regions:
+        visited = {region["id"]}
+        current = region
+        while "parent" in current:
+            parent = current["parent"]
+            if (not isinstance(parent, dict) or parent.get("region") not in by_id
+                    or parent.get("state") not in by_id[parent["region"]]["states"]):
+                raise ValueError("region.parent must reference a declared region state")
+            if parent["region"] in visited:
+                raise ValueError("state region parents must not contain cycles")
+            visited.add(parent["region"])
+            current = by_id[parent["region"]]
 
-    v0 is read permissively for retained cards already in the broker. Its missing
-    version means legacy, not an implicit upgrade to the current contract.
-    """
+
+def normalize_card(payload: dict) -> dict:
+    """Validate the current static declaration and return a detached copy."""
     if not isinstance(payload, dict):
         raise ValueError("Agent Card must be an object")
     card = deepcopy(payload)
-    version = card.get("card_schema_version", 0)
-    if type(version) is not int or version not in (0, 1):
+    version = card.get("card_schema_version")
+    if type(version) is not int or version != 1:
         raise ValueError(f"unsupported card_schema_version: {version!r}")
-    card["unit_id"] = _required_string(card.get("unit_id") or (card.get("slug") if version == 0 else None), "unit_id")
-    card.setdefault("device_id", card.get("parent_id") or card["unit_id"])
-    if version == 0:
-        card.setdefault("online", False)
-        card.setdefault("state", {})
-        card.setdefault("skills", [])
-        return card
-
+    if "training_capabilities" in card:
+        raise ValueError("derived training catalog does not belong in Agent Card")
+    card["unit_id"] = _required_string(card.get("unit_id"), "unit_id")
     for field in ("device_id", "name", "description", "agent_type", "version"):
         _required_string(card.get(field), field)
     transport = card.get("transport")
@@ -178,49 +205,13 @@ def normalize_card(payload: dict) -> dict:
         if not isinstance(sm, dict):
             raise ValueError("state_machine must be an object")
         _validate_state_machine(sm)
-        if "regions" in sm:
-            regions = sm["regions"]
-            if not isinstance(regions, list) or not regions:
-                raise ValueError("state_machine.regions must be a nonempty array")
-            by_id = {}
-            for region in regions:
-                if not isinstance(region, dict):
-                    raise ValueError("state region must be an object")
-                region_id = _required_string(region.get("id"), "region.id")
-                _required_string(region.get("label"), "region.label")
-                if region_id in by_id:
-                    raise ValueError("state region IDs must be unique")
-                _validate_state_machine(region)
-                if "retain_when_inactive" in region and type(region["retain_when_inactive"]) is not bool:
-                    raise ValueError("region.retain_when_inactive must be a boolean")
-                by_id[region_id] = region
-            if "primary_region" in sm:
-                _required_string(sm["primary_region"], "state_machine.primary_region")
-                if sm["primary_region"] not in by_id:
-                    raise ValueError("state_machine.primary_region must reference a declared region")
-            for region in regions:
-                visited = {region["id"]}
-                current = region
-                while "parent" in current:
-                    parent = current["parent"]
-                    if (not isinstance(parent, dict) or parent.get("region") not in by_id
-                            or parent.get("state") not in by_id[parent["region"]]["states"]):
-                        raise ValueError("region.parent must reference a declared region state")
-                    if parent["region"] in visited:
-                        raise ValueError("state region parents must not contain cycles")
-                    visited.add(parent["region"])
-                    current = by_id[parent["region"]]
-        elif "primary_region" in sm:
-            # A flat-only legacy consumer may keep this presentation hint while
-            # omitting regions. It is not an instruction to synthesize topology.
-            _required_string(sm["primary_region"], "state_machine.primary_region")
-
     for axis in card.get("modes", []):
         if not isinstance(axis, dict) or not isinstance(axis.get("options"), list):
             raise ValueError("mode axis requires options")
-        for key in ("get", "set"):
-            if key in axis:
-                _same_origin_path(axis[key], f"mode.{key}")
+        if "set" in axis:
+            raise ValueError("mode actions must use set_action")
+        if "get" in axis:
+            _same_origin_path(axis["get"], "mode.get")
         if "set_action" in axis:
             _required_string(axis["set_action"], "mode.set_action")
         if "state_field" in axis:
@@ -259,13 +250,13 @@ def normalize_card(payload: dict) -> dict:
                 _required_string(widget.get("disconnect_action"), "widget.connection.disconnect_action")
             if kind in ("video", "map"):
                 _same_origin_path(widget.get("endpoint"), f"widget.{kind}.endpoint")
-            widget_machine = sm
+            from cloud.cards.state_machine import primary_region
+            widget_machine = primary_region(sm) if sm else None
             if sm and "state_field" in widget:
-                widget_machine = next((region for region in sm.get("regions", [])
+                widget_machine = next((region for region in sm["regions"]
                                        if region["state_field"] == widget["state_field"]), None)
-                if widget_machine is None and widget["state_field"] != sm["state_field"]:
+                if widget_machine is None:
                     raise ValueError("widget.state_field references an undeclared state region")
-                widget_machine = widget_machine or sm
             if widget_machine and any(state not in widget_machine["states"] and state not in widget_machine.get("views", {}) for state in widget.get("states", [])):
                 raise ValueError("widget.states references unknown state")
             if kind == "joystick" and "node_state" in widget:
@@ -281,6 +272,6 @@ def normalize_card(payload: dict) -> dict:
         accepted.append(widget)
     if "widgets" in card:
         card["widgets"] = accepted
-    card["online"] = False
-    card["state"] = {}
+    card.pop("online", None)
+    card.pop("state", None)
     return card

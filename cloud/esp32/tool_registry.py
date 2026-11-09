@@ -3,30 +3,9 @@
 from typing import Any
 
 from copy import deepcopy
-from edge.lamp_contract import ACTION_SCHEMAS, BLINK_DEFAULT, FSM_VERSION, valid_params
+from edge.lamp_contract import ACTION_SCHEMAS, BLINK_DEFAULT, valid_params
 
 PHYSICAL_TIMEOUT = 20.0
-
-# Frozen v1 wire schema. Current firmware edits must not silently rewrite the
-# capabilities of deployed firmware which has no fsm_version field.
-LEGACY_ACTION_SCHEMAS = {
-    "SET_STATE": {"type": "object", "required": ["state"],
-                  "properties": {"state": {"type": "string", "enum": ["BRIGHT", "DIM", "OFF"]}},
-                  "additionalProperties": False},
-    "SET_COLOR": {"type": "object", "required": ["r", "g", "b"],
-                  "properties": {key: {"type": "integer", "minimum": 0, "maximum": 255}
-                                 for key in ("r", "g", "b", "brightness")},
-                  "additionalProperties": False},
-    "BLINK": {"type": "object", "required": ["count"],
-              "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 20},
-                             **{key: {"type": "integer", "minimum": 0, "maximum": 255}
-                                for key in ("r", "g", "b")}},
-              "additionalProperties": False},
-}
-
-# Deployed v2 lamps only support finite blinking.
-V2_ACTION_SCHEMAS = deepcopy(LEGACY_ACTION_SCHEMAS)
-V2_ACTION_SCHEMAS["SET_STATE"]["properties"]["state"]["enum"] = ["ON", "OFF"]
 
 # Public subset and its tool association live here; hardware argument limits
 # are the versioned firmware contract, consumed by the receiver as well.
@@ -78,12 +57,6 @@ TOOL_DECLARATIONS.update({
                                                       "game_id": {"type": "string"}}}},
 })
 
-TOOL_DESCRIPTIONS = "可用工具（系统注入目标灯单元 ID）：\n" + "\n".join(
-    f"- {name}{' / ' + declaration['action'] if declaration.get('action') else ''}: {declaration['description']}"
-    for name, declaration in TOOL_DECLARATIONS.items()
-) + "\n无需动作时输出 []"
-
-
 def valid_auxiliary_params(tool: str, params: Any) -> bool:
     if not isinstance(params, dict):
         return False
@@ -114,32 +87,17 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
     return False
 
 
-def lamp_skill(action: str, *, legacy: bool = False, fsm_version: int = FSM_VERSION) -> dict:
+def lamp_skill(action: str) -> dict:
     metadata = LAMP_SKILLS[action]
-    schema = deepcopy(LEGACY_ACTION_SCHEMAS[action] if legacy else
-                      V2_ACTION_SCHEMAS[action] if fsm_version == 2 else
-                      TOOL_DECLARATIONS[metadata["tool"]]["params_schema"])
     return {"id": metadata["id"], "name": metadata["name"],
-            "description": ("闪烁指定次数，恢复先前灯光后确认完成"
-                            if action == "BLINK" and (legacy or fsm_version == 2)
-                            else metadata["description"]), "tags": ["actuator", "light"],
-            "params_schema": schema, "invoke": {"action": action}}
+            "description": metadata["description"], "tags": ["actuator", "light"],
+            "params_schema": deepcopy(ACTION_SCHEMAS[action]), "invoke": {"action": action}}
 
 
-def valid_lamp_params(action: str, params: Any, *, allow_legacy: bool = False,
-                      card: dict | None = None) -> bool:
-    schemas = LEGACY_ACTION_SCHEMAS if allow_legacy else ACTION_SCHEMAS
-    if card is not None:
-        schemas = {(skill.get("invoke") or {}).get("action"): skill["params_schema"]
-                   for skill in card.get("skills", []) if skill.get("params_schema")}
+def valid_lamp_params(action: str, params: Any, *, card: dict | None = None) -> bool:
+    schemas = ACTION_SCHEMAS if card is None else {
+        skill["invoke"]["action"]: skill["params_schema"] for skill in card["skills"]}
     return valid_params(action, params, schemas=schemas)
-
-
-def blink_default(card: dict | None = None) -> int:
-    """Only advertise continuous blinking when the device declares support."""
-    if card is None:
-        return BLINK_DEFAULT
-    return 0 if valid_lamp_params("BLINK", {"count": 0}, card=card) else 3
 
 
 def normalize_brightness(action: str, params: dict, current: dict) -> dict:
@@ -157,7 +115,8 @@ def normalize_brightness(action: str, params: dict, current: dict) -> dict:
 def fsm_allows(card: dict, current_ism: str, action: str, params: dict) -> bool:
     """Precheck declared transitions; the edge ISM remains final authority."""
     machine = card.get("state_machine") or {}
-    transitions = machine.get("transitions") or []
+    from cloud.cards.state_machine import primary_region
+    transitions = primary_region(machine).get("transitions", [])
     if not transitions:
         return False
     for edge in transitions:

@@ -3,7 +3,6 @@
 import threading
 import json
 import time
-from typing import Optional
 
 
 class SharedState:
@@ -13,8 +12,6 @@ class SharedState:
         self._actuators       = {}   # unit_id → { state, report }
         self._manifests       = {}   # unit_id → manifest payload（用于按 agent_type 分桶）
         self._decision_active = False
-        self._task_results    = {}   # task_id → result payload
-        self._task_owners     = {}   # task_id → session_id
         self._sessions        = {}   # session_id → trusted context metadata
 
     # ── MQTT message ingestion ────────────────────────────────
@@ -65,7 +62,7 @@ class SharedState:
                 "expires_at": context.get("expires_at"),
             }
 
-    def get_session(self, session_id: str) -> Optional[dict]:
+    def get_session(self, session_id: str) -> dict | None:
         with self._lock:
             value = self._sessions.get(session_id)
             return dict(value) if value else None
@@ -83,48 +80,6 @@ class SharedState:
         """Remove only one session's ephemeral task/results metadata."""
         with self._lock:
             self._sessions.pop(session_id, None)
-            owned = [tid for tid, owner in self._task_owners.items() if owner == session_id]
-            for task_id in owned:
-                self._task_owners.pop(task_id, None)
-                self._task_results.pop(task_id, None)
-
-    def register_task(self, task_id: str, session_id: str):
-        with self._lock:
-            # A task id may be reused by a later turn in the same session.
-            self._task_owners[task_id] = session_id
-            self._task_results.pop(task_id, None)
-            if len(self._task_owners) > 512:
-                oldest = next(iter(self._task_owners))
-                self._task_owners.pop(oldest, None)
-                self._task_results.pop(oldest, None)
-
-    def store_task_result(self, task_id: str, result: dict) -> bool:
-        """Store a result only for its registered owning session.
-
-        Older ESP32 firmware may omit session_id; the registered task owner is
-        then authoritative.  An explicit mismatching session_id is rejected.
-        """
-        with self._lock:
-            owner = self._task_owners.get(task_id)
-            if owner is None:
-                return False
-            result_session = result.get("session_id")
-            if result_session is not None and result_session != owner:
-                return False
-            if self._task_results.get(task_id, {}).get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout"):
-                return False
-            self._task_results[task_id] = {**result, "session_id": owner}
-            if len(self._task_results) > 256:
-                oldest = next(iter(self._task_results))
-                self._task_results.pop(oldest, None)
-                self._task_owners.pop(oldest, None)
-            return True
-
-    def get_task_result(self, task_id: str, session_id: str | None = None) -> Optional[dict]:
-        with self._lock:
-            if session_id is not None and self._task_owners.get(task_id) != session_id:
-                return None
-            return self._task_results.get(task_id)
 
     def _is_actuator(self, unit_id: str) -> bool:
         """按 manifest agent_type 判定执行器；未知默认非执行器（进 sensor 桶）。"""

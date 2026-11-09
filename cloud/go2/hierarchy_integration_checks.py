@@ -11,7 +11,7 @@ import pytest
 
 from cloud.go2.connection import Go2Connection
 from cloud.go2.control import ControlLease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ async def test_life_change_pushes_sse_and_matches_http_mqtt_without_sensor_frame
         r.card._publish_go2_state()
         mqtt = json.loads(r.mqtt.publish.call_args.args[1])
         for field in ('state_schema_version', 'epoch', 'revision', 'connection_state',
-                      'activity_state', 'life_state', 'body_state', 'fsm_state',
+                      'activity_state', 'life_state', 'body_state', 'body_state',
                       'body_confirmation', 'pending_action', 'control_mode'):
             assert result[field] == http[field] == sse[field] == mqtt[field]
         assert http['activity_state'] == 'rest'

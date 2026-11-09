@@ -12,7 +12,7 @@ from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.go2.actions import ACTIONS, SPORT_COMMANDS
 from cloud.go2.control import LeaseConflict, control_lease, session_tasks
-from cloud.go2.execution import ExecutionContext, current_context, use_context
+from cloud.space.execution import ExecutionContext, current_context, use_context
 from cloud.go2.tools.registry import get_tool_spec
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
             else:
                 validator(command, params)
     if command and not dispatch_only and hasattr(go2, "fsm_next"):
-        state = getattr(go2, "fsm_state", "")
+        state = getattr(go2, "body_state", "")
         permitted = command == "StopMove" and state not in ("offline", "connecting")
         permitted = permitted or (command == "Move" and state == "moving")
         # Internal firmware activation is intentionally absent from the public
@@ -165,7 +165,7 @@ async def _training_preflight(command, params, context, *, reserve=False, dispat
             current = go2.state_snapshot()
             fresh_body = current.get('body_telemetry_fresh') is True
             if not fresh_body:
-                current = {**current, 'body_state': None, 'fsm_state': None}
+                current = {**current, 'body_state': None}
             effect = current_effect()
             def history(record, transition_id):
                 if effect is None:

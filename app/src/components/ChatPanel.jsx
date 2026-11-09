@@ -1,178 +1,88 @@
-/* ChatPanel — 统一聊天面板组件（variant="inline"：内嵌页面，撑满父容器剩余高度） */
-const { useState, useEffect, useRef } = React;
+/* Shared panel shell. Pages supply context and domain-specific feed cards;
+ * ChatMessages and ChatInput own all conversation presentation. */
+function ChatPanel({ messages = [], agents, defaultAgent, training, onReviseRule,
+  onSend, busy, disabled, placeholder, focusKey, suggestions = [],
+  beforeMessages, messageContent, children }) {
+  return <div className="chat-panel">
+    <div className="chat-panel__scroll">
+      {beforeMessages}
+      {messageContent || <ChatMessages entries={messages} agents={agents} defaultAgent={defaultAgent}
+        training={training} onReviseRule={onReviseRule}/>}
+      <div style={{ height: 16 }}/>
+    </div>
+    <div className="chat-panel__footer">
+      {suggestions.length > 0 && <div className="chat-suggestions">
+        {suggestions.map(text => <button type="button" key={text}
+          disabled={disabled || busy} onClick={() => onSend(text)}>{text}</button>)}
+      </div>}
+      {children}
+      <ChatInput onSend={onSend} busy={busy} disabled={disabled}
+        placeholder={placeholder} focusKey={focusKey}/>
+    </div>
+  </div>;
+}
+window.ChatPanel = ChatPanel;
 
-function ChatPanel({ messages, thinking, thinkingText, thinkingAgent, thinkingAgentName, deviceName,
-                     onSend, placeholder, variant, disabled, open, children, training, onReviseRule, focusKey }) {
-  const [input,  setInput]  = useState('');
-  const msgsRef  = useRef(null);
-  const inputRef = useRef(null);
-  useEffect(() => {
-    if (msgsRef.current) {
-      msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
-    }
-  }, [messages, thinking]);
-
-  // sheet variant: 随 open 变化聚焦输入框
-  useEffect(() => {
-    if (variant === 'sheet' && open) {
-      setTimeout(() => inputRef.current?.focus(), 360);
-    }
-  }, [open, variant]);
-
-  useEffect(() => { if (focusKey) inputRef.current?.focus(); }, [focusKey]);
+function ChatInput({ onSend, busy, disabled, placeholder, focusKey }) {
+  const inputRef = React.useRef(null);
+  React.useEffect(() => { if (focusKey) inputRef.current?.focus(); }, [focusKey]);
+  const unavailable = disabled || busy;
+  const [input, setInput] = React.useState('');
 
   const handleSend = () => {
     const t = input.trim();
-    if (!t || disabled) return;
+    if (!t || unavailable) return;
     setInput('');
     onSend(t);
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-
-      {/* 消息气泡区 */}
-      <div ref={msgsRef} className="chat-messages" style={{ flex: 1, overflowY: 'auto', padding: '12px 16px',
-        display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {messages.map((m, i) => {
-          const agentColor = getAgentBubbleColor(m.agent);
-          const displayName = defaultAgentNames[m.agent] ? getAgentDisplayName(m.agent)
-            : m.agentName || (m.agent === thinkingAgent && deviceName)
-            || getAgentDisplayName(m.agent);
-          if (m.role === 'rule') return <div key={m.id} className="chat-rule-message" style={{alignSelf:'flex-start',width:'100%',maxWidth:420}}>
-            <TrainingPreview proposal={m.proposal} error={training?.proposalErrors?.[m.proposal.proposal_id]}
-              onConfirm={training?.confirm} onCancel={training?.cancel} onRevise={onReviseRule}/>
-          </div>;
-          if (m.role === 'process') {
-            const previous = messages[i - 1];
-            const startsGroup = previous?.role !== 'process' || previous.requestKey !== m.requestKey
-              || previous.agent !== m.agent;
-            return <div key={m.id || i} className={`run-process${m.terminal ? ' run-process--terminal' : ''}`}
-              style={{ '--run-color': agentColor }}>
-              {startsGroup && <div className="run-process__agent">{displayName}</div>}
-              <div className="run-process__detail"><span className="run-process__marker" aria-hidden="true"/>
-                {m.text}
-              </div>
-            </div>;
-          }
-          return (
-          <div key={m.id || i} style={{ maxWidth: '82%',
-            alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-            display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{
-                fontSize: 10, paddingLeft: m.role === 'user' ? 0 : 4,
-                paddingRight: m.role === 'user' ? 4 : 0,
-                color: m.role === 'user' ? 'var(--color-accent)' : agentColor,
-                opacity: 0.75, textAlign: m.role === 'user' ? 'right' : 'left',
-                fontFamily: 'var(--font-mono)', letterSpacing: '0.04em',
-              }}>
-                {m.role === 'user' ? '你' : displayName}
-            </div>
-            <div style={{
-              padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
-              borderRadius: m.role === 'user' ? '16px 16px 4px 16px' : '4px 16px 16px 16px',
-              background: m.role === 'user' ? 'var(--color-accent)' : `${agentColor}10`,
-              color: m.role === 'user' ? 'var(--color-bg)' : 'var(--color-text)',
-              border: m.role === 'user' ? 'none' : `1px solid ${agentColor}25`,
-            }}>{m.text}</div>
-            {m.actions?.map((ac, ai) => (
-              <div key={ai} style={{ display: 'flex', alignItems: 'center', gap: 8,
-                padding: '7px 11px',
-                background: 'var(--color-accent-dim)',
-                border: '1px solid rgba(200,255,62,0.2)', borderRadius: 12 }}>
-                <div style={{ width: 22, height: 22, borderRadius: 7, background: 'var(--color-accent)',
-                  color: 'var(--color-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Icon name="check" size={11} sw={2.5}/>
-                </div>
-                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>{ac.name}</span>
-                <span style={{ fontSize: 12, color: 'var(--color-accent)', fontFamily: 'monospace',
-                  marginLeft: 'auto' }}>{ac.action}</span>
-              </div>
-            ))}
-          </div>
-          );
-        })}
-
-        {thinking && (() => {
-          const tc = getAgentBubbleColor(thinkingAgent);
-          return (
-            <div style={{ alignSelf: 'flex-start', display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ fontSize: 10, paddingLeft: 4, color: tc, opacity: 0.75,
-                fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                {thinkingAgentName || getAgentDisplayName(thinkingAgent)}
-              </div>
-              <div style={{ padding: '10px 14px',
-                borderRadius: '4px 16px 16px 16px',
-                background: `${tc}10`, border: `1px solid ${tc}25`,
-                display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                  <span className="typing-dot" style={{ background: tc, opacity: 0.6 }}/>
-                  <span className="typing-dot" style={{ background: tc, opacity: 0.6, animationDelay: '.14s' }}/>
-                  <span className="typing-dot" style={{ background: tc, opacity: 0.6, animationDelay: '.28s' }}/>
-                </div>
-                {thinkingText && (
-                  <span style={{ fontSize: 11, color: tc, opacity: 0.7,
-                    fontFamily: 'var(--font-mono)' }}>{thinkingText}</span>
-                )}
-              </div>
-            </div>
-          );
-        })()}
-        {training?.error && <p role="alert">{training.error}</p>}
-        <div/>
-      </div>
-
-      {/* 扩展插槽（培养草案卡片、快捷建议等） */}
-      {children}
-
-      {/* 输入栏 */}
+    <div style={{
+      flexShrink: 0, padding: '8px 12px',
+      paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
+      background: 'transparent',
+    }}>
       <div style={{
-        padding: '8px 12px',
-        paddingBottom: variant === 'sheet'
-          ? 'calc(12px + env(safe-area-inset-bottom, 0px))'
-          : 'calc(8px + env(safe-area-inset-bottom, 0px))',
-        borderTop: '1px solid var(--color-border)',
-        flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        background: 'rgba(30,29,38,0.95)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 999,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8,
-          padding: '6px 6px 6px 16px',
-          background: 'rgba(30,29,38,0.95)',
-          border: '1px solid var(--color-border)',
-          borderRadius: 999 }}>
-          <input
-            ref={inputRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !e.isComposing && handleSend()}
-            placeholder={placeholder || '输入消息…'}
-            disabled={disabled}
-            style={{
-              flex: 1, background: 'transparent', border: 'none',
-              color: disabled ? 'var(--color-text-dim)' : 'var(--color-text)',
-              fontSize: 14, fontFamily: 'inherit', outline: 'none',
-              WebkitTapHighlightColor: 'transparent',
-            }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || disabled}
-            style={{
-              width: 38, height: 38, borderRadius: 999, flexShrink: 0,
-              background: input.trim() && !disabled ? 'var(--color-accent)' : 'var(--color-surface-2)',
-              color:      input.trim() && !disabled ? 'var(--color-bg)' : 'var(--color-text-dim)',
-              border: 'none',
-              cursor: input.trim() && !disabled ? 'pointer' : 'default',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: input.trim() && !disabled ? '0 0 18px var(--color-accent-glow)' : 'none',
-              WebkitTapHighlightColor: 'transparent',
-            }}
-          >
-            <Icon name="arrow" size={16} sw={2.2}/>
-          </button>
-        </div>
+        <input
+          ref={inputRef}
+          aria-label="聊天消息"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && !e.isComposing && handleSend()}
+          placeholder={busy && !disabled ? '处理中…' : (placeholder || '告诉我想要什么…')}
+          disabled={unavailable}
+          style={{
+            flex: 1, minWidth: 0, background: 'transparent', border: 'none',
+            color: unavailable ? 'rgba(255,255,255,0.35)' : '#fff',
+            fontSize: 14, fontFamily: 'inherit', outline: 'none',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+        />
+        <button
+          type="button"
+          aria-label="发送消息"
+          onClick={handleSend}
+          disabled={!input.trim() || unavailable}
+          style={{
+            width: 38, height: 38, borderRadius: 999, flexShrink: 0,
+            background: input.trim() && !unavailable ? 'var(--color-accent)' : 'var(--color-surface-2)',
+            color:      input.trim() && !unavailable ? 'var(--color-bg)' : 'var(--color-text-dim)',
+            border: 'none',
+            cursor: input.trim() && !unavailable ? 'pointer' : 'default',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: input.trim() && !unavailable ? '0 0 18px var(--color-accent-glow)' : 'none',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+        >
+          <Icon name="arrow" size={16} sw={2.2}/>
+        </button>
       </div>
     </div>
   );
 }
-
-window.ChatPanel = ChatPanel;

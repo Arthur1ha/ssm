@@ -32,8 +32,6 @@ def update_profile(changes: dict, context) -> dict:
     return _store.update_profile(changes, context)
 
 
-def get_trait_specs() -> dict:
-    return TRAIT_SPECS
 
 
 def evolve_profile(delta: dict, date_str: str, *, expected_revision: int | None = None,

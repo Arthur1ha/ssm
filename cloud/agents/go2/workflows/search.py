@@ -682,7 +682,7 @@ class DeviceSearch:
 async def _run_search(target: str = "", *, mode: str = "find_object", context=None,
                      task_id: str | None = None, deadline: float | None = None) -> dict:
     from cloud.agents.common.checkpoint import FileCheckpointSaver
-    from cloud.go2.execution import current_context, use_context
+    from cloud.space.execution import current_context, use_context
     from cloud.go2.connection import go2
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2.control import control_lease, session_tasks
@@ -841,7 +841,7 @@ async def run_search(target: str = "", *, mode: str = "find_object", context=Non
                      task_id: str | None = None, deadline: float | None = None) -> dict:
     """Serialize duplicate tasks before checking their existing effects."""
     from cloud.agents.common.checkpoint import FileCheckpointSaver
-    from cloud.go2.execution import current_context
+    from cloud.space.execution import current_context
     context = context or current_context()
     requested = _request.get()
     task_id = task_id or (requested[0] if requested else "search_" + uuid.uuid4().hex)

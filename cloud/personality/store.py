@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from cloud.storage.json_files import locked_directory, write_record
 
@@ -33,24 +33,18 @@ def _read_json(path: Path) -> dict | None:
 
 class ProfileStore:
     def __init__(self, *, agent_id: str, path: Path, name: str, prompt: str,
-                 trait_specs: dict[str, dict], migration: Callable[[], dict] | None = None):
+                 trait_specs: dict[str, dict]):
         self.agent_id = agent_id
         self.path = path
         self.name = name
         self.prompt = prompt
         self.trait_specs = trait_specs
-        self.migration = migration
 
     def _initial(self) -> dict:
-        migrated = self.migration() if self.migration else {}
-        traits = {key: spec["default"] for key, spec in self.trait_specs.items()}
-        traits.update({key: value for key, value in migrated.get("traits", {}).items()
-                       if key in traits and type(value) is int and 0 <= value <= 100})
-        prompt = migrated.get("prompt")
         return {"schema_version": 1, "agent_id": self.agent_id, "name": self.name,
-                "prompt": prompt if isinstance(prompt, str) and prompt.strip() else self.prompt,
-                "traits": traits, "revision": 1,
-                "metadata": migrated.get("metadata", {})}
+                "prompt": self.prompt,
+                "traits": {key: spec["default"] for key, spec in self.trait_specs.items()},
+                "revision": 1, "metadata": {}}
 
     def _load(self) -> dict:
         data = _read_json(self.path)

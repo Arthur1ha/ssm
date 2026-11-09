@@ -12,7 +12,7 @@ from cloud.agents.go2.workflows.body_action import start_body_action
 from cloud.go2.actions import ACTIONS, SPORT_COMMANDS
 from cloud.go2.connection import Go2Connection
 from cloud.go2.control import ControlLease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 USER = ExecutionContext('body-action-user', 'visitor', False)
 TARGETS = [cmd for cmd in SPORT_COMMANDS if ACTIONS[cmd].source_states == ('standing',)] + ['EnterMoveControl']
@@ -78,7 +78,7 @@ async def test_every_standing_action_waits_for_correct_rise_receipt(robot, sourc
     else:
         assert robot.sent == [ACTIONS[stand].api_id, ACTIONS[command].api_id]
         assert result['dispatch_only'] is True
-        assert robot.fsm_state is None  # target acceptance is not its completion
+        assert robot.body_state is None  # target acceptance is not its completion
 
 
 @pytest.mark.asyncio

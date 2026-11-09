@@ -218,16 +218,11 @@ def _subscribe_and_announce(client):
     # card 和 manifest topic 由 CardRegistry 统一订阅
     registry.subscribe(client)
     client.publish("ssm/decision/active", "true", retain=True)
-    from cloud.orchestrator.card import build_card, build_manifest
+    from cloud.orchestrator.card import build_card
     client.publish(
         f"ssm/agents/{ORCHESTRATOR_ID}/card",
         json.dumps(build_card(ORCHESTRATOR_ID), ensure_ascii=False),
         qos=1, retain=True,
-    )
-    client.publish(
-        f"ssm/agents/{ORCHESTRATOR_ID}/manifest",
-        json.dumps(build_manifest(ORCHESTRATOR_ID)),
-        retain=False,
     )
     _publish_decision_state(client)
     logger.info("[MQTT] Subscribed and announced as %s", ORCHESTRATOR_ID)
@@ -378,10 +373,6 @@ def on_message(client, userdata, msg):
             if durable is False:
                 logger.warning("[Result] rejected mismatched task=%s", task_id)
                 return
-            accepted = state.store_task_result(task_id, payload)
-            if not accepted and durable is None:
-                logger.warning("[Result] rejected unowned/mismatched task=%s", task_id)
-                return
             extra = f" error={payload['error']}" if payload.get("error") else ""
             logger.info("[Result] task=%s → %s%s", task_id, payload.get("result"), extra)
         return
@@ -415,10 +406,11 @@ _presence_client.reconnect_delay_set(min_delay=5, max_delay=30)
 _presence_client.on_connect = _on_presence_connect
 
 agent_tools.init(state, mqtt_client, registry)
+from cloud.esp32.physical_tasks import observed_result
 _agent_messenger = AgentMessenger(mqtt_client, registry, get_space_registry(),
                                   {ORCHESTRATOR_ID},
                                   lambda message: _intent_worker.submit(_handle_agent_message, message),
-                                  task_result_lookup=state.get_task_result)
+                                  task_result_lookup=observed_result)
 agent_tools._messenger = _agent_messenger
 
 mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)

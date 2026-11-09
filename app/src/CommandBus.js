@@ -98,7 +98,7 @@ const commandBus = {
           `/api/commands/${encodeURIComponent(unitId)}/tasks/${encodeURIComponent(taskId)}`,
           { signal: controller.signal },
         );
-        if (result?.result !== 'executing') return result;
+        if (!['executing', 'accepted', 'unknown'].includes(result?.result)) return result;
       } catch (error) {
         if ([401, 403, 404].includes(error.status)) {
           return { result: 'error', task_id: taskId, error: error.message };

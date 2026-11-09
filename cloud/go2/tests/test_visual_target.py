@@ -173,7 +173,7 @@ async def test_missing_calibration_uses_lidar_without_claiming_a_target(monkeypa
     from cloud.go2.navigation import target_approach
 
     monkeypatch.setattr(tools.go2, 'is_connected', True)
-    monkeypatch.setattr(tools.go2, 'fsm_state', 'standing')
+    monkeypatch.setattr(tools.go2, 'body_state', 'standing')
     monkeypatch.setattr(tools.go2, '_connected_serial', 'robot-serial', raising=False)
 
     def missing_calibration(*, serial):
@@ -305,7 +305,7 @@ async def test_visual_result_preserves_arrival_boundary_in_user_reply(tmp_path, 
     from cloud.agents.go2.run_view import Go2RunView
     from cloud.agents.common.checkpoint import FileCheckpointSaver
     from cloud.agents.common.run_index import FileRunIndex
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
 
     class UnusedModel:
         def bind_tools(self, schemas, parallel_tool_calls=False):
@@ -372,7 +372,7 @@ def lidar_localizer(monkeypatch, tmp_path):
     frame = {'width': 640, 'height': 360, 'frame_id': 3, 'received_at': now,
              'pose_received_at': now, 'odom_session_id': 's', 'pose_at_capture': pose}
     voxel = {'data': {'resolution': .05, 'data': {'points': [[2., 0., .2]]}}}
-    robot = SimpleNamespace(fsm_state='standing', _sport_state_observed_at=now,
+    robot = SimpleNamespace(body_state='standing', _sport_state_observed_at=now,
                             voxel_raw=voxel, voxel_received_at=now,
                             odom_frame_id='odom', voxel_frame_id='odom')
     calls = []

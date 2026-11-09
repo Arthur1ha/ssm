@@ -8,7 +8,7 @@ import pytest
 
 from cloud.go2.connection import Go2Connection
 from cloud.go2.control import ControlLease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ async def test_manual_http_actions_do_not_wait_or_lock_on_missing_posture(manual
         assert robot._action_deadline is None
         assert robot.runtime.data['life_state'] == 'idle'
         assert robot.runtime.data['last_action']['phase'] == 'dispatched'
-        assert robot.fsm_state is None  # no fabricated physical posture
+        assert robot.body_state is None  # no fabricated physical posture
     assert publish.await_count == 3
 
 
@@ -60,7 +60,7 @@ async def test_manual_send_ignores_old_unconfirmed_action_but_keeps_rejection(ma
     result = await robot.send_command('Sit', dispatch_only=True)
     assert result['result'] == 'error'
     assert result['request_status_code'] == 7
-    assert robot.fsm_state is None
+    assert robot.body_state is None
     assert robot.body_confirmation == 'unknown'
 
 

@@ -115,7 +115,7 @@ class Navigator:
     def _begin(self, name: str, owner_session_id: str, task: asyncio.Task) -> str:
         import uuid
         runtime = runtime_for(go2)
-        if runtime is not None and (runtime.active_reason() or go2.body_ready_reason() or go2.fsm_state not in {'standing', 'moving'} or go2.pending_action):
+        if runtime is not None and (runtime.active_reason() or go2.body_ready_reason() or go2.body_state not in {'standing', 'moving'} or go2.pending_action):
             raise ValueError(runtime.active_reason() or 'body_not_ready')
         self.stop()
         self.task_id = uuid.uuid4().hex
@@ -278,9 +278,7 @@ class Navigator:
                 loc = await spatial_memory.find_location(name)
             if loc is None:
                 return self._finish("blocked", "location_not_found", f"找不到地点「{name}」", task_id)
-            if loc.get("legacy_unanchored") or not loc.get("session_id"):
-                return self._finish("blocked", "legacy_unanchored", f"地点「{name}」需在当前会话重新标定", task_id)
-            if loc.get("session_id") != getattr(go2, "_odom_session_id", None):
+            if not loc.get("session_id") or loc["session_id"] != getattr(go2, "_odom_session_id", None):
                 return self._finish("blocked", "map_mismatch", "地点不属于当前 odom 会话", task_id)
             if (loc.get("frame_id") != "odom" or
                     not all(isinstance(loc.get(k), (int, float)) and math.isfinite(loc[k]) for k in ("x", "y")) or
@@ -977,31 +975,6 @@ def _distance_to_path(
     return math.sqrt(min_d2) if min_d2 < float("inf") else 0.0
 
 
-def _nearest_free_cell(
-    grid_obj, cell: tuple[int, int], max_r: int = 40
-) -> tuple[int, int] | None:
-    """BFS 找距 cell 最近的可通行格，目标点落在障碍内时使用，不会穿越障碍选到墙另一侧。"""
-    from collections import deque
-    if grid_obj.is_free(*cell):
-        return cell
-    queue: deque = deque([(cell, 0)])
-    visited: set = {cell}
-    dirs = [(1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)]
-    while queue:
-        (ix, iy), dist = queue.popleft()
-        if dist >= max_r:
-            continue
-        for dx, dy in dirs:
-            nb = (ix + dx, iy + dy)
-            if nb in visited:
-                continue
-            visited.add(nb)
-            if not (0 <= nb[0] < grid_obj.width[0] and 0 <= nb[1] < grid_obj.width[1]):
-                continue
-            if grid_obj.is_free(*nb):
-                return nb
-            queue.append((nb, dist + 1))
-    return None
 
 
 navigator = Navigator()

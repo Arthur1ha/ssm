@@ -84,13 +84,6 @@ def get_tool_spec(name: str) -> ToolSpec | None:
     return spec
 
 
-def tool_descriptions() -> str:
-    return "可用工具：\n" + "\n".join(
-        f"- {spec.name}: {spec.description}; 参数 JSON Schema: {spec.params_schema}"
-        for spec in (get_tool_spec(name) for name in TOOL_REGISTRY)
-    )
-
-
 CHAT_PARAMS_SCHEMA = _schema({"message": _string(minLength=1, maxLength=2000)}, ("message",))
 
 # Only these externally meaningful goals are advertised to the orchestrator.

@@ -52,7 +52,7 @@ def observed(monkeypatch):
 def test_connected_robot_confirms_standing_from_joint_geometry_without_commands(observed):
     robot, feed, _ = observed
     feed(count=7)
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
     assert robot.runtime.data['body_observation_source'] == 'joint_posture'
     assert 'Hello' in robot.available_actions
     robot._conn.datachannel.pub_sub.publish_request_new.assert_not_called()
@@ -61,7 +61,7 @@ def test_connected_robot_confirms_standing_from_joint_geometry_without_commands(
 def test_real_sitting_geometry_is_not_standing_despite_overlapping_height(observed):
     robot, feed, _ = observed
     feed(SITTING, count=8, pitch=-.86, height=.31)
-    assert robot.fsm_state == 'sitting'
+    assert robot.body_state == 'sitting'
     assert 'RiseSit' in robot.available_actions
     assert 'Hello' not in robot.available_actions
 
@@ -70,7 +70,7 @@ def test_invalid_joint_measurements_do_not_confirm_initial_posture(observed):
     robot, feed, _ = observed
     feed([0] * 12, count=8)
     feed([float('nan')] * 12, count=8)
-    assert robot.fsm_state is None
+    assert robot.body_state is None
     assert robot.available_actions == ['StopMove']
 
 
@@ -80,7 +80,7 @@ def test_missing_imu_is_not_assumed_to_be_a_level_body(observed):
         clock[0] += .1
         robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, -.07]}})
         robot._on_low_state({'data': {'motor_state': [{'q': q} for q in STANDING]}})
-    assert robot.fsm_state is None
+    assert robot.body_state is None
 
 
 def test_vertical_velocity_bias_is_not_planar_movement(observed):
@@ -88,9 +88,9 @@ def test_vertical_velocity_bias_is_not_planar_movement(observed):
     feed(count=7)
     robot._motion_observation_enabled = True
     feed(count=4, velocity=[.001, -.002, -.08])
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
     feed(velocity=[0, 0, 0], yaw=.2)
-    assert robot.fsm_state == 'moving'
+    assert robot.body_state == 'moving'
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,7 @@ async def test_sit_completion_requires_joint_pattern_not_target_assignment(obser
     assert not task.done()
     feed(SITTING, count=12, pitch=-.86, height=.31)
     assert (await task)['result'] == 'ok'
-    assert robot.fsm_state == 'sitting'
+    assert robot.body_state == 'sitting'
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_timeout_can_restore_observed_control_without_claiming_action_succ
     feed(count=12)
     assert (await task)['result'] == 'timeout'
     assert robot.pending_action is None
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
     assert robot.runtime.data['last_action']['phase'] == 'recovered'
     assert robot.runtime.data['last_action']['result'] == 'timeout'
 
@@ -153,7 +153,7 @@ def test_low_state_dropout_blocks_body_actions_even_with_fresh_sport(observed):
     clock[0] += 3
     robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, -.07]}})
     assert robot.available_actions == ['StopMove']
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
 
 
 def test_fresh_low_state_cannot_use_stale_sport_to_confirm_posture(observed):
@@ -164,7 +164,7 @@ def test_fresh_low_state_cannot_use_stale_sport_to_confirm_posture(observed):
         clock[0] += .1
         robot._on_low_state({'data': {'motor_state': [{'q': q} for q in STANDING],
                                       'imu_state': {'rpy': [0, 0, 0]}}})
-    assert robot.fsm_state is None
+    assert robot.body_state is None
 
 @pytest.mark.parametrize('feedback', ['renewed', 'frozen', 'increasing_loss'])
 def test_nonzero_motor_loss_accepts_stationary_angles_but_rejects_growing_loss(observed, feedback):
@@ -178,7 +178,7 @@ def test_nonzero_motor_loss_accepts_stationary_angles_but_rejects_growing_loss(o
         motors[0]['lost'] = 5 + (i if feedback == 'increasing_loss' else 0)
         robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, -.07], 'yaw_speed': 0}})
         robot._on_low_state({'data': {'motor_state': motors, 'imu_state': {'rpy': [0, 0, 0]}}})
-    assert (robot.fsm_state == 'standing') is (feedback != 'increasing_loss')
+    assert (robot.body_state == 'standing') is (feedback != 'increasing_loss')
     assert (robot._low_state['motor_positions'] is not None) is (feedback != 'increasing_loss')
 
 

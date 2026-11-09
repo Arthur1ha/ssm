@@ -55,7 +55,7 @@ def test_project_odom_voxels_into_visual_target_box():
     assert np.allclose(pixels, [[320, 180], [360, 180]])
     assert np.allclose(depths, [1, 1])
     assert np.allclose(visible, points[:2])
-    assert rgb_lidar.bbox_depths(pixels, depths, [480, 450, 520, 550], 640, 360).tolist() == [1.0]
+    assert depths[rgb_lidar.bbox_mask(pixels, [480, 450, 520, 550], 640, 360)].tolist() == [1.0]
 
 
 def test_projection_uses_full_odom_orientation():

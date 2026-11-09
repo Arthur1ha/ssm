@@ -59,6 +59,21 @@ assert.equal(lampOverlay.ism,'BLINKING');
 assert.equal(lampOverlay.control_ts,1001,'Physical frame erased cloud control state');
 lampOverlay=merge(lampOverlay,{ts:102,ism:'ON',control_ts:999,control_state:'manual',autonomy_mode:'manual'});
 assert.equal(lampOverlay.control_state,'holding','Old control cursor replaced newer overlay');
+let rebootedLamp = {ts:570,ism:'OFF',_received_at:1000,
+  control_ts:2000,autonomy_mode:'reactive',control_state:'holding'};
+rebootedLamp=merge(rebootedLamp,{ts:19,ism:'ON',_received_at:1001});
+assert.equal(rebootedLamp.ism,'ON','ESP32 clock reset discarded a confirmed post-reboot state');
+assert.equal(rebootedLamp.control_state,'holding','Post-reboot state erased the cloud overlay');
+rebootedLamp=merge(rebootedLamp,{ts:570,ism:'OFF',_received_at:1000,
+  control_ts:2001,autonomy_mode:'manual',control_state:'manual'});
+assert.equal(rebootedLamp.ism,'ON','Delayed pre-reboot snapshot replaced the live state');
+assert.equal(rebootedLamp.control_state,'manual','Older physical snapshot blocked a newer control overlay');
+rebootedLamp=merge(rebootedLamp,{ts:null,ism:'OFF',_received_at:1002});
+assert.equal(rebootedLamp.ism,'OFF','An unsynchronized device clock froze physical updates');
+assert.equal(merge(rebootedLamp,{ts:9999,ism:'ON'}).ism,'OFF',
+  'Retained state without live receipt evidence replaced the live state');
+assert.equal(merge({ts:570,ism:'OFF'},{ts:19,ism:'ON',_received_at:1001}).ism,'ON',
+  'First live post-reboot state was discarded behind a retained snapshot');
 const files = ['app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
   'app/src/hooks/useTraining.js', 'app/src/components/TrainingPreview.jsx', 'app/src/components/TrainingDrawer.jsx', 'app/src/pages/TransitionInspector.jsx',
   'app/src/components/DeviceWidgets.jsx', 'app/src/pages/fsmWidgets.jsx',
@@ -156,23 +171,22 @@ async function checkInteractions() {
   });
   for (const file of files) vm.runInContext(compile(file), ui, { filename: file });
   const originalRows = [
-    {role:'user',text:'重复要求',runId:'run-old',requestKey:'old'},
-    {role:'assistant',text:'原回复',requestKey:'old'},
-    {role:'user',text:'重复要求',runId:'run-new',requestKey:'new'},
+    {type:'user',text:'重复要求',runId:'run-old',requestId:'old'},
+    {type:'ai',text:'原回复',requestId:'old'},
+    {type:'user',text:'重复要求',runId:'run-new',requestId:'new'},
   ];
   const cardRows = ui.window.trainingTimeline(originalRows,[
     {proposal_id:'p-old',source_run_id:'run-old',source_text:'重复要求',created_at:1},
     {proposal_id:'p-next',source_run_id:'run-old',source_text:'重复要求',created_at:2},
   ]);
-  assert.deepEqual(Array.from(cardRows,row=>row.role==='rule' ? row.proposal.proposal_id : row.runId || row.text),
+  assert.deepEqual(Array.from(cardRows,row=>row.type==='rule' ? row.proposal.proposal_id : row.runId || row.text),
     ['run-old','原回复','p-old','p-next','run-new'], 'Rule cards must anchor exact source runs and preserve chronological order');
 
-  const sm = { state_field: 'fsm_state', connection_field: 'connected', states: ['standing', 'sitting'],
-    transitions: [], views: { standing: {label:'站立'}, sitting: {label:'坐下'} },
-    regions: [{ id:'body', label:'身体', state_field:'body_state', states:['standing','sitting'], views:{} }] };
+  const sm = { primary_region:'body', connection_field:'connected',
+    regions:[{id:'body',label:'身体',state_field:'body_state',states:['standing','sitting'],transitions:[],views:{}}] };
   const card = { unit_id:'go2',device_id:'go2',name:'Go2',_online:true,
     transport:{state_stream:'/api/go2/connection/stream'},state_machine:sm,widgets:[],modes:[],skills:[] };
-  const initial = {epoch:'a',revision:2,connected:true,body_state:'standing',fsm_state:'standing'};
+  const initial = {epoch:'a',revision:2,connected:true,body_state:'standing'};
   const find = (tree, type) => !tree || typeof tree !== 'object' ? null
     : Array.isArray(tree) ? tree.map(item => find(item, type)).find(Boolean)
     : tree.type === type ? tree : find(tree.props?.children, type);
@@ -196,14 +210,17 @@ async function checkInteractions() {
   sources[0].onmessage({data:JSON.stringify({...initial,epoch:'a',revision:999})});
   board = find(render(), ui.window.HierarchicalFsmBoard);
   assert.equal(board.props.liveState.body_state, null);
-  const lamp = {unit_id:'lamp',name:'灯',_online:true,transport:{},state_machine:{states:['OFF','ON'],state_field:'ism',initial:'OFF',transitions:[],views:{}},widgets:[],modes:[],skills:[]};
+  const lamp = {unit_id:'lamp',name:'灯',_online:true,transport:{},state_machine:{primary_region:'device',regions:[{id:'device',label:'照明',states:['OFF','ON'],state_field:'ism',transitions:[],views:{}}]},widgets:[],modes:[],skills:[]};
   const flat = find(render(lamp, {ism:'ON',ts:1}), ui.window.DeviceStateBoard);
   assert.equal(flat.props.current, 'ON', 'Old device stream contaminated the lamp');
   sources[0].onmessage({data:JSON.stringify({...initial,epoch:'late',revision:1})});
   assert.equal(find(render(lamp, {ism:'ON',ts:1}), ui.window.DeviceStateBoard).props.current, 'ON');
+  render(lamp,{ism:'OFF',ts:570,_received_at:1000});
+  const rebootedBoard = find(render(lamp,{ism:'ON',ts:19,_received_at:1001}),ui.window.DeviceStateBoard);
+  assert.equal(rebootedBoard.props.current,'ON','Device page remained stuck in its pre-reboot state');
   let previewCount = 0, fireCount = 0;
-  const graph = ui.window.FsmGraph({ states:['standing','sitting'], current:'standing', views:{}, layout:{},
-    transitions:[{src:'standing',dst:'sitting',trigger:'Sit',action:'Sit',label:'坐下'}],
+  const graph = ui.window.FsmGraph({nodes:[{id:'standing',label:'standing',current:true},{id:'sitting',label:'sitting'}],
+    edges:[{id:'sit',src:'standing',dst:'sitting',active:true,transition:{src:'standing',dst:'sitting',trigger:'Sit',action:'Sit',label:'坐下'}}],
     onSelectState() { previewCount++; }, onInspectTransition() { fireCount++; } });
   const descendants = tree => !tree || typeof tree !== 'object' ? [] : Array.isArray(tree)
     ? tree.flatMap(descendants) : [tree, ...descendants(tree.props?.children)];
@@ -214,7 +231,7 @@ async function checkInteractions() {
   descendants(graph).find(node => node.props?.['data-action'] === 'Sit').props.onClick({type:'click'});
   assert.equal(fireCount, 1, 'Edge must open transition details');
   hooks.forEach(hook => hook?.cleanup?.());
-  console.log('PASS: command duplicate guard and errors, SSE old epoch rejection, device switch isolation, flat lamp fallback, separate node selection and edge inspection.');
+  console.log('PASS: command duplicate guard and errors, SSE old epoch rejection, device switch isolation, region-based lamp state, separate node selection and edge inspection.');
 }
 
 (async () => {
@@ -225,7 +242,7 @@ async function checkInteractions() {
     'import json; from cloud.go2.card import _go2_state_machine; print(json.dumps(_go2_state_machine()))'],
   { cwd: root, env: { ...process.env, UV_CACHE_DIR: process.env.UV_CACHE_DIR || '/tmp/ssm-uv' }, encoding: 'utf8' })).stdout);
   const lampCard = JSON.parse((await promisify(execFile)('uv', ['run','python','-c',
-    'import json; from edge.lamp_contract import FSM_VERSION; from cloud.cards.builder import build_card_from_manifest; print(json.dumps(build_card_from_manifest({"unit_id":"esp32_desk_led","name":"ws2812_ring","agent_type":"actuator","fsm_version":FSM_VERSION,"capabilities":[{"action":"SET_COLOR"},{"action":"SET_STATE"},{"action":"BLINK"}]})))'],
+    'import json; from edge.lamp_contract import FSM_VERSION; from cloud.cards.builder import build_card_from_manifest; print(json.dumps(build_card_from_manifest({"unit_id":"esp32_desk_led","name":"ws2812_ring","firmware_ver":"0.3.0","agent_type":"actuator","fsm_version":FSM_VERSION,"capabilities":[{"action":"SET_COLOR"},{"action":"SET_STATE"},{"action":"BLINK"}]})))'],
     {cwd:root,env:{...process.env,UV_CACHE_DIR:process.env.UV_CACHE_DIR || '/tmp/ssm-uv-cache'},encoding:'utf8'})).stdout);
   const velocitySchema = JSON.parse((await promisify(execFile)('uv', ['run','python','-c',
     'import json; from cloud.go2.actions import velocity_schema; print(json.dumps(velocity_schema()))'],
@@ -329,9 +346,13 @@ async function checkInteractions() {
         React.createElement('p',null,'浏览器验证 · 模拟状态，不连接真机'),
         React.createElement('textarea',{placeholder:props.placeholder,disabled:props.disabled,'aria-label':'设备对话',style:{marginTop:18,width:'100%',height:60,background:'#17171b',color:'#ccc',border:'1px solid #333',borderRadius:10,padding:12}}));` });
     for (const name of files) await page.addScriptTag({ content: compile(name) });
-    if (process.argv.includes('--training-only')) await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
+    if (process.argv.includes('--training-only')) {
+      await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
+      await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
+      await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
+    }
     await page.addScriptTag({ content: `window.__velocitySchema=${JSON.stringify(velocitySchema)};window.__lampCard=${JSON.stringify(lampCard)};window.__sm=${JSON.stringify(sm)};
-      window.__state={state_schema_version:2,epoch:'a',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',body_confirmation:'observed',control_mode:'normal',autonomy_mode:'manual',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore']};
+      window.__state={state_schema_version:2,epoch:'a',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',body_confirmation:'observed',control_mode:'normal',autonomy_mode:'manual',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore']};
       window.__manualCommands=__sm.regions.find(region=>region.id==='body').transitions.filter(t=>t.dispatch_only).map(t=>t.action);
       __state.available_manual_actions=__manualCommands;
       window.__card={unit_id:'go2',device_id:'go2',name:'Go2 机器狗',agent_type:'robot',_online:true,state_machine:__sm,transport:{state_stream:'/api/go2/connection/stream'},widgets:[],modes:[],skills:[]};
@@ -341,6 +362,28 @@ async function checkInteractions() {
 
     await page.waitForSelector('.device-state-board');
     await page.evaluate(() => document.fonts.ready);
+    if (process.argv.includes('--lamp-reboot-only')) {
+      await page.evaluate(() => __renderState({ism:'OFF',ts:570,_received_at:1000},{...__lampCard,_online:true}));
+      await page.waitForSelector('[data-state="device:OFF"].is-current');
+      await page.evaluate(() => __renderState({ism:'ON',ts:19,_received_at:1001},{...__lampCard,_online:true}));
+      await page.waitForSelector('[data-state="device:ON"].is-current');
+      await page.waitForFunction(() => document.querySelector('[data-state="device:OFF"]').dataset.executable==='true');
+      await page.tap('[data-state="device:OFF"]');
+      await page.waitForFunction(() => __calls.length===1);
+      assert.deepEqual(await page.evaluate(() => __calls[0]),{
+        unit:lampCard.unit_id,action:'SET_STATE',params:{state:'OFF'},
+      },'Post-reboot state did not enable the correct command');
+      // Acceptance alone must not move the state node before physical feedback.
+      await page.waitForSelector('[data-state="device:ON"].is-current');
+      await page.evaluate(() => __renderState({ism:'OFF',ts:20,_received_at:1002},{...__lampCard,_online:true}));
+      await page.waitForSelector('[data-state="device:OFF"].is-current');
+      await page.evaluate(() => __renderState({ism:'ON',ts:570,_received_at:1000},{...__lampCard,_online:true}));
+      await page.waitForSelector('[data-state="device:OFF"].is-current');
+      assert.equal(await page.evaluate(() => __calls.length),1,'State updates replayed a command');
+      assert.deepEqual(errors,[]);
+      console.log('PASS: real-browser lamp reboot clock rollback, correct target click, acceptance waits for physical feedback, delayed snapshot rejection.');
+      return;
+    }
     if (process.argv.includes('--posture-only')) {
       const tap = async (value, action, params = {}) => {
         const selector = `[data-state="body:${value}"]`;
@@ -358,7 +401,7 @@ async function checkInteractions() {
       };
       for (const [source,stand] of [['sitting','RiseSit'],['lying','StandUp']]) {
         await page.evaluate(source => __renderState({...__state,revision:__state.revision+1,
-          body_state:source,fsm_state:source,body_telemetry_fresh:true,available_actions:[source==='sitting'?'RiseSit':'StandUp']}), source);
+          body_state:source,body_telemetry_fresh:true,available_actions:[source==='sitting'?'RiseSit':'StandUp']}), source);
         await tap('standing',stand);
         const targets = await page.evaluate(source => __sm.regions.find(r => r.id==='body').transitions
           .filter(t => t.src==='standing' && t.dispatch_only && t.dst!==source).map(t => [t.dst,t.action]), source);
@@ -368,7 +411,7 @@ async function checkInteractions() {
         assert.equal(await page.evaluate(() => __calls.length),count,'Current pose was re-executed');
       }
       await page.evaluate(() => __renderState({...__state,revision:__state.revision+1,body_state:'sitting',
-        fsm_state:'sitting',body_telemetry_fresh:false}));
+        body_telemetry_fresh:false}));
       await page.waitForFunction(() => document.querySelector('[data-state="body:lying"]').dataset.executable==='false');
       const count = await page.evaluate(() => __calls.length);
       await page.$eval('[data-state="body:lying"]',node => node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
@@ -615,7 +658,7 @@ async function checkInteractions() {
         await tapOnce('device:ON','SET_STATE',{state:'ON'});
         await page.evaluate(()=>__renderState({ism:'ON',ts:2},{...__lampCard,_online:true}));
         await tapOnce('device:OFF','SET_STATE',{state:'OFF'});
-        const blink=lampCard.state_machine.transitions.find(t=>t.src==='ON' && t.action==='BLINK');
+        const blink=lampCard.state_machine.regions[0].transitions.find(t=>t.src==='ON' && t.action==='BLINK');
         await tapOnce('device:BLINKING','BLINK',blink.id ? {} : blink.params);
         assert.deepEqual(errors,[]);
         console.log('PASS: direct dog and lamp state commands, duplicate declarations collapsed, blocked actions and rule inspection never dispatch, distinct actions remain selectable.');
@@ -695,6 +738,8 @@ async function checkInteractions() {
       return;
     }
     if (process.argv.includes('--layout-only')) {
+      await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
+      await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
       await page.evaluate(()=>{
         __card.widgets=[{type:'video',endpoint:'/api/go2/video',states:[],requires_connection:true},
@@ -953,14 +998,14 @@ async function checkInteractions() {
     await page.waitForFunction(()=>document.body.textContent.includes('尚未确认完成'));
     await clickAction('休息');
     assert.equal(await page.evaluate(()=>__calls.at(-1).params.action),'request_rest');
-    await page.evaluate(()=>__renderState({...__state,revision:2,activity_state:'rest',life_state:null,body_state:'lying',fsm_state:'lying',available_actions:[],available_life_actions:['wake']}));
+    await page.evaluate(()=>__renderState({...__state,revision:2,activity_state:'rest',life_state:null,body_state:'lying',available_actions:[],available_life_actions:['wake']}));
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="activity:rest"]');
     assert.equal(await page.$$('.fsm-whiteboard__node.is-current[data-state^="body:"]').then(nodes=>nodes.length),0);
     assert.equal(await page.$$('.fsm-whiteboard__node.is-retained[data-state="body:lying"]').then(nodes=>nodes.length),1);
     await page.screenshot({path:'/tmp/go2-whiteboard-rest-mobile.png',fullPage:true});
     await clickAction('唤醒');
     assert.equal(await page.evaluate(()=>__calls.at(-1).params.action),'wake');
-    await page.evaluate(()=>__sources[0].onmessage({data:JSON.stringify({...__state,epoch:'b',revision:1,activity_state:'active',life_state:'idle',body_state:null,fsm_state:null,body_confirmation:'unknown'})}));
+    await page.evaluate(()=>__sources[0].onmessage({data:JSON.stringify({...__state,epoch:'b',revision:1,activity_state:'active',life_state:'idle',body_state:null,body_confirmation:'unknown'})}));
     await page.waitForFunction(()=>document.querySelectorAll('.fsm-whiteboard__node.is-current[data-state^="body:"]').length===0);
     assert.equal(await page.$('.device-header__stop'),null,'Go2 header should not show a stop button');
     await page.click('.device-header__settings');
@@ -968,7 +1013,7 @@ async function checkInteractions() {
     await page.click('[aria-label="关闭管理"]');
     await page.evaluate(()=>__sources[0].onmessage({data:JSON.stringify({...__state,epoch:'a',revision:99,body_state:'standing'})}));
     assert.equal(await page.$$('.fsm-whiteboard__node[data-state="body:unknown"],.fsm-whiteboard__node.is-current[data-state^="body:"]').then(nodes=>nodes.length),0);
-    await page.evaluate(()=>__renderState({...__state,epoch:'c',revision:1,activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',available_actions:['EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore','stop_explore']},__card,'visitor'));
+    await page.evaluate(()=>__renderState({...__state,epoch:'c',revision:1,activity_state:'active',life_state:'idle',body_state:'standing',available_actions:['EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore','stop_explore']},__card,'visitor'));
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="body:standing"]');
     assert.equal(await page.$$eval('.fsm-whiteboard__edge',nodes=>nodes.find(node=>node.dataset.label==='开启探索').dataset.available),'false');
     assert.equal(await page.$$eval('.fsm-whiteboard__edge',nodes=>nodes.some(node=>node.dataset.label==='停止探索')),true,'Idle exploration permission has no stop action');
@@ -1016,7 +1061,7 @@ async function checkInteractions() {
     await page.waitForFunction(()=>!document.querySelector('.device-remote-controls'));
     await closeExplanation();
     await page.evaluate(()=>{
-      __renderState({...__state,epoch:'d',revision:1,life_state:'explore',body_state:'moving',fsm_state:'moving',control_mode:'remote',available_actions:['Move','StopMove'],available_life_actions:['stop_explore']});
+      __renderState({...__state,epoch:'d',revision:1,life_state:'explore',body_state:'moving',control_mode:'remote',available_actions:['Move','StopMove'],available_life_actions:['stop_explore']});
     });
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="body:moving"]');
     await clickAction('停止探索');
@@ -1050,7 +1095,7 @@ async function checkInteractions() {
     await page.click('.device-header__settings');
     assert.equal(await page.$eval('.device-settings-safety',node=>node.disabled),false,'Stale stream disabled the settings stop action');
     await page.click('[aria-label="关闭管理"]');
-    await page.evaluate(()=>__renderState({ism:'ON',ts:1},{unit_id:'lamp',name:'灯',_online:true,transport:{},state_machine:{states:['OFF','ON'],state_field:'ism',initial:'OFF',views:{OFF:{label:'关'},ON:{label:'开'}},transitions:[{src:'ON',dst:'OFF',trigger:'off',action:'SET_STATE',label:'关灯',params:{state:'OFF'}}]},widgets:[],modes:[],skills:[]}));
+    await page.evaluate(()=>__renderState({ism:'ON',ts:1},{unit_id:'lamp',name:'灯',_online:true,transport:{},state_machine:{primary_region:'device',regions:[{id:'device',label:'照明',states:['OFF','ON'],state_field:'ism',views:{OFF:{label:'关'},ON:{label:'开'}},transitions:[{src:'ON',dst:'OFF',trigger:'off',action:'SET_STATE',label:'关灯',params:{state:'OFF'}}]}]},widgets:[],modes:[],skills:[]}));
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="device:ON"]');
     assert.equal(await page.$$('.fsm-whiteboard__node').then(nodes=>nodes.length),2);
     await clickAction('关灯');
@@ -1116,7 +1161,7 @@ async function checkInteractions() {
     assert.equal(await page.$$('.fsm-whiteboard__edge.is-running').then(nodes=>nodes.length),0,
       'A completed receipt must not animate as a running command');
     await page.evaluate(()=>{
-      const machine={state_field:'position',connection_field:'attached',primary_region:'mechanism',regions:[{id:'mechanism',label:'位置',state_field:'position',states:['open','closed'],views:{open:{label:'打开'},closed:{label:'关闭'}},available_actions_field:'allowed',blocked_actions_field:'reasons',transitions:[{src:'open',dst:'closed',trigger:'close',action:'SET_POSITION',availability_key:'close',label:'关闭'}]}]};
+      const machine={connection_field:'attached',primary_region:'mechanism',regions:[{id:'mechanism',label:'位置',state_field:'position',states:['open','closed'],views:{open:{label:'打开'},closed:{label:'关闭'}},available_actions_field:'allowed',blocked_actions_field:'reasons',transitions:[{src:'open',dst:'closed',trigger:'close',action:'SET_POSITION',availability_key:'close',label:'关闭'}]}]};
       __renderState({position:'open',attached:true,allowed:['close'],ts:2},{unit_id:'generic',name:'设备',_online:true,state_machine:machine,transport:{},widgets:[],modes:[],skills:[]});
     });
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="mechanism:open"]');
@@ -1126,9 +1171,11 @@ async function checkInteractions() {
     await page.waitForFunction(()=>document.querySelector('.device-header__status').textContent==='未连接');
     assert.equal(await page.$$eval('.fsm-whiteboard__edge[data-action]',nodes=>nodes.every(node=>node.dataset.available==='false')),true);
     // Verify the real shared chat as well; a stub cannot catch flex overflow.
+    await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
+    await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
     await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
     await page.evaluate(()=>{
-      __renderState({epoch:'real-chat',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',fsm_state:'standing',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl'],available_life_actions:['request_rest','start_explore']});
+      __renderState({epoch:'real-chat',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl'],available_life_actions:['request_rest','start_explore']});
     });
     await page.waitForSelector('.device-page__chat input');
     for(const [width,height] of [[390,844],[360,740],[390,520]]) {

@@ -50,7 +50,7 @@ function App({ session, logout, refreshSession }) {
   const [deviceNotice, setDeviceNotice] = useState('');
   const [activityQuestion, setActivityQuestion] = useState(null);
   const training = useTraining('', {sessionId:session.session_id,canEdit:session.actor === 'admin'});
-  const chatRows = useMemo(() => trainingTimeline(activityLog, session.actor === 'admin' ? training.proposals : [], 'home'), [activityLog,training.proposals,session.actor]);
+  const chatRows = useMemo(() => trainingTimeline(activityLog, session.actor === 'admin' ? training.proposals : []), [activityLog,training.proposals,session.actor]);
   useEffect(() => { if (session.actor === 'admin') training.loadAll(agents); }, [agents.map(agent => agent.unit_id).join(','), session.session_id]);
   const [trainingSelection, setTrainingSelection] = useState(null);
   const [trainingLocation, setTrainingLocation] = useState(null);
@@ -90,7 +90,7 @@ function App({ session, logout, refreshSession }) {
   const appendActivity = entry => setActivityLog(prev => [...prev, entry]);
   const insertBeforeRequestEnd = (entries, requestId, row) => {
     const endIndex = entries.findIndex(entry => entry.requestId === requestId
-      && (entry.terminal || entry.type === 'ai' && entry.final));
+      && entry.type === 'ai' && entry.final);
     if (endIndex >= 0) return [...entries.slice(0, endIndex), row, ...entries.slice(endIndex)];
     for (let index = entries.length - 1; index >= 0; index--) {
       if (entries[index].requestId === requestId) {
@@ -290,7 +290,10 @@ function App({ session, logout, refreshSession }) {
           </button>}
         </div> : <>
         {/* 卡片、对话和输入栏在首次设备快照就绪后一起显示。 */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
+        <ChatPanel onSend={handleSend} busy={thinking}
+          placeholder={loadingAgents ? '正在整理空间成员…' : '告诉我想让大家做什么…'}
+          suggestions={activityLog.every(e => e.type !== 'user') && !thinking && !currentActivity ? suggestions : []}
+          beforeMessages={<>
           {agentsError && (
             <div style={{ padding: '14px 16px 0' }}>
               <div className="inline-notice inline-notice--error" role="alert">
@@ -305,7 +308,8 @@ function App({ session, logout, refreshSession }) {
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
-          <ActivityFeed entries={chatRows}
+          </>}
+          messageContent={<ActivityFeed entries={chatRows}
             training={training} onReviseRule={p => setTrainingSelection({unit_id:p.unit_id,transition_id:p.transition_ids?.[0],proposal_id:p.proposal_id})} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
@@ -313,41 +317,11 @@ function App({ session, logout, refreshSession }) {
             onAnswerActivity={event => {
               setActivityQuestion(event);
               navigate(`#/devices/${encodeURIComponent(event.unit_id || 'go2')}`);
-            }}/>
-
-          <div style={{ height: 16 }}/>
-        </div>
-
-        {/* 输入栏 */}
-        <div style={{
-          flexShrink: 0, background: 'var(--color-bar)',
-          borderTop: '1px solid var(--color-border)',
-        }}>
-          {activityLog.every(e => e.type !== 'user') && !thinking && !currentActivity && (
-            <div style={{ padding: '8px 12px 0', display: 'flex', gap: 8, overflowX: 'auto', scrollbarWidth: 'none' }}>
-              {suggestions.map(s => (
-                <button key={s} onClick={() => handleSend(s)} style={{
-                  flexShrink: 0, padding: '8px 16px', borderRadius: 'var(--radius-card)',
-                  background: 'var(--color-surface-2)', border: '1px solid var(--color-border-strong)',
-                  color: 'var(--color-text-muted)', fontSize: 13, cursor: 'pointer',
-                  fontFamily: 'inherit', whiteSpace: 'nowrap',
-                  WebkitTapHighlightColor: 'transparent',
-                }}>{s}</button>
-              ))}
-            </div>
-          )}
+            }}/>}
+          >
           {trainingSelection && <div className="training-selection">修改规则：请直接输入新的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
           {currentActivity && <p className="home-activity-input-note">发送新指令将结束当前自由活动</p>}
-          <MainInputBar
-            onSend={handleSend}
-            thinking={thinking}
-            placeholder={
-              loadingAgents
-                ? '正在整理空间成员…'
-                : '告诉我想让大家做什么…'
-            }
-          />
-        </div>
+        </ChatPanel>
 
         </>}
 

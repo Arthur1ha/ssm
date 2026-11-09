@@ -568,7 +568,7 @@ def _snapshot_execution_reasons(card, record, viewer, catalog):
             return [{'code': 'device_offline'}]
         fresh = current.get('body_telemetry_fresh') is True
         if not fresh:
-            current = {**current, 'body_state': None, 'fsm_state': None}
+            current = {**current, 'body_state': None}
         ledger = FileEffectLedger()
         def history(edge_id):
             return ledger.completion_history(unit_id=card['unit_id'], transition_id=edge_id,

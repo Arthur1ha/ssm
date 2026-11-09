@@ -27,10 +27,10 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 from cloud.esp32 import service as esp32_agent_mod
-from cloud.esp32 import tools as esp32_tools
 from cloud.esp32.router import router as esp32_router, internal_router as esp32_internal_router
 from cloud.esp32.state import ESP32State
 from cloud.go2 import router as go2_router_module
+from cloud.go2.card import GO2_STATUS_TOPIC
 from cloud.go2.router import router as go2_router
 from cloud.api.training import router as training_router
 from cloud.agents.common.training import service as training_service
@@ -233,7 +233,7 @@ async def lifespan(app):
 
     # LWT：api 进程意外崩溃时把 Go2 标记离线（能力卡 retained 保留，靠 online=false 表达失活，
     # 与 ESP32 的 status/LWT 模型一致）。paho 单客户端仅一个 will，故选 status 离线。
-    _esp32_mqtt_client.will_set(go2_router_module.GO2_STATUS_TOPIC, "offline", retain=True, qos=1)
+    _esp32_mqtt_client.will_set(GO2_STATUS_TOPIC, "offline", retain=True, qos=1)
 
     try:
         _esp32_mqtt_client.connect(broker_host, broker_port, keepalive=60)
@@ -242,7 +242,6 @@ async def lifespan(app):
     except Exception as e:
         logger.error("[ESP32Agent MQTT] Connection failed: %s", e)
 
-    esp32_tools.init(_esp32_mqtt_client)
     agent = esp32_agent_mod.init(_esp32_state)
     agent.start()
 

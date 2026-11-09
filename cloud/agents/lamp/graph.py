@@ -25,7 +25,7 @@ from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
 from cloud.agents.common.replies import factual_fallback, needs_persona_reply
 from cloud.agents.lamp.personality.profile import get_profile
-from cloud.agents.lamp.personality.soul import load_personality
+from cloud.personality.store import render_identity
 from cloud.esp32.physical_tasks import get as get_physical_task, stable_task_id
 from cloud.cards import registry as cards
 from cloud.observability import bind_context, emit_agent_event
@@ -163,7 +163,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             **facts,
         )
         if phase == "observed" and step is not None:
-            persona, _, _ = load_personality()
+            persona = render_identity(get_profile())
             status = result.get("result", "unknown")
 
             def publish_text(answer):

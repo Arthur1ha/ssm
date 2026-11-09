@@ -12,7 +12,7 @@ import time
 
 from cloud.go2.connection import go2
 from cloud.go2.control import control_lease, LeaseConflict
-from cloud.go2.execution import current_context
+from cloud.space.execution import current_context
 from cloud.go2.navigation.navigator import navigator
 from cloud.go2.navigation.target_view import make_target_hint, select_target_view, target_hint_valid
 from cloud.go2.perception import visual_target
@@ -36,13 +36,6 @@ APPROACH_COMMAND_LIMIT = .30
 APPROACH_COMMAND_FLOOR = .25
 
 
-def observation_waypoint(grid, pose, observation, bounds=None):
-    """Compatibility entrypoint for the shared bearing-only view selector."""
-    hint = make_target_hint(observation)
-    point = select_target_view(grid, pose, hint, bounds)
-    if point is None:
-        raise TargetUnlocalized('no_known_free_observation_path')
-    return point
 
 
 async def _localize_with_reobservation(target, locate, context, bounds, receipts, hint_state,
@@ -177,7 +170,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         task_pose = receipt.get('last_trusted_pose') or task_pose
 
     try:
-        if getattr(go2, 'fsm_state', None) != 'standing':
+        if getattr(go2, 'body_state', None) != 'standing':
             raise TargetUnlocalized('posture_not_confirmed')
         try:
             calibration = visual_target.load_calibration(serial=getattr(go2, '_connected_serial', None))

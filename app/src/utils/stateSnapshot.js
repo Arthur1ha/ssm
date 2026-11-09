@@ -12,10 +12,16 @@ function mergeStateSnapshot(current, incoming, retiredEpochs = new Set()) {
   }
   if (current.epoch && !incoming.epoch) return current;
   if (incoming.epoch) return incoming;
-  // Physical observation time and cloud control time are independent cursors.
-  // A new device frame may omit the overlay; a mode event may reuse physical ts.
+  // Physical receipt time and cloud control time are independent cursors.
+  // ESP32 RTCs can reset or remain unsynchronized across reboots. The server
+  // stamps live MQTT frames with _received_at; prefer that over device ts.
+  // A mode event reuses the original physical receipt time, never refreshing it.
   const controlFields = ['autonomy_mode', 'control_state', 'control_hold_until', 'control_ts'];
-  const physical = (current.ts || 0) > (incoming.ts || 0) ? current : incoming;
+  const oldReceived = Number(current._received_at) || 0;
+  const newReceived = Number(incoming._received_at) || 0;
+  const physical = (oldReceived || newReceived
+    ? oldReceived > newReceived
+    : (current.ts || 0) > (incoming.ts || 0)) ? current : incoming;
   const oldControlTime = Number(current.control_ts) || 0;
   const newControlTime = Number(incoming.control_ts) || 0;
   const control = newControlTime > oldControlTime ? incoming : current;

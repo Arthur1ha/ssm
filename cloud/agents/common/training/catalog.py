@@ -12,7 +12,7 @@ def transition_id(region, edge):
 
 def catalog_for(card: dict) -> dict:
     machine = card.get('state_machine') or {}
-    regions = machine.get('regions') or [{'id': 'device', **machine}]
+    regions = machine.get('regions', [])
     skills = {s.get('invoke', {}).get('action'): s.get('params_schema', {}) for s in card.get('skills', [])}
     fields = {r['state_field']: {'type': 'string', 'enum': list(r['states'])}
               for r in regions if r.get('state_field') and r.get('states')}
@@ -43,18 +43,9 @@ def catalog_for(card: dict) -> dict:
     return result
 
 
-def declare_training(card: dict) -> dict:
-    """Attach stable edge IDs and the capability projection to a Card."""
-    catalog = catalog_for(card)
-    machine = card.get('state_machine') or {}
-    regions = machine.get('regions') or [{'id': 'device', **machine}]
-    for region in regions:
-        for edge in region.get('transitions', []):
+def declare_transition_ids(card: dict) -> dict:
+    """Attach stable identities without embedding the derived training catalog."""
+    for region in (card.get('state_machine') or {}).get('regions', []):
+        for edge in region['transitions']:
             edge['id'] = transition_id(region['id'], edge)
-    if machine.get('regions'):
-        primary = machine.get('primary_region')
-        if primary:
-            for edge in machine.get('transitions', []):
-                edge['id'] = transition_id(primary, edge)
-    card['training_capabilities'] = catalog
     return card

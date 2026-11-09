@@ -9,7 +9,7 @@ import pytest
 from cloud.go2.navigation import target_approach as approach
 from cloud.go2.perception import visual_target as vision
 from cloud.go2.perception.rgb_lidar import target_cluster
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 def test_background_returns_never_become_target_median():
@@ -29,7 +29,7 @@ def test_disjoint_object_clusters_are_ambiguous():
 
 def setup_approach(monkeypatch, *, nav_status='succeeded', final_shift=0):
     monkeypatch.setattr(approach, 'go2', SimpleNamespace(is_connected=True,
-                        fsm_state='standing', _connected_serial='robot'))
+                        body_state='standing', _connected_serial='robot'))
     context = ExecutionContext('visitor', 'visitor', False, expires_at=int(time.time()+120))
     monkeypatch.setattr(approach, 'current_context', lambda: context)
     monkeypatch.setattr(approach, 'control_lease', SimpleNamespace(acquire=lambda _: None, heartbeat=lambda _: None))
@@ -291,11 +291,10 @@ def test_observation_can_translate_forward_without_unverified_rotation():
                 'observation': {'found': True, 'bbox_1000': [870, 520, 895, 565]}}
     grid = SimpleNamespace(is_body_clear=lambda x, y, heading: abs(y) < .01,
                            turn_sweep_details=lambda x, y, h, end: {'clear': abs(y) < .01 and abs(end) < .01})
-    point = approach.observation_waypoint(grid, pose, observed)
+    point = approach.select_target_view(grid, pose, approach.make_target_hint(observed))
     assert (point['x'], point['y'], point['heading']) == (.30, 0., 0.)
     grid.is_body_clear = lambda *_: False
-    with pytest.raises(vision.TargetUnlocalized, match='no_known_free_observation_path'):
-        approach.observation_waypoint(grid, pose, observed)
+    assert approach.select_target_view(grid, pose, approach.make_target_hint(observed)) is None
 
 
 @pytest.mark.asyncio

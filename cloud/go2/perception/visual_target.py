@@ -22,7 +22,7 @@ from cloud.go2.navigation.astar import astar
 from cloud.observability import current_event_context, emit_agent_event
 from cloud.observability.logging_config import LOG_DIR
 from cloud.go2.connection import go2
-from cloud.go2.execution import current_context
+from cloud.space.execution import current_context
 
 
 logger = logging.getLogger(__name__)
@@ -509,7 +509,7 @@ async def locate_ground_target(target: str, calibration: dict, *,
         associate_ground_target, quaternion_matrix, save_paired_sample,
     )
     state_at = getattr(go2, '_sport_state_observed_at', None)
-    if (getattr(go2, 'fsm_state', None) != 'standing' or state_at is None
+    if (getattr(go2, 'body_state', None) != 'standing' or state_at is None
             or not 0 <= time.monotonic() - state_at <= 1.0):
         raise TargetUnlocalized('posture_not_confirmed')
     jpeg, frame, quality = await _capture_still(after_frame_id=after_frame_id,
@@ -573,7 +573,7 @@ async def locate_lidar_target(target: str, *, after_frame_id=None,
         save_paired_sample,
     )
     state_at = getattr(go2, '_sport_state_observed_at', None)
-    if (getattr(go2, 'fsm_state', None) != 'standing' or state_at is None
+    if (getattr(go2, 'body_state', None) != 'standing' or state_at is None
             or not 0 <= time.monotonic() - state_at <= 1.0):
         raise TargetUnlocalized('posture_not_confirmed')
     jpeg, frame, quality = await _capture_still(after_frame_id=after_frame_id,

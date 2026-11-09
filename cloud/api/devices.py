@@ -24,10 +24,10 @@ def _readable_json(payload: Any) -> Response:
 
 
 _CARD_GROUPS = (
-    ("card_schema_version", "version", "unit_id", "device_id", "parent_id", "name", "description", "agent_type", "tags"),
-    ("online", "transport", "services"),
+    ("card_schema_version", "version", "unit_id", "device_id", "name", "description", "agent_type", "tags"),
+    ("transport", "services"),
     ("skills", "observations"),
-    ("state", "state_machine", "modes", "telemetry", "widgets", "suggestions"),
+    ("state_machine", "modes", "telemetry", "widgets", "suggestions"),
 )
 
 
@@ -53,7 +53,7 @@ def _card_response(card: dict[str, Any]) -> dict[str, Any]:
     from cloud.esp32.presentation import project_card
     card = project_card(card)
     keys = (
-        "card_schema_version", "version", "unit_id", "device_id", "parent_id", "name", "description", "agent_type",
+        "card_schema_version", "version", "unit_id", "device_id", "name", "description", "agent_type",
         "online", "transport", "services", "state", "state_machine", "skills", "modes", "telemetry",
         "widgets", "suggestions", "tags", "observations",
     )
@@ -87,5 +87,7 @@ async def device_agent_card(unit_id: str, _session: dict[str, Any] = Depends(req
     card = _fixed_cards().get(unit_id)
     if card is None:
         raise HTTPException(status_code=404, detail=f"unit '{unit_id}' is not in the current space")
-    from cloud.esp32.presentation import project_card
-    return _readable_card(project_card(card))
+    declaration = get_registry().get_static_card(unit_id)
+    if declaration is None:
+        raise HTTPException(status_code=404, detail="device has no discovered Agent Card")
+    return _readable_card(declaration)

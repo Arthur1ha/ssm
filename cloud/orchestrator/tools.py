@@ -96,8 +96,6 @@ def do_publish_task(
 
     topic 一律用 unit_id（传输层唯一标识），不用 slug。见 protocol/identifiers.md。
     """
-    if _state:
-        _state.register_task(task_id, session_id)
     execution_context = context or {}
     correlation = current_event_context()
     emit_agent_event("device.command", task_id=task_id, target_unit_id=unit_id,

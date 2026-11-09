@@ -55,7 +55,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   /* ── 对话 ── */
   const greeting = getAgentOpeningLine(card || unitId);
   const initialMsg = {
-    id: 'welcome', role: 'assistant', agent: unitId,
+    id: 'welcome', type: 'ai', agent: unitId,
     text: greeting,
   };
   const [messages, setMessages] = useSessionTranscript(sessionId, `device:${unitId}`, [initialMsg]);
@@ -85,50 +85,42 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     pendingRuns.current.set(runId, { ...pending,
       timer: setTimeout(() => forgetRun(runId), 180000) });
   };
-  const insertAfterRequest = (rows, requestKey, row) => {
+  const insertAfterRequest = (rows, requestId, row) => {
     for (let index = rows.length - 1; index >= 0; index--) {
-      if (rows[index].requestKey === requestKey) {
+      if (rows[index].requestId === requestId) {
         return [...rows.slice(0, index + 1), row, ...rows.slice(index + 1)];
       }
     }
     return [...rows, row];
   };
-  const appendProcess = (requestKey, text, eventId) => {
+  const appendProcess = (requestId, text, eventId, event = {}) => {
     if (!text) return;
-    const row = { id: `${requestKey}:process:${eventId || ++nextProcessId.current}`,
-      role: 'process', agent: unitId, requestKey, text, eventId };
+    const row = { id: `${requestId}:process:${eventId || ++nextProcessId.current}`,
+      type: 'process', agent: unitId, requestId, text, eventId,
+      stage: event.stage, taskId: event.task_id, media_ref: event.media_ref };
     setMessages(previous => {
-      if (eventId && previous.some(message => message.role === 'process'
-        && message.requestKey === requestKey && message.eventId === eventId)) return previous;
-      const endIndex = previous.findIndex(message => message.requestKey === requestKey
-        && (message.terminal || message.role === 'assistant'));
+      if (eventId && previous.some(message => message.type === 'process'
+        && message.requestId === requestId && message.eventId === eventId)) return previous;
+      const endIndex = previous.findIndex(message => message.requestId === requestId
+        && message.type === 'ai');
       if (endIndex >= 0) return [...previous.slice(0, endIndex), row,
         ...previous.slice(endIndex)];
-      return insertAfterRequest(previous, requestKey, row);
+      return insertAfterRequest(previous, requestId, row);
     });
   };
-  const finishMessage = (requestKey, text, eventId, isError = false) => {
+  const finishMessage = (requestId, text, eventId, isError = false) => {
     if (!text) return;
     setMessages(previous => {
-      const hasTerminal = previous.some(message => message.requestKey === requestKey
-        && message.terminal);
-      const finalBefore = previous.findIndex(message => message.role === 'assistant'
-        && message.requestKey === requestKey);
-      const terminal = { id: `${requestKey}:terminal`, role: 'process', agent: unitId,
-        requestKey, text: '处理结束', terminal: true };
-      const rows = hasTerminal ? previous : finalBefore >= 0
-        ? [...previous.slice(0, finalBefore), terminal, ...previous.slice(finalBefore)]
-        : insertAfterRequest(previous, requestKey, terminal);
-      const finalIndex = rows.findIndex(message => message.role === 'assistant'
-        && message.requestKey === requestKey);
+      const finalIndex = previous.findIndex(message => message.type === 'ai'
+        && message.requestId === requestId);
       if (finalIndex >= 0) {
-        if (isError && !rows[finalIndex].isError) return rows;
-        return rows.map((message, index) => index === finalIndex
+        if (isError && !previous[finalIndex].isError) return previous;
+        return previous.map((message, index) => index === finalIndex
           ? { ...message, text, eventId, final: true, isError } : message);
       }
-      return insertAfterRequest(rows, requestKey,
-        { id: `${requestKey}:reply`, role: 'assistant', agent: unitId,
-          requestKey, text, eventId, final: true, isError });
+      return insertAfterRequest(previous, requestId,
+        { id: `${requestId}:reply`, type: 'ai', agent: unitId,
+          requestId, text, eventId, final: true, isError });
     });
   };
   useEffect(() => () => {
@@ -142,12 +134,12 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       const autonomous = item.scope === 'space' && item.source === 'autonomous';
       const pending = pendingRuns.current.get(item.run_id);
       if (!autonomous && (item.source !== 'device_chat' || !pending)) return;
-      const requestKey = autonomous ? `auto:${item.run_id || item.event_id}` : pending.key;
+      const requestId = autonomous ? `auto:${item.run_id || item.event_id}` : pending.key;
       if (item.type === 'agent_reply' && item.text) {
-        const replyKey = `${requestKey}:${item.event_id}`;
+        const replyKey = `${requestId}:${item.event_id}`;
         if (seenReplies.current.has(replyKey)) return;
         seenReplies.current.add(replyKey);
-        finishMessage(requestKey, item.text, item.event_id);
+        finishMessage(requestId, item.text, item.event_id);
         if (!autonomous) {
           retainRun(item.run_id);
           if (activeRun.current === item.run_id) {
@@ -157,11 +149,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         }
       } else if (item.type === 'run_stage' || item.type === 'agent_progress') {
         if (item.stage !== 'finished') {
-          appendProcess(requestKey, processEventText(item), item.event_id);
+          appendProcess(requestId, processEventText(item), item.event_id, item);
         }
       } else if (item.type === 'reply_error') {
         const message = '这次没能给出完整回复，请稍后再试。';
-        finishMessage(requestKey, message, item.event_id, true);
+        finishMessage(requestId, message, item.event_id, true);
         if (!autonomous) {
           retainRun(item.run_id);
           if (activeRun.current === item.run_id) {
@@ -206,8 +198,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   }, [unitId, modeIds]);
 
   const switchMode = (axis, value) => {
-    if (offline || stateHealth === 'reconnecting' || !axis.set_action && !axis.set) return;
-    commandBus.command(unitId, axis.set_action || 'set_mode', { axis: axis.id, value }).then(result => {
+    if (offline || stateHealth === 'reconnecting' || !axis.set_action) return;
+    commandBus.command(unitId, axis.set_action, { axis: axis.id, value }).then(result => {
       if (result.mode === value) {
         setModeVals(prev => ({ ...prev, [axis.id]: value }));
         setExecution('模式已更新');
@@ -248,15 +240,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   const regions = stateMachineRegions(sm);
   const primaryRegion = primaryStateRegion(sm);
   const stateHealth = transport?.state_stream ? streamHealth : eventsHealthy ? 'live' : 'reconnecting';
-  const stateField = sm?.state_field || (!card?.card_schema_version
-    ? ('fsm_state' in runtimeState ? 'fsm_state' : 'ism' in runtimeState ? 'ism' : '') : '');
-  const connectionField = sm?.connection_field || (!card?.card_schema_version && 'connected' in runtimeState ? 'connected' : '');
-  const current = runtimeState[primaryRegion?.state_field || stateField] || '';
+  const connectionField = sm?.connection_field || '';
+  const current = runtimeState[primaryRegion?.state_field] || '';
   const connected = connectionField ? runtimeState[connectionField] === true : !!(card?._online ?? card?.online);
   const offline = !(card?._online ?? card?.online) || (connectionField && !connected);
   const meta = getAgentMeta(card || { unit_id: unitId, name: unitId });
   const ACCENT = meta.color;
-  const hasUserMsg = messages.some(m => m.role === 'user');
+  const hasUserMsg = messages.some(m => m.type === 'user');
   const statusLabel = runtimeState.connection_state === 'connecting' ? '连接中'
     : offline ? '未连接' : stateHealth === 'reconnecting' ? '状态同步中' : '在线';
   const safetyTransitions = regions.flatMap(region => (region.transitions || [])
@@ -303,13 +293,13 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     const runId = pendingRunId || (unitId === 'go2' ? 'go2_' : 'lamp_') +
       crypto.randomUUID().replaceAll('-', '');
     if (pendingRuns.current.has(runId)) forgetRun(runId);
-    const requestKey = `chat:${++nextRequestId.current}`;
-    setMessages(prev => [...prev, { id: `${requestKey}:user`, role: 'user', text, requestKey, runId },
-      { id: `${requestKey}:initial`, role: 'process', agent: unitId, requestKey,
-        text: '已收到请求', eventId: `initial:${requestKey}` }]);
+    const requestId = `chat:${++nextRequestId.current}`;
+    setMessages(prev => [...prev, { id: `${requestId}:user`, type: 'user', text, requestId, runId },
+      { id: `${requestId}:initial`, type: 'process', agent: unitId, requestId,
+        text: '已收到请求', eventId: `initial:${requestId}` }]);
     setSending(true);
     activeRun.current = runId;
-    pendingRuns.current.set(runId, { key: requestKey, timer: null });
+    pendingRuns.current.set(runId, { key: requestId, timer: null });
     const answerText = activityQuestion && unitId === 'go2'
       ? `回答你刚才的问题「${activityQuestion.text}」（${activityQuestion.question_id || activityQuestion.event_id}）：${text}`
       : text;
@@ -326,10 +316,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
         if (!pendingRuns.current.has(runId)) return;
         const reply = result?.reply || result?.response;
-        const replyKey = `${requestKey}:${result?.event_id}`;
+        const replyKey = `${requestId}:${result?.event_id}`;
         if (result?.event_id && reply && !seenReplies.current.has(replyKey)) {
           seenReplies.current.add(replyKey);
-          finishMessage(requestKey, reply, result.event_id);
+          finishMessage(requestId, reply, result.event_id);
           setSending(false);
           activeRun.current = null;
           retainRun(runId);
@@ -337,9 +327,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           const fallback = reply || result?.question || apiErrorText(
             { message: commandBus.describe(result) }, '设备暂时无法完成处理，请稍后重试。');
           if (['accepted', 'executing', 'timeout'].includes(result?.result)) {
-            appendProcess(requestKey, fallback, `pending:${result?.result}`);
+            appendProcess(requestId, fallback, `pending:${result?.result}`);
           } else {
-            finishMessage(requestKey, fallback, result?.event_id,
+            finishMessage(requestId, fallback, result?.event_id,
               !reply && !result?.question);
           }
           setSending(false);
@@ -351,7 +341,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       })
       .catch(error => {
         if (!pendingRuns.current.has(runId)) return;
-        finishMessage(requestKey, apiErrorText(error), undefined, true);
+        finishMessage(requestId, apiErrorText(error), undefined, true);
         if (activeRun.current === runId) {
           setSending(false);
           activeRun.current = null;
@@ -416,7 +406,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         </div>
       )}
 
-      {/* ── ChatPanel（撑满剩余高度）；离线整体置灰并禁用输入 ── */}
+      {/* ── 共用聊天面板；离线整体置灰并禁用输入 ── */}
       <div className="device-page__chat" style={{
         flex: '1 1 180px', minHeight: 150, display: 'flex', flexDirection: 'column',
         filter: offline ? 'grayscale(1)' : 'none',
@@ -435,35 +425,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         training={training}
         onReviseRule={p => setTrainingSelection({unit_id:unitId,transition_id:p.transition_ids?.[0],proposal_id:p.proposal_id,summaryText:p.summaryText})}
         focusKey={trainingSelection}
-        thinking={false}
-        thinkingText=""
-        thinkingAgent={unitId}
-        deviceName={getAgentDisplayName(card || unitId)}
+        defaultAgent={unitId}
+        agents={card ? [card] : []}
+        busy={sending}
+        suggestions={!hasUserMsg && !sending && !offline ? suggestions : []}
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : sending ? '正在处理…' : '告诉设备要做什么…'}
-        disabled={offline || sending}
-        variant="inline"
-      >
-        {/* 快捷指令（card.suggestions 驱动）：无用户消息时显示，位置与主屏建议一致 */}
-        {suggestions.length > 0 && !hasUserMsg && !sending && !offline && (
-          <div style={{
-            padding: '6px 12px 0', display: 'flex', gap: 6,
-            overflowX: 'auto', scrollbarWidth: 'none',
-          }}>
-            {suggestions.map(cmd => (
-              <button key={cmd} onClick={() => handleSend(cmd)} style={{
-                flexShrink: 0, padding: '7px 14px',
-                borderRadius: 'var(--radius-card)',
-                background: 'var(--color-surface-2)',
-                border: '1px solid var(--color-border-strong)',
-                color: 'var(--color-text-muted)', fontSize: 13,
-                cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
-                WebkitTapHighlightColor: 'transparent',
-              }}>{cmd}</button>
-            ))}
-          </div>
-        )}
-      </ChatPanel>
+        disabled={offline}
+      />
       </div>
       {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:record.transition_ids[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)}); setTrainingOpen(false);}}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}

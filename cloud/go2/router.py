@@ -23,13 +23,12 @@ from cloud.go2.mode.free_explore import drive
 from cloud.go2.perception.vision import vision_loop
 from cloud.go2.perception.identity import identity_skill
 from cloud.go2.control import LeaseConflict, control_lease, session_tasks
-from cloud.go2.execution import (
+from cloud.space.execution import (
     ExecutionContext, SYSTEM_CONTEXT, current_context, require_admin_read,
     require_authenticated_read, require_service_context, use_context,
 )
 from cloud.go2.card import (
-    GO2_CARD_TOPIC, GO2_STATUS_TOPIC, _build_go2_card, _publish_go2_card,
-    _publish_go2_status, _publish_go2_state, _clear_go2_card,
+    _publish_go2_card, _publish_go2_status, _publish_go2_state,
 )
 
 from cloud.go2.service import (
@@ -366,7 +365,6 @@ async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends
 
 
 class ChatRequest(BaseModel):
-    session_id: str | None = None  # untrusted compatibility field; ignored
     message: str
     selection: dict | None = None
     skill_id: str | None = None
@@ -623,9 +621,6 @@ class AutonomyRequest(BaseModel):
     mode: str  # "manual" | "free_explore"
 
 
-class PersonalityRequest(BaseModel):
-    prompt: str
-    social_initiative: int | None = None
 
 
 @router.post("/navigation/locations")
@@ -795,7 +790,7 @@ async def set_search_scope(req: SearchScopeRequest,
     if not go2.is_connected or req.session_id != getattr(go2, "_odom_session_id", None):
         raise HTTPException(status_code=409, detail="search_scope_session_mismatch")
     runtime = runtime_for(go2)
-    if (navigator.owner_session_id or go2.fsm_state == "moving"
+    if (navigator.owner_session_id or go2.body_state == "moving"
             or runtime and runtime.data["life_state"] not in {"idle", "rest"}):
         raise HTTPException(status_code=409, detail="stop_active_task_before_configuring_scope")
     try:
@@ -889,38 +884,8 @@ async def go2_identity_recognize(context: ExecutionContext = Depends(require_int
     return asdict(snapshot)
 
 
-@router.get("/personality")
-async def go2_personality_get(context=Depends(require_admin_read)):
-    context = _normalize_context(context)
-    _require_admin_persist(context)
-    from cloud.agents.go2.personality.profile import get_profile
-    profile = get_profile()
-    return {"prompt": profile["prompt"],
-            "social_initiative": profile["traits"]["extraversion"]}
 
 
-@router.post("/personality")
-async def go2_personality_set(req: PersonalityRequest, context: ExecutionContext = Depends(require_service_context)):
-    context = _normalize_context(context)
-    _require_admin_persist(context)
-    from cloud.agents.go2.personality.profile import get_profile, update_profile
-    from cloud.personality.store import RevisionConflict
-    from cloud.observability import emit_agent_event
-    current = get_profile()
-    changes = {"revision": current["revision"], "prompt": req.prompt}
-    if req.social_initiative is not None:
-        changes["traits"] = {"extraversion": req.social_initiative}
-    try:
-        updated = update_profile(changes, context)
-    except RevisionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    emit_agent_event("persona.changed", agent_id="go2", operator_kind="admin",
-                     before_hash=hashlib.sha256(current["prompt"].encode()).hexdigest(),
-                     after_hash=hashlib.sha256(updated["prompt"].encode()).hexdigest())
-    return {"ok": True, "prompt": updated["prompt"],
-            "social_initiative": updated["traits"]["extraversion"]}
 
 
 @router.get("/debug/voxel_map")
@@ -1082,11 +1047,17 @@ async def go2_map_debug(context=Depends(require_admin_read)):
                             if grid_obj is not None else None)
             if grid_summary is not None and odom and grid_obj.has_free_space_evidence:
                 from cloud.go2.navigation.frontier import (
-                    find_frontier_target, raycast_directions, reachable_summary,
+                    select_observation_target, raycast_directions, reachable_summary,
                 )
                 grid_summary["reachable_directions_m"] = raycast_directions(grid_obj, odom)
                 grid_summary.update(reachable_summary(grid_obj, odom))
-                grid_summary["frontier_target"] = find_frontier_target(grid_obj, odom)
+                from cloud.go2.navigation.observation_coverage import ObservationCoverage
+                bounds = (grid_obj.origin[0], grid_obj.origin[1],
+                          grid_obj.origin[0] + grid_obj.width[0] * grid_obj.resolution,
+                          grid_obj.origin[1] + grid_obj.width[1] * grid_obj.resolution)
+                selection = select_observation_target(grid_obj, odom,
+                    ObservationCoverage(grid_obj.map_session, bounds=bounds), bounds=bounds)
+                grid_summary["observation_target"] = selection.target.as_dict() if selection.target else None
                 grid_summary["body_clear"] = grid_obj.is_body_clear(
                     odom["x"], odom["y"], odom.get("heading", 0.0))
         except (ValueError, TypeError):

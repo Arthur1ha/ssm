@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from cloud.agents.common.effects import FileEffectLedger
 from cloud.go2.connection import Go2Connection
 from cloud.go2.control import ControlLease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 from cloud.go2.tasks import command_identity, read_command_result
 
 USER = ExecutionContext('commands-user', 'visitor', False)

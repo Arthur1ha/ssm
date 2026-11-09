@@ -1,11 +1,10 @@
 /* Rules are interpreted by the existing agent Graph. This hook only projects
  * authenticated API history and submits explicit user decisions. */
+// Navigation can remount a device page; only this page load owns its history.
+const chatTranscripts = new Map();
 function useSessionTranscript(sessionId, scope, initialRows = []) {
-  const key = sessionId ? `ssm_chat:${sessionId}:${scope}` : null;
-  const read = () => {
-    try { const rows = key && JSON.parse(sessionStorage.getItem(key)); return Array.isArray(rows) ? rows : initialRows; }
-    catch (_) { return initialRows; }
-  };
+  const key = `${sessionId || ''}:${scope}`;
+  const read = () => chatTranscripts.get(key) || initialRows;
   const [stored, setStored] = React.useState(() => ({key, rows:read()}));
   const rows = stored.key === key ? stored.rows : read();
   const setRows = React.useCallback(update => setStored(previous => {
@@ -14,8 +13,7 @@ function useSessionTranscript(sessionId, scope, initialRows = []) {
     return {key, rows:next.slice(-300)};
   }), [key]);
   React.useEffect(() => {
-    if (!key || stored.key !== key) return;
-    try { sessionStorage.setItem(key, JSON.stringify(stored.rows)); } catch (_) {}
+    if (stored.key === key) chatTranscripts.set(key, stored.rows);
   }, [key, stored]);
   return [rows, setRows];
 }
@@ -28,31 +26,30 @@ function trainingProposalOpen(proposal) {
 }
 /* Attach each card to its originating request, including after reload. No rule
  * intent is inferred here: source text is used solely as a history anchor. */
-function trainingTimeline(rows, proposals, mode = 'device') {
+function trainingTimeline(rows, proposals) {
   const result = [...rows];
   for (const proposal of [...proposals].sort((a,b) => a.created_at - b.created_at)) {
     const sourceText = proposal.source_text || proposal.after?.source_text;
     const id = `rule:${proposal.proposal_id}`;
-    const roleKey = mode === 'home' ? 'type' : 'role';
-    let anchor = proposal.source_run_id ? result.findIndex(row => row[roleKey] === 'user' && row.runId === proposal.source_run_id) : -1;
+    let anchor = proposal.source_run_id ? result.findIndex(row => row.type === 'user' && row.runId === proposal.source_run_id) : -1;
     if (anchor < 0 && sourceText) {
       for (let i = result.length - 1; i >= 0; i--) {
-        if (result[i][roleKey] === 'user' && result[i].text === sourceText) { anchor = i; break; }
+        if (result[i].type === 'user' && result[i].text === sourceText) { anchor = i; break; }
       }
     }
     if (anchor < 0 && sourceText) {
-      result.push({id:`${id}:source`, [roleKey]:'user', text:sourceText,
-        requestId:id, requestKey:id, runId:proposal.source_run_id});
+      result.push({id:`${id}:source`, type:'user', text:sourceText,
+        requestId:id, runId:proposal.source_run_id});
       anchor = result.length - 1;
     }
     const owner = result[anchor];
     if (owner) {
-      const request = mode === 'home' ? owner.requestId : owner.requestKey;
+      const request = owner.requestId;
       while (anchor + 1 < result.length && request != null
-          && (mode === 'home' ? result[anchor + 1].requestId : result[anchor + 1].requestKey) === request) anchor++;
+          && result[anchor + 1].requestId === request) anchor++;
     }
-    const entry = {id, [roleKey]:'rule', proposal, agent:proposal.unit_id,
-      ...(owner ? {requestId:owner.requestId,requestKey:owner.requestKey} : {})};
+    const entry = {id, type:'rule', proposal, agent:proposal.unit_id,
+      ...(owner ? {requestId:owner.requestId} : {})};
     result.splice(anchor < 0 ? result.length : anchor + 1, 0, entry);
   }
   return result;

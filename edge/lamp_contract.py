@@ -1,5 +1,5 @@
 # Pure MicroPython-compatible lamp wire contract. No hardware or cloud imports.
-# Version 3 adds continuous blinking; historical cloud contracts stay frozen.
+# The current contract supports continuous and explicitly counted blinking.
 
 FSM_VERSION = 3
 BYTE_MIN = 0
@@ -38,15 +38,11 @@ def capabilities():
     result = []
     for action in ("SET_COLOR", "SET_STATE", "BLINK"):
         schema = ACTION_SCHEMAS[action]
-        capability = {"action": action, "params": list(schema["properties"]),
-                      "params_schema": schema}
-        if action == "SET_STATE":
-            capability["values"] = schema["properties"]["state"]["enum"]
-        result.append(capability)
+        result.append({"action": action, "params_schema": schema})
     return result
 
 
-def valid_params(action, params, allow_legacy=False, allow_defaults=False, schemas=None):
+def valid_params(action, params, allow_defaults=False, schemas=None):
     """Check the same limits on cloud and edge; edge retains wire defaults."""
     schema = (ACTION_SCHEMAS if schemas is None else schemas).get(action)
     if schema is None or not isinstance(params, dict):
@@ -58,8 +54,6 @@ def valid_params(action, params, allow_legacy=False, allow_defaults=False, schem
         definition = schema["properties"].get(key)
         if definition is None:
             return False
-        if allow_legacy and action == "SET_STATE" and value in ("BRIGHT", "DIM"):
-            continue
         if definition["type"] == "integer":
             if type(value) is not int or not definition["minimum"] <= value <= definition["maximum"]:
                 return False

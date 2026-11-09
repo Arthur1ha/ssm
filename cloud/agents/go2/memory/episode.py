@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NotRequired, Optional, TypedDict
 
 from cloud.go2.paths import MEMORY_DIR
-from cloud.go2.execution import ExecutionContext, can_persist
+from cloud.space.execution import ExecutionContext, can_persist
 
 logger = logging.getLogger(__name__)
 

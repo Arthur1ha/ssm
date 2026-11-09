@@ -9,8 +9,6 @@ from lamp_contract import BLINK_DEFAULT, valid_params
 _LED_STATE_TRIG = {
     "OFF":    Trigger.CMD_OFF,
     "ON":     Trigger.CMD_ON,
-    "BRIGHT": Trigger.CMD_COLOR,  # migration aliases
-    "DIM":    Trigger.CMD_COLOR,
 }
 
 
@@ -44,7 +42,7 @@ class TriggerMap:
     #  LED execution — ISM validates first, then BSM acts
     # ─────────────────────────────────────────────────────────
     def _exec_led(self, action, params):
-        if not valid_params(action, params, allow_legacy=True, allow_defaults=True):
+        if not valid_params(action, params, allow_defaults=True):
             raise ValueError("invalid lamp action parameters")
         trigger = {"SET_COLOR": Trigger.CMD_COLOR, "BLINK": Trigger.CMD_BLINK}.get(action)
         if action == "SET_STATE":
@@ -54,13 +52,10 @@ class TriggerMap:
                      params.get("b", 255), params.get("brightness", 200))
             if color[3] == 0 or not any(color[:3]):
                 trigger = Trigger.CMD_OFF
-        elif action == "SET_STATE" and params.get("state") in ("BRIGHT", "DIM"):
-            brightness = 255 if params["state"] == "BRIGHT" else 40
-            color = (255, 255, 255, brightness)
         if not trigger or not self._ism_led.allows(trigger):
             return False
         # Hardware runs before committing the public state; failures never announce a target state.
-        if action == "SET_COLOR" or (action == "SET_STATE" and params.get("state") in ("BRIGHT", "DIM")):
+        if action == "SET_COLOR":
             if trigger == Trigger.CMD_OFF:
                 self._bsm.led_set_state("OFF")
             else:

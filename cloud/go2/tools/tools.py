@@ -9,30 +9,17 @@ from cloud.go2.actions import (SPORT_COMMANDS, move_tool_schema,
                                validate_move_goal,
                                LED_DEFAULT_COLOR, LED_DEFAULT_DURATION)
 from cloud.go2.control import control_lease
-from cloud.go2.execution import current_context, require_admin, require_persist
+from cloud.space.execution import current_context, require_admin, require_persist
 
-from cloud.go2.models import get_text_llm, get_vision_llm
+from cloud.go2.models import get_vision_llm
 
 # ── 工具函数 ──────────────────────────────────────────────────────
 
 _VALID_SPORT_CMDS = frozenset(SPORT_COMMANDS)
-_SPORT_CMD_BY_LOWER = {c.lower(): c for c in _VALID_SPORT_CMDS}
-
-
-def _normalize_sport_action(action: str) -> str | None:
-    """把 LLM 给的 action 归一成规范动作名，匹配不上返回 None。
-
-    容错：LLM 常把工具名混进来（"go2_sport Hello"），剥前缀；大小写不敏感。
-    """
-    a = action.strip()
-    if a.lower().startswith("go2_sport"):
-        a = a[len("go2_sport"):].strip()
-    return _SPORT_CMD_BY_LOWER.get(a.lower())
-
 async def go2_sport(cmd: str) -> dict | str:
     if not go2.is_connected:
         return "Go2 未连接，请先建立连接"
-    canonical = _normalize_sport_action(cmd)
+    canonical = cmd if cmd in _VALID_SPORT_CMDS else None
     if canonical is None:
         return f"未知动作 {cmd}，支持: {', '.join(sorted(_VALID_SPORT_CMDS))}"
     from cloud.go2.tools.executor import execute_action
@@ -100,10 +87,6 @@ def go2_status() -> dict:
 
 
 # ── 导航工具 ─────────────────────────────────────────────────────
-
-_VISUAL_NAV_BLOCK_MESSAGES = {
-    "calibration_unavailable": "当前 Go2 的实测相机标定缺失或未通过校验，无法确定画面目标的位置；本次任务未发出移动指令。",
-}
 
 async def go2_tag_location(name: str) -> str:
     require_persist("save a location")
@@ -262,7 +245,3 @@ TOOL_FN_MAP = {
     "send_message":               send_message,
     "request_peer_skill":         request_peer_skill,
 }
-
-from cloud.go2.tools.registry import tool_descriptions
-
-TOOL_DESCRIPTIONS = tool_descriptions()

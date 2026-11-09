@@ -14,9 +14,10 @@ from typing import Optional
 
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
-from cloud.go2.tools.tools import go2_observe, get_text_llm
+from cloud.go2.tools.tools import go2_observe
+from cloud.go2.models import get_text_llm
 from cloud.go2.tools.executor import execute_tool
-from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT
+from cloud.space.execution import ExecutionContext, SYSTEM_CONTEXT
 from cloud.go2.perception.vision import VisionFrame
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.agents.go2.memory.episode import episode_memory, EventType
@@ -888,7 +889,7 @@ class Drive:
             return False
         if (runtime.active_reason() or runtime.data['life_state'] != 'idle'
                 or runtime.data['control_mode'] != 'normal' or go2.pending_action
-                or go2.fsm_state != 'standing' or go2.body_ready_reason()):
+                or go2.body_state != 'standing' or go2.body_ready_reason()):
             return False
         from cloud.go2.control import control_lease
         from cloud.go2.navigation.navigator import navigator

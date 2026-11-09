@@ -251,9 +251,11 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
           </button>)}
         </div>
         <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
-          {selectedDirection.edges.map(edge => <TransitionInspector key={edge.id}
-            selection={{label:stateTransitionLabel(edge.transition)}}
-            projection={records.filter(record => record.transition_ids?.includes(edge.transition.id))}/>) }
+          {selectedDirection.edges.map((edge,index) => <React.Fragment key={edge.id}>
+            {index > 0 && <div className="device-whiteboard__rule-or">或</div>}
+            <TransitionInspector transition={edge.transition}
+              projection={records.filter(record => record.transition_ids?.includes(edge.transition.id))}/>
+          </React.Fragment>)}
         </div>
       </StateBoardPopover>}
     </div>

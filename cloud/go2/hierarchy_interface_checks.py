@@ -23,19 +23,19 @@ def _card():
     }
 
 
-def test_regions_preserve_flat_body_and_rest_observations():
+def test_regions_own_body_and_rest_observations():
     card = normalize_card(_card())
     graph = card["state_machine"]
     regions = {region["id"]: region for region in graph["regions"]}
-    assert graph["state_field"] == "fsm_state"
+    assert "state_field" not in graph
     assert regions["body"]["state_field"] == "body_state"
-    assert regions["body"]["states"] == graph["states"]
+    assert "states" not in graph
     assert regions["body"]["retain_when_inactive"] is True
     assert regions["life"]["parent"] == {"region": "activity", "state": "active"}
     assert regions["activity"]["parent"] == {"region": "connection", "state": "online"}
-    assert graph["views"]["moving"]["label"] == "移动"
+    assert regions["body"]["views"]["moving"]["label"] == "移动"
     # No dynamic value is baked into capability metadata.
-    assert card["state"] == {}
+    assert "state" not in card
 
 
 @pytest.mark.parametrize("mutation", ["duplicate", "missing_parent", "cycle", "bad_edge", "bad_view"])
@@ -56,10 +56,11 @@ def test_invalid_optional_regions_are_rejected(mutation):
         normalize_card(card)
 
 
-def test_legacy_flat_cards_keep_working_without_regions():
+def test_cards_without_regions_are_rejected():
     card = _card()
     del card["state_machine"]["regions"]
-    assert "regions" not in normalize_card(card)["state_machine"]
+    with pytest.raises(ValueError, match="regions"):
+        normalize_card(card)
 
 
 def test_registry_rejects_old_revision_retired_epoch_and_legacy_updates():
@@ -77,7 +78,7 @@ def test_registry_rejects_old_revision_retired_epoch_and_legacy_updates():
     assert registry._states["go2"]["body_state"] == "standing"
     send("second", 0, None)
     send("first", 100, "lying")
-    registry.handle_message(topic, json.dumps({"fsm_state": "standing"}))
+    registry.handle_message(topic, json.dumps({"body_state": "standing"}))
     assert registry._states["go2"]["epoch"] == "second"
     assert registry._states["go2"]["body_state"] is None
     send("second", 1, "lying")
@@ -89,7 +90,7 @@ def test_mqtt_uses_same_snapshot_and_preserves_pending_and_gate(monkeypatch):
     snapshot = {
         "state_schema_version": 2, "epoch": "snapshot", "revision": 3,
         "connected": True, "connection_state": "online", "activity_state": "rest",
-        "life_state": None, "body_state": "lying", "fsm_state": "lying",
+        "life_state": None, "body_state": "lying",
         "available_actions": [], "available_life_actions": ["wake"],
         "life_blocked_reasons": {"request_rest": "already_resting"},
         "blocked_actions": {"StandUp": "resting"},
@@ -196,7 +197,7 @@ def test_rest_peer_and_space_keep_null_life_region():
 
 def test_public_life_skill_and_device_projection_retain_contract():
     from cloud.api.devices import _card_response
-    from cloud.go2.card import get_card_skill
+    from cloud.go2.tools.registry import get_card_skill
     from cloud.go2.tools.registry import get_tool_spec
     skill = get_card_skill("go2_life")
     assert skill["params_schema"] == get_tool_spec("go2_life").params_schema

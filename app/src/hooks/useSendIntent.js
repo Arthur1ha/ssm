@@ -1,10 +1,8 @@
 /* useSendIntent — intents enter FastAPI; feedback returns on session-scoped SSE. */
-const STAGE_LABELS = { planning: '正在规划', executing: '正在执行', summarizing: '正在汇总', finished: '任务已结束' };
 
 function useSendIntent() {
   const { useState, useCallback, useEffect, useRef } = React;
   const [thinking, setThinking] = useState(false);
-  const [thinkingText, setThinkingText] = useState('');
   const activeRef = useRef(null);
   const pendingRunRef = useRef(null);
   const seenRef = useRef(new Set());
@@ -15,7 +13,6 @@ function useSendIntent() {
     clearTimeout(active.timeoutId);
     activeRef.current = null;
     setThinking(false);
-    setThinkingText('');
   }, []);
 
   const resetTimeout = useCallback((milliseconds = 150000) => {
@@ -51,21 +48,11 @@ function useSendIntent() {
         if (payload.agent_id === 'cloud_orchestrator') finish();
         return;
       }
-      if (payload.type === 'run_stage') {
-        resetTimeout();
-        setThinkingText(describeRunProgress(payload));
-        active.callbacks.onProgress?.(payload);
-        if (payload.stage === 'finished' && payload.status === 'needs_clarification') {
-          pendingRunRef.current = payload.run_id || null;
-        }
-        return;
-      }
-      if (payload.type === 'agent_progress') {
+      if (['run_stage', 'agent_progress'].includes(payload.type)) {
         if (payload.stage === 'finished' && payload.status === 'needs_clarification') {
           pendingRunRef.current = payload.run_id || null;
         }
         resetTimeout();
-        setThinkingText(describeRunProgress(payload));
         active.callbacks.onProgress?.(payload);
         return;
       }
@@ -77,12 +64,8 @@ function useSendIntent() {
       const stage = payload.stage;
       if (!stage) return;
       const callbacks = active.callbacks;
-      if (stage === 'planning' || stage === 'executing') {
+      if (['planning', 'executing', 'ack'].includes(stage)) {
         resetTimeout();
-        setThinkingText(`正在核对可用设备与当前状态，处理：${active.goal}`);
-      } else if (stage === 'ack') {
-        resetTimeout();
-        setThinkingText(STAGE_LABELS.executing);
       } else if (stage === 'question') {
         pendingRunRef.current = payload.run_id || null;
         if (!payload.question) callbacks.onStatus?.('请补充信息');
@@ -103,9 +86,8 @@ function useSendIntent() {
   const send = useCallback(async (text, callbacks = {}) => {
     if (!text.trim() || activeRef.current) return;
     setThinking(true);
-    setThinkingText(`正在核对可用设备与当前状态，处理：${text.trim()}`);
     activeRef.current = { callbacks, timeoutId: null, traceId: null,
-      goal: text.trim(), pendingEvents: [] };
+      pendingEvents: [] };
     resetTimeout(150000);
     const body = { text: text.trim() };
     if (pendingRunRef.current) body.resume_run_id = pendingRunRef.current;
@@ -133,7 +115,7 @@ function useSendIntent() {
     }
   }, [finish, resetTimeout]);
 
-  return { thinking, thinkingText, send };
+  return { thinking, send };
 }
 
 window.useSendIntent = useSendIntent;

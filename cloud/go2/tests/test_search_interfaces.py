@@ -9,7 +9,6 @@ from cloud.peers.policy import permits_skill
 
 
 def test_search_media_is_temporary_bounded_and_expiring(monkeypatch, tmp_path):
-    monkeypatch.setattr(activity_media, '_ROOT', tmp_path)
     monkeypatch.setattr(activity_media, '_TEMP_IMAGES', activity_media.OrderedDict())
     monkeypatch.setattr(activity_media, '_MAX_IMAGES', 2)
     monkeypatch.setattr(activity_media.time, 'monotonic', lambda: 100.)
@@ -69,7 +68,7 @@ async def test_router_natural_chat_admits_long_search_without_explicit_skill(mon
     from cloud.go2 import router, tasks
     from cloud.agents.go2 import graph
     from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from types import SimpleNamespace
     captured = {}
     class Registry:
@@ -99,7 +98,7 @@ async def test_visitor_cannot_change_search_bounds(monkeypatch):
 @pytest.mark.asyncio
 async def test_scope_rejects_other_localization_session(monkeypatch):
     from cloud.go2 import router
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     monkeypatch.setattr(router.go2, 'is_connected', True)
     monkeypatch.setattr(router.go2, '_odom_session_id', 'new')
     context = ExecutionContext('admin', 'admin', True, expires_at=int(time.time()) + 60)
@@ -112,7 +111,7 @@ async def test_scope_rejects_other_localization_session(monkeypatch):
 async def test_task_stop_without_lease_still_requires_device_feedback(monkeypatch):
     from cloud.go2 import router
     from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     monkeypatch.setattr(router.control_lease, 'snapshot', lambda: None)
     async def stop(**_):
         return {'result': 'accepted', 'reason': 'stop_unconfirmed'}
@@ -129,24 +128,25 @@ async def test_map_diagnostic_planning_does_not_block_sensor_loop(monkeypatch):
     import numpy as np
     from cloud.go2 import router
     from cloud.go2.navigation import frontier
-    from cloud.go2.execution import SYSTEM_CONTEXT
+    from cloud.space.execution import SYSTEM_CONTEXT
 
     entered = threading.Event()
     release = threading.Event()
     grid = SimpleNamespace(measured_floor_z=0., has_free_space_evidence=True,
         cells=np.ones((2, 2)), obstacles=np.zeros((2, 2), dtype=bool),
+        origin=[0.,0.], width=[2,2], resolution=.05, map_session='test',
         is_body_clear=lambda *args: True)
     robot = SimpleNamespace(voxel_raw={'data': {}}, occupancy_grid=grid,
         odom={'x': 0., 'y': 0., 'heading': 0.}, sensor_diagnostics={'pose': {'age_s': .01}})
 
-    def slow_selection(*args):
+    def slow_selection(*args, **kwargs):
         entered.set()
         if not release.wait(.8):
             raise AssertionError('event loop blocked while planning')
-        return (1., 0.)
+        return SimpleNamespace(target=SimpleNamespace(as_dict=lambda: {'x':1.,'y':0.}))
 
     monkeypatch.setattr(router, 'go2', robot)
-    monkeypatch.setattr(frontier, 'find_frontier_target', slow_selection)
+    monkeypatch.setattr(frontier, 'select_observation_target', slow_selection)
     monkeypatch.setattr(frontier, 'raycast_directions', lambda *args: {})
     monkeypatch.setattr(frontier, 'reachable_summary', lambda *args: {})
     task = asyncio.create_task(router.go2_map_debug(SYSTEM_CONTEXT))
@@ -159,7 +159,7 @@ async def test_map_diagnostic_planning_does_not_block_sensor_loop(monkeypatch):
         assert not task.done()
         release.set()
         result = await asyncio.wait_for(task, 1)
-        assert result['grid']['frontier_target'] == (1., 0.)
+        assert result['grid']['observation_target'] == {'x':1.,'y':0.}
         assert result['diagnostics']['pose']['age_s'] == .01
     finally:
         release.set()
@@ -170,14 +170,14 @@ async def test_map_diagnostic_planning_does_not_block_sensor_loop(monkeypatch):
 async def test_admin_can_explicitly_configure_reachable_space_without_rectangle(monkeypatch):
     from types import SimpleNamespace
     from cloud.go2 import router
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2 import state as device_state
     from cloud.agents.go2.workflows import search
     monkeypatch.setattr(search, '_configured_scope', None)
     monkeypatch.setattr(search, '_exploration_coverage', None)
     monkeypatch.setattr(router, 'go2', SimpleNamespace(is_connected=True,
-        _odom_session_id='current', fsm_state='standing'))
+        _odom_session_id='current', body_state='standing'))
     monkeypatch.setattr(navigator, 'owner_session_id', None)
     monkeypatch.setattr(device_state, 'runtime_for', lambda _: SimpleNamespace(data={'life_state':'idle'}))
     context = ExecutionContext('operator', 'admin', True, expires_at=int(time.time())+60)

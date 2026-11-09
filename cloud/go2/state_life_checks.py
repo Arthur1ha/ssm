@@ -10,7 +10,7 @@ from cloud.go2.connection.webrtc import Go2Connection
 from cloud.go2.connection.fsm import CommandBlocked
 from cloud.go2.state import Go2State
 from cloud.go2.control import ControlLease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 def robot_at(body='standing'):
@@ -27,7 +27,7 @@ def robot_at(body='standing'):
 def test_connecting_epoch_and_initial_telemetry_do_not_guess_standing():
     robot = Go2Connection()
     first = robot.state_snapshot()
-    robot.fsm_state = 'connecting'
+    robot.runtime.connection('connecting')
     robot.is_connected = True
     for _ in range(4):
         robot._on_state({'data': {'body_height': .32, 'mode': 0, 'velocity': [0, 0, 0]}})
@@ -43,17 +43,17 @@ async def test_remote_zero_movement_and_exit_have_separate_facts():
     robot = robot_at()
     await robot.send_command('EnterMoveControl')
     assert robot.state_snapshot()['control_mode'] == 'remote'
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
     robot.move_velocity(.1, 0, 0)
-    assert robot.fsm_state == 'standing'  # Sending velocity is not observation.
+    assert robot.body_state == 'standing'  # Sending velocity is not observation.
     robot._on_state({'data': {'velocity': [.1, 0, 0]}})
-    assert robot.fsm_state == 'moving'
+    assert robot.body_state == 'moving'
     robot.move_velocity(0, 0, 0)
     assert robot.state_snapshot()['control_mode'] == 'remote'
-    assert robot.fsm_state is None  # Need physical stopped evidence.
+    assert robot.body_state is None  # Need physical stopped evidence.
     for _ in range(3):
         robot._on_state({'data': {'velocity': [0, 0, 0]}})
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
     await robot.send_command('StopMove')
     assert robot.state_snapshot()['control_mode'] == 'normal'
 
@@ -63,7 +63,7 @@ def test_emergency_zero_preserves_stable_body_in_rest(body):
     robot = robot_at(body)
     robot.runtime.request_rest()
     robot.stop_velocity()
-    assert robot.fsm_state == body
+    assert robot.body_state == body
     assert robot.state_snapshot()['activity_state'] == 'rest'
     with pytest.raises(CommandBlocked):
         robot.move_velocity(.1, 0, 0)
@@ -309,7 +309,7 @@ async def test_explore_handoff_waits_old_navigation_cleanup_and_fresh_stop(monke
         robot._on_state({'data': {'velocity': [0, 0, 0]}})
     await asyncio.wait_for(handoff, timeout=1)
     assert robot.runtime.data['life_state'] == 'idle'
-    assert robot.fsm_state == 'standing'
+    assert robot.body_state == 'standing'
     robot._conn.datachannel.pub_sub.publish_request_new.assert_not_awaited()
 
 

@@ -1,15 +1,11 @@
 /* Card-owned spatial layout. State clicks delegate actions; edges inspect rules. */
-function FsmGraph({ nodes, edges, states = [], transitions = [], current = '', views = {},
+function FsmGraph({ nodes:graphNodes, edges:graphEdges,
   selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
   const svgRef = useRef(null);
   const gesture = useRef({ points:new Map(), moved:false, blockClick:false });
   const marker = useRef('fsm-arrow-' + Math.random().toString(36).slice(2));
-  const graphNodes = nodes || states.map(value => ({id:value,value,label:views[value]?.label || value,
-    view:views[value],current:value === current}));
-  const graphEdges = edges || transitions.filter(edge => !edge.safety && !edge.graph_hidden)
-    .map((transition,index) => ({...transition,id:String(index),transition,active:transition.src === current}));
   const {width,height} = stateGraphDimensions(graphNodes.length, diagram);
   const cx = width/2, cy = height/2;
   const radius = graphNodes.length === 1 ? 0 : graphNodes.length < 6 ? 188 : 244;

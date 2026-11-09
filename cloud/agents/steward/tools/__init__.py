@@ -43,14 +43,10 @@ def _public_view(cards: dict) -> list:
             for uid, card in cards.items()]
 
 def _wait_mqtt_result(task_id: str, session_id: str, deadline: float,
-                      *, unit_id: str | None = None) -> dict:
+                      *, unit_id: str) -> dict:
+    from cloud.esp32.physical_tasks import get as get_physical_result
     while time.time() < deadline:
-        result = None
-        if unit_id is not None:
-            from cloud.esp32.physical_tasks import get as get_physical_result
-            result = get_physical_result(task_id, unit_id=unit_id, session_id=session_id)
-        if not result or result.get("result") in {"accepted", "executing", "unknown", "timeout"}:
-            result = transport._state.get_task_result(task_id, session_id) if transport._state else result
+        result = get_physical_result(task_id, unit_id=unit_id, session_id=session_id)
         if isinstance(result, dict):
             status = result.get("result")
             if status in {"ok", "blocked", "rejected", "error", "cancelled", "timeout"}:

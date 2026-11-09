@@ -54,17 +54,16 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 - 可选 `last_action` 保存最近动作终态，包含动作名、关联 ID、阶段、结果与确认依据；`body_observation_source`、`body_observed_at`、`body_telemetry_fresh` 解释身体观测来源与新鲜度。`exploration_enabled` 表示当前探索许可，和 `autonomy_mode` 配置及 `life_state` 当前任务分别表达。`last_transition` 提供最近事实变化原因。
 
 `body_observation_source=joint_posture` 表示结合当前连接的关节、IMU 和平面运动反馈检查姿态，不是仅靠高度或开机默认值。当前动作阶段可由本次发送后的关节运动证据进入 `executing`；`last_action.phase=completed|recovered|rejected|error` 与 `result` 分开解释：恢复到可靠姿态不等于之前超时或取消的动作已经成功。动作目录声明 `completion=joint_posture` 时，仅在相应真实观测可用时等待完成；缺少该反馈仍返回请求接受且保持未确认。
-- 迁移字段 `fsm_state` 只从新快照投影：离线/连接中为旧占位，在线为身体状态。
 
 同 epoch 按 revision 排序，旧 revision 不覆盖当前状态；相同 revision 只有事实内容一致的非 retained 心跳可刷新接收时间，不允许改写事实。新 epoch 可从较小 revision 开始。
 消费者拒绝已退役 epoch 的晚到事件。`ts` 用于新鲜度，不用于代替版本排序。
 离线、重连和服务重启均不代表站立或动作完成，也不重发未完成身体动作。
 RPC 接受仅表示请求接受；缺少可靠完成证据时保持未确认，不解锁依赖动作。
 
-Card 的 `state_machine.regions` 是可选静态声明，区域包含 `id`、`label`、`state_field`、
+Card 的 `state_machine.regions` 是唯一静态拓扑声明，区域包含 `id`、`label`、`state_field`、
 `states`、`transitions`、`views`，可用 `parent:{region,state}` 表达激活关系。
 Go2 声明 connection、activity、life、body 四区；body 的 `retain_when_inactive` 保留休息期间的身体展示。
-顶层平面身体图仍保留；灯也通过同一结构声明自己的照明区域，旧平面卡在页面消费边界适配单区。`primary_region`、区域实时动作门禁绑定、命令与自动事件转移等公共字段见 [Agent Card 契约](agent-card.md)。实时值只来自 state/SSE，不复制进静态 Card。
+灯也通过同一结构声明自己的照明区域；状态与转换只在区域中声明，删除根层平面副本和旧卡适配。`primary_region`、区域实时动作门禁绑定、命令与自动事件转移等公共字段见 [Agent Card 契约](agent-card.md)。实时值只来自 state/SSE，不复制进静态 Card。
 
 生活控制通过已认证 `POST /api/commands/go2` 发送
 `{action:"LIFE",params:{action:"request_rest|wake|start_explore|stop_explore"}}`，
@@ -78,7 +77,10 @@ Go2 声明 connection、activity、life、body 四区；body 的 `retain_when_in
 `autonomy_mode=manual|reactive`、`control_state=manual|ready|holding`、
 `control_hold_until`（Unix 秒或 null）和独立的严格递增变化游标 `control_ts`。
 这些值来自已有灯 Agent 的模式和用户／同伴让位窗口；让位到期由现有服务投递变化。
-消费者分别按物理 `ts` 与云端 `control_ts` 合并，云端投影不更新物理新鲜度，
+消费者分别按物理游标与云端 `control_ts` 合并：有 `epoch/revision` 时沿用版本排序；
+无版本的状态优先使用 API 为实时 MQTT 消息记录的 `_received_at`，两份快照均无接收时间时才兼容使用 `ts`。
+设备重启或未校时不能使新收到的物理状态被旧 `ts` 卡住；无实时接收证据的 retained 快照不能覆盖已有实时状态。
+云端投影保留原 `_received_at`，不更新物理新鲜度，
 不覆盖原 `ism`、颜色、亮度或 MQTT status/LWT，也不发布到 ESP32 的 retained state topic。
 静态控制区域和公共字段说明见 [Agent Card 契约](agent-card.md)。
 
@@ -97,10 +99,10 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/task/{unit_id}/{task_id}` | Cloud | `{"task_id":"...","session_id":"...","action":"SET_STATE","params":{"state":"ON"},"actor":"admin\|visitor\|agent","persist":false,"space_id":"main","ts":1234567890}`；灯的正式命令为 `SET_STATE`（`ON/OFF`）、`SET_COLOR`（`r/g/b/brightness`）、`BLINK`（`r/g/b/count`）；v3 默认 `count=0` 持续闪烁，只有明确指定 `1..20` 次数时才自动结束。持续闪烁启动后即回传 `ok`（`ism_state=BLINKING`），有限次数则等待恢复后回传成功。旧固件的 `SET_STATE BRIGHT/DIM` 仅在迁移期兼容；不携带云端 service token，发布者由 broker ACL 限制为 API/编排器账号 |
-| `ssm/result/{unit_id}/{task_id}` | ESP32 | `{"task_id":"...","session_id":"...","result":"executing\|ok\|cancelled\|blocked\|error","ism_state":"ON","ts":...}`；旧固件可省略 `session_id`，编排器按已登记任务归属补齐 |
+| `ssm/task/{unit_id}/{task_id}` | Cloud | `{"task_id":"...","session_id":"...","action":"SET_STATE","params":{"state":"ON"},"actor":"admin\|visitor\|agent","persist":false,"space_id":"main","ts":1234567890}`；灯的正式命令为 `SET_STATE`（`ON/OFF`）、`SET_COLOR`（`r/g/b/brightness`）、`BLINK`（`r/g/b/count`）；v3 默认 `count=0` 持续闪烁，只有明确指定 `1..20` 次数时才自动结束。持续闪烁启动后即回传 `ok`（`ism_state=BLINKING`），有限次数则等待恢复后回传成功。不携带云端 service token，发布者由 broker ACL 限制为 API/编排器账号 |
+| `ssm/result/{unit_id}/{task_id}` | ESP32 | `{"task_id":"...","session_id":"...","result":"executing\|ok\|cancelled\|blocked\|error","ism_state":"ON","ts":...}`；仅接收与持久任务账本中已登记归属一致的回执 |
 
-任务消息可附带 `trace_id`（用户任务根 ID）、`run_id`（发起智能体运行）和 `request_id`（同伴请求）；ESP32 在回执中回传收到的关联字段，异步 `BLINK` 完成回执也沿用同一组值。旧固件不回传时，云端按已登记 `task_id` 补齐查询关联。这些字段只用于观测，不参与权限判断或设备动作选择。
+任务消息可附带 `trace_id`（用户任务根 ID）、`run_id`（发起智能体运行）和 `request_id`（同伴请求）；ESP32 在回执中回传收到的关联字段，异步 `BLINK` 完成回执也沿用同一组值。这些字段只用于观测，不参与权限判断或设备动作选择。
 
 > 注：ESP32 云端离线时由 `local_rules` 直接调用 `TriggerMap.exec_command` 执行兜底动作（设备内函数调用，不经 MQTT）。
 

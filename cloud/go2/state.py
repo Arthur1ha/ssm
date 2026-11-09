@@ -97,35 +97,37 @@ def life_transitions(region):
         if spec.region != region:
             continue
         for source in spec.sources:
-            # Describe prerequisites positively; runtime rejection reasons stay
-            # in LIFE_GUARDS and are only reported for an actual request.
-            conditions = []
-            labels = {"connected": "已连接", "active": "已唤醒", "idle": "空闲",
-                      "stable": "姿态稳定", "standing": "站立", "no_body_action": "空闲",
-                      "no_motion": "空闲", "not_remote": "非遥控", "exploring": "探索中"}
+            # Source and parent states are already visible on the diagram.
+            # Keep the remaining guards beside the trigger that needs them.
+            guard_labels = {"stable": "姿态已确认", "standing": "站立已确认",
+                            "no_body_action": "无待确认动作", "no_motion": "无运动任务",
+                            "not_remote": "非遥控", "exploring": "探索已开启", "idle": "待命"}
+            rule_conditions = ["收到" + spec.label + "指令"]
+            if spec.required_actor == "admin":
+                rule_conditions[0] = "收到管理员的" + spec.label + "指令"
             for guard in spec.guards:
+                if guard not in guard_labels or guard == "idle" and source == "idle":
+                    continue
                 if guard == "stable" and "standing" in spec.guards:
                     continue
-                label = labels[guard]
-                if label not in conditions:
-                    conditions.append(label)
-            if spec.required_actor == "admin":
-                conditions.append("管理员")
+                rule_conditions.append(guard_labels[guard])
             transitions.append({
                 "src": source, "dst": spec.target, "trigger": spec.action,
                 "label": spec.label, "action": "LIFE", "params": {"action": spec.action},
                 "training_fixed_params": ["action"],
                 **({"training_disabled": True} if spec.action in {"start_explore", "stop_explore"} else {}),
                 "availability_key": spec.action,
-                "description": " · ".join(conditions),
+                "trigger_condition": "，且".join(rule_conditions),
                 **({"required_actor": spec.required_actor} if spec.required_actor else {}),
                 **({"available_only": True} if source == spec.target else {}),
             })
     if region == "life":
         for target in LIFE_TASK_STATES:
             transitions.extend([
-                {"src": "idle", "dst": target, "trigger": "task_accepted", "label": "接到" + LIFE_VIEWS["life"][target]["label"] + "任务"},
-                {"src": target, "dst": "idle", "trigger": "task_finished", "label": LIFE_VIEWS["life"][target]["label"] + "结束"},
+                {"src": "idle", "dst": target, "trigger": "task_accepted", "label": "接到" + LIFE_VIEWS["life"][target]["label"] + "任务",
+                 "trigger_condition": LIFE_VIEWS["life"][target]["label"] + "任务已接纳"},
+                {"src": target, "dst": "idle", "trigger": "task_finished", "label": LIFE_VIEWS["life"][target]["label"] + "结束",
+                 "trigger_condition": LIFE_VIEWS["life"][target]["label"] + "任务结束，且无待确认的任务动作"},
             ])
     return transitions
 
@@ -280,9 +282,7 @@ class Go2State:
 
     @synchronized
     def snapshot(self):
-        d = deepcopy(self.data)
-        d['fsm_state'] = d['body_state'] if d['connected'] else d['connection_state']
-        return d
+        return deepcopy(self.data)
 
 
 def runtime_for(robot):

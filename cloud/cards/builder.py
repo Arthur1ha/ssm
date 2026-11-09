@@ -1,116 +1,21 @@
 """cloud.cards.builder — 将 ESP32 manifest 或自描述 card payload 组装成 AgentCard。
 
-构建逻辑：
-- build_card_from_manifest：从 MQTT manifest 字典构建（ESP32 设备）。
-- parse_card：从自描述 card payload 构建（Go2 等 HTTP 设备，Task 2 接入）。
+只构建当前 ESP32 manifest 的静态能力声明；自描述卡直接通过统一校验。
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 
-from cloud.cards.schema import AgentCard, SkillDef, StateMachine, Transport
+from cloud.cards.schema import AgentCard, StateRegion
 from cloud.cards.validation import normalize_card
 from cloud.esp32.tool_registry import LAMP_SKILLS, lamp_skill
 from edge.ism import LED_TABLE, LED_STATES, BLINK_DONE_TARGETS
 from edge.lamp_contract import BLINK_DEFAULT, FSM_VERSION
 
 
-# ── 声明式技能映射表 ──────────────────────────────────────────────
-# 将 ESP32 manifest.capabilities 中的每条 action 映射到完整 SkillDef 结构。
-# 新增智能体 action 只需在此表添加一条，build_card_from_manifest 无需修改。
-CAPABILITY_SKILLS: dict[str, SkillDef] = {
-    **{action: lamp_skill(action, legacy=True) for action in LAMP_SKILLS},
-    "PLAY": {
-        "id": "play_sound",
-        "name": "播放声音",
-        "description": "播放设备预置提示音",
-        "tags": ["actuator", "sound"],
-        "params_schema": {
-            "type": "object",
-            "required": ["pattern"],
-            "properties": {
-                "pattern": {"type": "string", "enum": ["NOTIFY", "ALERT"]},
-            },
-        },
-        "invoke": {"action": "PLAY"},
-    },
-}
-
-# ── 声明式状态机表 ────────────────────────────────────────────────
-# 旧固件没有 fsm_version；保留其拓扑快照，不能依赖升级后的 edge.ism。
-_LED_LABELS = {
-    "CMD_OFF": "关灯", "CMD_BRIGHT": "调亮", "CMD_DIM": "调暗",
-    "CMD_COLOR": "彩光", "CMD_BLINK": "闪烁",
-}
-
+# Lamp topology is projected directly from the current edge contract.
 _LED_COMMANDS = {
-    "CMD_OFF": ("SET_STATE", {"state": "OFF"}),
-    "CMD_BRIGHT": ("SET_STATE", {"state": "BRIGHT"}),
-    "CMD_DIM": ("SET_STATE", {"state": "DIM"}),
-    "CMD_COLOR": ("SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
-    "CMD_BLINK": ("BLINK", {"r": 255, "g": 255, "b": 255, "count": 3}),
-}
-_LEGACY_LED_TABLE = {
-    ("OFF", "CMD_OFF"): "OFF", ("OFF", "CMD_BRIGHT"): "BRIGHT",
-    ("OFF", "CMD_DIM"): "DIM", ("OFF", "CMD_COLOR"): "COLOR",
-    ("OFF", "CMD_BLINK"): "BLINK",
-    ("BRIGHT", "CMD_OFF"): "OFF", ("BRIGHT", "CMD_DIM"): "DIM",
-    ("BRIGHT", "CMD_COLOR"): "COLOR", ("BRIGHT", "CMD_BLINK"): "BLINK",
-    ("DIM", "CMD_OFF"): "OFF", ("DIM", "CMD_BRIGHT"): "BRIGHT",
-    ("DIM", "CMD_COLOR"): "COLOR", ("DIM", "CMD_BLINK"): "BLINK",
-    ("COLOR", "CMD_OFF"): "OFF", ("COLOR", "CMD_BRIGHT"): "BRIGHT",
-    ("COLOR", "CMD_DIM"): "DIM", ("COLOR", "CMD_COLOR"): "COLOR",
-    ("COLOR", "CMD_BLINK"): "BLINK",
-    ("BLINK", "CMD_OFF"): "OFF", ("BLINK", "CMD_BRIGHT"): "BRIGHT",
-    ("BLINK", "CMD_DIM"): "DIM", ("BLINK", "CMD_COLOR"): "COLOR",
-}
-_LED_EDGES = [
-    (src, trigger, dst, *_LED_COMMANDS[trigger])
-    for (src, trigger), dst in _LEGACY_LED_TABLE.items()
-]
-
-FSM_DEFS: dict[str, StateMachine] = {
-    "led": {
-        "state_field": "ism",
-        "states": ["OFF", "DIM", "BRIGHT", "COLOR", "BLINK", "ERROR"],
-        "transitions": [
-            {"src": s, "dst": d, "trigger": t, "label": _LED_LABELS[t], "action": a, "params": p,
-             **({"training_fixed_params": ["state"]} if a == "SET_STATE" else {})}
-            for (s, t, d, a, p) in _LED_EDGES
-        ],
-        "initial": "OFF",
-        "views": {
-            "OFF": {
-                "label": "熄灭", "description": "灯环熄灭，等待下一条照明指令。",
-                "type": "light_ring",
-            },
-            "DIM": {
-                "label": "柔光", "description": "低亮暖光，适合休息和夜间环境。",
-                "type": "light_ring",
-            },
-            "BRIGHT": {
-                "label": "亮光", "description": "高亮度照明，适合工作和阅读。",
-                "type": "light_ring",
-            },
-            "COLOR": {
-                "label": "彩光", "description": "以设定的颜色和亮度营造空间氛围。",
-                "type": "light_ring",
-            },
-            "BLINK": {
-                "label": "闪烁", "description": "灯环间歇闪烁，用于提醒或引起注意。",
-                "type": "light_ring",
-            },
-            "ERROR": {
-                "label": "异常", "description": "灯光执行异常，请检查设备连接与供电。",
-                "type": "light_ring",
-            },
-        },
-    },
-}
-
-# The current topology is the edge ISM contract, not a second handwritten table.
-_LED_V2_COMMANDS = {
     "CMD_ON": ("开灯", "SET_STATE", {"state": "ON"}),
     "CMD_OFF": ("关灯", "SET_STATE", {"state": "OFF"}),
     "CMD_COLOR": ("调色", "SET_COLOR", {"r": 255, "g": 200, "b": 80, "brightness": 180}),
@@ -121,23 +26,24 @@ _LED_V2_COMMANDS = {
 def _current_led_transitions():
     transitions = []
     for (src, trigger), dst in LED_TABLE.items():
-        label, action, params = _LED_V2_COMMANDS[trigger]
+        label, action, params = _LED_COMMANDS[trigger]
         transitions.append({"src": src, "dst": dst, "trigger": trigger,
                             "label": label, "action": action, "params": deepcopy(params),
+                            "trigger_condition": f"收到{label}指令",
                             "graph_hidden": trigger == "CMD_COLOR",
                             **({"training_events": ["sensor.sound_detected"]} if action == "BLINK" else {}),
                             **({"training_fixed_params": ["state"]} if action == "SET_STATE" else {})})
     for target in BLINK_DONE_TARGETS:
         transitions.append({"src": "BLINKING", "dst": target, "trigger": "BLINK_DONE",
                             "label": "闪烁结束",
+                            "trigger_condition": "指定次数完成，且闪烁前为" + ("熄灭" if target == "OFF" else "常亮"),
                             "action": "", "params": {}, "graph_hidden": False})
     return transitions
 
 
-NEW_LED_FSM: StateMachine = {
+LED_REGION: StateRegion = {
     "state_field": "ism",
     "states": list(LED_STATES),
-    "initial": "OFF",
     "transitions": _current_led_transitions(),
     "views": {
         "OFF": {"label": "熄灭", "description": "灯环熄灭。",
@@ -148,8 +54,6 @@ NEW_LED_FSM: StateMachine = {
                      "type": "light_ring"},
     },
 }
-
-NEW_SET_STATE_SKILL: SkillDef = lamp_skill("SET_STATE")
 
 # ── 声明式模式轴表 ────────────────────────────────────────────────
 # 灯只有「自主性」一个轴；端点指向现有 /api/esp32/autonomy（不改后端）。
@@ -162,11 +66,9 @@ _LED_MODES: list[dict] = [{
         {"value": "reactive", "label": "自动调光", "description": "灯自发根据环境调色温与亮度"},
     ],
     "get": "/api/esp32/autonomy",
-    "set": "/api/esp32/autonomy",
     "set_action": "set_mode",
 }]
 
-MODE_DEFS: dict[str, list[dict]] = {"led": _LED_MODES}
 
 # ── 声明式快捷指令表 ──────────────────────────────────────────────
 # 设备页对话的快捷词，由 card.suggestions 驱动（前端无设备特判）。
@@ -177,7 +79,6 @@ _LED_SUGGESTIONS: list[str] = [
     "闪烁三次提醒我",
 ]
 
-SUGGESTION_DEFS: dict[str, list[str]] = {"led": _LED_SUGGESTIONS}
 
 _LED_COLOR_SWATCHES: list[dict] = [
     {"label": "暖白", "r": 255, "g": 226, "b": 190, "brightness": 180},
@@ -191,127 +92,54 @@ _LED_WIDGETS: list[dict] = [{
     "placement": "controls",
     "order": 10,
     "action": "SET_COLOR",
-    "params_schema": lamp_skill("SET_COLOR")["params_schema"],
     "swatches": _LED_COLOR_SWATCHES,
 }]
 
-WIDGET_DEFS: dict[str, list[dict]] = {"led": _LED_WIDGETS}
-
-def _copy_widgets(widgets: list[dict]) -> list[dict]:
-    copied: list[dict] = []
-    for widget in widgets:
-        item = dict(widget)
-        if "swatches" in item:
-            item["swatches"] = [dict(swatch) for swatch in item["swatches"]]
-        copied.append(item)
-    return copied
-
-
-def _fsm_key(manifest: dict) -> str:
-    """选用哪张 FSM：优先 manifest['fsm'] 提示，否则按 name/unit_id 猜。"""
-    hint = manifest.get("fsm")
-    if hint in FSM_DEFS:
-        return hint
-    name = (manifest.get("name", "") + manifest.get("unit_id", "")).lower()
-    if any(k in name for k in ("led", "rgb", "ws2812", "ring", "灯")):
-        return "led"
-    return ""
-
 
 def build_card_from_manifest(manifest: dict) -> AgentCard:
-    """从 ESP32 MQTT manifest 字典组装完整 AgentCard。
-
-    unit_id 为唯一标识（注册表 key、topic、URL 都用它）。
-    skills 只映射 CAPABILITY_SKILLS 中已知的 action，未知 action 静默跳过。
-    online 固定为 True（收到 manifest 即表示设备在线）。
-    state 固定为空 {}（动态状态由 state topic 单独维护）。
-    """
+    """Build a current static Card from the edge capability declaration."""
     unit_id = manifest.get("unit_id", "")
-    if _fsm_key(manifest) == "led" and manifest.get("fsm_version") not in (None, 1, 2, FSM_VERSION):
-        raise ValueError("unsupported lamp fsm_version")
-    name = manifest.get("name", unit_id)
-    agent_type = manifest.get("agent_type", "sensor")
-    description = manifest.get("description") or f"{name} 智能体"
-
-    transport: Transport = {
-        "kind": "mqtt",
-        "task_topic": f"ssm/task/{unit_id}/{{task_id}}",  # 用 unit_id，保证 ESP32 能收到
-    }
-
-    capabilities: list[dict] = manifest.get("capabilities", [])
-    capability_actions = {cap.get("action", "") for cap in capabilities}
-    skills: list[SkillDef] = []
+    capabilities = manifest.get("capabilities", [])
+    actions = {cap.get("action") for cap in capabilities}
+    is_lamp = bool(actions.intersection(LAMP_SKILLS))
+    if is_lamp and manifest.get("fsm_version") != FSM_VERSION:
+        raise ValueError(f"unsupported lamp fsm_version={manifest.get('fsm_version')!r} for {unit_id}; "
+                         f"expected {FSM_VERSION}, update the ESP32 scripts")
+    skills = []
     for cap in capabilities:
-        action = cap.get("action", "")
-        current_lamp = _fsm_key(manifest) == "led" and manifest.get("fsm_version") in (2, FSM_VERSION)
-        skill = (lamp_skill(action, fsm_version=manifest["fsm_version"]) if current_lamp and action in LAMP_SKILLS
-                 else CAPABILITY_SKILLS.get(action))
-        if current_lamp and action in LAMP_SKILLS and cap.get("params_schema") is not None:
-            if cap["params_schema"] != skill["params_schema"]:
-                raise ValueError("lamp manifest parameter contract does not match fsm_version")
-        if skill:
-            skills.append(skill)
-    if agent_type == "actuator" and _fsm_key(manifest) == "led" and "SET_COLOR" in capability_actions:
+        action = cap.get("action")
+        if action not in LAMP_SKILLS:
+            continue
+        skill = lamp_skill(action)
+        if cap.get("params_schema") is not None and cap["params_schema"] != skill["params_schema"]:
+            raise ValueError("lamp manifest parameter contract does not match fsm_version")
+        skills.append(skill)
+    card = {
+        "card_schema_version": 1,
+        "version": manifest["firmware_ver"],
+        "unit_id": unit_id,
+        "device_id": manifest.get("parent_id") or unit_id,
+        "name": manifest["name"],
+        "description": manifest.get("description") or f"{manifest['name']} 智能体",
+        "agent_type": manifest["agent_type"],
+        "transport": {"kind": "mqtt", "task_topic": f"ssm/task/{unit_id}/{{task_id}}"},
+        "skills": skills,
+        "tags": list(manifest.get("tags", [])),
+    }
+    if is_lamp:
         from cloud.esp32.card import adjust_lighting_skill
-        skills.append(adjust_lighting_skill(unit_id))
-
-    card = AgentCard(
-        card_schema_version=1,
-        version=str(manifest.get("version") or manifest.get("firmware_version") or manifest.get("firmware_ver") or "unknown"),
-        unit_id=unit_id,
-        device_id=manifest.get("parent_id") or unit_id,
-        name=name,
-        description=description,
-        agent_type=agent_type,
-        online=True,
-        transport=transport,
-        skills=skills,
-        state={},
-    )
-    card["parent_id"] = manifest.get("parent_id", "")
-    card["tags"] = list(manifest.get("resource_tags") or manifest.get("tags") or [])
-    fsm_key = _fsm_key(manifest)
-    if fsm_key:
-        if fsm_key == "led" and agent_type == "actuator":
-            card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat"}
-            card["observations"] = [
-                {"id": "sensor.sound_detected", "fields": {"detected": "boolean"}},
-                {"id": "sensor.light_changed", "fields": {"level": "string"}},
-            ]
-        machine = deepcopy(NEW_LED_FSM if fsm_key == "led" and
-                           manifest.get("fsm_version") in (2, FSM_VERSION) else FSM_DEFS[fsm_key])
-        if fsm_key == "led" and manifest.get("fsm_version") == 2:
-            for transition in machine["transitions"]:
-                if transition.get("action") == "BLINK":
-                    transition["params"]["count"] = 3
-            machine["views"]["BLINKING"]["description"] = "闪烁结束后恢复先前灯光。"
-        # A lamp and a robot share the same region contract. The flat fields
-        # remain available to older consumers and the edge keeps its own enums.
-        machine["primary_region"] = "device"
-        machine["regions"] = [{
-            "id": "device", "label": "照明" if fsm_key == "led" else "设备状态",
-            **{key: deepcopy(machine[key]) for key in
-               ("state_field", "states", "transitions", "views") if key in machine},
-        }]
-        card["state_machine"] = machine
-        modes = MODE_DEFS.get(fsm_key)
-        if modes:
-            card["modes"] = modes
-        suggestions = SUGGESTION_DEFS.get(fsm_key)
-        if suggestions:
-            card["suggestions"] = suggestions
-        widgets = WIDGET_DEFS.get(fsm_key)
-        if widgets and "SET_COLOR" in capability_actions:
-            card["widgets"] = _copy_widgets(widgets)
-            if fsm_key == "led" and manifest.get("fsm_version") not in (2, FSM_VERSION):
-                card["widgets"][0]["states"] = ["BRIGHT", "DIM", "COLOR"]
-    from cloud.agents.common.training.catalog import declare_training
-    return declare_training(normalize_card(card))
-
-
-def parse_card(payload: dict) -> AgentCard:
-    """验证并返回自描述 Agent Card（Go2 等 HTTP 设备使用）。
-
-    state_machine 字段若存在则原样透传（Go2 等设备自带拓扑描述）。
-    """
-    return normalize_card(payload)
+        if "SET_COLOR" in actions:
+            skills.append(adjust_lighting_skill(unit_id))
+            card["widgets"] = deepcopy(_LED_WIDGETS)
+        card["services"] = {"chat_endpoint": f"/api/esp32/{unit_id}/chat"}
+        card["observations"] = [
+            {"id": "sensor.sound_detected", "fields": {"detected": "boolean"}},
+            {"id": "sensor.light_changed", "fields": {"level": "string"}},
+        ]
+        card["state_machine"] = {"primary_region": "device", "regions": [
+            {"id": "device", "label": "照明", **deepcopy(LED_REGION)},
+        ]}
+        card["modes"] = deepcopy(_LED_MODES)
+        card["suggestions"] = list(_LED_SUGGESTIONS)
+    from cloud.agents.common.training.catalog import declare_transition_ids
+    return declare_transition_ids(normalize_card(card))

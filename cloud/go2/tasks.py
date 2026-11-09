@@ -215,7 +215,7 @@ def observe_command_results(robot) -> None:
             records.pop(old_key, None)
 
 
-def track_command_result(robot, ledger, identity, result, *, context=None) -> None:
+def track_command_result(robot, ledger, identity, result, *, context) -> None:
     if result.get('dispatch_only'):
         return
     if result.get("result") not in {"accepted", "executing", "timeout"}:
@@ -227,15 +227,7 @@ def track_command_result(robot, ledger, identity, result, *, context=None) -> No
     records = getattr(robot, "_command_result_records", None)
     if records is None:
         records = robot._command_result_records = {}
-    if context is None:
-        # Legacy direct request identities only. Graph callers pass explicit facts.
-        import json
-        try:
-            _space, origin, session = json.loads(identity[1])
-        except (ValueError, TypeError):
-            return
-    else:
-        origin, session = context.origin_kind, context.session_id
+    origin, session = context.origin_kind, context.session_id
     records[(epoch, physical_id)] = (ledger, identity, dict(result), set(),
                                    {'origin_kind': origin, 'session_id': session})
     robot._command_result_callback = lambda: observe_command_results(robot)

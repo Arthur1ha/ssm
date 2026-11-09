@@ -121,7 +121,7 @@ def test_shared_policy_preserves_explicit_authority_differences():
 def _lamp_card():
     from cloud.cards.builder import build_card_from_manifest
     from edge.lamp_contract import capabilities, FSM_VERSION
-    card = build_card_from_manifest({
+    card = build_card_from_manifest({'firmware_ver': '0.3.0',
         "unit_id": "esp32_desk_led", "parent_id": "esp32_desk", "name": "灯",
         "agent_type": "actuator", "fsm": "led", "fsm_version": FSM_VERSION,
         "capabilities": capabilities()})
@@ -184,7 +184,6 @@ async def test_steward_waits_for_blink_receipt_before_go2(monkeypatch, tmp_path,
 
     def publish(uid, task_id, action, params, session_id, **_kwargs):
         sequence.append("blink_dispatched")
-        state.register_task(task_id, session_id)
 
     def receipt(task_id, session_id, deadline, **_kwargs):
         sequence.append("blink_" + lamp_result)

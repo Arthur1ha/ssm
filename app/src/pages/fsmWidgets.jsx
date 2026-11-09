@@ -2,7 +2,7 @@
 function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connectionField, onlineConnection }) {
   const { useEffect, useState, useCallback, useRef } = React;
   const statusEndpoint = widget.status_endpoint || widget.endpoint;
-  const [status, setStatus] = useState({ connected: false, fsm_state: '', error: '' });
+  const [status, setStatus] = useState({ connected: false, connection_state: '', error: '' });
   const [busy, setBusy] = useState(false);
   const [checked, setChecked] = useState(false);
   const connectRequestedRef = useRef(false);
@@ -14,7 +14,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
       .then(d => {
         setStatus({
           connected: (connectionField ? d[connectionField] : d.connected) === true,
-          fsm_state: (stateField ? d[stateField] : d.fsm_state) || '',
+          connection_state: d.connection_state || '',
           error: d.error ? apiErrorText({ message: d.error }, '设备连接暂时不可用') : '',
         });
         setChecked(true);
@@ -23,7 +23,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
         setStatus(prev => ({
           ...prev,
           connected: false,
-          fsm_state: 'offline',
+          connection_state: 'offline',
           error: '设备连接暂时不可用，请稍后重试。',
         }));
         setChecked(true);
@@ -40,7 +40,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
     commandBus.command(unitId, widget.connect_action || 'connect', {})
       .then(data => {
         if (data.result === 'error') throw new Error(data.error || '连接失败');
-        setStatus(prev => ({ ...prev, fsm_state: 'connecting', error: '' }));
+        setStatus(prev => ({ ...prev, connection_state: 'connecting', error: '' }));
         setTimeout(refresh, 700);
       })
       .catch(err => setStatus(prev => ({
@@ -62,7 +62,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
   const connected = connectionField
     ? (liveState?.[connectionField] ?? status.connected)
     : onlineConnection;
-  const state = (stateField ? liveState?.[stateField] : undefined) || status.fsm_state;
+  const state = liveState?.connection_state || status.connection_state;
   const connecting = liveState?.connection_state === 'connecting' || state === 'connecting' || busy;
 
   useEffect(() => {
@@ -328,8 +328,6 @@ function JoystickControls({ unitId, widget, report, liveState, connected }) {
   const feedback = React.useRef(report);
   feedback.current = report;
   const action = widget.action;
-  // Old retained cards lacked axis declarations; this is their wire-version
-  // fallback. Current cards provide the adapter's shared physical limits.
   const limits = widget.params_schema?.properties;
   const maxX = limits?.x?.maximum ?? .5;
   const maxY = limits?.y?.maximum ?? .5;

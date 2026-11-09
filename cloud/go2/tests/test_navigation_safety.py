@@ -11,7 +11,7 @@ from cloud.go2.navigation.occupancy_grid import OccupancyGrid, FREE, UNKNOWN
 from cloud.go2.navigation import navigator as nav_module
 from cloud.go2.navigation.observation_coverage import ObservationCoverage
 from cloud.go2.navigation.frontier import (
-    find_frontier_target, raycast_directions, select_observation_target,
+    raycast_directions, select_observation_target,
 )
 
 
@@ -50,7 +50,12 @@ def test_nearby_measured_floor_bridges_only_local_sensor_blind_gap():
     grid = OccupancyGrid(_voxel(floor), robot_pose={"x": 0, "y": 0})
     summary = raycast_directions(grid, {"x": 0, "y": 0, "heading": 0})
     assert summary["forward"] >= 0.6
-    assert find_frontier_target(grid, {"x": 0, "y": 0, "heading": 0})
+    bounds = (grid.origin[0], grid.origin[1],
+              grid.origin[0] + grid.width[0] * grid.resolution,
+              grid.origin[1] + grid.width[1] * grid.resolution)
+    selection = select_observation_target(grid, {"x": 0, "y": 0, "heading": 0},
+        ObservationCoverage(None, bounds=bounds), bounds=bounds)
+    assert selection.target is not None
     assert grid.cells[20, 20] == FREE
     assert grid.cells[20, 36] == FREE  # measured floor beyond the blind gap
 
@@ -300,7 +305,7 @@ def test_navigation_rejects_turn_without_body_clearance(monkeypatch):
 
 def test_stop_cancels_navigation_and_sends_zero(monkeypatch):
     from cloud.go2.control import ControlLease
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     lease = ControlLease()
     lease.acquire(ExecutionContext("owner", "visitor", False, expires_at=int(time.time()) + 60))
     monkeypatch.setattr(nav_module, "control_lease", lease)
@@ -388,7 +393,7 @@ def test_reconnect_clears_previous_path_overlay():
 
 def test_map_debug_serializes_numpy_sample(monkeypatch):
     from cloud.go2 import router as go2_router
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     grid = OccupancyGrid(_voxel([[0.6, 0.0, 0.5]]), robot_pose={"x": 0, "y": 0})
     monkeypatch.setattr(go2_router, "_require_admin_persist", lambda _context: None)
     monkeypatch.setattr(go2_router, "go2", SimpleNamespace(

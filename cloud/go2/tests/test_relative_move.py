@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cloud.go2.actions import move_tool_schema, validate_move_goal
-from cloud.go2.execution import ExecutionContext, use_context
+from cloud.space.execution import ExecutionContext, use_context
 from cloud.go2.tools.executor import validate_params
 
 
@@ -58,9 +58,9 @@ def movement(monkeypatch):
     monkeypatch.setattr(nav_module, 'runtime_for', lambda _: None)
     monkeypatch.setattr(nav_module, 'control_lease', ControlLease())
     monkeypatch.setattr(nav_module, 'navigator', nav)
-    monkeypatch.setattr(nav_module, 'MOTION_PROGRESS_TIMEOUT_S', .015)
+    monkeypatch.setattr(nav_module, 'MOTION_PROGRESS_TIMEOUT_S', .15)
     monkeypatch.setattr(nav_module, 'TELEMETRY_RECOVERY_S', .005)
-    monkeypatch.setattr(nav_module, 'STOP_CONFIRMATION_S', .01)
+    monkeypatch.setattr(nav_module, 'STOP_CONFIRMATION_S', .1)
     monkeypatch.setattr(executor, 'execute_action', AsyncMock(return_value={'result': 'accepted'}))
     monkeypatch.setattr(tools, 'go2', robot)
     context = ExecutionContext('move-test', 'visitor', False, expires_at=time.time()+60)

@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 
 from cloud.go2.control import ControlLease, LeaseConflict
-from cloud.go2.execution import ExecutionContext, require_service_context, use_context
+from cloud.space.execution import ExecutionContext, require_service_context, use_context
 
 
 VISITOR_A = ExecutionContext("visitor-a", "visitor", False)
@@ -110,7 +110,7 @@ def test_global_identity_vision_uses_non_persistent_context(tmp_path, monkeypatc
     from cloud.go2 import service
     from cloud.agents.go2.memory.episode import EpisodeMemory
     from cloud.go2.perception.identity import IdentityEvent, IdentitySnapshot
-    from cloud.go2.execution import current_context
+    from cloud.space.execution import current_context
 
     seen = []
     monkeypatch.setattr(
@@ -216,7 +216,7 @@ async def test_visitor_cannot_read_long_term_go2_assets(monkeypatch, tmp_path):
     ) as client:
         assert (await client.get("/api/go2/identity")).status_code == 200
         assert (await client.get("/api/go2/memory")).status_code == 403
-        assert (await client.get("/api/go2/personality")).status_code == 403
+        assert (await client.get("/api/go2/personality")).status_code == 404
 
 
 @pytest.mark.asyncio

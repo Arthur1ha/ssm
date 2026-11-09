@@ -5,7 +5,7 @@ permissions. The Graph never calls a robot primitive directly.
 """
 
 from cloud.go2.tools.registry import TOOL_REGISTRY, get_tool_spec
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 def tool_schemas(context: ExecutionContext | None = None) -> dict[str, dict]:
@@ -34,4 +34,3 @@ READ_ONLY_TOOLS = frozenset({
     "go2_status", "go2_observe", "go2_list_locations",
     "go2_recognize_person", "go2_list_people", "list_peers", "get_space_context",
 })
-

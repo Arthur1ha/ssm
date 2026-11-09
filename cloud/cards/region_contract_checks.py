@@ -15,7 +15,7 @@ from edge.lamp_contract import FSM_VERSION
 
 
 def lamp(version=FSM_VERSION):
-    return build_card_from_manifest({
+    return build_card_from_manifest({'firmware_ver': '0.3.0',
         "unit_id": "esp32_desk_led", "parent_id": "esp32_desk",
         "name": "桌面灯", "agent_type": "actuator", "fsm": "led", "fsm_version": version,
         "capabilities": [{"action": "SET_STATE"}, {"action": "SET_COLOR"}, {"action": "BLINK"}],
@@ -25,50 +25,46 @@ def lamp(version=FSM_VERSION):
 def test_lamp_card_matches_three_state_edge_contract():
     from edge.ism import LED_TABLE
     machine = lamp()["state_machine"]
-    declared = {(edge["src"], edge["trigger"]): edge["dst"] for edge in machine["transitions"]}
+    assert set(machine) == {"primary_region", "regions"}
+    region = machine["regions"][0]
+    declared = {(edge["src"], edge["trigger"]): edge["dst"] for edge in region["transitions"]}
     for key, destination in LED_TABLE.items():
         assert declared[key] == destination
-    assert {"OFF", "ON", "BLINKING"} == set(machine["states"])
-    assert set(machine["views"]) == set(machine["states"])
-    assert all(edge["src"] in machine["states"] and edge["dst"] in machine["states"]
-               for edge in machine["transitions"])
-    assert declared[("BLINKING", "BLINK_DONE")] in {"OFF", "ON"}
-    assert all(not edge.get("action") for edge in machine["transitions"]
-               if edge["trigger"] == "BLINK_DONE")
+    assert region["states"] == ["OFF", "ON", "BLINKING"]
+    assert set(region["views"]) == set(region["states"])
+    assert all(not edge.get("action") for edge in region["transitions"] if edge["trigger"] == "BLINK_DONE")
 
 
-@pytest.mark.parametrize("version", [1, 2, FSM_VERSION])
-def test_lamp_board_shows_only_lighting_and_keeps_autonomy_in_settings(version):
-    card = lamp(version)
-    machine = card["state_machine"]
-    regions = {region["id"]: region for region in machine["regions"]}
-    primary = regions[machine["primary_region"]]
-    assert primary["state_field"] == "ism"
-    assert set(regions) == {"device"}
-    assert primary["states"] == machine["states"]
-    if version in (2, FSM_VERSION):
-        assert primary["states"] == ["OFF", "ON", "BLINKING"]
-        assert "ERROR" not in primary["views"]
-    else:
-        assert "ERROR" in primary["views"]
-    assert primary["transitions"] == machine["transitions"]
-    normalize_card(card)
+def test_lamp_card_contains_only_one_static_declaration():
+    card = lamp()
+    region = card["state_machine"]["regions"][0]
+    assert card["state_machine"]["primary_region"] == region["id"] == "device"
+    assert region["state_field"] == "ism"
     assert card["modes"][0]["state_field"] == "autonomy_mode"
-    assert card["state"] == {}  # No physical or cloud runtime values in retained Card.
-    primary["states"].append("TEST_ONLY")
-    assert "TEST_ONLY" not in lamp(version)["state_machine"]["states"]
+    assert not {"online", "state", "training_capabilities", "parent_id"}.intersection(card)
+    assert "params_schema" not in card["widgets"][0]
+    region["states"].append("TEST_ONLY")
+    assert "TEST_ONLY" not in lamp()["state_machine"]["regions"][0]["states"]
 
 
-def test_current_lamp_error_support_preserves_legacy_alias_normalization():
+@pytest.mark.parametrize("version", [None, 1, 2])
+def test_retired_firmware_is_rejected(version):
+    with pytest.raises(ValueError, match="unsupported lamp fsm_version"):
+        lamp(version)
+
+
+def test_registry_keeps_static_card_separate_from_runtime_and_returns_detached_data():
     registry = CardRegistry()
-    registry.handle_message("ssm/agents/esp32_desk_led/card", json.dumps(lamp()))
-    registry.handle_message("ssm/agents/esp32_desk_led/state", json.dumps({"ism": "BRIGHT", "ts": 1}))
-    assert registry.get_card("esp32_desk_led")["state"]["ism"] == "ON"
-    registry.handle_message("ssm/agents/esp32_desk_led/state", json.dumps({"ism": "ERROR", "ts": 2}))
-    assert registry.get_card("esp32_desk_led")["state"]["ism"] == "ERROR"
-    registry.handle_message("ssm/agents/esp32_desk_led/card", json.dumps(lamp(1)))
-    registry.handle_message("ssm/agents/esp32_desk_led/state", json.dumps({"ism": "BRIGHT", "ts": 3}))
-    assert registry.get_card("esp32_desk_led")["state"]["ism"] == "BRIGHT"
+    declaration = lamp()
+    base = "ssm/agents/esp32_desk_led/"
+    registry.handle_message(base + "card", json.dumps(declaration))
+    registry.handle_message("ssm/agents/esp32_desk/status", "online")
+    registry.handle_message(base + "state", json.dumps({"ism": "ON", "ts": 2}))
+    snapshot = registry.get_card("esp32_desk_led")
+    assert snapshot["online"] is True and snapshot["state"]["ism"] == "ON"
+    assert registry.get_static_card("esp32_desk_led") == declaration
+    snapshot["state_machine"]["regions"][0]["states"].clear()
+    assert registry.get_static_card("esp32_desk_led") == declaration
 
 
 @pytest.mark.parametrize("mutation", [
@@ -101,7 +97,7 @@ def test_widget_binding_uses_declared_region_and_simple_value_conditions():
     assert normalize_card(unknown)["widgets"] == []
 
 
-def test_go2_declares_task_events_gates_and_nonoverlapping_flat_fallback():
+def test_go2_declares_task_events_and_one_body_topology():
     from cloud.go2.card import _go2_state_machine
     machine = _go2_state_machine()
     regions = {region["id"]: region for region in machine["regions"]}
@@ -113,10 +109,7 @@ def test_go2_declares_task_events_gates_and_nonoverlapping_flat_fallback():
     permission_stop = next(edge for edge in regions["life"]["transitions"]
                            if edge.get("availability_key") == "stop_explore" and edge["src"] == "idle")
     assert permission_stop["dst"] == "idle" and permission_stop["available_only"] is True
-    coordinates = [(machine["layout"][state]["x"] * 240,
-                    machine["layout"][state]["y"] * 250) for state in machine["states"]]
-    assert all(math.dist(left, right) >= 54 for index, left in enumerate(coordinates)
-               for right in coordinates[index + 1:])
+    assert not {"state_field", "states", "transitions", "views", "layout"}.intersection(machine)
 
 
 def test_mqtt_projection_preserves_execution_and_observation_evidence(monkeypatch):
@@ -137,7 +130,7 @@ def test_go2_whiteboard_groups_do_not_invent_pose_states():
     from cloud.go2.card import _build_go2_card
     machine = normalize_card(_build_go2_card())['state_machine']
     regions = {region['id']: region for region in machine['regions']}
-    assert 'unknown' not in machine['states'] and 'unknown' not in machine['views']
+    assert 'unknown' not in regions['body']['states'] and 'unknown' not in regions['body']['views']
     assert regions['activity']['diagram_group'] == regions['life']['diagram_group'] == '行为'
     assert regions['body']['diagram_group'] == '姿态与动作'
     assert regions['body']['node_radius'] < regions['life']['node_radius']

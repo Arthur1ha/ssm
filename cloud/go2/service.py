@@ -14,7 +14,7 @@ from cloud.go2.perception.vision import vision_loop
 from cloud.go2.perception.identity import IdentityEvent, identity_skill
 from cloud.agents.go2.memory.episode import EventType, episode_memory
 from cloud.go2.control import control_lease
-from cloud.go2.execution import ExecutionContext, SYSTEM_CONTEXT, current_context, use_context
+from cloud.space.execution import ExecutionContext, SYSTEM_CONTEXT, current_context, use_context
 from cloud.go2.card import _publish_go2_card
 
 _active_rule_cb = None
@@ -226,7 +226,7 @@ async def prepare_user_interaction(context: ExecutionContext):
         (drive_task, getattr(drive, 'owner_session_id', None)),
         (nav_task, getattr(navigator, 'owner_session_id', None)))
         if task_owner == owner and active(task)]
-    moving = (go2.fsm_state == 'moving' or navigation
+    moving = (go2.body_state == 'moving' or navigation
               or getattr(go2, '_velocity_command_active', False)
               or go2._command_lock.locked())
     drive._user_handoff_in_progress = True
@@ -245,12 +245,12 @@ async def prepare_user_interaction(context: ExecutionContext):
                 raise ValueError('exploration_cancellation_unconfirmed') from exc
         if moving:
             sent_at = time.monotonic()
-            if not go2.pending_action and go2.fsm_state in {'standing', 'moving'} and go2.body_confirmation == 'observed':
+            if not go2.pending_action and go2.body_state in {'standing', 'moving'} and go2.body_confirmation == 'observed':
                 go2._motion_observation_enabled = True
             go2._stationary_samples = 0
             go2.stop_velocity()
             for _ in range(20):
-                if (go2.fsm_state == 'standing' and go2.body_confirmation == 'observed'
+                if (go2.body_state == 'standing' and go2.body_confirmation == 'observed'
                         and go2._stationary_samples >= 3
                         and (getattr(go2, '_sport_state_observed_at', None) or 0) > sent_at):
                     break
@@ -348,5 +348,3 @@ async def _perform_life_control(action: str, context: ExecutionContext):
         runtime.exploration_enabled = False
         runtime.commit('stop_explore', life_state='idle', life_owner=None, life_task_id=None)
     return {'result': 'ok', 'action': action, **go2.state_snapshot()}
-
-

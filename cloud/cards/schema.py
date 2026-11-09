@@ -13,7 +13,7 @@ class FsmTransition(TypedDict):
     id: NotRequired[str]  # 稳定转换标识
     src: str        # 源状态
     dst: str        # 目标状态
-    trigger: str    # 触发命令名（ESP32: CMD_BRIGHT；Go2: Move 等）
+    trigger: str    # 触发命令名（ESP32: CMD_ON；Go2: Sit 等）
     label: str      # 人类可读按钮文案，如「开灯」
     action: NotRequired[str]   # MQTT action 名（如 SET_STATE），供前端直接派发
     params: NotRequired[dict]  # 该转移的默认 params（颜色/亮度等）
@@ -27,7 +27,7 @@ class FsmTransition(TypedDict):
     available_only: NotRequired[bool]  # 不可用时不展示次要入口（例如待命时关闭探索许可）
     completion: NotRequired[str]  # 真实完成依据；unavailable 不得承诺可串联执行
     dispatch_only: NotRequired[bool]  # 手动请求只等发送结果，不依赖姿态观察
-    description: NotRequired[str]
+    trigger_condition: NotRequired[str]  # 连线卡片：触发事件及必要条件，用“且”连接
 
 
 class StateView(TypedDict):
@@ -65,19 +65,13 @@ class StateRegion(TypedDict):
 class StateMachine(TypedDict):
     """智能体静态状态机拓扑。不含当前态——当前态由实时通道提供。"""
 
-    states: list[str]
-    state_field: str
     connection_field: NotRequired[str]
-    regions: NotRequired[list[StateRegion]]
-    primary_region: NotRequired[str]  # 默认主区，控件/动作预览不依赖固定设备区域名
+    regions: list[StateRegion]
+    primary_region: str  # 默认主区，控件/动作预览不依赖固定设备区域名
     execution_field: NotRequired[str]  # 当前请求，值为 {command,label,phase,...}
     last_execution_field: NotRequired[str]  # 最近终态结果，值为 {command,label,result,...}
     reason_labels: NotRequired[dict[str, str]]  # 设备声明的不可用原因文案
     freshness_field: NotRequired[str]  # state 中的布尔新鲜度字段；false 时禁止普通动作
-    transitions: list[FsmTransition]
-    initial: NotRequired[str]   # 可选离线占位，渲染以实时当前态为准
-    views: NotRequired[dict[str, StateView]]  # 状态语义与预览；前端不按设备类型硬编码
-    layout: NotRequired[dict[str, dict[str, float]]]  # 相对初始画布的比例，默认布局应完整显示全部节点
     diagram: NotRequired[dict]  # {width,height,sections:[{label,top}]}，仅影响白板布局
 
 
@@ -136,7 +130,6 @@ class ModeAxis(TypedDict):
     set_action: NotRequired[str]
     state_field: NotRequired[str]  # 有实时值时取代独立 GET/本地模式副本
     get: NotRequired[str]        # http: GET 端点，返回 {mode}
-    set: NotRequired[str]        # http: PUT 端点，body 发 {mode: value}
     get_topic: NotRequired[str]  # mqtt: 读当前值的 topic
     set_topic: NotRequired[str]  # mqtt: 切换发布的 topic
 
@@ -144,7 +137,7 @@ class ModeAxis(TypedDict):
 class TelemetryField(TypedDict):
     """设备实时上报的一个字段声明，供 UI 取数展示。"""
 
-    key: str            # 字段名，如 "fsm_state" / "body_height"
+    key: str            # 字段名，如 "body_state" / "body_height"
     label: str
     unit: NotRequired[str]
 
@@ -182,27 +175,30 @@ class AgentCard(TypedDict):
     """智能体能力描述卡片，供编排器和 PWA 动态发现与调用。
 
     unit_id：唯一标识（如 esp32_desk_led）。寻址/topic/注册表 key/URL 全用它。
-    online 字段为动态状态，由 registry 根据 status/LWT 或 card 消息维护。
-    state 字段为动态状态，由对应 state topic 更新，builder 不填充。
+    只声明静态能力。在线与实时状态由 DeviceSnapshot 在读取时附加。
     """
 
     unit_id: str                # 唯一标识：寻址/topic/注册表 key/URL 都用它
-    card_schema_version: NotRequired[int]
-    version: NotRequired[str]
-    device_id: NotRequired[str] # 物理设备/节点 ID；多 unit 设备共享同一 device_id
-    parent_id: NotRequired[str] # 父设备 device_id，用于按 status 继承在线状态
+    card_schema_version: int
+    version: str
+    device_id: str # 物理设备/节点 ID；多 unit 设备共享同一 device_id
     name: str
     description: str
     agent_type: str   # "actuator" | "sensor" | "robot" | "decision"
-    online: bool
     transport: Transport
     services: NotRequired[dict[str, str]]  # 云端 API 能力（如 chat_endpoint），不属于设备 transport
     tags: NotRequired[list[str]]
     skills: list[SkillDef]
-    state: dict        # 动态状态，初始为空
-    training_capabilities: NotRequired[dict]  # 静态可训练能力
+    observations: NotRequired[list[dict]]
     state_machine: NotRequired[StateMachine]   # 静态拓扑，无此字段则前端回退富页
     modes: NotRequired[list[ModeAxis]]          # 声明式模式轴；无则无模式开关
     telemetry: NotRequired[list[TelemetryField]] # 实时字段声明；无则无字段展示
     widgets: NotRequired[list[Widget]]           # 态内富控件；无则无摇杆/视频/地图
     suggestions: NotRequired[list[str]]          # 设备页对话快捷指令词；无则不显示
+
+
+class DeviceSnapshot(AgentCard):
+    """静态 Card 与独立 MQTT 在线、状态消息合成的设备视图。"""
+
+    online: bool
+    state: dict

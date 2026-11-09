@@ -34,28 +34,11 @@ device_chat_logger = logging.getLogger("cloud.esp32.chat")
 router = APIRouter(tags=["gateway"])
 
 _mqtt_client = None
-_lamp_task_owners: dict[str, tuple[str, str]] = {}
-_lamp_task_results: dict[str, dict[str, Any]] = {}
-_lamp_task_owners_lock = threading.Lock()
-
-
 def record_lamp_task_result(task_id: str, result: dict[str, Any]) -> bool:
-    """Validate ownership before an observation can enter any result cache."""
+    """Only an existing durable reservation can own a device receipt."""
     from cloud.esp32.physical_tasks import record_result
     unit_id = os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
-    durable = record_result(task_id, unit_id, result)
-    if durable is False:
-        return False
-    with _lamp_task_owners_lock:
-        owner = _lamp_task_owners.get(task_id)
-        if durable is None and (owner is None or owner[0] != unit_id or
-                                result.get("session_id") not in (None, owner[1])):
-            return False
-        if owner is not None and (_lamp_task_results.get(task_id) or {}).get("result") not in {
-            "ok", "blocked", "rejected", "cancelled", "error",
-        }:
-            _lamp_task_results[task_id] = dict(result)
-    return True
+    return record_result(task_id, unit_id, result)
 
 
 def init_mqtt(client) -> None:
@@ -560,8 +543,7 @@ def _dispatch_mqtt_task(
         from cloud.api.main import _esp32_state
         current = (_esp32_state.actuator_snapshot().get(unit_id, {}).get("state") or {})
         current_ism = str(current.get("ism") or (card.get("state") or {}).get("ism") or "")
-        legacy_states = {"BRIGHT", "DIM"} <= set((card.get("state_machine") or {}).get("states", []))
-        if not valid_lamp_params(action, params, allow_legacy=legacy_states):
+        if not valid_lamp_params(action, params, card=card):
             raise HTTPException(status_code=400, detail="invalid lamp action parameters")
         if action == "SET_COLOR" and "brightness" not in params:
             try:
@@ -576,26 +558,13 @@ def _dispatch_mqtt_task(
         str((skill.get("invoke") or {}).get("action") or "")
         for skill in card.get("skills", [])
     }
-    allowed.update(str(edge.get("action") or "") for edge in (card.get("state_machine") or {}).get("transitions", []))
+    from cloud.cards.state_machine import transitions
+    allowed.update(str(edge.get("action") or "") for edge in transitions(card.get("state_machine") or {}))
     if allowed and action not in allowed:
         raise HTTPException(status_code=403, detail="action is not declared by this unit")
-    if unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
-        from cloud.api.main import _esp32_state
-        machine = card.get("state_machine") or {}
-        current = (_esp32_state.actuator_snapshot().get(unit_id, {}).get("state") or {}).get("ism")
-        transitions = machine.get("transitions") or []
-        # Only precheck when the reported state belongs to this Card version.
-        # Older retained Cards may use different state names; the edge FSM
-        # remains authoritative in that case.
-        if current in machine.get("states", []) and transitions and not any(
-            edge.get("src") == current and edge.get("action") == action
-            for edge in transitions
-        ):
-            raise HTTPException(status_code=409, detail="action is blocked in the current lamp state")
     task_id = task_id or "task_" + uuid.uuid4().hex
     if not re.fullmatch(r"task_[A-Fa-f0-9]{32}", task_id):
         raise ValueError("invalid_physical_task_id")
-    owned_lamp_task = unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
     # execute_physical owns the durable reservation for every entry point.
     payload = {
         "task_id": task_id,
@@ -611,22 +580,10 @@ def _dispatch_mqtt_task(
     payload.update({key: correlation[key] for key in ("trace_id", "run_id") if key in correlation})
     if source:
         payload["source"] = source
-    if owned_lamp_task:
-        with _lamp_task_owners_lock:
-            _lamp_task_owners[task_id] = (unit_id, session["session_id"])
     emit_agent_event("device.command", task_id=task_id, target_unit_id=unit_id,
                      action=action, params=params, transport="mqtt",
                      status="pending_publish")
-    try:
-        _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
-    except Exception:
-        # Keep the reservation: MQTT may have accepted the command before
-        # reporting failure, so another publish would risk a duplicate action.
-        if owned_lamp_task:
-            with _lamp_task_owners_lock:
-                _lamp_task_owners.pop(task_id, None)
-                _lamp_task_results.pop(task_id, None)
-        raise
+    _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
     return task_id
 
 
@@ -699,9 +656,6 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         "set_search_scope": ("/api/go2/navigation/search-scope", "PUT", params),
         "tag_location": ("/api/go2/navigation/locations", "POST", {"name": str(params.get("name") or "").strip()}),
         "set_home": ("/api/go2/navigation/home", "PUT", {}),
-        "set_personality": ("/api/go2/personality", "POST", {"prompt": str(params.get("prompt") or "").strip(),
-                                                            **({"social_initiative": params["social_initiative"]}
-                                                               if "social_initiative" in params else {})}),
     }
     if normalized in admin_routes:
         if session["actor"] != "admin":
@@ -951,23 +905,9 @@ async def get_lamp_command_task(unit_id: str, task_id: str,
     from cloud.esp32.physical_tasks import get as get_physical_task
     durable = get_physical_task(task_id, unit_id=unit_id,
                                 session_id=session["session_id"])
-    if durable is not None:
-        if durable["result"] == "unknown":
-            with _lamp_task_owners_lock:
-                if _lamp_task_owners.get(task_id) == (unit_id, session["session_id"]):
-                    return {"result": "executing", "task_id": task_id}
-        return durable
-    with _lamp_task_owners_lock:
-        owner = _lamp_task_owners.get(task_id)
-        cached = _lamp_task_results.get(task_id)
-    if owner != (unit_id, session["session_id"]):
+    if durable is None:
         raise HTTPException(status_code=404, detail="lamp task not found")
-    from cloud.api.main import _esp32_state
-    physical = cached or _esp32_state.get_task_result(task_id)
-    if physical is None:
-        return {"result": "executing", "task_id": task_id}
-    return {"result": physical.get("result", "error"), "task_id": task_id,
-            "error": physical.get("error") or physical.get("reason")}
+    return durable
 
 
 @router.post("/api/commands/go2/tasks/{task_id}/cancel")
@@ -1047,9 +987,4 @@ async def end_session(session: dict[str, Any], reason: str) -> None:
         logger.warning("Failed to clean Go2 session %s", session_id)
     _events.emit(session_id, {"type": "session_ended", "reason": reason})
     _events.clear(session_id)
-    with _lamp_task_owners_lock:
-        for task_id, owner in tuple(_lamp_task_owners.items()):
-            if owner[1] == session_id:
-                _lamp_task_owners.pop(task_id, None)
-                _lamp_task_results.pop(task_id, None)
     audit_event("session_ended", session, reason=reason)

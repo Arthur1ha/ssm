@@ -13,7 +13,7 @@ from cloud.space.freshness import state_observed_at
 STATE_MAX_AGE_S = 60.0
 _STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state",
            "body_confirmation", "control_mode", "autonomy_mode", "epoch", "revision",
-           "state_schema_version", "ism", "fsm_state", "connected", "battery_soc", "brightness")
+           "state_schema_version", "ism", "connected", "battery_soc", "brightness")
 
 
 def _state_summary(state: Any, now: float) -> dict[str, Any]:

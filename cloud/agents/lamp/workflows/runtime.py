@@ -64,7 +64,6 @@ class ReactiveMind:
         set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
         色温/亮度由上游 LLM 决定，此处不做任何颜色逻辑。
         """
-        from cloud.esp32 import tools as _tools_mod
         from cloud.esp32.tool_registry import (
             TOOL_DECLARATIONS, valid_auxiliary_params, valid_lamp_params,
         )
@@ -75,14 +74,6 @@ class ReactiveMind:
         params = dict(params)
 
         if tool_name == "send_message":
-            # Older model outputs used the tool wrapper's unit_id/message names.
-            # Convert only these two aliases, then validate the actual contract.
-            if "target" not in params and "unit_id" in params:
-                params["target"] = params.pop("unit_id")
-            if "content" not in params and "message" in params:
-                params["content"] = params.pop("message")
-            params.pop("reason", None)
-            params.pop("reply_to", None)
             if not valid_auxiliary_params("send_message", params):
                 self._last_reactive_tool_result = {"result": "rejected", "error": "invalid_message_params"}
                 return False
@@ -91,7 +82,7 @@ class ReactiveMind:
             context = get_space_context(led_unit, state=self._state)
             activity, peers = activity_peers(led_unit, context["peers"])
             target = str(params.get("target") or "")
-            topic = str(params.get("reason") or params.get("content") or "")
+            topic = str(params.get("content") or "")
             if activity and self._social_state.activity_id != activity["activity_id"]:
                 self._social_state.reset(activity["activity_id"])
             if (not activity or target not in {peer["unit_id"] for peer in peers}
@@ -103,12 +94,10 @@ class ReactiveMind:
         if action:
             from cloud.cards.registry import get_registry
             card = get_registry().get_card(led_unit)
-            legacy = bool(card and {"BRIGHT", "DIM"} <= set(
-                (card.get("state_machine") or {}).get("states", [])))
-            valid = valid_lamp_params(action, params, allow_legacy=legacy, card=card)
+            valid = valid_lamp_params(action, params, card=card)
             if not valid and action == 'BLINK' and 'count' not in params:
-                from cloud.esp32.tool_registry import blink_default
-                valid = valid_lamp_params(action, {**params, 'count': blink_default(card)}, allow_legacy=legacy, card=card)
+                from cloud.esp32.tool_registry import BLINK_DEFAULT
+                valid = valid_lamp_params(action, {**params, 'count': BLINK_DEFAULT}, card=card)
             if not valid:
                 logger.warning("invalid reactive tool arguments: %s %s", tool_name, params)
                 return False
@@ -121,13 +110,6 @@ class ReactiveMind:
                 self._last_reactive_tool_result = {"result": "blocked", "error": "repeat_action_cooldown"}
                 return False
 
-        if tool_name not in _tools_mod.TOOL_FN_MAP:
-            logger.warning("unknown tool: %s", tool_name)
-            return False
-        fn = getattr(_tools_mod, tool_name, None)
-        if fn is None:
-            logger.warning("unknown tool: %s", tool_name)
-            return False
         try:
             if tool_name in {"list_peers", "get_space_context", "request_peer_skill", "send_message"}:
                 from cloud.esp32.tool_executor import execute_auxiliary

@@ -93,7 +93,7 @@ def test_invalid_bbox_logs_why_it_was_rejected(caplog):
     assert "640x480" in caplog.text
 
 
-def test_turn_clearance_reports_unknown_floor_and_obstacle_separately():
+def test_turn_clearance_reports_floor_coverage_and_blocks_measured_obstacle():
     grid = OccupancyGrid.__new__(OccupancyGrid)
     grid.origin = [-1.0, -1.0]
     grid.width = [40, 40]
@@ -103,10 +103,11 @@ def test_turn_clearance_reports_unknown_floor_and_obstacle_separately():
     grid.obstacles = np.zeros((40, 40), dtype=bool)
     assert grid.turn_clearance_details(0.0, 0.0)["clear"]
     grid.known_floor[20, 24] = False
+    assert grid.turn_clearance_details(0.0, 0.0)["clear"]
     grid.obstacles[20, 26] = True
     details = grid.turn_clearance_details(0.0, 0.0)
     assert not details["clear"] and not grid.is_turn_clear(0.0, 0.0)
-    assert details["blockers"] == ["unmeasured_floor", "measured_obstacle"]
+    assert details["blockers"] == ["measured_obstacle"]
     assert details["unknown_floor_cells"] == 1
     assert details["obstacle_cells"] == 1
     assert details["nearest_obstacle_m"] == 0.3
@@ -167,11 +168,11 @@ async def test_heading_only_turn_rejects_unmapped_body_clearance(monkeypatch):
 async def test_unique_executor_rejects_inconsistent_confirmation_before_motion(monkeypatch, mismatch):
     from cloud.go2.navigation import target_approach as executor
     from cloud.go2.control import ControlLease
-    from cloud.go2.execution import ExecutionContext, use_context
+    from cloud.space.execution import ExecutionContext, use_context
 
     context = ExecutionContext('confirm-test', 'visitor', False, expires_at=int(time.time() + 60))
     monkeypatch.setattr(executor, 'control_lease', ControlLease())
-    monkeypatch.setattr(executor, 'go2', SimpleNamespace(is_connected=True, fsm_state='standing'))
+    monkeypatch.setattr(executor, 'go2', SimpleNamespace(is_connected=True, body_state='standing'))
     monkeypatch.setattr(executor.visual_target, 'load_calibration', lambda **_: {})
     calls = []
     async def locate(*args, **kwargs):
@@ -195,11 +196,11 @@ async def test_unique_executor_rejects_inconsistent_confirmation_before_motion(m
 async def test_unique_executor_success_requires_fresh_post_navigation_recheck(monkeypatch):
     from cloud.go2.navigation import target_approach as executor
     from cloud.go2.control import ControlLease
-    from cloud.go2.execution import ExecutionContext, use_context
+    from cloud.space.execution import ExecutionContext, use_context
 
     context = ExecutionContext('arrival-test', 'visitor', False, expires_at=int(time.time() + 60))
     monkeypatch.setattr(executor, 'control_lease', ControlLease())
-    monkeypatch.setattr(executor, 'go2', SimpleNamespace(is_connected=True, fsm_state='standing'))
+    monkeypatch.setattr(executor, 'go2', SimpleNamespace(is_connected=True, body_state='standing'))
     monkeypatch.setattr(executor.visual_target, 'load_calibration', lambda **_: {})
     calls, moved = [], []
     start = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
@@ -233,7 +234,7 @@ async def test_authorization_expiry_cancels_pending_visual_inference(monkeypatch
     import asyncio
     from cloud.go2.navigation import target_approach as executor
     from cloud.go2.control import ControlLease
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
 
     context = ExecutionContext('expiry-test', 'visitor', False, expires_at=time.time() + .05)
     lease = ControlLease()

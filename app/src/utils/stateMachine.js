@@ -1,14 +1,10 @@
 /* Card-owned state topology, shared by every device page and home summary. */
 function stateMachineRegions(machine) {
-  if (!machine) return [];
-  if (Array.isArray(machine.regions) && machine.regions.length) return machine.regions;
-  return [{ ...machine, id: 'device', label: '设备', state_field: machine.state_field }];
+  return machine?.regions || [];
 }
 function primaryStateRegion(machine) {
   const regions = stateMachineRegions(machine);
-  return regions.find(region => region.id === machine?.primary_region)
-    || regions.find(region => region.state_field === machine?.state_field)
-    || regions[regions.length - 1] || null;
+  return regions.find(region => region.id === machine?.primary_region) || null;
 }
 function stateRegionActive(region, regions, state, visited = new Set()) {
   if (!region?.parent) return true;
@@ -121,12 +117,6 @@ function stateTransitionLabel(transition) {
     BLINK_DONE:'闪烁结束'})[transition.trigger]
     || (transition.label || '').replace(/^接纳/,'开始').replace(/ · 自动转换$/,'');
 }
-function stateTransitionDescription(transition) {
-  const description = transition.description || '';
-  if (transition.dispatch_only || description === stateTransitionLabel(transition)
-    || description.startsWith('以下条件会阻止请求：') || description.startsWith('仅在当前连接收到')) return '';
-  return description;
-}
 /* Small graphs need a shallower default canvas; explicit Card diagrams win. */
 function stateGraphDimensions(nodeCount, diagram) {
   return {width: diagram?.width || 600,
@@ -169,4 +159,4 @@ function stateBoardTopology(machine, state = {}) {
 }
 Object.assign(window, { stateMachineRegions, primaryStateRegion, stateRegionActive, stateRegionLabel,
   stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology,
-  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateTransitionDescription, stateGraphDimensions });
+  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateGraphDimensions });

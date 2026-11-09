@@ -45,8 +45,6 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
     """
     from cloud.esp32.physical_tasks import get, reserve, record_result
 
-    legacy = bool(card and {"BRIGHT", "DIM"} <= set(
-        (card.get("state_machine") or {}).get("states", [])))
     if action not in PHYSICAL_ACTIONS or not isinstance(params, dict):
         return {"result": "rejected", "error": "invalid_lamp_action"}
     if (context.space_id != "main" or context.actor not in {"admin", "visitor", "agent"}
@@ -98,9 +96,9 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                         base = edge.get('params') or {}
                         params = {**{key: base[key] for key in ('r', 'g', 'b') if key in base}, **params}
                 if action == "BLINK" and "count" not in params:
-                    from cloud.esp32.tool_registry import blink_default
-                    params = {**params, "count": blink_default(card)}
-                if not valid_lamp_params(action, params, allow_legacy=legacy, card=card):
+                    from cloud.esp32.tool_registry import BLINK_DEFAULT
+                    params = {**params, "count": BLINK_DEFAULT}
+                if not valid_lamp_params(action, params, card=card):
                     return {"result": "rejected", "error": "invalid_lamp_action"}
                 params = normalize_brightness(action, params, current)
                 if card is not None:
@@ -213,8 +211,8 @@ def execute_auxiliary(*, unit_id: str, tool: str, params: dict,
                                       game_id=params.get("game_id"))
     try:
         if tool == "list_peers":
-            from cloud.esp32 import tools
-            return {"result": "ok", "peers": tools.list_peers(unit_id)}
+            from cloud.peers.gateway import list_visible_peers
+            return {"result": "ok", "peers": list_visible_peers(unit_id)}
         if tool == "get_space_context":
             from cloud.api.main import _esp32_state
             from cloud.space.context import get_space_context

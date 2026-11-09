@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 class LeaseConflict(RuntimeError):
@@ -126,4 +126,3 @@ class SessionTasks:
 
 control_lease = ControlLease()
 session_tasks = SessionTasks()
-

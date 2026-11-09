@@ -111,7 +111,7 @@ def test_catalog_id_and_hash_independent_of_order_and_layout():
 def test_lamp_schema_and_cooldown_limits():
     from cloud.cards.builder import build_card_from_manifest
     from edge.lamp_contract import FSM_VERSION, capabilities
-    catalog = catalog_for(build_card_from_manifest({'unit_id': 'led', 'agent_type': 'actuator', 'fsm': 'led', 'fsm_version': FSM_VERSION, 'capabilities': capabilities()}))
+    catalog = catalog_for(build_card_from_manifest({'name': '测试灯', 'firmware_ver': '0.3.0', 'unit_id': 'led', 'agent_type': 'actuator', 'fsm': 'led', 'fsm_version': FSM_VERSION, 'capabilities': capabilities()}))
     definition = blink_defaults(2)['definition']
     assert validate_definition(definition, catalog) == definition
     invalid = deepcopy(definition)
@@ -138,7 +138,7 @@ def test_card_edge_ids_match_catalog_and_unloaded_teaching_is_inactive():
     card = _build_go2_card()
     body = next(r for r in card['state_machine']['regions'] if r['id'] == 'body')
     hello = next(e for e in body['transitions'] if e['trigger'] == 'Hello')
-    assert hello['id'] in {e['id'] for e in card['training_capabilities']['transitions']}
+    assert hello['id'] in {e['id'] for e in catalog_for(card)['transitions']}
     record = hello_cooldown(60)
     record['loaded_revision'] = 0
     facts = _facts() | {'completion_history_known': False}
@@ -149,7 +149,7 @@ def test_safety_recovery_and_fixed_arguments():
     from cloud.agents.common.training.catalog import transition_id
     from cloud.cards.builder import build_card_from_manifest
     from edge.lamp_contract import FSM_VERSION, capabilities
-    lamp = catalog_for(build_card_from_manifest({'unit_id': 'led', 'agent_type': 'actuator', 'fsm': 'led', 'fsm_version': FSM_VERSION, 'capabilities': capabilities()}))
+    lamp = catalog_for(build_card_from_manifest({'name': '测试灯', 'firmware_ver': '0.3.0', 'unit_id': 'led', 'agent_type': 'actuator', 'fsm': 'led', 'fsm_version': FSM_VERSION, 'capabilities': capabilities()}))
     assert all(not e['trainable'] for e in lamp['transitions'] if e['src'] == 'ERROR')
     assert all(not e['trainable'] for e in _go2_catalog()['transitions'] if e['trigger'] in ('stop_explore', 'StopMove', 'EMERGENCY_STOP'))
     edge = {'src': 'a', 'dst': 'b', 'trigger': 'set', 'action': 'set', 'params': {'state': 'x'}, 'training_fixed_params': ['state']}
@@ -158,15 +158,15 @@ def test_safety_recovery_and_fixed_arguments():
     assert transition_id('r', edge) != transition_id('r', other)
 
 
-def test_legacy_lamp_transition_rejects_fixed_state_override():
+def test_lamp_transition_rejects_fixed_state_override():
     from cloud.cards.builder import build_card_from_manifest
     from edge.lamp_contract import capabilities
-    card = build_card_from_manifest({'unit_id': 'legacy_led', 'agent_type': 'actuator',
-                                     'fsm': 'led', 'capabilities': capabilities()})
+    card = build_card_from_manifest({'name': '测试灯', 'firmware_ver': '0.3.0', 'unit_id': 'led', 'agent_type': 'actuator',
+                                     'fsm': 'led', 'fsm_version': 3, 'capabilities': capabilities()})
     catalog = catalog_for(card)
-    edge = next(e for e in catalog['transitions'] if e['src'] == 'OFF' and e['dst'] == 'BRIGHT' and e['action'] == 'SET_STATE')
+    edge = next(e for e in catalog['transitions'] if e['src'] == 'OFF' and e['dst'] == 'ON' and e['action'] == 'SET_STATE')
     assert edge['fixed_params'] == ['state']
     definition = {'transition_ids': [edge['id']], 'origins': ['user_delegated'],
-                  'conditions': [], 'cooldown_s': None, 'defaults': {'state': 'DIM'}, 'trigger': None}
+                  'conditions': [], 'cooldown_s': None, 'defaults': {'state': 'OFF'}, 'trigger': None}
     with pytest.raises(ValueError, match='fixed transition parameters'):
         validate_definition(definition, catalog)

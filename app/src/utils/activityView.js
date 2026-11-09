@@ -159,3 +159,10 @@ Object.assign(window, {activityStateAge, activityLightColor, activityPhysicalLab
   activityTaskKey, activityTaskRows, activityRelatedEvents, activityMessageReceipt, activityReasonText,
   isActivityLightingAction});
 window.activityFeedbackChange = activityFeedbackChange;
+
+function activityMediaUrl(event) {
+  const candidate = event.media_ref || event.media_url;
+  const path = typeof candidate === 'string' ? candidate : candidate?.url;
+  if (typeof path !== 'string' || !path.startsWith('/api/')) return '';
+  return path;
+}

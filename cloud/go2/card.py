@@ -17,8 +17,7 @@ GO2_STATE_TOPIC = "ssm/agents/go2/state"
 _mqtt_client = None
 _last_status_online: bool | None = None
 
-# Compatibility imports; the public subset is maintained with the tools.
-from cloud.go2.tools.registry import CARD_SKILLS, get_card_skill, card_skills
+from cloud.go2.tools.registry import card_skills
 
 
 def init_mqtt(client) -> None:
@@ -42,7 +41,7 @@ def _publish_go2_state() -> None:
         fields = (
             "unit_id", "state_schema_version", "epoch", "revision", "connected",
             "connection_state", "activity_state", "life_state", "body_state",
-            "fsm_state", "body_confirmation", "control_mode", "autonomy_mode",
+            "body_confirmation", "control_mode", "autonomy_mode",
             "life_owner", "life_task_id", "available_actions", "blocked_actions",
             "available_life_actions", "life_blocked_reasons", "pending_action", "ts",
             "last_action", "body_observation_source", "body_observed_at",
@@ -59,6 +58,7 @@ def _publish_go2_state() -> None:
 def _go2_state_machine() -> dict:
     """Project declared goals and observation edges without inspecting a live adapter."""
     topology = fsm_transitions()
+    views = body_views()
     transitions = []
     interruptible_states = {
         spec.execution_state for spec in ACTIONS.values() if spec.interruptible
@@ -69,9 +69,14 @@ def _go2_state_machine() -> dict:
                 continue  # 有速度的 Move 属于数据面；图上只显示控制状态入口。
             if trigger == "StopMove" and src not in interruptible_states:
                 continue  # Safety STOP remains available without promising interruption.
+            spec = ACTIONS[trigger]
+            condition = f"收到{spec.label}指令"
+            if spec.expected_state and not spec.execution_state and spec.completion == "joint_posture":
+                condition += "，且设备确认" + views[dst]["label"]
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
                 "label": ACTIONS[trigger].label,
+                "trigger_condition": condition,
                 "action": trigger,
                 "params": {},
                 "completion": ACTIONS[trigger].completion,
@@ -83,16 +88,18 @@ def _go2_state_machine() -> dict:
             })
     # These edges explain observation-driven recovery and completion. They
     # carry no action and never authorize a button or a timed fake completion.
-    def observed_transition(src, dst, trigger, label):
-        return {"src": src, "dst": dst, "trigger": trigger, "label": label}
+    def observed_transition(src, dst, trigger, label, condition):
+        return {"src": src, "dst": dst, "trigger": trigger, "label": label,
+                "trigger_condition": condition}
 
     for spec in ACTIONS.values():
         if spec.execution_state in TRANSIENT_STATES and spec.expected_state:
             transitions.append(observed_transition(spec.execution_state, spec.expected_state,
-                                                   "action_completed", "动作执行完毕"))
+                                                   "action_completed", "动作执行完毕",
+                                                   "设备确认动作完成，且已恢复" + views[spec.expected_state]["label"]))
     transitions.extend([
-        observed_transition("standing", "moving", "motion_observed", "开始移动"),
-        observed_transition("moving", "standing", "motion_stationary", "停止移动"),
+        observed_transition("standing", "moving", "motion_observed", "开始移动", "设备反馈正在移动"),
+        observed_transition("moving", "standing", "motion_stationary", "停止移动", "设备反馈已停止移动"),
     ])
     for src in BODY_STATES:
         transitions.append({
@@ -101,31 +108,18 @@ def _go2_state_machine() -> dict:
             "action": "STOP", "params": {}, "safety": True,
         })
     state_machine = {
-        "state_field": "fsm_state",
         "connection_field": "connected",
         "primary_region": "body",
         "execution_field": "pending_action",
         "last_execution_field": "last_action",
         "freshness_field": "body_telemetry_fresh",
         "reason_labels": deepcopy(STATE_REASON_LABELS),
-        "states": list(BODY_STATES),
         "diagram": {"width": 600, "height": 670, "sections": [
             {"label": "行为", "top": 28},
             {"label": "姿态与动作", "top": 295},
         ]},
-        "transitions": transitions,
-        # Complete fallback coordinates; never mix a partial legacy layout
-        # with circular defaults for newly added states.
-        "layout": {state: {"x": .14 + (index % 4) * .24,
-                            "y": .14 + (index // 4) * .24}
-                   for index, state in enumerate(topology)},
-        "views": body_views(),
     }
-    # Preserve the established movement anchor for flat consumers; the last
-    # grid row has enough space for it without intersecting another node.
-    state_machine["layout"]["moving"] = {"x": .50, "y": .82}
-    body = {key: deepcopy(state_machine[key]) for key in
-            ("states", "transitions", "views", "layout")}
+    body = {"states": list(BODY_STATES), "transitions": transitions, "views": views}
     body.update(id="body", label="身体", state_field="body_state",
                 prepare_action={"via": "standing", "action": "SPORT"},
                 parent={"region": "activity", "state": "active"}, retain_when_inactive=True,
@@ -183,8 +177,7 @@ def _go2_state_machine() -> dict:
 def _build_go2_card() -> dict:
     """构建 Go2 Agent Card dict（静态能力描述，符合 AgentCard schema）。
 
-    card 只含能力，不含 volatile state；online/status 表示真实 WebRTC 连接状态，
-    FSM/动作等动态状态经 HTTP /api/go2/* 实时获取。
+    card 只含当前静态能力；服务在线、WebRTC 连接及动作状态由独立实时通道提供。
     """
     from cloud.go2.perception.identity import identity_skill
 
@@ -206,7 +199,6 @@ def _build_go2_card() -> dict:
              "available": identity_skill.enabled,
              "fields": {"recognized": "boolean"}},
         ],
-        "online": False,
         "transport": {
             "kind": "http",
             "endpoint": "/api/go2/chat",
@@ -220,8 +212,6 @@ def _build_go2_card() -> dict:
             "识别一下你面前的人",
             "有哪些已保存的地点？",
         ],
-        # 动态状态不进 card（card=静态能力）；FSM/动作经 HTTP /api/go2/* 实时获取
-        "state": {},
         "state_machine": _go2_state_machine(),
         "modes": [{
             "id": "autonomy",
@@ -232,11 +222,9 @@ def _build_go2_card() -> dict:
                 {"value": "free_explore", "label": "允许自主探索", "description": "允许现有自主策略发起探索，当前生活状态另行显示；休息和显式停止后不会自动重放任务"},
             ],
             "get": "/api/go2/autonomy",
-            "set": "/api/go2/autonomy",
             "set_action": "set_mode",
         }],
         "telemetry": [
-            {"key": "fsm_state", "label": "兼容动作状态"},
             {"key": "body_state",  "label": "身体状态"},
             {"key": "control_mode", "label": "控制模式"},
             {"key": "body_height", "label": "身高", "unit": "m"},
@@ -263,8 +251,8 @@ def _build_go2_card() -> dict:
              "available_actions_field": "available_actions", "blocked_actions_field": "blocked_actions", "availability_key": "Move", "params_schema": velocity_schema()},
         ],
     }
-    from cloud.agents.common.training.catalog import declare_training
-    return declare_training(normalize_card(card))
+    from cloud.agents.common.training.catalog import declare_transition_ids
+    return declare_transition_ids(normalize_card(card))
 
 
 def _publish_go2_card() -> None:
@@ -298,19 +286,3 @@ def _publish_go2_status(online: bool | None = None, *, force: bool = True) -> No
         logging.info("[Go2] status → %s", "online" if online else "offline")
     except Exception as exc:
         logging.error("[Go2] 发布 status 失败: %s", exc)
-
-
-def _clear_go2_card() -> None:
-    """清除 broker 上的 Go2 retained card（发布空 payload，qos=1）。
-
-    若 MQTT 客户端尚未注入则静默失败，不影响断开流程。
-    """
-    if _mqtt_client is None:
-        logging.warning("[Go2] MQTT 客户端未注入，跳过 card 清除")
-        return
-    try:
-        _mqtt_client.publish(GO2_CARD_TOPIC, "", retain=True, qos=1)
-        logging.info("[Go2] 已清除 retained card: %s", GO2_CARD_TOPIC)
-    except Exception as exc:
-        logging.error("[Go2] 清除 card 失败: %s", exc)
-

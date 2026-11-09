@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from cloud.go2.actions import ACTIONS, BODY_STATES, SPORT_COMMANDS
 from cloud.go2.connection.webrtc import Go2Connection
 from cloud.go2.control import control_lease
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 NEW_COMMANDS = ("Sit", "RiseSit", "Content", "FingerHeart", "FrontPounce", "FrontJump")
@@ -39,7 +39,7 @@ def robot(monkeypatch, tmp_path):
     connection._sport_state_observed_at = time.monotonic()
     connection.send_command = AsyncMock(return_value={
         "result": "accepted", "confirmation": "sport_rpc", "confirmation_scope": "request",
-        "request_status_code": 0, "fsm_state": None,
+        "request_status_code": 0, "body_state": None,
         "pending_action": {"command": "Sit", "phase": "accepted"},
     })
     monkeypatch.setattr(router, "go2", connection)
@@ -199,7 +199,7 @@ async def test_emergency_stop_remains_reachable_with_uninterruptible_pending_act
     result = await router.emergency_stop(context=VISITOR)
     assert result["ok"] is True
     robot.stop_velocity.assert_called_once_with()
-    assert robot.fsm_state is None
+    assert robot.body_state is None
     assert robot.pending_action["command"] == "FrontJump"
 
 
@@ -229,13 +229,13 @@ async def test_gateway_forwards_new_command_with_original_identity(monkeypatch, 
 
 
 def test_card_capabilities_and_topology_derive_from_same_catalog():
-    from cloud.go2.card import _go2_state_machine, get_card_skill
-    from cloud.go2.tools.registry import get_tool_spec
+    from cloud.go2.card import _go2_state_machine
+    from cloud.go2.tools.registry import get_card_skill, get_tool_spec
 
     schema = get_card_skill("go2_sport")["params_schema"]
     assert schema == get_tool_spec("go2_sport").params_schema
     assert set(schema["properties"]["cmd"]["enum"]) == set(SPORT_COMMANDS)
-    graph = _go2_state_machine()
+    graph = next(region for region in _go2_state_machine()["regions"] if region["id"] == "body")
     assert set(graph["states"]) == set(BODY_STATES)
     for command in NEW_COMMANDS:
         action = ACTIONS[command]

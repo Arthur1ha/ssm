@@ -82,12 +82,14 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       window.setAgentDisplayNames = () => {};
       window.SessionBadge = () => null;
       window.ActivityFeed = () => React.createElement('div', null, '对话内容');
-      window.MainInputBar = () => React.createElement('input', {'aria-label':'消息'});
+
       window.snapshots = [];
       apiClient.request = path => path === '/api/devices'
         ? new Promise((resolve,reject) => snapshots.push({resolve,reject}))
         : Promise.resolve({});
     `});
+    await page.addScriptTag({content:compile('app/src/hooks/useTraining.js')});
+    await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
     await page.addScriptTag({content:compile('app/src/app.jsx')});
     await page.evaluate(() => root.render(React.createElement(App,{key:'home',session:{actor:'visitor'}})));
     await waitText('正在准备你的空间');

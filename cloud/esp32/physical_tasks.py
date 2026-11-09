@@ -46,9 +46,9 @@ def reserve(task_id: str, *, unit_id: str, session_id: str, action: str,
         path = record_path(PHYSICAL_TASKS_DIR, task_id)
         old = read_record(path)
         if old is not None:
-            same_request = old.get("request_fingerprint", old.get("fingerprint")) == request_fingerprint
+            same_request = old.get("request_fingerprint") == request_fingerprint
             if not same_request or (origin_kind is not None and
-                                    old.get("origin_kind") not in (None, origin_kind)):
+                                    old.get("origin_kind") != origin_kind):
                 raise ValueError("physical_task_id_conflict")
             return False
         return write_record(path, {
@@ -62,12 +62,8 @@ def reserve(task_id: str, *, unit_id: str, session_id: str, action: str,
         }, exclusive=True)
 
 
-def record_result(task_id: str, unit_id: str, result: dict) -> bool | None:
-    """Persist an owned observation; None means no durable reservation exists.
-
-    Legacy callers may then consult their existing in-memory registration.
-    False means invalid identity/result and must never use that fallback.
-    """
+def record_result(task_id: str, unit_id: str, result: dict) -> bool:
+    """Persist only a receipt owned by an existing durable reservation."""
     if (result.get("task_id") not in (None, task_id)
             or result.get("unit_id") not in (None, unit_id)
             or result.get("result") not in {"accepted", "executing", "ok", "blocked",
@@ -77,7 +73,7 @@ def record_result(task_id: str, unit_id: str, result: dict) -> bool | None:
         path = record_path(PHYSICAL_TASKS_DIR, task_id)
         old = read_record(path)
         if old is None:
-            return None
+            return False
         if old.get("unit_id") != unit_id:
             return False
         if result.get("session_id") not in (None, old.get("session_id")):
@@ -95,6 +91,14 @@ def record_result(task_id: str, unit_id: str, result: dict) -> bool | None:
         return True
 
 
+def observed_result(task_id: str) -> dict | None:
+    """Internal peer-message lookup of an assigned task's durable observation."""
+    with locked_directory(PHYSICAL_TASKS_DIR):
+        record = read_record(record_path(PHYSICAL_TASKS_DIR, task_id))
+    result = record.get("result") if record else None
+    return dict(result) if isinstance(result, dict) else None
+
+
 def get(task_id: str, *, unit_id: str, session_id: str,
         action: str | None = None, request_params: dict | None = None,
         origin_kind: str | None = None) -> dict | None:
@@ -109,8 +113,8 @@ def get(task_id: str, *, unit_id: str, session_id: str,
         return None
     if action is not None:
         fingerprint = _fingerprint(unit_id, session_id, action, request_params or {})
-        if (old.get("request_fingerprint", old.get("fingerprint")) != fingerprint
-                or (origin_kind is not None and old.get("origin_kind") not in (None, origin_kind))):
+        if (old.get("request_fingerprint") != fingerprint
+                or (origin_kind is not None and old.get("origin_kind") != origin_kind)):
             raise ValueError("physical_task_id_conflict")
     result = old.get("result")
     training = old.get("training") or {}
@@ -144,9 +148,7 @@ def completion_history(*, unit_id: str, transition_id: str, teaching_id: str,
                 if result.get("result") in {None, "accepted", "executing", "timeout"}:
                     return False, None
                 if result.get("result") == "ok":
-                    # Older ledger rows predate completed_at; their terminal
-                    # updated_at is the same server-owned first success receipt.
-                    completed = row.get("completed_at", row.get("updated_at"))
+                    completed = row.get("completed_at")
                     if (type(completed) not in (int, float) or not math.isfinite(completed)
                             or completed < row.get("created_at", 0)):
                         return False, None

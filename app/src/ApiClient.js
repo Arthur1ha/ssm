@@ -1,9 +1,12 @@
-/* ApiClient — browser trust boundary: cookies + CSRF + session-scoped SSE.
+/* ApiClient — browser trust boundary: cookies + CSRF + page-scoped chat/SSE.
  * The browser never supplies actor, persistence or space identifiers.
  */
 class ApiClient extends EventTarget {
   constructor() {
     super();
+    // Kept only in memory: refresh creates a new conversation, reconnect does not.
+    this.chatId = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      value => value.toString(16).padStart(2, '0')).join('');
     this.csrfToken = '';
     this.eventSource = null;
     this.eventsConnected = false;
@@ -19,6 +22,7 @@ class ApiClient extends EventTarget {
     const method = (options.method || 'GET').toUpperCase();
     const headers = new Headers(options.headers || {});
     headers.set('Accept', 'application/json');
+    headers.set('X-SSM-Chat-Id', this.chatId);
     if (options.body !== undefined && !(options.body instanceof FormData)) {
       headers.set('Content-Type', 'application/json');
     }
@@ -54,7 +58,7 @@ class ApiClient extends EventTarget {
 
   openEvents() {
     if (this.eventSource) return;
-    const source = new EventSource('/api/events', { withCredentials: true });
+    const source = new EventSource('/api/events?chat_id=' + encodeURIComponent(this.chatId), { withCredentials: true });
     this.eventSource = source;
     source.onopen = () => {
       this.eventsConnected = true;

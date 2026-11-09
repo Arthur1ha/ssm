@@ -1,7 +1,7 @@
 # mqtt_client.py — MQTT transport that never retries inside a hardware tick.
 
 import time
-import json
+import ujson as json
 import network
 import socket
 from umqtt.simple import MQTTClient as _MQTTClient

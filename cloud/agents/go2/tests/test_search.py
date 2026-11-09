@@ -62,7 +62,7 @@ async def run(adapter, **changes):
 @pytest.mark.parametrize('actor', ['admin', 'visitor'])
 def test_user_search_scope_is_task_local_and_does_not_enable_exploration(monkeypatch, actor):
     from cloud.agents.go2.workflows import search
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     monkeypatch.setattr(search, '_configured_scope', None)
     monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
     monkeypatch.delenv('GO2_SEARCH_SESSION_ID', raising=False)
@@ -79,7 +79,7 @@ def test_user_search_scope_is_task_local_and_does_not_enable_exploration(monkeyp
 
 def test_new_search_keeps_rectangles_and_never_reuses_old_coordinates(monkeypatch):
     from cloud.agents.go2.workflows import search
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     context = ExecutionContext('user', 'admin', False)
     monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
     assert search.resolve_search_scope(context, 'find_object', 'map')['bounds'] == [-1., -1., 1., 1.]
@@ -231,7 +231,7 @@ async def test_server_owned_search_deadline_and_retry_do_not_replay(monkeypatch,
     from unittest.mock import AsyncMock
     from cloud.agents.go2.workflows import search
     from cloud.go2 import connection, control, state as device_state
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
     monkeypatch.setattr(search, '_configured_scope', ((-1.,-1.,1.,1.), 'map'))
@@ -273,7 +273,7 @@ async def test_device_selection_with_numpy_map_coordinates_survives_checkpoint(m
     import numpy as np
     from cloud.agents.go2.workflows.search import DeviceSearch
     from cloud.agents.common.checkpoint import FileCheckpointSaver
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2.navigation.occupancy_grid import OccupancyGrid, FREE
 
@@ -309,7 +309,7 @@ async def test_failed_node_preserves_completed_coverage_and_logs_safe_diagnostic
     from unittest.mock import AsyncMock
     from cloud.agents.go2.workflows import search
     from cloud.go2 import connection, control, state as device_state
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
     monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
@@ -415,7 +415,7 @@ def test_reachable_scope_is_explicit_and_bounded_default_is_preserved(monkeypatc
 async def test_reachable_scope_follows_map_growth_but_not_session_change(monkeypatch):
     from types import SimpleNamespace
     from cloud.agents.go2.workflows.search import DeviceSearch
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     from cloud.go2.navigation.occupancy_grid import OccupancyGrid, FREE
 
@@ -458,7 +458,7 @@ async def test_scope_monitor_does_not_add_a_freshness_gate_after_initialization(
     from types import SimpleNamespace
     from cloud.agents.go2.workflows.search import DeviceSearch
     from cloud.go2 import connection, control, state as device_state
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     context = ExecutionContext('scope-monitor', 'admin', False, expires_at=int(time.time()) + 60)
     lease = control.ControlLease()
@@ -491,7 +491,7 @@ async def test_monitor_failure_preserves_completed_navigation_receipt(monkeypatc
     from unittest.mock import AsyncMock
     from cloud.agents.go2.workflows import search
     from cloud.go2 import connection, control, state as device_state
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
     monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
@@ -538,7 +538,7 @@ def segment_device(monkeypatch):
     from unittest.mock import AsyncMock
     from cloud.agents.go2.workflows.search import DeviceSearch
     from cloud.go2 import connection
-    from cloud.go2.execution import ExecutionContext
+    from cloud.space.execution import ExecutionContext
     from cloud.go2.perception import visual_target
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'map'}
     robot = SimpleNamespace(odom=pose, odom_received_at=time.monotonic(), odom_frame_id='odom',

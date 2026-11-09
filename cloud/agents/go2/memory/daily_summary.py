@@ -6,8 +6,8 @@ from typing import Optional
 
 from cloud.go2.paths import MEMORY_DIR
 from cloud.agents.go2.memory.episode import _EPISODES_DIR, read_day
-from cloud.go2.tools.tools import get_text_llm
-from cloud.go2.execution import can_persist
+from cloud.go2.models import get_text_llm
+from cloud.space.execution import can_persist
 
 logger = logging.getLogger(__name__)
 

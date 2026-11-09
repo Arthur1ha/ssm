@@ -8,11 +8,6 @@ def exploration_interval(curiosity: int) -> int:
     return max(7, min(17, 17 - curiosity // 10))
 
 
-def social_action_candidates(boldness: int, available: set[str]) -> set[str]:
-    """A cautious Go2 observes first and limits optional gestures to Hello."""
-    if boldness < 30:
-        return available.intersection({"Hello"})
-    return set(available)
 
 
 def decision_persona(profile: dict) -> str:

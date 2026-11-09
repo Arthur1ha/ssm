@@ -5,7 +5,8 @@ import time
 from typing import Optional
 
 from cloud.go2.paths import MEMORY_DIR
-from cloud.go2.execution import require_persist
+from cloud.space.execution import require_persist
+from cloud.go2.models import get_text_llm
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,7 @@ async def find_location(query: str) -> Optional[dict]:
     if query in data:
         v = data[query]
         return {"name": query, "x": v["x"], "y": v["y"], "heading": v["heading"],
-                "frame_id": v.get("frame_id"), "session_id": v.get("session_id"),
-                "legacy_unanchored": not bool(v.get("session_id"))}
+                "frame_id": v["frame_id"], "session_id": v["session_id"]}
     return await _llm_find(query)
 
 
@@ -66,7 +66,7 @@ async def _llm_find(query: str) -> Optional[dict]:
     if not names:
         return None
     logger.info("[SpatialMemory] 精确匹配失败，LLM 模糊查找「%s」，候选：%s", query, names)
-    matched = await run_spatial_lookup(query, names, _get_text_llm())
+    matched = await run_spatial_lookup(query, names, get_text_llm())
     if matched is None:
         logger.info("[SpatialMemory] LLM 未找到匹配地点")
         return None
@@ -74,18 +74,12 @@ async def _llm_find(query: str) -> Optional[dict]:
     return await find_location(matched)
 
 
-def _get_text_llm():
-    from cloud.go2.tools.tools import get_text_llm
-    return get_text_llm()
-
-
 def list_locations() -> list[dict]:
     """列出所有命名地点，按保存时间倒序。"""
     data = _load()
     items = [
         {"name": name, "x": v["x"], "y": v["y"], "heading": v["heading"], "ts": v["ts"],
-         "frame_id": v.get("frame_id"), "session_id": v.get("session_id"),
-         "legacy_unanchored": not bool(v.get("session_id"))}
+         "frame_id": v["frame_id"], "session_id": v["session_id"]}
         for name, v in data.items()
     ]
     items.sort(key=lambda r: r["ts"], reverse=True)

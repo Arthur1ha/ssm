@@ -374,13 +374,3 @@ def select_observation_target(grid, odom, coverage, *, bounds, current=None):
                     and _can_start_observation(grid, odom, retained, bounds, plans)):
                 return Selection(retained, 'target_retained')
     return Selection(best, {'frontier': 'frontier_selected', 'pending_recheck': 'recheck_selected'}.get(best.source, 'unobserved_view_selected'))
-
-
-def find_frontier_target(grid_obj, odom, visited=None):
-    """Legacy tuple API delegates to the sole observation selector."""
-    bounds = (grid_obj.origin[0], grid_obj.origin[1],
-              grid_obj.origin[0] + grid_obj.width[0] * grid_obj.resolution,
-              grid_obj.origin[1] + grid_obj.width[1] * grid_obj.resolution)
-    coverage = ObservationCoverage(getattr(grid_obj, 'map_session', None), bounds=bounds)
-    result = select_observation_target(grid_obj, odom, coverage, bounds=bounds)
-    return None if result.target is None else (result.target.x, result.target.y)

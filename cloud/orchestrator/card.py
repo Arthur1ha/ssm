@@ -3,17 +3,19 @@
 
 def build_card(unit_id: str) -> dict:
     return {
+        "card_schema_version": 1,
+        "version": "1",
         "unit_id": unit_id,
         "device_id": unit_id,
         "name": "云端编排器",
         "description": "协调空间内智能体任务",
         "agent_type": "decision",
         "space_id": "main",
-        "online": False,
-        "transport": {"kind": "mqtt"},
+        "transport": {"kind": "mqtt", "task_topic": "ssm/intent/{session_id}"},
         "skills": [{
             "id": "coordinate_request",
             "name": "跨设备协调",
+            "description": "理解用户目标并协调空间内智能体执行",
             "tags": ["coordination"],
             "params_schema": {
                 "type": "object", "required": ["message"],
@@ -22,18 +24,4 @@ def build_card(unit_id: str) -> dict:
             },
             "invoke": {"action": "COORDINATE"},
         }],
-        "state": {},
-    }
-
-
-def build_manifest(unit_id: str) -> dict:
-    return {
-        "unit_id": unit_id,
-        "agent_type": "decision",
-        "name": "llm_orchestrator",
-        "hw_platform": "cloud",
-        "topics": {
-            "manifest": f"ssm/agents/{unit_id}/manifest",
-            "state": f"ssm/agents/{unit_id}/state",
-        },
     }

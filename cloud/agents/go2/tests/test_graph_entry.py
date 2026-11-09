@@ -12,7 +12,7 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
 from cloud.agents.go2.memory.episode import EpisodeMemory, EventType, read_day
-from cloud.go2.execution import ExecutionContext
+from cloud.space.execution import ExecutionContext
 
 
 class ScriptedModel:
