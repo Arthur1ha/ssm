@@ -33,6 +33,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   const training = useTraining(unitId, {sessionId,canEdit:actor === 'admin'});
   const [trainingOpen, setTrainingOpen] = useState(false);
   const [trainingSelection, setTrainingSelection] = useState(null);
+  useEffect(() => { setTrainingSelection(null); }, [training.resetVersion]);
   useEffect(() => {
     if (trainingLocation?.teaching_id) {
       setTrainingSelection({unit_id:unitId,transition_id:trainingLocation.transition_id,teaching_id:trainingLocation.teaching_id,summaryText:trainingLocation.summaryText});
@@ -423,7 +424,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       <ChatPanel
         messages={chatRows}
         training={training}
-        onReviseRule={p => setTrainingSelection({unit_id:unitId,transition_id:p.transition_ids?.[0],proposal_id:p.proposal_id,summaryText:p.summaryText})}
+        onReviseRule={p => setTrainingSelection({unit_id:unitId,transition_id:trainingTransitionIds(p)[0],proposal_id:p.proposal_id,summaryText:p.summaryText})}
         focusKey={trainingSelection}
         defaultAgent={unitId}
         agents={card ? [card] : []}
@@ -434,7 +435,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         disabled={offline}
       />
       </div>
-      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:record.transition_ids[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)}); setTrainingOpen(false);}}/>}
+      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)}); setTrainingOpen(false);}}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         card={card}
         modes={modes} modeVals={effectiveModeVals} onSwitchMode={switchMode}

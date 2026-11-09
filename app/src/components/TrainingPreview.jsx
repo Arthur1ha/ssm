@@ -11,6 +11,7 @@ function TrainingPreview({proposal,onConfirm,onCancel,onRevise,error}) {
     {before && proposal.operation !== 'remove' && <p>原来：{before}</p>}
     {proposal.operation === 'remove' ? <p>{before || summary}</p>
       : effect && effect !== summary && <p>{effect}</p>}
+    {proposal.operation !== 'remove' && <TrainingRuleSteps record={proposal}/>}
     {proposal.confirmed && <p>{proposal.operation === 'remove' ? '这条规则已删除。' : '规则已保存。'}</p>}
     {proposal.cancelled && <p>这次没有修改规则。</p>}
     {(proposal.superseded || proposal.superseded_by) && <p>后续对话已调整这项要求。</p>}

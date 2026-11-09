@@ -11,6 +11,74 @@ from cloud.esp32.perception import sense as sense_sensors
 logger = logging.getLogger(__name__)
 
 
+async def run_training_behavior(prepared, context, *, run_id, agent, dispatch=None,
+                                availability=None):
+    """Run lamp teachings through the shared ordered Graph and MQTT boundary."""
+    from dataclasses import asdict
+    from cloud.agents.common.training.workflow import run_training_workflow
+    from cloud.cards.registry import get_registry
+    from cloud.esp32.tool_executor import execute_physical
+    from cloud.esp32.tool_registry import PHYSICAL_ACTIONS
+    from cloud.esp32.physical_tasks import stable_task_id
+
+    unit_id = prepared['unit_id']
+    active = getattr(agent, '_training_behavior_run_id', None)
+    if active is not None and active != run_id:
+        return {'result': 'blocked', 'error': 'training_behavior_busy'}
+    agent._training_behavior_run_id = run_id
+    command_epoch = getattr(agent, '_command_epoch', 0)
+    autonomy_epoch = getattr(agent, '_autonomy_epoch', 0)
+
+    def available():
+        if getattr(agent, '_command_epoch', 0) != command_epoch:
+            return False
+        if context.origin_kind == 'agent_autonomous' and (
+                agent.get_autonomy_mode() != 'reactive' or agent._in_user_hold()
+                or getattr(agent, '_autonomy_epoch', 0) != autonomy_epoch):
+            return False
+        return availability is None or availability()
+
+    def snapshot():
+        card = get_registry().get_card(unit_id) or {}
+        return {**(agent._state.actuator_snapshot().get(unit_id, {}).get('state') or {}),
+                'connected': card.get('online') is True}
+
+    def before_step(resolved, trusted):
+        if not available():
+            return {'result': 'cancelled', 'error': 'lamp_control_changed'}
+        return None
+
+    def send(uid, action, params, trusted, source, *, task_id):
+        if dispatch is not None:
+            return dispatch(uid, action, params, trusted, source, task_id=task_id)
+        from cloud.api.intents import _dispatch_mqtt_task
+        return _dispatch_mqtt_task(uid, action, params, asdict(trusted),
+                                  source=source, task_id=task_id)
+
+    def execute(action, params, trusted, request_id):
+        if action not in PHYSICAL_ACTIONS:
+            return {'result': 'rejected', 'error': 'training_action_unavailable'}
+        card = get_registry().get_card(unit_id)
+        return execute_physical(
+            state=agent._state, unit_id=unit_id, action=action, params=params,
+            context=trusted, dispatch=send, source='lamp_training', card=card,
+            task_id=stable_task_id(unit_id, run_id, request_id),
+            preflight=lambda current, arguments: None if available() else 'lamp_control_changed')
+
+    def observe(receipt):
+        from cloud.esp32.physical_tasks import get
+        return get(stable_task_id(unit_id, run_id, receipt['request_id']),
+                   unit_id=unit_id, session_id=context.session_id)
+
+    try:
+        return await run_training_workflow(prepared, context, run_id=run_id,
+                                           snapshot=snapshot, execute=execute,
+                                           before_step=before_step, observe=observe)
+    finally:
+        if getattr(agent, '_training_behavior_run_id', None) == run_id:
+            agent._training_behavior_run_id = None
+
+
 class ReactiveMind:
     def _in_user_hold(self) -> bool:
         """当前是否处于用户让位窗口内。"""
@@ -18,7 +86,7 @@ class ReactiveMind:
 
     def _should_act(self) -> bool:
         """自主层本拍是否应主动行动：manual 或处于用户让位窗口时返回 False。"""
-        if self._autonomy_mode == "manual":
+        if self._autonomy_mode == "manual" or getattr(self, '_training_behavior_run_id', None):
             return False
         if self._in_user_hold():
             return False
@@ -58,7 +126,7 @@ class ReactiveMind:
         return (snap.get(led_unit, {}).get("state") or {}).get("ism", "").upper()
 
     def _dispatch_tool(self, tool_name: str, params: dict, led_unit: str,
-                       *, task_id: str | None = None, training_intent: dict | None = None) -> bool:
+                       *, task_id: str | None = None) -> bool:
         """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
 
         set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
@@ -105,7 +173,7 @@ class ReactiveMind:
         if tool_name in ("set_led_state", "set_led_color", "blink_led"):
             params["unit_id"] = led_unit
             key = f"{tool_name}_{json.dumps(params, sort_keys=True)}"
-            if not training_intent and now - self._cooldown.get(key, 0) < 300:
+            if now - self._cooldown.get(key, 0) < 300:
                 logger.debug("cooldown skip: %s", key)
                 self._last_reactive_tool_result = {"result": "blocked", "error": "repeat_action_cooldown"}
                 return False
@@ -135,8 +203,7 @@ class ReactiveMind:
                 from cloud.space.execution import ExecutionContext
                 card = get_registry().get_card(led_unit)
                 def preflight(current, arguments):
-                    if not self._should_act() or (training_intent and (time.time() >= training_intent['deadline']
-                            or training_intent['autonomy_epoch'] != self._autonomy_epoch)):
+                    if not self._should_act():
                         return "autonomy_unavailable"
                     if not card:
                         return "lamp_unavailable"
@@ -152,11 +219,7 @@ class ReactiveMind:
                     state=self._state, unit_id=led_unit, action=action,
                     params={k: v for k, v in params.items() if k != "unit_id"},
                     context=ExecutionContext("agent_auto", "agent", False,
-                                             "main", "agent_autonomous", 0,
-                                             trigger_ref=training_intent['teaching_id'] if training_intent else None,
-                                             trigger_revision=training_intent['revision'] if training_intent else None,
-                                             trigger_transition_id=training_intent['transition_id'] if training_intent else None,
-                                             trigger_situation_confirmed=bool(training_intent and training_intent.get('situation_confirmed'))),
+                                             "main", "agent_autonomous", 0),
                     dispatch=dispatch, task_id=task_id,
                     source="lamp_reactive", preflight=preflight,
                     card=card,

@@ -182,29 +182,28 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                             run.goal, step, invoke_text, publish_text,
                             progress_closed, min(run.deadline, time.time() + 4))
 
+    training_attempt_start = len(run.steps)
+
     async def execute(name, params, step_id):
         if name == "apply_training":
             from cloud.agents.common.training.tools import prepare_training_application
-            from cloud.esp32.tool_registry import PHYSICAL_ACTIONS
+            from cloud.agents.lamp.workflows.runtime import run_training_behavior
             try:
                 prepared = await prepare_training_application(params, context)
             except ValueError as exc:
                 return {"result": "rejected", "error": str(exc)}
-            if prepared["unit_id"] != unit_id or prepared["action"] not in PHYSICAL_ACTIONS:
+            if prepared["unit_id"] != unit_id:
                 return {"result": "rejected", "error": "training_target_mismatch"}
-            execution = replace(context, **{key: prepared[key] for key in
-                                ("training_ref", "training_revision", "training_overrides")})
-            return execute_lamp_tool(PHYSICAL_ACTIONS[prepared["action"]]["tool"],
-                                     prepared["params"], step_id, agent=agent, unit_id=unit_id,
-                                     context=execution, dispatch=dispatch,
-                                     lighting_only=lighting_only, run_id=run.run_id)
+            return await run_training_behavior(prepared, context,
+                run_id=run.run_id + ':' + step_id, agent=agent, dispatch=dispatch)
         if name in {"list_training", "propose_training"}:
             from dataclasses import asdict
             from cloud.agents.common.training.tools import execute_training
             if run.parent_run_id or context.session_id.startswith("peer_"):
                 return {"result": "rejected", "error": "direct_user_request_required"}
             return await execute_training(name, params, {**asdict(context), "run_id": run.run_id,
-                                                        "source_text": text, "selection": selection})
+                                                        "source_text": text, "selection": selection,
+                                                        "proposal_attempts": run.steps[training_attempt_start:-1]})
         return execute_lamp_tool(name, params, step_id, agent=agent, unit_id=unit_id,
                                  context=context, dispatch=dispatch,
                                  lighting_only=lighting_only, run_id=run.run_id)
@@ -255,15 +254,24 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     async def invoke_graph():
         nonlocal run_model
         run_model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+        declarations = visible_schemas(lighting_only=lighting_only,
+                                      card=cards.get_registry().get_card(unit_id))
+        if context.training_ref:
+            from cloud.agents.common.training.tools import SCHEMAS as training_schemas
+            declarations['apply_training'] = training_schemas['apply_training']
         return await run_role_graph(
             run, model=run_model,
-            tool_schemas=visible_schemas(lighting_only=lighting_only,
-                                        card=cards.get_registry().get_card(unit_id)),
+            tool_schemas=declarations,
             build_messages=messages_for,
             execute=execute, reconcile_effect=reconcile,
             finalize=finalize, checkpointer=saver, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
             resume=resume, resume_value=text if resume else None,
+            initial_tool=(('apply_training', {
+                'unit_id': unit_id, 'teaching_id': context.training_ref,
+                'revision': context.training_revision,
+                'overrides': context.training_overrides or {}})
+                if context.training_ref and context.training_step_index is None else None),
         )
 
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,

@@ -16,6 +16,9 @@ GO2_STATUS_TOPIC = "ssm/agents/go2/status"
 GO2_STATE_TOPIC = "ssm/agents/go2/state"
 _mqtt_client = None
 _last_status_online: bool | None = None
+TRAINING_OBSERVATIONS = (
+    "vision.person_presence", "vision.face_presence", "vision.owner_recognized",
+)
 
 from cloud.go2.tools.registry import card_skills
 
@@ -82,7 +85,10 @@ def _go2_state_machine() -> dict:
                 "completion": ACTIONS[trigger].completion,
                 # Continuous motion/remote control is outside first-version training.
                 **({"training_disabled": True} if trigger in {'Move', 'EnterMoveControl', 'BalanceStand'} else {}),
-                **({"training_events": ["vision.person_presence"]} if trigger == "Hello" else {}),
+                # Observations can request any trainable discrete action. The
+                # original action contract still owns posture and safety.
+                **({"training_events": list(TRAINING_OBSERVATIONS)}
+                   if trigger not in {'Move', 'EnterMoveControl', 'BalanceStand', 'StopMove'} else {}),
                 **({"dispatch_only": True}
                    if trigger in SPORT_COMMANDS and trigger != 'StopMove' else {}),
             })

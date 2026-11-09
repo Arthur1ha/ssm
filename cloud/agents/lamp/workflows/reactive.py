@@ -7,6 +7,7 @@ uses native tool calls for ordinary reactive decisions.
 from __future__ import annotations
 
 import json
+import asyncio
 import time
 import uuid
 from typing import TypedDict
@@ -95,7 +96,7 @@ def _prompt(agent, state: ReactiveState):
         "如果本轮先调灯，完成后仍有可玩玩法与社交机会，应再决定是否发送邀请；"
         "仍可选择普通交流或不发消息，同伴也可拒绝。邀请不等于游戏完成。"
         "判断游戏输赢只看本局目标导航回执；狗之后自由探索到达别处，不等于找到游戏目标。"
-        "观测中的 training_intent 是本次唯一允许的绑定动作；若不执行，应说明原因。"
+        "观测中的 training_intent 是本次唯一允许启动的已确认教导；若不执行，应说明原因。"
         "training_intent.situation 若存在，是用户教导的语义适用情境，须结合真实当前上下文理解。"
         "事件出现不代表该情境已成立；当前不适用时说明原因并不执行。"
         "仍须遵守用户让位和真实执行回执。"
@@ -170,7 +171,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if selected is None or time.time() >= selected['deadline']:
             return {'status': 'blocked', 'call': None}
         return {'sense': {**state['sense'], 'training_intent': selected}, 'turns': 1,
-                'call': {'name': 'blink_led', 'args': dict(selected['params']),
+                'call': {'name': 'apply_training', 'args': {},
                          'id': 'training_' + selected['event_id']}}
 
     def plan(state):
@@ -198,10 +199,6 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         call = calls[0]
         if call.get("name") not in VISIBLE or not isinstance(call.get("args"), dict):
             return {"status": "rejected", "call": None}
-        intent = state['sense'].get('training_intent')
-        if intent and (call.get('name') != 'blink_led' or call['args'] != intent['params']
-                       or state.get('turns', 0) or time.time() >= intent['deadline']):
-            return {"status": "blocked", "call": None}
         return {"turns": state.get("turns", 0) + 1,
                 "call": {"name": call["name"], "args": call["args"],
                          "id": call.get("id") or "call_" + uuid.uuid4().hex}}
@@ -215,6 +212,43 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                 or not agent._should_act() or not agent._device_online()):
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
+        intent = state['sense'].get('training_intent')
+        if intent:
+            from cloud.agents.common.training.store import list_records
+            from cloud.agents.common.training.catalog import catalog_for
+            from cloud.cards.registry import get_registry
+            from cloud.agents.lamp.workflows.runtime import run_training_behavior
+            from cloud.esp32.tool_registry import PHYSICAL_ACTIONS
+            from cloud.space.execution import ExecutionContext
+            unit_id = agent._find_led_unit()
+            record = next((row for row in list_records(unit_id, space_id='main')
+                           if row['teaching_id'] == intent['teaching_id']
+                           and row['revision'] == intent['revision']), None)
+            card = get_registry().get_card(unit_id)
+            if record is None or card is None:
+                return {'status': 'blocked', 'call': None}
+            prepared = {'unit_id': unit_id, 'record': record, 'catalog': catalog_for(card),
+                        'steps': record['definition']['steps'],
+                        'training_ref': record['teaching_id'], 'training_revision': record['revision'],
+                        'training_overrides': {}}
+            context = ExecutionContext('agent_auto', 'agent', False, 'main',
+                'agent_autonomous', int(time.time()+180), trigger_ref=record['teaching_id'],
+                trigger_revision=record['revision'], trigger_transition_id=intent['transition_id'],
+                trigger_situation_confirmed=bool(intent.get('situation')))
+            result = asyncio.run(run_training_behavior(prepared, context,
+                run_id=state['run_id'] + ':' + call['id'], agent=agent,
+                availability=lambda: state['autonomy_epoch'] == agent._autonomy_epoch
+                                     and agent._device_online()))
+            agent._last_reactive_tool_result = result
+            receipts = [{'step_id': item['request_id'],
+                         'tool': PHYSICAL_ACTIONS[item['action']]['tool'],
+                         'params': {}, 'result': item['result']}
+                        for item in result.get('steps', []) if item['action'] in PHYSICAL_ACTIONS]
+            if result.get('result') != 'ok':
+                receipts.append({'step_id': call['id'], 'tool': 'apply_training',
+                                 'params': {}, 'result': result})
+            return {'status': result.get('result', 'unknown'), 'call': None,
+                    'steps': [*state.get('steps', []), *receipts]}
         if name in PHYSICAL and (not state["sense"].get("lighting_eligible")
                 or any(step.get("tool") in PHYSICAL for step in state.get("steps", []))):
             event(state, "tool.rejected", tool=name, reason="lighting_not_eligible")
@@ -235,23 +269,10 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if name in PHYSICAL:
             from cloud.esp32.physical_tasks import stable_task_id
             task_id = stable_task_id(agent._find_led_unit(), state["run_id"], call["id"])
-            intent = state['sense'].get('training_intent')
-            # The model selected the exact bound action after interpreting the
-            # candidate's situation against this event's current context.
-            confirmed_intent = ({**intent, 'situation_confirmed': bool(intent.get('situation'))}
-                                if intent else None)
-            ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id,
-                                      training_intent=confirmed_intent)
+            ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id)
         else:
             ok = agent._dispatch_tool(name, args, agent._find_led_unit())
         result = getattr(agent, "_last_reactive_tool_result", {"result": "unknown"})
-        intent = state['sense'].get('training_intent')
-        if intent:
-            from cloud.agents.common.training.service import _emit
-            _emit('training.applied', space_id='main', unit_id=agent._find_led_unit(),
-                  teaching_id=intent['teaching_id'], revision=intent['revision'],
-                  transition_id=intent['transition_id'], status=result.get('result', 'unknown'),
-                  reasons=result.get('reasons', []))
         step = {"step_id": call["id"], "tool": name, "params": args, "result": result}
         event(state, "tool.result", tool=name, step_id=call["id"], result=result,
               status=result.get("result", "unknown"),
@@ -263,8 +284,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                     step_id=call["id"], stage="observed", tool=name,
                     decision_observation=observation,
                     reason=result.get("error") or result.get("reason"))
-        status = ("ok" if intent and ok and result.get("result") == "ok" else
-                  "executing" if ok and result.get("result") == "ok"
+        status = ("executing" if ok and result.get("result") == "ok"
                   else result.get("result", "error"))
         return {"steps": [*state.get("steps", []), step], "call": None,
                 "status": status}

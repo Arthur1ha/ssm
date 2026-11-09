@@ -1,5 +1,6 @@
 """cloud.esp32.router — ESP32 桌面智能体 HTTP 端点。"""
 
+import json
 import os
 import re
 import threading
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 from cloud.esp32 import service as _esp32_agent
 from cloud.api.auth import require_admin, require_admin_csrf, require_session
 from cloud.space.execution import ExecutionContext, require_service_context
+from cloud.agents.common.training.models import ApplyTraining
 
 router = APIRouter(prefix="/api/esp32", tags=["esp32"])
 internal_router = APIRouter(prefix="/api/internal/esp32", tags=["esp32-internal"])
@@ -69,6 +71,7 @@ class SemanticTaskRequest(BaseModel):
     deadline: float | None = None
     trace_id: str | None = None
     parent_run_id: str | None = None
+    training: ApplyTraining | None = None
 
 
 class PhysicalReplyRequest(BaseModel):
@@ -137,6 +140,12 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
                               context: ExecutionContext = Depends(require_service_context)):
     """Trusted orchestration entry; semantic planning stays in the lamp brain."""
     _require_led_unit(unit_id)
+    if req.training is not None:
+        if req.training.unit_id != unit_id:
+            raise HTTPException(status_code=422, detail="training_target_mismatch")
+        context = replace(context, training_ref=req.training.teaching_id,
+                          training_revision=req.training.revision,
+                          training_overrides=req.training.overrides)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", req.task_id):
         raise HTTPException(status_code=400, detail="invalid task_id")
     if req.trace_id is not None and not re.fullmatch(r"tr_[A-Fa-f0-9]{32}", req.trace_id):
@@ -179,10 +188,16 @@ def invoke_lamp_semantic_task(unit_id: str, req: SemanticTaskRequest,
                                      trace_id=trace_id,
                                      parent_run_id=req.parent_run_id,
                                      deadline=req.deadline)
-        return {**result, "physical_task_id": result.get("task_id")}
+        return {**result, "physical_task_id": result.get("task_id"),
+                **({'training_ref': context.training_ref,
+                    'training_revision': context.training_revision} if context.training_ref else {})}
     # FastAPI runs synchronous route handlers in its worker pool. Waiting for
     # the result here therefore leaves the API event loop free for MQTT/SSE.
-    return run_once(req.task_id, (context.session_id, unit_id, goal), work,
+    fingerprint = (context.session_id, unit_id, goal)
+    if req.training:
+        fingerprint += (json.dumps(req.training.model_dump(), sort_keys=True,
+                                   ensure_ascii=False, allow_nan=False),)
+    return run_once(req.task_id, fingerprint, work,
                     trace_id=trace_id)
 
 
@@ -199,7 +214,12 @@ async def get_lamp_semantic_task(unit_id: str, task_id: str,
         if agent:
             physical = agent._state.get_task_result(result["physical_task_id"])
             if physical:
-                result = update_late_result(task_id, context.session_id, physical) or result
+                if result.get('training_ref'):
+                    # A late receipt confirms one step, not all remaining
+                    # transitions in a paused teaching behavior.
+                    result = {**result, 'last_step_result': physical}
+                else:
+                    result = update_late_result(task_id, context.session_id, physical) or result
     return result
 
 

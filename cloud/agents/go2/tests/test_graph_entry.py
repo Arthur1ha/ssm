@@ -33,6 +33,45 @@ class ScriptedModel(JsonReplyModel):
 
 
 @pytest.mark.asyncio
+async def test_event_proposal_retry_preserves_trigger_and_can_repair_parameters(entry, monkeypatch):
+    from copy import deepcopy
+    from cloud.agents.common.training import tools
+    definition = {'transition_ids': ['tr_sit'], 'origins': ['agent_autonomous'],
+                  'conditions': [], 'cooldown_s': None, 'defaults': {},
+                  'trigger': {'event_id': 'vision.owner_recognized',
+                              'where': {}, 'params': {'recognized': True}}}
+    original = {'operation': 'create', 'unit_id': 'go2', 'name': '看到主人就坐下',
+                'effect_text': '确认主人后自动坐下', 'definition': definition}
+    dropped = deepcopy(original)
+    dropped['definition']['trigger'] = None
+    fixed = deepcopy(original)
+    fixed['definition']['trigger'] = {'event_id': 'vision.owner_recognized', 'where': {'recognized': True}, 'params': {}}
+    replies = [AIMessage(content='', tool_calls=[{'name': 'propose_training',
+        'id': 'attempt-' + str(index), 'args': args}]) for index, args in enumerate((original, dropped, fixed))]
+    model = ScriptedModel([*replies, AIMessage(content='草案已准备，请确认。')])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    posts = []
+    async def api(path, payload, context, *, method='POST'):
+        if method == 'GET':
+            return {'catalog': {'hash': 'a'*64}, 'records': []}
+        posts.append(payload)
+        if len(posts) == 1:
+            raise tools.TrainingAPIError('invalid_definition', status_code=422,
+                                         details={'details': 'recognized belongs in trigger.where'})
+        return {'proposal_id': 'corrected-draft'}
+    monkeypatch.setattr(tools, 'internal_api_call', api)
+    context = ExecutionContext('retry-session', 'admin', True, expires_at=int(time.time())+60)
+    result = await go2_graph.run_go2_loop('retry-session', '以后认出主人就坐下', context=context)
+    assert len(posts) == 2, result
+    assert posts[-1]['definition']['trigger'] == fixed['definition']['trigger']
+    results = [step['result'] for step in result['tool_results']]
+    assert results[0]['details']['details'] == 'recognized belongs in trigger.where'
+    assert results[1]['error'].startswith('event_trigger_changed_on_retry')
+    assert results[2]['result'] == 'ok'
+
+
+@pytest.mark.asyncio
 async def test_identity_prose_from_openai_compatible_provider_reaches_chat_reply(entry, monkeypatch):
     """Replay the live failure without the fake model's automatic JSON wrapping."""
     answer = "我是呆呆狗呀，就在这个空间里待着的机器狗。"

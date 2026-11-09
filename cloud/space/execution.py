@@ -29,12 +29,19 @@ class ExecutionContext:
     trigger_revision: int | None = None
     trigger_transition_id: str | None = None
     trigger_mode_epoch: int | None = None
+    # Bound by the local observation adapter, never by a model or browser.
+    trigger_observation_id: str | None = None
+    trigger_person_id: str | None = None
     # Set only after the event Graph matched an open semantic situation.
     trigger_situation_confirmed: bool = False
     # Bound by the apply_training adapter; executors recheck the saved revision.
     training_ref: str | None = None
     training_revision: int | None = None
     training_overrides: dict | None = None
+    # Bound by the confirmed teaching workflow for one exact execution step.
+    training_step_index: int | None = None
+    trigger_step_index: int | None = None
+    training_run_id: str | None = None
 
 
 SYSTEM_CONTEXT = ExecutionContext("system", "admin", True, origin_kind="system")

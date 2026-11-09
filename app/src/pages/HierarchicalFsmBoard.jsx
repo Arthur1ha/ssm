@@ -75,7 +75,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const primary = primaryStateRegion(sm);
   const stale = streamHealth === 'reconnecting';
   const taughtTransitionIds = new Set(records.filter(record => record.desired_status === 'enabled')
-    .flatMap(record => record.transition_ids || []));
+    .flatMap(trainingTransitionIds));
   const topology = stateBoardTopology(sm, liveState, taughtTransitionIds);
   const pendingExecution = liveState[sm?.execution_field];
   const execution = pendingExecution || liveState[sm?.last_execution_field];
@@ -255,11 +255,17 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
           </button>)}
         </div>
         <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
-          {selectedDirection.edges.map((edge,index) => <React.Fragment key={edge.id}>
-            {index > 0 && <div className="device-whiteboard__rule-or">或</div>}
-            <TransitionInspector transition={edge.transition}
-              projection={records.filter(record => record.transition_ids?.includes(edge.transition.id))}/>
-          </React.Fragment>)}
+          {selectedDirection.edges.map((edge,index) => {
+            const earlierIds = new Set(selectedDirection.edges.slice(0,index).map(item => item.transition.id));
+            const projection = records.filter(record => {
+              const ids = trainingTransitionIds(record);
+              return ids.includes(edge.transition.id) && !ids.some(id => earlierIds.has(id));
+            });
+            return <React.Fragment key={edge.id}>
+              {index > 0 && <div className="device-whiteboard__rule-or">或</div>}
+              <TransitionInspector transition={edge.transition} projection={projection}/>
+            </React.Fragment>;
+          })}
         </div>
       </StateBoardPopover>}
     </div>

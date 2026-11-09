@@ -1,5 +1,5 @@
-function trainingParameterRows(definition = {}) {
-  const params = {...definition.defaults, ...definition.trigger?.params};
+function trainingParameterRows(step = {}) {
+  const params = {...step.defaults};
   const rows = [];
   const rgb = ['r','g','b'].map(key => params[key]);
   if (rgb.every(value => Number.isInteger(value) && value >= 0 && value <= 255)) {
@@ -14,45 +14,57 @@ function trainingParameterRows(definition = {}) {
       : typeof value === 'object' ? JSON.stringify(value) : String(value);
     rows.push({key,label:labels[key] || key,value:text});
   }
-  if (definition.cooldown_s != null) rows.push({key:'cooldown_s',label:'间隔',value:`${definition.cooldown_s} 秒`});
   return rows;
+}
+
+function TrainingRuleSteps({record, transition, showParameters = false}) {
+  const steps = trainingSteps(record);
+  if (!steps.length) return null;
+  const currentSteps = transition ? steps.filter(step => step.transition_ids?.includes(transition.id)) : [];
+  return <>
+    {steps.length > 1 && currentSteps.length > 0 && <p className="training-inspector__action">
+      此转换为第 {currentSteps.map(step => step.step_index + 1).join('、')} 步，按完整顺序执行。
+    </p>}
+    <ol className={`training-rule-steps${steps.length === 1 ? ' training-rule-steps--single' : ''}`} aria-label="规则执行顺序">
+      {steps.map(step => {
+        const parameters = showParameters ? trainingParameterRows(step) : [];
+        return <li key={step.step_index}>
+          <span>{step.label}</span>
+          {step.conditionText && <p className="training-inspector__action">{step.conditionText}</p>}
+          {step.goalText && <p className="training-inspector__action">{step.goalText}</p>}
+          {parameters.length > 0 && <dl className="training-inspector__params" aria-label="动作参数">
+            {parameters.map(parameter => <div key={parameter.key}>
+              <dt>{parameter.label}</dt><dd>
+                {parameter.color && <span className="training-inspector__color" aria-hidden="true" style={{backgroundColor:parameter.color}}/>}
+                {parameter.value}
+              </dd>
+            </div>)}
+          </dl>}
+        </li>;
+      })}
+    </ol>
+  </>;
 }
 
 function TrainingRuleDetails({record,transition}) {
   const definition = record.definition || {};
   const summary = record.summaryText || record.name || record.source_text;
-  const situation = definition.situation
-    ? definition.trigger && summary && summary !== definition.situation
-      ? `${definition.situation} · ${summary}` : definition.situation
-    : summary;
-  const parameters = trainingParameterRows(definition);
   return <div className="training-inspector__rule" data-teaching-id={record.teaching_id}>
-    <p>{situation}<span className="training-inspector__action"> → {stateTransitionLabel(transition)}</span></p>
-    {parameters.length > 0 && <dl className="training-inspector__params" aria-label="动作参数">
-      {parameters.map(parameter => <div key={parameter.key}>
-        <dt>{parameter.label}</dt><dd>
-          {parameter.color && <span className="training-inspector__color" aria-hidden="true" style={{backgroundColor:parameter.color}}/>}
-          {parameter.value}
-        </dd>
-      </div>)}
-    </dl>}
+    <p>{summary}</p>
+    {definition.situation && definition.situation !== summary && <p>{definition.situation}</p>}
+    <TrainingRuleSteps record={record} transition={transition} showParameters/>
+    {definition.cooldown_s != null && <p className="training-inspector__action">间隔 {definition.cooldown_s} 秒</p>}
   </div>;
 }
 
 function TransitionInspector({transition,projection = []}) {
   const rules = projection.filter(record => record.desired_status === 'enabled');
-  const contextualRules = rules.filter(record => record.definition?.trigger || record.definition?.situation);
-  const requestRules = rules.filter(record => !record.definition?.trigger && !record.definition?.situation);
   const condition = transition.trigger_condition || (transition.action
     ? `收到${stateTransitionLabel(transition)}指令` : `${stateTransitionLabel(transition)}时`);
   return <div className="training-inspector"><p>{condition}</p>
-    {requestRules.length > 0 && <ul className="training-inspector__rules" aria-label="你制定的规则">
-      {requestRules.map(record => <li key={record.teaching_id}><TrainingRuleDetails record={record} transition={transition}/></li>)}
+    {rules.length > 0 && <ul className="training-inspector__rules" aria-label="你制定的规则">
+      {rules.map(record => <li key={record.teaching_id}><TrainingRuleDetails record={record} transition={transition}/></li>)}
     </ul>}
-    {contextualRules.map(record => <React.Fragment key={record.teaching_id}>
-      <div className="device-whiteboard__rule-or">或</div>
-      <TrainingRuleDetails record={record} transition={transition}/>
-    </React.Fragment>)}
   </div>;
 }
-window.TransitionInspector = TransitionInspector;
+Object.assign(window, {TransitionInspector,TrainingRuleSteps});

@@ -25,6 +25,19 @@ def stable_task_id(unit_id: str, run_id: str, step_id: str) -> str:
                                   f"ssm/lamp/{unit_id}/{run_id}/{step_id}").hex
 
 
+def is_training_dispatch(task_id: str, unit_id: str, session_id: str,
+                         action: str, params: dict) -> bool:
+    """Recognize a reserved behavior step when its MQTT publish loops back."""
+    if not isinstance(task_id, str) or not task_id:
+        return False
+    with locked_directory(PHYSICAL_TASKS_DIR):
+        row = read_record(record_path(PHYSICAL_TASKS_DIR, task_id))
+        return bool(row and row.get('unit_id') == unit_id
+                    and row.get('session_id') == session_id
+                    and row.get('action') == action and row.get('params') == params
+                    and (row.get('training') or {}).get('training_run_id'))
+
+
 def _fingerprint(unit_id: str, session_id: str, action: str, params: dict) -> str:
     payload = json.dumps([unit_id, session_id, action, params],
                          sort_keys=True, separators=(",", ":"), ensure_ascii=False)

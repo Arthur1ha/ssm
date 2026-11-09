@@ -129,6 +129,8 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                                           'training_ref': context.training_ref,
                                           'training_revision': context.training_revision,
                                           'training_overrides': context.training_overrides,
+                                          'training_run_id': context.training_run_id,
+                                          'training_step_index': context.training_step_index,
                                           'training_refs': training['training_refs'],
                                           'reasons': training['reasons']})
                 if not first:

@@ -105,6 +105,17 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         else:
             return {"result": "rejected", "error": "unknown_public_skill"}
 
+    if context.training_ref and context.training_step_index is None:
+        if skill_id not in (None, 'go2_chat') or allowed_tools is not None or tool_guard is not None:
+            return {'result': 'rejected', 'error': 'training_not_allowed_for_restricted_task'}
+        # A trusted HTTP delegation references the whole behavior. Individual
+        # transitions stay inside the API process and never recurse through
+        # another delegated conversation.
+        initial_tool = ('apply_training', {
+            'unit_id': 'go2', 'teaching_id': context.training_ref,
+            'revision': context.training_revision,
+            'overrides': context.training_overrides or {}})
+
     await view.reconcile_interrupted(session_id)
     previous = view.get(run_id, session_id, require_head=resume) if run_id else None
     if previous and not resume:
@@ -170,7 +181,9 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
     # Explicit read/life skills keep status lookup and wake reachable without
     # claiming an interaction. Other accepted Graph tasks own play until their
     # true terminal or clarification event, including time spent waiting on LLM.
-    read_or_life = initial_tool is not None and (initial_tool[0] in READ_ONLY_TOOLS or initial_tool[0] == 'go2_life' or TOOL_REGISTRY[initial_tool[0]].motion)
+    read_or_life = initial_tool is not None and (
+        initial_tool[0] in READ_ONLY_TOOLS or initial_tool[0] in {'go2_life', 'apply_training'}
+        or (initial_tool[0] in TOOL_REGISTRY and TOOL_REGISTRY[initial_tool[0]].motion))
     if runtime is not None and not runtime.active_reason() and not read_or_life:
         if context.origin_kind != 'agent_autonomous':
             from cloud.go2.service import prepare_user_interaction
@@ -181,34 +194,37 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         if runtime.data['life_state'] == 'idle':
             interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
 
+    training_attempt_start = len(run.steps)
+
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
         nonlocal interaction_token, motion_unconfirmed
         execution_context = context
         if name == "apply_training":
+            if allowed_tools is not None or tool_guard is not None or skill_id not in (None, 'go2_chat'):
+                return {'result': 'rejected', 'error': 'training_not_allowed_for_restricted_task'}
             from cloud.agents.common.training.tools import prepare_training_application
-            from cloud.go2.actions import SPORT_COMMANDS
-            from cloud.go2.tools.registry import CARD_SKILLS
+            from cloud.go2.service import run_training_behavior
             try:
                 prepared = await prepare_training_application(arguments, context)
             except ValueError as exc:
                 return {"result": "rejected", "error": str(exc)}
             if prepared["unit_id"] != "go2":
                 return {"result": "rejected", "error": "training_target_mismatch"}
-            action = prepared["action"]
-            name = ("go2_sport" if action in SPORT_COMMANDS else next((
-                spec["tool_name"] for spec in CARD_SKILLS.values()
-                if spec.get("tool_name") and (spec.get("invoke") or {}).get("action") == action), ""))
-            arguments = ({"cmd": action, **prepared["params"]}
-                         if name == "go2_sport" else prepared["params"])
-            execution_context = replace(context, **{key: prepared[key] for key in
-                                        ("training_ref", "training_revision", "training_overrides")})
+            if interaction_token is not None:
+                runtime.finish_life(interaction_token)
+                interaction_token = None
+            result = await run_training_behavior(
+                prepared, context, run_id=run.run_id + ':' + step_id)
+            motion_unconfirmed = result.get('result') in {'accepted', 'executing', 'unknown', 'timeout'}
+            return result
         if name in {"list_training", "propose_training"}:
             from dataclasses import asdict
             from cloud.agents.common.training.tools import execute_training
             if allowed_tools is not None or skill_id or run.parent_run_id or session_id.startswith("peer_"):
                 return {"result": "rejected", "error": "direct_user_request_required"}
             return await execute_training(name, arguments, {**asdict(context), "run_id": run.run_id,
-                                                            "source_text": message, "selection": selection})
+                                                            "source_text": message, "selection": selection,
+                                                            "proposal_attempts": run.steps[training_attempt_start:-1]})
         if name not in TOOL_REGISTRY:
             return {"result": "rejected", "error": "unknown_tool"}
         if allowed_tools is not None and name not in allowed_tools:

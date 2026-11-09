@@ -48,6 +48,7 @@ class ESP32Agent(ReactiveMind):
         self._beliefs_since_summary: int = 0
         self._autonomy_mode: str = "manual"   # 默认手动：连上不自动控灯，reactive 需显式开启
         self._autonomy_epoch = 0
+        self._command_epoch = 0
         self._autonomy_since = 0.0
         self._user_hold_until: float = 0.0
         self._control_view_lock = threading.Lock()
@@ -85,6 +86,8 @@ class ESP32Agent(ReactiveMind):
         """切换自主模式；非法值抛 ValueError。"""
         if mode not in _VALID_AUTONOMY_MODES:
             raise ValueError(f"未知自主模式: {mode}")
+        with self._control_view_lock:
+            self._command_epoch += 1
         self._autonomy_epoch += 1
         self._autonomy_since = time.time()
         self._autonomy_mode = mode
@@ -107,7 +110,9 @@ class ESP32Agent(ReactiveMind):
         logger.info("autonomy mode → %s", mode)
 
     def mark_user_command(self, unit_id: str) -> None:
-        """自主模式收到外部命令时，开启让位窗口。"""
+        """Invalidate older behaviors; reactive mode also yields temporarily."""
+        with self._control_view_lock:
+            self._command_epoch += 1
         if self._autonomy_mode != "reactive":
             return
         self._autonomy_epoch += 1
@@ -119,6 +124,8 @@ class ESP32Agent(ReactiveMind):
 
     def mark_peer_command(self, unit_id: str) -> None:
         """Peer requests get a shorter reactive hold without cancelling peer work."""
+        with self._control_view_lock:
+            self._command_epoch += 1
         if self._autonomy_mode != "reactive":
             return
         self._autonomy_epoch += 1

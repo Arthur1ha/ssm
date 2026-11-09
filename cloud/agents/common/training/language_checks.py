@@ -21,6 +21,55 @@ async def test_preview_only_uses_snapshot_and_trusted_source():
 
 
 @pytest.mark.asyncio
+async def test_training_http_error_preserves_backend_validation_reason(monkeypatch):
+    import io
+    import json
+    import time
+    import urllib.error
+    from cloud.agents.common.training import tools
+    detail = {'code': 'invalid_definition', 'details': 'invalid_event_action_parameters: recognized belongs in trigger.where'}
+    class Opener:
+        def open(self, *args, **kwargs):
+            raise urllib.error.HTTPError('http://internal', 422, 'Unprocessable Content', {},
+                                          io.BytesIO(json.dumps({'detail': detail}).encode()))
+    monkeypatch.setattr(tools.urllib.request, 'build_opener', lambda *a: Opener())
+    async def direct(call):
+        return call()
+    monkeypatch.setattr(tools.asyncio, 'to_thread', direct)
+    monkeypatch.setenv('SSM_INTERNAL_SERVICE_TOKEN', 'test-token')
+    context = {'session_id': 's', 'actor': 'admin', 'persist': True,
+               'expires_at': int(time.time()+60), 'run_id': 'r', 'source_text': '看到主人坐下'}
+    result = await tools.execute_training('list_training', {'unit_id': 'go2'}, context)
+    assert result == {'result': 'rejected', 'error': 'invalid_definition',
+                      'status_code': 422, 'details': detail}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['missing', 'different_event', 'removed_condition'])
+async def test_proposal_retry_cannot_drop_automatic_event(change):
+    from copy import deepcopy
+    definition = {'transition_ids': ['tr_sit'], 'origins': ['agent_autonomous'],
+                  'conditions': [], 'cooldown_s': None, 'defaults': {},
+                  'trigger': {'event_id': 'vision.owner_recognized',
+                              'where': {'recognized': True}, 'params': {}}}
+    original = {'operation': 'create', 'unit_id': 'go2', 'name': '主人面前坐下', 'definition': definition}
+    updated = deepcopy(original)
+    if change == 'missing':
+        updated['definition'].pop('trigger')
+    elif change == 'different_event':
+        updated['definition']['trigger'] = {'event_id': 'vision.person_presence', 'where': {'detected': True}, 'params': {}}
+    else:
+        updated['definition']['trigger']['where'] = {}
+    async def api(*args, **kwargs):
+        if kwargs.get('method') == 'GET':
+            return {'catalog': {'hash': 'a'*64}, 'records': []}
+        pytest.fail('a changed retry must not submit a new draft')
+    with pytest.raises(ValueError, match='event_trigger_changed_on_retry'):
+        await propose_training(updated, {'proposal_attempts': [
+            {'tool': 'propose_training', 'params': original, 'result': {'result': 'rejected'}}]}, api)
+
+
+@pytest.mark.asyncio
 async def test_selection_and_source_cannot_be_forged():
     async def api(path, payload, context, *, method='POST'):
         return {'catalog': {'hash': 'a' * 64}, 'records': []}

@@ -473,3 +473,197 @@ async def test_late_completion_releases_only_the_automatic_actions_own_lease(bou
         assert lease.snapshot().generation == newer.generation
     else:
         assert lease.snapshot() is None
+
+
+def owner_event(*, status='recognized', role='owner', person_id='owner-1', ts=None):
+    from cloud.go2.perception.identity import IdentityEvent, IdentitySnapshot
+    return IdentityEvent(IdentitySnapshot('idle'), IdentitySnapshot(
+        status, person_id=person_id, role=role, name='主人', score=99,
+        ts=time.time() if ts is None else ts))
+
+
+def face_frame(index, present=True, *, count=1):
+    return {**frame(index, present), 'faces': {'detected': present,
+                                              'count': count if present else 0}}
+
+
+def save_owner_teaching(f, action):
+    from cloud.agents.common.training import store
+    record = deepcopy(f['records'][0])
+    edge = next(edge for edge in f['catalog']['transitions'] if edge['action'] == action)
+    record['definition'].update(
+        transition_ids=[edge['id']], cooldown_s=None,
+        situation='摄像头确认面前是主人时',
+        trigger={'event_id': 'vision.owner_recognized', 'where': {'recognized': True}, 'params': {}})
+    with store.partition_lock('go2', space_id='main', write=True) as data:
+        data['records'][record['teaching_id']] = record
+
+
+class OwnerSituationModel:
+    def with_structured_output(self, schema, **kwargs):
+        return self
+
+    async def ainvoke(self, messages):
+        assert 'vision.owner_recognized' in messages[1].content
+        assert 'owner-1' in messages[1].content
+        return {'choice': 'accept', 'reason': '真实身份观察已确认主人'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('action,body', [('Sit', 'standing'), ('Stretch', 'standing'),
+                                      ('FingerHeart', 'standing'), ('RiseSit', 'sitting')])
+async def test_provider_identity_reaches_graph_and_original_executor(bound_listener, monkeypatch, action, body):
+    """Provider result -> service callback -> saved teaching -> real command boundary."""
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception.identity import IdentitySkill
+    from cloud.space.people.provider import FaceSearchResult, FaceCandidate
+    from cloud.go2 import service
+    adapter, robot, lease, f = bound_listener
+    save_owner_teaching(f, action)
+    robot.runtime.body(body, confirmation='observed')
+    robot._sport_state_observed_at = time.monotonic()
+    robot.send_command.return_value = {'result': 'ok', 'confirmation_scope': 'completion'}
+    monkeypatch.setattr(events, 'get_text_llm', OwnerSituationModel)
+    monkeypatch.setattr('cloud.space.activity.get_activity_store', lambda: SimpleNamespace(current=lambda: None))
+    person = SimpleNamespace(person_id='owner-1', name='主人', role='owner')
+    provider = SimpleNamespace(search_persons=AsyncMock(return_value=FaceSearchResult(
+        (FaceCandidate('owner-1', '主人', 99),))))
+    skill = IdentitySkill(provider, SimpleNamespace(get=lambda _: person), lambda: (None, None))
+    monkeypatch.setattr(skill, '_get_face_crop', lambda: b'fresh-face')
+    skill.add_callback(service._on_identity_event)
+    adapter.on_vision_frame(face_frame(1))
+    await skill.recognize_now()
+    for worker in (adapter, adapter._face_listener, adapter._owner_listener):
+        await flush(worker)
+    robot.send_command.assert_awaited_once_with(action)
+    assert adapter._owner_listener.last_result['result'] == 'ok'
+    assert lease.snapshot() is None
+    # The provider may refresh its result, but continuous presence is one event.
+    await skill.recognize_now()
+    await flush(adapter._owner_listener)
+    assert robot.send_command.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('identity', [
+    {'role': 'guest'}, {'status': 'candidate'}, {'status': 'unknown'},
+    {'status': 'error'}, {'status': 'disabled'}, {'ts': 1},
+])
+async def test_unconfirmed_identity_never_runs_owner_teaching(bound_listener, monkeypatch, identity):
+    adapter, robot, _, f = bound_listener
+    save_owner_teaching(f, 'Sit')
+    monkeypatch.setattr(events, 'get_text_llm', OwnerSituationModel)
+    adapter.on_vision_frame(face_frame(1))
+    adapter.on_identity_event(owner_event(**identity))
+    for worker in (adapter, adapter._face_listener, adapter._owner_listener):
+        await flush(worker)
+    robot.send_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_leaving_or_user_takeover_during_judgment_cannot_dispatch(bound_listener, monkeypatch):
+    adapter, robot, _, f = bound_listener
+    save_owner_teaching(f, 'Sit')
+    entered, release = asyncio.Event(), asyncio.Event()
+    class Model(OwnerSituationModel):
+        async def ainvoke(self, messages):
+            entered.set()
+            await release.wait()
+            return await super().ainvoke(messages)
+    monkeypatch.setattr(events, 'get_text_llm', Model)
+    adapter.on_vision_frame(face_frame(1))
+    adapter.on_identity_event(owner_event())
+    await entered.wait()
+    context = replace(adapter._owner_listener._context,
+                      trigger_mode_epoch=adapter._owner_listener._generation,
+                      trigger_person_id='owner-1', expires_at=int(time.time()+30))
+    assert adapter.allows(context)
+    adapter.interrupt()
+    assert not adapter.allows(context)
+    adapter.on_vision_frame(face_frame(2, False))
+    release.set()
+    for worker in (adapter, adapter._face_listener, adapter._owner_listener):
+        await flush(worker)
+    robot.send_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inflight_identity_for_departed_face_is_discarded(monkeypatch):
+    from cloud.go2.perception.identity import IdentitySkill
+    from cloud.space.people.provider import FaceSearchResult, FaceCandidate
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def search(_jpeg):
+        entered.set()
+        await release.wait()
+        return FaceSearchResult((FaceCandidate('owner-1', '主人', 99),))
+    skill = IdentitySkill(SimpleNamespace(search_persons=search),
+        SimpleNamespace(get=lambda _: SimpleNamespace(person_id='owner-1', name='主人', role='owner')),
+        lambda: (None, None))
+    monkeypatch.setattr(skill, '_get_face_crop', lambda: b'old-face')
+    observations = []
+    skill.add_callback(lambda event: observations.append(event.current.status))
+    skill.on_vision_frame(face_frame(1))
+    await entered.wait()
+    skill.on_vision_frame(face_frame(2, False))
+    skill.on_vision_frame(face_frame(3))
+    release.set()
+    await skill._auto_task
+    assert 'recognized' not in observations
+    assert skill.current.status == 'idle'
+
+
+@pytest.mark.asyncio
+async def test_same_frame_person_and_face_do_not_queue_two_actions(listener, monkeypatch):
+    adapter, _, _, _, calls = listener
+    f = person_greeting_fixture()
+    face_rule = deepcopy(f['records'][0])
+    face_rule['teaching_id'] = 'face-greeting'
+    face_rule['definition']['trigger']['event_id'] = 'vision.face_presence'
+    monkeypatch.setattr(events, 'list_records', lambda *a, **k: [*f['records'], face_rule])
+    adapter.on_vision_frame(face_frame(1))
+    for worker in adapter._workers():
+        await flush(worker)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_rule_requires_new_appearance_before_repeating(bound_listener, monkeypatch):
+    adapter, robot, _, f = bound_listener
+    save_owner_teaching(f, 'Sit')
+    monkeypatch.setattr(events, 'get_text_llm', OwnerSituationModel)
+    robot.send_command.return_value = {'result': 'ok', 'confirmation_scope': 'completion'}
+    adapter.on_vision_frame(face_frame(1))
+    adapter.on_identity_event(owner_event())
+    for worker in adapter._workers():
+        await flush(worker)
+    adapter.on_vision_frame(face_frame(2))
+    adapter.on_identity_event(owner_event())
+    await flush(adapter._owner_listener)
+    assert robot.send_command.await_count == 1
+    adapter.on_vision_frame(face_frame(3, False))
+    adapter.on_vision_frame(face_frame(4))
+    adapter.on_identity_event(owner_event())
+    for worker in adapter._workers():
+        await flush(worker)
+    assert robot.send_command.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_person_presence_cannot_authorize_an_owner_event(bound_listener):
+    from cloud.go2.tools.executor import execute_tool
+    from cloud.agents.common.training import store
+    adapter, robot, _, f = bound_listener
+    save_owner_teaching(f, 'Sit')
+    adapter.on_vision_frame(face_frame(1))
+    for worker in adapter._workers():
+        await flush(worker)
+    record = store.list_records('go2', space_id='main')[0]
+    context = replace(adapter._context, trigger_mode_epoch=adapter._generation,
+        trigger_ref=record['teaching_id'], trigger_revision=record['revision'],
+        trigger_transition_id=record['definition']['transition_ids'][0],
+        trigger_situation_confirmed=True, expires_at=int(time.time()+30))
+    result = await execute_tool('go2_sport', {'cmd': 'Sit'}, context=context,
+                                request_id='wrong-observation')
+    assert result['result'] == 'blocked'
+    assert {'code': 'trigger_authorization_invalid'} in result['reasons']
+    robot.send_command.assert_not_awaited()

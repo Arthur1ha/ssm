@@ -72,6 +72,7 @@ class IdentitySkill:
         self._last_face_seen = 0.0
         self._last_search_ts = 0.0
         self._previous_face_count = 0
+        self._face_generation = 0
         self._candidate_id = ""
         self._candidate_count = 0
 
@@ -120,6 +121,10 @@ class IdentitySkill:
         """同步轻量入口；云调用只在后台 task 中发生。"""
         now = time.time()
         face_count = int(frame["faces"]["count"])
+        if face_count != self._previous_face_count:
+            self._face_generation += 1
+            self._candidate_id = ""
+            self._candidate_count = 0
         if face_count > 0:
             self._last_face_seen = now
         elif self._previous_face_count > 0:
@@ -159,6 +164,7 @@ class IdentitySkill:
         if self._search_lock.locked():
             return self._snapshot("searching", error_code="busy")
         async with self._search_lock:
+            face_generation = self._face_generation
             self._set_current(self._snapshot("searching"))
             self._last_search_ts = time.time()
             try:
@@ -167,6 +173,12 @@ class IdentitySkill:
             except (VisionFaceRejected, FaceProviderError) as exc:
                 code = getattr(exc, "code", "recognition_failed")
                 return self._set_current(self._snapshot("error", error_code=code))
+
+            if face_generation != self._face_generation:
+                # The result belongs to a face that left or a different group
+                # of faces. A later fresh frame must initiate a new search.
+                self._last_search_ts = 0.0
+                return self._set_current(self._snapshot("idle"))
 
             candidate = result.candidates[0] if result.candidates else None
             if candidate is None or candidate.score < self.candidate_score:
@@ -206,6 +218,7 @@ class IdentitySkill:
         )
 
     def clear_transient(self) -> None:
+        self._face_generation += 1
         if self._auto_task and not self._auto_task.done():
             self._auto_task.cancel()
         self._candidate_id = ""

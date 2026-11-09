@@ -137,7 +137,10 @@ def check_direct_motion(command: str | None, params: dict, context: ExecutionCon
         if hasattr(go2, "_validate_velocity"):
             go2._validate_velocity(**velocity)
     if command != "StopMove":
-        control_lease.acquire(context)
+        from cloud.go2.service import interrupt_training_behavior, note_training_lease
+        interrupt_training_behavior(context)
+        acquired = control_lease.acquire(context)
+        note_training_lease(context, acquired)
         if previous is not None and previous.owner_session_id != context.session_id:
             from cloud.go2.navigation.navigator import navigator
             navigator.stop(owner_session_id=previous.owner_session_id)
@@ -290,7 +293,8 @@ async def execute_action(command: str, params: dict | None = None, *,
         result = normalize_result("go2_sport", raw)
         result = {**result, "action": command, "device_epoch": dispatch_epoch, **_training_result(checked)}
         from cloud.go2.tasks import release_teaching_lease, track_command_result
-        release_teaching_lease(result, teaching_lease)
+        if not context.training_run_id:
+            release_teaching_lease(result, teaching_lease)
         if teaching_lease is not None and result.get('result') in {'accepted', 'executing', 'timeout', 'unknown'}:
             result['teaching_lease'] = teaching_lease
         ledger, identity = current_effect()

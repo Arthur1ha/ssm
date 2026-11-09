@@ -15,7 +15,9 @@ from cloud.agents.common.training.catalog import catalog_for
 from cloud.agents.common.training.models import (
     Identifier, LoadedRequest, Proposal, ProposalRequest, Record,
 )
-from cloud.agents.common.training.policy import conflicts, validate_definition
+from cloud.agents.common.training.policy import (
+    conflicts, validate_definition, definition_transition_ids, step_parameters, evaluate,
+)
 from cloud.agents.common.training import store
 
 _IDENTIFIER = TypeAdapter(Identifier)
@@ -121,23 +123,43 @@ def _commit(data, record, expected_revision, proposal_id):
         raise TrainingError(code, 409 if code == 'revision_conflict' else 422) from exc
 
 
+def _condition_text(condition, catalog):
+    field, value = condition['field'], condition['value']
+    if field == 'requester_is_owner' and condition['op'] == 'eq':
+        return '请求者是主人' if value else '请求者不是主人'
+    spec = catalog['state_fields'].get(field, {})
+    values = value if condition['op'] == 'in' else [value]
+    labels = spec.get('labels', {})
+    rendered = '或'.join(str(labels.get(item, item)) for item in values)
+    return str(spec.get('label') or field) + '为' + rendered
+
+
 def _explain(record, catalog):
     edges = {edge['id']: edge for edge in catalog['transitions']}
-    selected = [edges[key] for key in record['definition']['transition_ids'] if key in edges]
     definition = record['definition']
-    trigger = definition['trigger']
-    # The existing role Graph supplies these presentation strings alongside the
-    # structured definition. They never participate in execution or permission
-    # checks. Old records retain their own user-facing name without exposing JSON.
-    summary = record['name']
-    return {'transitionLabel': '、'.join(f"{edge.get('source_label', edge['src'])} → {edge.get('destination_label', edge['dst'])}" for edge in selected) or '目标转换能力已变化',
-            'summaryText': summary,
-            'changeText': ('删除这条规则：' + summary if record['desired_status'] == 'removed'
-                           else record.get('effect_text') or summary),
-            'scopeText': '仅此事件触发的请求' if trigger else '、'.join(
+    summaries = []
+    for index, step in enumerate(definition['steps']):
+        selected = [edges[key] for key in step['transition_ids'] if key in edges]
+        label = '、'.join(dict.fromkeys(
+            f"{edge.get('source_label', edge['src'])} → {edge.get('destination_label', edge['dst'])}"
+            for edge in selected)) or '目标转换能力已变化'
+        goal_text = None
+        if step.get('goal_state') and selected:
+            goal_text = '已经' + selected[0].get('destination_label', step['goal_state']) + '时跳过'
+        summaries.append({'step_index': index, 'label': label,
+                          'transition_ids': list(step['transition_ids']),
+                          'conditions': deepcopy(step['conditions']),
+                          'conditionText': '，且'.join(_condition_text(item, catalog) for item in step['conditions']),
+                          'defaults': deepcopy(step['defaults']),
+                          'goal_state': step.get('goal_state'), 'goalText': goal_text})
+    return {'transitionLabel': '，然后'.join(step['label'] for step in summaries),
+            'summaryText': record['name'],
+            'changeText': ('删除这条规则：' + record['name'] if record['desired_status'] == 'removed'
+                           else record.get('effect_text') or record['name']),
+            'scopeText': '仅此事件触发的行为' if definition['trigger'] else '、'.join(
                 {'user_delegated': '用户委托请求', 'agent_autonomous': '自主请求'}[origin]
                 for origin in definition['origins']),
-            'transition_ids': list(definition['transition_ids'])}
+            'transition_ids': definition_transition_ids(definition), 'stepSummaries': summaries}
 
 
 def _preview(proposal, data, catalog):
@@ -215,7 +237,7 @@ def propose(request: dict, session: dict) -> dict:
                 record['definition'] = req['definition']
                 record['effect_text'] = req['effect_text']
         else:
-            record = {'schema_version': 1, 'teaching_id': previous['record']['teaching_id'] if previous else 'trn_' + uuid4().hex,
+            record = {'schema_version': 2, 'teaching_id': previous['record']['teaching_id'] if previous else 'trn_' + uuid4().hex,
                       'unit_id': req['unit_id'], 'space_id': session['space_id'], 'name': req['name'],
                       'effect_text': req['effect_text'],
                       'source_text': source.text, 'revision': 1, 'definition': req['definition'],
@@ -391,7 +413,7 @@ def snapshot(unit_id: str, viewer: dict) -> dict:
                 reasons.extend(_snapshot_execution_reasons(card, record, viewer, catalog))
             record.update(saved=True, load_status='loaded' if loaded else 'awaiting_load',
                           executable=not reasons, execution_reasons=reasons, **_explain(record, catalog))
-            for edge_id in record['definition']['transition_ids']:
+            for edge_id in definition_transition_ids(record['definition']):
                 annotations.setdefault(edge_id, []).append({
                     'teaching_id': record['teaching_id'], 'revision': record['revision'],
                     'desired_status': record['desired_status'], 'load_status': record['load_status'],
@@ -445,84 +467,124 @@ def teaching_baseline(record):
                  if version['desired_status'] == 'enabled'), record['created_at'])
 
 
-def _selected_application(records, card, catalog, action, params, context):
-    """Check a Graph-selected configuration using the current locked partition."""
-    from cloud.agents.common.training.policy import application_parameters
+def resolve_training_step(record, catalog, step_index, current_state, overrides=None):
+    """Resolve one confirmed step against the current authoritative snapshot."""
+    _check_catalog(record, catalog)
+    if len(record['definition']['steps']) > 1 and overrides:
+        raise TrainingError('ambiguous_overrides: specify a separate teaching revision for a multi-step parameter change')
+    prepared = step_parameters(record, catalog, step_index, overrides)
+    edges = [edge for edge in catalog['transitions'] if edge['id'] in prepared['transition_ids']]
+    goal = prepared['goal_state']
+    field = edges[0]['state_field']
+    parent = edges[0].get('parent')
+    if parent and current_state.get(parent['state_field']) != parent['state']:
+        raise TrainingError('step_parent_state_unavailable')
+    connected = current_state.get('connected', current_state.get('_connected', current_state.get('online'))) is True
+    if field == 'body_state':
+        fresh = current_state.get('body_telemetry_fresh') is True
+    elif field in {'life_state', 'activity_state'}:
+        fresh = connected
+    else:
+        received = current_state.get('_received_at')
+        fresh = type(received) in (int, float) and 0 <= time.time() - received <= 30
+    if goal is not None and current_state.get(field) == goal:
+        if not connected or not fresh:
+            raise TrainingError('state_unknown')
+        return {**prepared, 'transition_id': None, 'skip': True}
+    matching = [edge for edge in edges if current_state.get(edge['state_field']) == edge['src']]
+    if len(matching) != 1:
+        raise TrainingError('source_state_unavailable' if not matching else 'transition_ambiguous')
+    prepared = step_parameters(record, catalog, step_index, overrides, transition_id=matching[0]['id'])
+    return {**prepared, 'transition_id': matching[0]['id'], 'skip': False}
 
-    selected_ref = context.training_ref
-    selected_revision = context.training_revision
-    if selected_ref is None and selected_revision is None:
-        return None
-    selected = next((row for row in records if row['teaching_id'] == selected_ref), None)
+
+def _selected_application(records, card, catalog, current, action, params, context):
+    reference = context.training_ref or context.trigger_ref
+    if reference is None:
+        if context.training_revision is not None or context.trigger_revision is not None:
+            raise TrainingError('training_selection_invalid')
+        return None, None
+    selected = next((row for row in records if row['teaching_id'] == reference), None)
     if (selected is None or selected['desired_status'] != 'enabled'
             or selected['unit_id'] != card['unit_id'] or selected['space_id'] != context.space_id
             or context.origin_kind not in selected['definition']['origins']
-            or context.trigger_ref):
+            or (context.training_ref and context.trigger_ref and context.training_ref != context.trigger_ref)):
         raise TrainingError('training_selection_invalid')
-    if type(selected_revision) is not int or selected['revision'] != selected_revision:
+    revision = context.training_revision if context.training_ref else context.trigger_revision
+    if type(revision) is not int or selected['revision'] != revision:
         raise TrainingError('training_revision_changed', 409)
     _check_catalog(selected, catalog)
-    selected_action, bound = application_parameters(
-        selected, catalog, context.training_overrides or {})
-    if action != selected_action or params != bound:
+    index = (getattr(context, 'training_step_index', None) if context.training_ref
+             else getattr(context, 'trigger_step_index', None))
+    if type(index) is not int or not 0 <= index < len(selected['definition']['steps']):
+        raise TrainingError('training_step_invalid')
+    if selected['definition']['trigger']:
+        if (context.trigger_ref != reference or context.origin_kind != 'agent_autonomous'
+                or context.trigger_revision != selected['revision']
+                or getattr(context, 'trigger_step_index', None) != index
+                or (context.trigger_observation_id is not None and
+                    context.trigger_observation_id != selected['definition']['trigger']['event_id'])):
+            raise TrainingError('trigger_authorization_invalid')
+    elif context.trigger_ref:
+        raise TrainingError('trigger_authorization_invalid')
+    overrides = context.training_overrides or {}
+    if len(selected['definition']['steps']) > 1 and overrides:
+        raise TrainingError('ambiguous_overrides')
+    choices = [edge for edge in catalog['transitions']
+               if edge['id'] in selected['definition']['steps'][index]['transition_ids']
+               and current.get(edge['state_field']) == edge['src']]
+    if len(choices) != 1:
+        raise TrainingError('source_state_unavailable' if not choices else 'transition_ambiguous')
+    prepared = step_parameters(selected, catalog, index, overrides, transition_id=choices[0]['id'])
+    if prepared['action'] != action or prepared['params'] != params:
         raise TrainingError('training_parameters_changed')
-    return selected
+    return selected, index
 
 
 def evaluate_execution(card, current, action, params, context, records, completion_history, *, state_fresh=True):
-    """Pure guard/default projection; callers hold their dispatch/partition locks.
-
-    Loaded ACKs only describe loading. Current confirmed definitions govern the
-    boundary even if an informational ACK was lost or the API restarted.
-    """
-    from cloud.agents.common.training.policy import evaluate
+    """Every device boundary enforces current matching step guards and defaults."""
     result = {'allowed': True, 'params': dict(params), 'reasons': [], 'training_refs': [], 'transition_id': None}
     if action in {'STOP', 'StopMove'}:
         return result
     catalog = catalog_for(card)
     records = list(records)
     try:
-        selected = _selected_application(records, card, catalog, action, params, context)
+        selected, selected_index = _selected_application(records, card, catalog, current, action, params, context)
     except (TrainingError, ValueError) as exc:
-        return {**result, 'allowed': False,
-                'reasons': [{'code': getattr(exc, 'code', str(exc))}]}
-    action_edges = [edge for edge in catalog['transitions'] if edge['action'] == action]
-    resolved = [edge for edge in action_edges if current.get(edge['state_field']) == edge['src']
-                and all(params.get(key) == value for key, value in edge.get('selector_params', {}).items())]
-    if len(resolved) == 1 and not resolved[0]['trainable'] and selected is None:
+        return {**result, 'allowed': False, 'reasons': [{'code': getattr(exc, 'code', str(exc))}]}
+    action_edges = [edge for edge in catalog['transitions'] if edge['action'] == action
+                    and all(params.get(key) == value for key, value in edge['selector_params'].items())]
+    current_edges = [edge for edge in action_edges if current.get(edge['state_field']) == edge['src']]
+    if len(current_edges) == 1 and not current_edges[0]['trainable'] and selected is None:
         return result
-    action_edges = [edge for edge in action_edges if edge['trainable']]
+    candidates = [edge for edge in current_edges if edge['trainable']]
+    applicable = []
     action_ids = {edge['id'] for edge in action_edges}
-    applicable = [record for record in records if record['desired_status'] == 'enabled'
-                  and context.origin_kind in record['definition']['origins']
-                  and (not record['definition']['trigger'] or context.trigger_ref == record['teaching_id'])
-                  and (not record['definition'].get('situation')
-                       or record['definition']['trigger'] or record['teaching_id'] == context.training_ref)
-                  and action_ids.intersection(record['definition']['transition_ids'])]
-    candidates = [edge for edge in action_edges if current.get(edge['state_field']) == edge['src']
-                  and all(params.get(key) == value for key, value in edge.get('selector_params', {}).items())]
-    if context.trigger_ref:
-        triggered = next((record for record in applicable if record['teaching_id'] == context.trigger_ref
-                          and record['definition']['trigger']), None)
-        if (triggered is None or context.origin_kind != 'agent_autonomous'
-                or context.trigger_revision != triggered['revision']):
-            result['reasons'].append({'code': 'trigger_authorization_invalid'})
+    for record in records:
+        definition = record['definition']
+        if record['desired_status'] != 'enabled' or context.origin_kind not in definition['origins']:
+            continue
+        is_selected = selected is not None and selected['teaching_id'] == record['teaching_id']
+        if definition['trigger'] and context.trigger_ref != record['teaching_id']:
+            continue
+        if definition.get('situation') and not is_selected:
+            continue
+        if action_ids.intersection(definition_transition_ids(definition)):
+            applicable.append(record)
     if len(candidates) != 1:
-        if applicable or context.trigger_ref or selected is not None:
+        if applicable or selected is not None:
             result['reasons'].append({'code': 'transition_unknown' if not candidates else 'transition_ambiguous'})
         result['allowed'] = not result['reasons']
         return result
     edge = candidates[0]
-    if selected is not None and edge['id'] not in selected['definition']['transition_ids']:
-        result['reasons'].append({'code': 'training_transition_mismatch'})
-    if context.trigger_ref and triggered is not None:
-        bound = {**edge.get('selector_params', {}), **triggered['definition']['trigger']['params']}
-        if (edge['id'] != context.trigger_transition_id or edge['id'] not in triggered['definition']['transition_ids']
-                or params != bound):
-            result['reasons'].append({'code': 'trigger_authorization_invalid'})
-        params = {**bound, **params}
     result['transition_id'] = edge['id']
-    applicable = [record for record in applicable if edge['id'] in record['definition']['transition_ids']]
+    if selected is not None:
+        ids = selected['definition']['steps'][selected_index]['transition_ids']
+        if edge['id'] not in ids:
+            result['reasons'].append({'code': 'training_transition_mismatch'})
+        if context.trigger_ref and edge['id'] != context.trigger_transition_id:
+            result['reasons'].append({'code': 'trigger_authorization_invalid'})
+    applicable = [record for record in applicable if edge['id'] in definition_transition_ids(record['definition'])]
     if applicable and not state_fresh:
         result['reasons'].append({'code': 'state_unknown'})
     defaults, selected_defaults = {}, {}
@@ -532,23 +594,24 @@ def evaluate_execution(card, current, action, params, context, records, completi
         except TrainingError as exc:
             result['reasons'].append({'code': exc.code})
             continue
+        is_selected = selected is not None and selected['teaching_id'] == record['teaching_id']
         known, last = completion_history(record, edge['id']) if record['definition']['cooldown_s'] is not None else (True, None)
         checked = evaluate([dict(record, loaded_revision=record['revision'])],
-                           {'transition_id': edge['id'], 'origin': context.origin_kind,
-                            'params': params, 'trigger_ref': context.trigger_ref,
-                            'training_ref': context.training_ref,
-                            'trigger_situation_confirmed': context.trigger_situation_confirmed},
-                           {'state': current, 'state_fresh': state_fresh, 'requester': context.requester,
-                            'completion_history_known': known, 'last_completed_at': {edge['id']: last}}, now=time.time())
+            {'transition_id': edge['id'], 'origin': context.origin_kind, 'params': {},
+             'trigger_ref': context.trigger_ref, 'training_ref': context.training_ref,
+             'step_index': selected_index if is_selected else None,
+             'trigger_situation_confirmed': context.trigger_situation_confirmed},
+            {'state': current, 'state_fresh': state_fresh, 'requester': context.requester,
+             'completion_history_known': known, 'last_completed_at': {edge['id']: last}}, now=time.time())
         result['reasons'].extend(checked['reasons'])
         result['training_refs'].extend(checked['teaching_refs'])
-        if selected is not None and record['teaching_id'] == selected['teaching_id']:
-            selected_defaults.update(record['definition']['defaults'])
-            continue
-        for key, value in record['definition']['defaults'].items():
-            if key in defaults and defaults[key] != value:
-                result['reasons'].append({'code': 'default_conflict', 'field': key})
-            defaults[key] = value
+        if is_selected:
+            selected_defaults.update(checked['params'])
+        else:
+            for key, value in checked['params'].items():
+                if key in defaults and defaults[key] != value:
+                    result['reasons'].append({'code': 'default_conflict', 'field': key})
+                defaults[key] = value
     result['params'] = {**defaults, **selected_defaults, **params}
     result['allowed'] = not result['reasons']
     return result
@@ -595,19 +658,14 @@ def load_runtime(card, context):
 
 
 def _snapshot_execution_reasons(card, record, viewer, catalog):
-    """Current eligibility only; loaded configuration is never a dispatch grant."""
+    """Snapshot eligibility describes the first step, never a dispatch grant."""
     from cloud.agents.common.effects import FileEffectLedger
-    from cloud.agents.common.training.policy import evaluate
     definition = record['definition']
     origin = 'user_delegated' if 'user_delegated' in definition['origins'] else 'agent_autonomous'
     if card.get('agent_type') == 'robot':
         from cloud.go2.connection import go2
         current = go2.state_snapshot()
-        if not current.get('connected'):
-            return [{'code': 'device_offline'}]
-        fresh = current.get('body_telemetry_fresh') is True
-        if not fresh:
-            current = {**current, 'body_state': None}
+        connected = current.get('connected') is True
         ledger = FileEffectLedger()
         def history(edge_id):
             return ledger.completion_history(unit_id=card['unit_id'], transition_id=edge_id,
@@ -617,46 +675,52 @@ def _snapshot_execution_reasons(card, record, viewer, catalog):
         import sys
         state = getattr(sys.modules.get('cloud.api.main'), '_esp32_state', None)
         entry = state.actuator_snapshot().get(card['unit_id'], {}) if state else {}
-        current = entry.get('state') or {}
-        received = current.get('_received_at') or entry.get('_received_at')
-        fresh = isinstance(received, (int, float)) and 0 <= time.time() - received <= 30
-        if not card.get('online'):
-            return [{'code': 'device_offline'}]
+        current = {**(entry.get('state') or {}), 'connected': card.get('online') is True}
+        current.setdefault('_received_at', entry.get('_received_at'))
+        connected = current['connected']
         from cloud.esp32.physical_tasks import completion_history
         def history(edge_id):
             return completion_history(unit_id=card['unit_id'], transition_id=edge_id,
                 teaching_id=record['teaching_id'], since=teaching_baseline(record),
                 origin_kind=origin, trigger_ref=record['teaching_id'] if definition['trigger'] else None)
-    edges = [edge for edge in catalog['transitions'] if edge['id'] in definition['transition_ids']
-             and edge['src'] == current.get(edge['state_field'])]
-    if not edges:
-        return [{'code': 'source_state_unavailable'}]
-    edge = edges[0]
-    if edge['state_field'] in {'activity_state', 'life_state'}:
-        # These are local runtime facts, independent of body telemetry age.
-        fresh = bool(current.get('connected'))
+    if not connected:
+        return [{'code': 'device_offline'}]
+    try:
+        prepared = resolve_training_step(record, catalog, 0, current)
+    except (TrainingError, ValueError) as exc:
+        return [{'code': getattr(exc, 'code', str(exc))}]
+    if prepared['skip']:
+        return []
+    edge = next(edge for edge in catalog['transitions'] if edge['id'] == prepared['transition_id'])
+    field = edge['state_field']
+    fresh = (connected if field in {'activity_state', 'life_state'} else
+             current.get('body_telemetry_fresh') is True if field == 'body_state' else
+             type(current.get('_received_at')) in (int, float) and 0 <= time.time()-current['_received_at'] <= 30)
     if not fresh:
         return [{'code': 'state_unknown'}]
-    reasons = []
-    if card.get('agent_type') == 'robot':
-        if edge['action'] == 'LIFE':
-            base = current.get('life_blocked_reasons', {}).get(edge['selector_params'].get('action'))
-        else:
-            base = current.get('blocked_actions', {}).get(edge['action'])
-        if base:
-            reasons.append({'code': 'device_precondition', 'detail': base})
     known, last = history(edge['id']) if definition['cooldown_s'] is not None else (True, None)
     checked = evaluate([dict(record, loaded_revision=record['revision'])],
-        {'transition_id': edge['id'], 'origin': origin, 'params': edge.get('selector_params', {}),
+        {'transition_id': edge['id'], 'origin': origin, 'params': prepared['params'],
          'trigger_ref': record['teaching_id'] if definition['trigger'] else None,
-         'training_ref': record['teaching_id'] if definition.get('situation') else None},
+         'training_ref': record['teaching_id'], 'step_index': 0},
         {'state': current, 'state_fresh': fresh, 'requester': None,
          'completion_history_known': known, 'last_completed_at': {edge['id']: last}}, now=time.time())
-    reasons.extend(checked['reasons'])
+    reasons = checked['reasons']
     if definition['trigger']:
         reasons.append({'code': 'fresh_trigger_required'})
     elif origin == 'agent_autonomous':
         reasons.append({'code': 'autonomy_context_required'})
-    if set(edge['params_schema'].get('required', [])) - checked['params'].keys():
-        reasons.append({'code': 'request_parameters_required'})
     return reasons
+
+
+def clear_training(*, space_id='main', unit_ids=None):
+    """API-owned maintenance used for the authorized clean schema cutover."""
+    _IDENTIFIER.validate_python(space_id)
+    units = store.partition_units(space_id=space_id) if unit_ids is None else list(unit_ids)
+    results = []
+    for unit_id in units:
+        partition = store.clear_partition(unit_id, space_id=space_id)
+        result = {'space_id': space_id, 'unit_id': unit_id, 'cursor': partition['cursor']}
+        _emit('training.reset', **result)
+        results.append(result)
+    return results

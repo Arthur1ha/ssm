@@ -181,7 +181,10 @@ def _on_esp32_message(client, userdata, msg):
                     "peer_autonomous", "peer_game_color", "peer_game_twist"}):
             agent = esp32_agent_mod.get_agent()
             if agent:
-                agent.mark_user_command(parts[2])
+                from cloud.esp32.physical_tasks import is_training_dispatch
+                if not is_training_dispatch(parts[3], parts[2], payload.get('session_id'),
+                                            payload.get('action'), payload.get('params')):
+                    agent.mark_user_command(parts[2])
 
 
 @asynccontextmanager

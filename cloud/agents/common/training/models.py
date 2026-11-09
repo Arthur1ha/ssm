@@ -15,17 +15,21 @@ class Condition(StrictModel):
 
 class Trigger(StrictModel):
     event_id: StrictStr
-    where: dict[str, Any]
-    params: dict[str, Any]
+    where: dict[str, Any] = Field(description='观察事件的条件，例如 recognized=true；只使用事件声明的字段')
+
+
+class Step(StrictModel):
+    transition_ids: list[StrictStr] = Field(min_length=1, description='本步骤各合法源状态的候选转换；普通步骤必须同动作，明确goal_state可包含到该目标的不同姿态动作；数组顺序不是执行顺序')
+    conditions: list[Condition] = Field(default_factory=list, description='只约束本步骤所指转换的准入条件；主人身份必须来自可信请求者事实')
+    defaults: dict[str, Any] = Field(default_factory=dict)
+    goal_state: StrictStr | None = Field(default=None, description='仅明确姿态或生命周期目标使用；当前真实状态已满足时可跳过，不能用于打招呼等命令动作')
 
 
 class Definition(StrictModel):
-    transition_ids: list[StrictStr] = Field(min_length=1)
+    steps: list[Step] = Field(min_length=1, max_length=12, description='有序的已有转换步骤；单动作也是仅含一步的教导')
     origins: list[Literal['user_delegated', 'agent_autonomous']] = Field(min_length=1)
-    conditions: list[Condition]
-    cooldown_s: StrictInt | StrictFloat | None
-    defaults: dict[str, Any]
-    trigger: Trigger | None
+    cooldown_s: StrictInt | StrictFloat | None = None
+    trigger: Trigger | None = None
     # Interpreted by the role Graph, never used as a global device guard.
     situation: StrictStr | None = Field(default=None, min_length=1, max_length=2000,
         description="自然语言适用情境，由智能体语义理解；不要求传感器事件或固定口令")
@@ -59,7 +63,7 @@ class ApplyTraining(StrictModel):
 
 
 class Revision(StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     teaching_id: Identifier
     unit_id: Identifier
     space_id: Identifier
@@ -178,7 +182,7 @@ class TrustedSource(StrictModel):
 
 
 class Partition(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     space_id: Identifier
     unit_id: Identifier
     records: dict[Identifier, Record] = Field(default_factory=dict, max_length=500)

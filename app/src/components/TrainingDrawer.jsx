@@ -37,6 +37,7 @@ function TrainingDrawer({unitId,training,onClose,onRevise,agents}) {
       {visibleRecords.length > 0 && <h3>{getAgentDisplayName(agent.unit_id)}</h3>}
       {visibleRecords.filter(record => record.unit_id === agent.unit_id || (!agents && !record.unit_id)).map(record => <article key={record.teaching_id} className="training-record">
         <p>{record.summaryText || record.name || record.source_text}</p>
+        <TrainingRuleSteps record={record}/>
         <div className="training-actions">
           <button type="button" onClick={() => onRevise(record)}>在对话中修改</button>
           <button type="button" disabled={removing === record.teaching_id} onClick={async () => {

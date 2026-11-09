@@ -156,6 +156,7 @@ def validate_training_selection(selection, session, *, unit_id=None):
     if selection is None:
         return None
     from cloud.agents.common.training import service
+    from cloud.agents.common.training.policy import definition_transition_ids
     try:
         selected = TrainingSelection.model_validate(selection).model_dump(exclude_none=True)
         if unit_id and selected['unit_id'] != unit_id:
@@ -164,7 +165,7 @@ def validate_training_selection(selection, session, *, unit_id=None):
         if not any(e['id'] == selected['transition_id'] and e['trainable'] for e in snapshot['catalog']['transitions']):
             raise ValueError('invalid_selection_transition')
         if selected.get('teaching_id') and not any(
-            r['teaching_id'] == selected['teaching_id'] and selected['transition_id'] in r['definition']['transition_ids']
+            r['teaching_id'] == selected['teaching_id'] and selected['transition_id'] in definition_transition_ids(r['definition'])
             for r in snapshot['records']):
             raise ValueError('invalid_selection_teaching')
         if selected.get('proposal_id'):

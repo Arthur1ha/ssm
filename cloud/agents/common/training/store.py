@@ -132,3 +132,38 @@ def commit(record: dict, *, expected_revision: int, proposal_id: str) -> dict:
     validated = Record.model_validate(record).model_dump()
     with partition_lock(validated['unit_id'], space_id=validated['space_id'], write=True) as data:
         return commit_locked(data, validated, expected_revision=expected_revision, proposal_id=proposal_id)
+
+
+def clear_partition(unit_id: str, *, space_id: str) -> dict:
+    """Delete teachings under the original lock, including obsolete schemas.
+
+    This is an explicit maintenance operation, not a compatibility reader.
+    Chat, person and physical effect stores are never accessed here.
+    """
+    path = _path(unit_id, space_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path.with_suffix('.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        cursor = 0
+        if path.exists():
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            if raw.get('space_id') != space_id or raw.get('unit_id') != unit_id:
+                raise StorageError('partition_identity_mismatch')
+            previous = raw.get('cursor', 0)
+            cursor = previous if type(previous) is int and previous >= 0 else 0
+        empty = Partition(space_id=space_id, unit_id=unit_id, cursor=cursor + 1).model_dump()
+        _write(path, empty)
+        return deepcopy(empty)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def partition_units(*, space_id: str) -> list[str]:
+    _IDENTIFIER.validate_python(space_id)
+    directory = Path(os.environ.get('SSM_TRAINING_DIR', str(_ROOT))) / space_id
+    units = []
+    for path in directory.glob('*.json'):
+        units.append(_IDENTIFIER.validate_python(path.stem))
+    return sorted(units)

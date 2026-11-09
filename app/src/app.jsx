@@ -54,6 +54,7 @@ function App({ session, logout, refreshSession }) {
   useEffect(() => { if (session.actor === 'admin') training.loadAll(agents); }, [agents.map(agent => agent.unit_id).join(','), session.session_id]);
   const [trainingSelection, setTrainingSelection] = useState(null);
   const [trainingLocation, setTrainingLocation] = useState(null);
+  useEffect(() => { setTrainingSelection(null); setTrainingLocation(null); }, [training.resetVersion]);
   const [, setAgentNamesRevision] = useState(0);
 
   useEffect(() => {
@@ -310,7 +311,7 @@ function App({ session, logout, refreshSession }) {
 
           </>}
           messageContent={<ActivityFeed entries={chatRows}
-            training={training} onReviseRule={p => setTrainingSelection({unit_id:p.unit_id,transition_id:p.transition_ids?.[0],proposal_id:p.proposal_id})} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
+            training={training} onReviseRule={p => setTrainingSelection({unit_id:p.unit_id,transition_id:trainingTransitionIds(p)[0],proposal_id:p.proposal_id})} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}
@@ -330,7 +331,7 @@ function App({ session, logout, refreshSession }) {
           onClose={() => setTrainingOpen(false)}
           onRevise={record => {
             setTrainingOpen(false);
-            setTrainingLocation({unit_id:record.unit_id,transition_id:record.transition_ids?.[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record),nonce:Date.now()});
+            setTrainingLocation({unit_id:record.unit_id,transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record),nonce:Date.now()});
             navigate(`#/devices/${encodeURIComponent(record.unit_id)}`);
           }}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}

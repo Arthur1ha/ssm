@@ -238,6 +238,7 @@ STEWARD_TOOL_SCHEMAS = {
 def make_executor(run, context: dict, resume: bool = False):
     """Bind the trusted context and domain services to one Graph tool call."""
     run_id, session_id = run.run_id, run.session_id
+    training_attempt_start = len(run.steps)
     async def execute(name: str, args: dict, step_id: str) -> dict:
         if context.get("peer_request_id") and peer_coordination_cancelled(context["peer_request_id"]):
             return {"result": "cancelled", "error": "higher_priority_user_request"}
@@ -251,17 +252,18 @@ def make_executor(run, context: dict, resume: bool = False):
             return {"result": "rejected", "error": "activity_started_for_this_intent"}
         if name == "apply_training":
             from cloud.agents.common.training.tools import prepare_training_application
-            from cloud.go2.actions import SPORT_COMMANDS
             try:
                 prepared = await prepare_training_application(args, context)
             except ValueError as exc:
                 return {"result": "rejected", "error": str(exc)}
-            unit_id, action = prepared["unit_id"], prepared["action"]
+            unit_id = prepared["unit_id"]
             card = _cards(context).get(unit_id) or {}
-            invoke_action = "SPORT" if card.get("agent_type") == "robot" and action in SPORT_COMMANDS else action
-            params = ({"cmd": action, **prepared["params"]} if invoke_action == "SPORT" else prepared["params"])
+            # Delegate a single versioned behavior, not individual steps over
+            # HTTP. The device service owns its Graph, state and control lease.
+            skill_id = 'go2_chat' if card.get('agent_type') == 'robot' else 'adjust_lighting'
+            params = ({'message': run.goal} if skill_id == 'go2_chat' else {'goal': run.goal})
             skill = next((item for item in card.get("skills", [])
-                          if (item.get("invoke") or {}).get("action") == invoke_action), None)
+                          if item.get('id') == skill_id), None)
             if skill is None:
                 return {"result": "rejected", "error": "training_action_unavailable"}
             trusted = {**context, **{key: prepared[key] for key in
@@ -274,7 +276,8 @@ def make_executor(run, context: dict, resume: bool = False):
             from cloud.agents.common.training.tools import execute_training
             if run.parent_run_id or context.get("peer_request_id"):
                 return {"result": "rejected", "error": "direct_user_request_required"}
-            return await execute_training(name, args, {**context, "run_id": run_id})
+            return await execute_training(name, args, {**context, "run_id": run_id,
+                                                      "proposal_attempts": run.steps[training_attempt_start:-1]})
         if name == "list_agents":
             return {"result": "ok", "agents": _public_view(_cards(context))}
         if name == "get_space_context":

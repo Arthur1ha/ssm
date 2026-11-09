@@ -20,6 +20,18 @@ function useSessionTranscript(sessionId, scope, initialRows = []) {
 function trainingRuleText(record) {
   return record?.summaryText || record?.name || record?.source_text || '设备规则';
 }
+function trainingSteps(record) {
+  const definition = record?.definition || record?.after?.definition || {};
+  return (definition.steps || []).map((step, index) => {
+    const summary = record?.stepSummaries?.find(item => item.step_index === index);
+    return {...step, step_index:index, label:summary?.label || `第 ${index + 1} 步`,
+      conditionText:summary?.conditionText || '', goalText:summary?.goalText || ''};
+  });
+}
+function trainingTransitionIds(record) {
+  const definition = record?.definition || record?.after?.definition || {};
+  return [...new Set((definition.steps || []).flatMap(step => step.transition_ids || []))];
+}
 function trainingProposalOpen(proposal) {
   return !!proposal && !proposal.confirmed && !proposal.cancelled && !proposal.superseded
     && !proposal.superseded_by && !proposal.expired;
@@ -27,7 +39,9 @@ function trainingProposalOpen(proposal) {
 /* Attach each card to its originating request, including after reload. No rule
  * intent is inferred here: source text is used solely as a history anchor. */
 function trainingTimeline(rows, proposals) {
-  const result = [...rows];
+  // Only the current authenticated proposal history owns rule cards. Clearing
+  // training must not leave a stale, actionable card inside a cached transcript.
+  const result = rows.filter(row => row.type !== 'rule');
   for (const proposal of [...proposals].sort((a,b) => a.created_at - b.created_at)) {
     const sourceText = proposal.source_text || proposal.after?.source_text;
     const id = `rule:${proposal.proposal_id}`;
@@ -62,6 +76,7 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
   const [error, setError] = useState('');
   const [readErrors, setReadErrors] = useState({});
   const [proposalErrors, setProposalErrors] = useState({});
+  const [resetVersion, setResetVersion] = useState(0);
   const generation = useRef(0);
   const allUnits = useRef([]);
   const historyRequest = useRef(0);
@@ -130,6 +145,14 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
     const onEvent = event => {
       const item = event.detail?.payload || event.detail || {};
       if (!item.type?.startsWith('training.') || unitId && item.unit_id && item.unit_id !== unitId) return;
+      if (item.type === 'training.reset') {
+        generation.current++;
+        snapshotRequest.current++; allRequest.current++; historyRequest.current++;
+        proposalRequests.current.clear();
+        setSnapshot(null); setProposals([]); setProposalErrors({}); setError('');
+        setAllRecords(previous => item.unit_id ? previous.filter(record => record.unit_id !== item.unit_id) : []);
+        setResetVersion(previous => previous + 1);
+      }
       if (item.proposal_id) getProposal(item.proposal_id);
       refresh();
     };
@@ -173,6 +196,6 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
   };
   return {catalog:snapshot?.catalog, records:snapshot?.records || [], allRecords,
     edges:snapshot?.edge_annotations || [], proposals, proposal, proposalErrors,
-    load, loadAll, loadHistory, confirm:selected => act(selected,'confirm'), cancel:selected => act(selected,'cancel'), remove, error:error || Object.values(readErrors).find(Boolean) || ''};
+    load, loadAll, loadHistory, resetVersion, confirm:selected => act(selected,'confirm'), cancel:selected => act(selected,'cancel'), remove, error:error || Object.values(readErrors).find(Boolean) || ''};
 }
-Object.assign(window, {useTraining,useSessionTranscript,trainingRuleText,trainingProposalOpen,trainingTimeline});
+Object.assign(window, {useTraining,useSessionTranscript,trainingRuleText,trainingSteps,trainingTransitionIds,trainingProposalOpen,trainingTimeline});

@@ -6,6 +6,7 @@ navigation and user handoff; it does not infer physical completion.
 import asyncio
 import logging
 import time
+from dataclasses import replace
 
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
@@ -22,6 +23,131 @@ _active_rule_cb = None
 _active_drive_cb = None
 _active_identity_cb = None
 _activity_mode_owner: str | None = None
+_training_behaviors: dict[str, dict] = {}
+
+
+def interrupt_training_behavior(context: ExecutionContext) -> None:
+    """A new authorized user command ends pending taught transitions."""
+    if context.training_run_id:
+        return
+    for entry in tuple(_training_behaviors.values()):
+        if context.actor != 'admin' and entry['session_id'] != context.session_id:
+            continue
+        entry['interrupted'] = True
+        task = entry['task']
+        if task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+
+def training_behavior_busy(context: ExecutionContext) -> bool:
+    return any(key != context.training_run_id and not entry['task'].done()
+               for key, entry in _training_behaviors.items())
+
+
+def note_training_lease(context: ExecutionContext, lease) -> None:
+    entry = _training_behaviors.get(context.training_run_id)
+    if (entry is not None and not entry['interrupted']
+            and entry['session_id'] == context.session_id):
+        entry['lease_generation'] = lease.generation
+
+
+async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
+                                run_id: str, availability=None) -> dict:
+    """Execute a confirmed Go2 behavior through the original state boundaries."""
+    from cloud.agents.common.training.workflow import run_training_workflow
+    from cloud.go2.actions import SPORT_COMMANDS
+    from cloud.go2.tools.executor import execute_tool
+    from cloud.go2.tools.registry import CARD_SKILLS
+    from cloud.go2.control import session_tasks
+
+    if prepared['unit_id'] != 'go2':
+        return {'result': 'rejected', 'error': 'training_target_mismatch'}
+    existing = _training_behaviors.get(run_id)
+    if existing is not None and existing['task'] is not asyncio.current_task() and not existing['task'].done():
+        return {'result': 'accepted', 'error': 'training_already_running', 'training_run_id': run_id}
+    if training_behavior_busy(replace(context, training_run_id=run_id)):
+        return {'result': 'blocked', 'error': 'training_behavior_busy'}
+    task = asyncio.current_task()
+    entry = {'session_id': context.session_id, 'task': task, 'interrupted': False,
+             'epoch': go2.state_snapshot().get('epoch'), 'lease_generation': None}
+    _training_behaviors[run_id] = entry
+    session_tasks.track(context.session_id, task)
+    own_life = None
+    last_result = {'result': 'unknown'}
+
+    async def before_step(resolved, trusted):
+        nonlocal own_life
+        current = go2.state_snapshot()
+        if (entry['interrupted'] or not go2.is_connected
+                or current.get('epoch') != entry['epoch']):
+            return {'result': 'cancelled', 'error': 'training_interrupted'}
+        if availability is not None and not availability(trusted):
+            return {'result': 'blocked', 'error': 'autonomy_unavailable'}
+        lease = control_lease.snapshot()
+        if ((lease is not None and lease.owner_session_id != trusted.session_id)
+                or entry['lease_generation'] is not None and
+                (lease is None or lease.generation != entry['lease_generation'])):
+            return {'result': 'cancelled', 'error': 'control_lease_transferred'}
+        if (current.get('control_mode') == 'remote' or current.get('pending_action')
+                or current.get('navigation_active') or current.get('velocity_requested')):
+            return {'result': 'blocked', 'error': 'device_busy'}
+        waking = resolved['action'] == 'LIFE' and resolved['params'].get('action') == 'wake'
+        if current.get('activity_state') != 'active' and not waking:
+            return {'result': 'blocked', 'error': 'device_resting'}
+        if resolved['action'] == 'LIFE' and resolved['params'].get('action') == 'request_rest' and own_life:
+            go2.runtime.finish_life(own_life)
+            own_life = None
+        return None
+
+    async def execute(action, params, trusted, request_id):
+        if action in SPORT_COMMANDS:
+            name, arguments = 'go2_sport', {'cmd': action, **params}
+        else:
+            name = next((spec['tool_name'] for spec in CARD_SKILLS.values()
+                         if spec.get('tool_name') and (spec.get('invoke') or {}).get('action') == action), '')
+            arguments = params
+        if not name:
+            return {'result': 'rejected', 'error': 'training_action_unavailable'}
+        return await execute_tool(name, arguments, context=trusted, request_id=request_id)
+
+    async def after_step(resolved, trusted, result):
+        nonlocal own_life
+        runtime = runtime_for(go2)
+        if (result.get('result') == 'ok' and runtime is not None
+                and resolved['step_index'] + 1 < len(prepared['steps'])
+                and not runtime.active_reason() and runtime.data['life_state'] == 'idle'):
+            own_life = runtime.begin_life('play', trusted.session_id, run_id)
+
+    def observe(receipt):
+        from cloud.go2.tasks import read_command_result
+        return read_command_result(context, receipt['request_id'], robot=go2)
+
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(min(5.0, control_lease.ttl_s / 3))
+            lease = control_lease.snapshot()
+            if (not entry['interrupted'] and lease is not None
+                    and lease.owner_session_id == context.session_id
+                    and lease.generation == entry['lease_generation']):
+                control_lease.heartbeat_session(context.session_id,
+                                                generation=entry['lease_generation'])
+
+    renewal = asyncio.create_task(heartbeat(), name='go2-teaching-lease')
+    try:
+        last_result = await run_training_workflow(
+            prepared, context, run_id=run_id, snapshot=go2.state_snapshot,
+            execute=execute, before_step=before_step, after_step=after_step, observe=observe)
+        return last_result
+    finally:
+        renewal.cancel()
+        await asyncio.gather(renewal, return_exceptions=True)
+        if own_life is not None:
+            go2.runtime.finish_life(own_life)
+        if _training_behaviors.get(run_id) is entry:
+            _training_behaviors.pop(run_id, None)
+        if last_result.get('result') not in {'accepted', 'executing', 'timeout', 'unknown'}:
+            if entry['lease_generation'] is not None:
+                control_lease.release(context.session_id, generation=entry['lease_generation'])
 
 
 def get_autonomy_mode() -> str:
@@ -118,6 +244,7 @@ _IDENTITY_VISION_CONTEXT = ExecutionContext(
 
 
 def _on_identity_event(event: IdentityEvent) -> None:
+    person_teachings.on_identity_event(event)
     current = event.current
     previous = event.previous
     execution = current_context()
@@ -208,6 +335,7 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
 
 
 async def prepare_user_interaction(context: ExecutionContext):
+    interrupt_training_behavior(context)
     """Cancel owned motion, finish its cleanup, then observe a fresh stop."""
     person_teachings.interrupt()
     runtime = runtime_for(go2)
@@ -334,7 +462,8 @@ async def _perform_life_control(action: str, context: ExecutionContext):
             raise ValueError(navigation_reason or 'navigation_unavailable')
     if context.origin_kind == 'user_delegated':
         person_teachings.interrupt()
-    control_lease.acquire(context)
+    acquired = control_lease.acquire(context)
+    note_training_lease(context, acquired)
     if action == 'request_rest':
         runtime.request_rest(navigation_busy=(navigator.mode.value != 'idle' or
              (isinstance(getattr(navigator, '_task', None), asyncio.Task) and not navigator._task.done())))

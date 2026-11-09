@@ -130,7 +130,36 @@ def test_events_must_be_declared_for_target_edge():
     definition['trigger']['where'] = {'invented': True}
     with pytest.raises(ValueError): validate_definition(definition, catalog)
     definition['trigger'] = {'event_id': 'vision.face_presence', 'where': {'detected': True}, 'params': {}}
+    assert validate_definition(definition, catalog) == definition
+    definition['trigger']['event_id'] = 'vision.invented'
     with pytest.raises(ValueError): validate_definition(definition, catalog)
+
+
+@pytest.mark.parametrize('action', ['Sit', 'Stretch', 'FingerHeart', 'RiseSit'])
+@pytest.mark.parametrize('event_id,where', [
+    ('vision.person_presence', {'detected': True}),
+    ('vision.face_presence', {'detected': True}),
+    ('vision.owner_recognized', {'recognized': True}),
+])
+def test_observations_bind_existing_trainable_actions(action, event_id, where):
+    catalog = _go2_catalog()
+    definition = hello_cooldown(60)['definition']
+    definition['transition_ids'] = [edge['id'] for edge in catalog['transitions']
+                                    if edge['action'] == action and edge['trainable']]
+    definition['trigger'] = {'event_id': event_id, 'where': where, 'params': {}}
+    assert validate_definition(definition, catalog) == definition
+    with pytest.raises(ValueError, match='event_trigger_requires_agent_autonomous'):
+        validate_definition(definition | {'origins': ['user_delegated']}, catalog)
+
+
+def test_event_cannot_bind_two_different_actions():
+    catalog = _go2_catalog()
+    definition = hello_cooldown(60)['definition']
+    definition['transition_ids'] = [edge['id'] for edge in catalog['transitions']
+                                    if edge['action'] in {'Sit', 'Stretch'}]
+    definition['trigger'] = {'event_id': 'vision.owner_recognized', 'where': {'recognized': True}, 'params': {}}
+    with pytest.raises(ValueError, match='one action'):
+        validate_definition(definition, catalog)
 
 
 def test_card_edge_ids_match_catalog_and_unloaded_teaching_is_inactive():
