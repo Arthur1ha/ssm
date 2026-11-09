@@ -476,7 +476,7 @@ async def test_http_velocity_packets_never_wait_for_global_activity_teardown(dev
     intervention = AsyncMock(side_effect=never.wait)
     monkeypatch.setattr(activity, 'user_intervention', intervention)
     move = MagicMock(return_value={'result': 'accepted', 'confirmation_scope': 'request'})
-    monkeypatch.setattr(robot, 'move_velocity', move)
+    monkeypatch.setattr(robot, 'manual_velocity', move)
     lease.acquire(user)
     app = FastAPI()
     app.include_router(router.router)

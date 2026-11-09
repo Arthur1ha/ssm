@@ -27,7 +27,8 @@ class Definition(StrictModel):
     defaults: dict[str, Any]
     trigger: Trigger | None
     # Interpreted by the role Graph, never used as a global device guard.
-    situation: StrictStr | None = Field(default=None, min_length=1, max_length=2000)
+    situation: StrictStr | None = Field(default=None, min_length=1, max_length=2000,
+        description="自然语言适用情境，由智能体语义理解；不要求传感器事件或固定口令")
 
 
 class Draft(StrictModel):
@@ -46,7 +47,11 @@ Timestamp = Annotated[StrictInt | StrictFloat, Field(ge=0, allow_inf_nan=False)]
 
 
 class ApplyTraining(StrictModel):
-    """Use a saved configuration with only this request's explicit overrides."""
+    """按 list_training 返回的教导 ID 和当前版本应用保存的动作参数。
+
+    用户表达当前情境时按语义选择适用教导；overrides 仅放本次明确修改的参数，
+    不猜测或重填保存的整组配置。临时修改不改变原教导；长期修改用 propose_training。
+    """
     unit_id: Identifier
     teaching_id: Identifier
     revision: StrictInt = Field(ge=1)

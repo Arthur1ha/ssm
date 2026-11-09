@@ -465,15 +465,59 @@ async def _capture_still(*, after_frame_id=None, after_received_at=None):
     raise TargetUnlocalized('fresh_still_frame_unavailable')
 
 
+async def _capture_view(*, after_frame_id=None, after_received_at=None):
+    """Read a fresh camera view without requiring odometry or authorizing motion."""
+    session = getattr(go2, '_odom_session_id', None)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        _check_authorization()
+        if not go2.is_connected:
+            raise TargetUnlocalized('disconnected')
+        if getattr(go2, '_odom_session_id', None) != session:
+            raise TargetUnlocalized('odom_session_mismatch')
+        if getattr(go2, '_velocity_command_active', False):
+            raise TargetUnlocalized('observation_requires_stop')
+        captured = go2.latest_frame_snapshot()
+        if captured is not None:
+            jpeg, frame = captured
+            stamp = frame.get('received_at')
+            if (frame.get('frame_id') != after_frame_id
+                    and type(stamp) in (int, float)
+                    and 0 <= time.monotonic() - stamp <= MAX_FRAME_AGE
+                    and stamp > (after_received_at or 0)
+                    and frame.get('odom_session_id') == session):
+                quality = await invoke_blocking(image_quality, jpeg)
+                if quality < .5:
+                    raise TargetUnlocalized('image_quality_insufficient')
+                return jpeg, frame, quality
+        await asyncio.sleep(.05)
+    raise TargetUnlocalized('fresh_frame_unavailable')
+
+
 async def observe_target(target: str, *, after_frame_id=None,
-                         after_received_at=None) -> dict:
-    """Detect on one fresh stationary image; absence only describes this view.
+                         after_received_at=None, require_pose: bool = True) -> dict:
+    """Detect on one fresh image; absence only describes this view.
 
     No image bytes or point clouds are returned, so the result fits a bounded
     Graph checkpoint. An empty target collects geometric camera coverage only.
+    Search may inspect the camera before localization; such a view has no pose
+    and cannot establish coverage or authorize a navigation target.
     """
-    jpeg, frame, quality = await _capture_still(after_frame_id=after_frame_id,
-                                               after_received_at=after_received_at)
+    capture = _capture_still if require_pose else _capture_view
+    jpeg, frame, quality = await capture(after_frame_id=after_frame_id,
+                                         after_received_at=after_received_at)
+    pose_reason = None
+    if not require_pose:
+        # Pairing belongs before model latency. A fresh submitted image will
+        # naturally be older than MAX_FRAME_AGE when inference finishes.
+        try:
+            validate_samples(frame, frame.get('pose_at_capture') or {},
+                             frame.get('pose_received_at'), frame['received_at'],
+                             go2.odom_frame_id, 'odom', frame['odom_session_id'])
+        except TargetUnlocalized as exc:
+            if exc.reason not in {'sensor_frame_skew', 'pose_invalid', 'odom_session_mismatch'}:
+                raise
+            pose_reason = exc.reason
     # Preserve exactly the submitted frame even if model latency or a later
     # pose-stability gate rejects its result. Visitor images remain unpersisted.
     image_path = save_diagnostic_frame(jpeg, frame) if current_context().persist else None
@@ -483,14 +527,27 @@ async def observe_target(target: str, *, after_frame_id=None,
         raise TargetUnlocalized('vision_result_invalid')
     if observation['found']:
         target_offset(observation, frame)
-    pose = _live_pose(frame['odom_session_id'])
-    _ensure_stable(frame['pose_at_capture'], pose)
+    pose = None
+    try:
+        pose = _live_pose(frame['odom_session_id'])
+        if pose_reason is None:
+            _ensure_stable(frame['pose_at_capture'], pose)
+        else:
+            pose = None
+    except TargetUnlocalized as exc:
+        if (require_pose or getattr(go2, '_odom_session_id', None) != frame['odom_session_id']
+                or exc.reason not in {'localization_unavailable', 'pose_invalid',
+                                      'sensor_frame_skew', 'odom_session_mismatch'}):
+            raise
+        # A sighting remains useful, but it has no geometric coverage or bearing.
+        pose, pose_reason = None, exc.reason
     # Existing authenticated media endpoint, with a bounded retention count.
     from cloud.go2.activity_media import save_temporary_snapshot
     context = current_context()
     media_id = hashlib.sha256(context.session_id.encode()).hexdigest()[:24]
     media_url = save_temporary_snapshot(media_id, str(frame['frame_id']), jpeg)
     return {'found': observation['found'], 'frame': frame, 'pose': pose,
+            'pose_reason': pose_reason,
             'observation': observation, 'quality': quality,
             'image_path': str(image_path) if image_path else None,
             'image_url': media_url, 'media_ref': media_url, 'frame_id': frame['frame_id'],

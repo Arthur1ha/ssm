@@ -13,6 +13,7 @@ from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, SPORT_COMMANDS, LED_COL
                                LED_DEFAULT_DURATION, LED_MAX_DURATION)
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
+from cloud.go2.connection.manual_velocity import ManualVelocityControl
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ _STATUS_INTERVAL  = 10.0
 _STATE_STALE_S = 20.0
 
 
-class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
+class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
     def __init__(self) -> None:
         super().__init__()
         self._conn: UnitreeWebRTCConnection | None = None
@@ -33,6 +34,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         self._velocity_request_id = uuid.uuid4().int & 0x7fffffff
         self._action_deadline = None
         self._velocity_timer = None
+        self._init_manual_velocity()
         self._move_control_active = False
         self._velocity_command_active = False
         self._odom_session_id = uuid.uuid4().hex
@@ -42,6 +44,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
     # ── 生命周期 ──────────────────────────────────────────────────────────
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
+        self._stop_manual_velocity()
         self._motion_observation_enabled = False
         self._velocity_command_active = False
         if self._status_task is not None:
@@ -136,6 +139,7 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
 
 
     async def disconnect(self) -> None:
+        self._stop_manual_velocity()
         owner = self.runtime.data['life_owner']
         self._connected_serial = None
         self._latest_frame = None
@@ -488,6 +492,27 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
             {"api_id": 1002, "parameter": {"name": mode}},
         )
 
+    def _publish_velocity(self, vx, vy, vyaw, *, sport):
+        active = any((vx, vy, vyaw))
+        try:
+            if sport:
+                self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
+                self._conn.datachannel.pub_sub.publish_without_callback(
+                    RTC_TOPIC['SPORT_MOD'],
+                    data={'header': {'identity': {'id': self._velocity_request_id,
+                                                 'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}},
+                          'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''},
+                    msg_type=DATA_CHANNEL_TYPE['REQUEST'])
+            else:
+                self._conn.datachannel.pub_sub.publish_without_callback(
+                    RTC_TOPIC['WIRELESS_CONTROLLER'],
+                    data={'lx': -vy, 'ly': vx, 'rx': -vyaw, 'ry': 0})
+        except Exception as exc:
+            self._cancel_manual_velocity()
+            self.is_connected = False
+            self.runtime.connection('offline')
+            raise RuntimeError(f'发送失败，连接已断开: {exc}') from exc
+
     def move_velocity(self, vx: float, vy: float, vyaw: float, *, deadman_s: float | None = None) -> dict:
         """Manual control streams Sport Move; zero input sends StopMove.
 
@@ -504,23 +529,8 @@ class Go2Connection(Go2FSM, Go2Sensors, Go2Video):
         )
         if self._command_lock.locked() and any((vx, vy, vyaw)):
             raise CommandBlocked("command_in_flight")
-        try:
-            if self._move_control_active:
-                self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
-                self._conn.datachannel.pub_sub.publish_without_callback(
-                    RTC_TOPIC['SPORT_MOD'],
-                    data={'header': {'identity': {'id': self._velocity_request_id,
-                                                 'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}},
-                          'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''},
-                    msg_type=DATA_CHANNEL_TYPE['REQUEST'])
-            else:
-                self._conn.datachannel.pub_sub.publish_without_callback(
-                    RTC_TOPIC['WIRELESS_CONTROLLER'],
-                    data={'lx': -vy, 'ly': vx, 'rx': -vyaw, 'ry': 0})
-        except Exception as exc:
-            self.is_connected = False
-            self.runtime.connection("offline")
-            raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
+        was_manual = self._cancel_manual_velocity()
+        self._publish_velocity(vx, vy, vyaw, sport=self._move_control_active or (was_manual and not active))
         self._finish_pending("cancelled", "velocity_override")
         self._motion_epoch += 1
         self._velocity_command_active = active

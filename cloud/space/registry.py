@@ -1,7 +1,7 @@
 """Space configuration and device/card projection.
 
-``space.json`` is the only runtime source for space membership. The legacy
-``devices.json`` is intentionally left untouched as a rollback artefact.
+``space.json`` is the only runtime source for space membership. Device
+capabilities and online status come from the retained MQTT card registry.
 """
 
 from __future__ import annotations

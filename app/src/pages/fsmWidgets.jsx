@@ -323,6 +323,21 @@ function ColorSwatchesWidget({ unitId, widget, report, ledState }) {
   </div>;
 }
 
+// A small dead zone and a gentle response near center preserve deliberate
+// diagonals while rejecting finger drift. Visual joystick geometry is unchanged.
+function joystickAxis(value) {
+  const magnitude = Math.min(1, Math.abs(value));
+  if (magnitude <= .12) return 0;
+  const scaled = (magnitude - .12) / .88;
+  return Math.sign(value) * (.65 * scaled + .35 * scaled ** 3);
+}
+
+function joystickTranslation(dx, dy) {
+  if (Math.abs(dx) < Math.abs(dy) * .2) dx = 0;
+  if (Math.abs(dy) < Math.abs(dx) * .2) dy = 0;
+  return {x: joystickAxis(dx), y: joystickAxis(dy)};
+}
+
 function JoystickControls({ unitId, widget, report, liveState, connected }) {
   const velocity = React.useRef({vx:0,vy:0,vyaw:0});
   const feedback = React.useRef(report);
@@ -336,11 +351,12 @@ function JoystickControls({ unitId, widget, report, liveState, connected }) {
     if (!['accepted','ok'].includes(result?.result)) feedback.current?.(result);
   }), [unitId,action]);
   const move = React.useCallback((dx,dy) => {
-    velocity.current.vx = +(-dy*maxX).toFixed(2);
-    velocity.current.vy = +(-dx*maxY).toFixed(2);
+    const input = joystickTranslation(dx,dy);
+    velocity.current.vx = +(-input.y*maxX).toFixed(3);
+    velocity.current.vy = +(-input.x*maxY).toFixed(3);
     emit();
   }, [emit,maxX,maxY]);
-  const turn = React.useCallback(dx => { velocity.current.vyaw = +(-dx*maxYaw).toFixed(2); emit(); }, [emit,maxYaw]);
+  const turn = React.useCallback(dx => { velocity.current.vyaw = +(-joystickAxis(dx)*maxYaw).toFixed(3); emit(); }, [emit,maxYaw]);
   const stopMove = React.useCallback(() => { velocity.current.vx=0; velocity.current.vy=0; emit(); }, [emit]);
   const stopTurn = React.useCallback(() => { velocity.current.vyaw=0; emit(); }, [emit]);
   const disabled = !connected || !stateWidgetEnabled(widget,liveState);

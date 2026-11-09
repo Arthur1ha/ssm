@@ -33,6 +33,33 @@ class ScriptedModel(JsonReplyModel):
 
 
 @pytest.mark.asyncio
+async def test_identity_prose_from_openai_compatible_provider_reaches_chat_reply(entry, monkeypatch):
+    """Replay the live failure without the fake model's automatic JSON wrapping."""
+    answer = "我是呆呆狗呀，就在这个空间里待着的机器狗。"
+
+    class ProviderModel(ScriptedModel):
+        def bind(self, **kwargs):
+            self.response_options = kwargs
+            return self
+
+    model = ProviderModel([AIMessage(content=answer)])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(go2_graph, 'execute_tool',
+                        lambda *a, **k: pytest.fail('identity question dispatched an action'))
+    context = ExecutionContext('identity-session', 'admin', False,
+                               expires_at=int(time.time()) + 60)
+    result = await go2_graph.run_go2_loop('identity-session', '你是谁呀', context=context)
+
+    assert result['result'] == 'ok' and result['response'] == answer
+    assert result['tool_results'] == [] and result['actions_taken'] == []
+    assert len(model.inputs) == 1
+    assert model.response_options == {'extra_body': {'response_format': {'type': 'json_object'}}}
+    assert any(event == 'agent_reply' and fields.get('text') == answer
+               for event, fields in entry)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_entry_is_durable_and_new_run_does_not_replay(entry, monkeypatch):
     model = ScriptedModel([
         AIMessage(content="", tool_calls=[{"name": "go2_sport",
@@ -87,7 +114,6 @@ def entry(tmp_path, monkeypatch):
     monkeypatch.setattr("cloud.agents.go2.personality.behavior.reply_persona",
                         lambda _profile: "Go2 persona")
     monkeypatch.setattr(go2_graph, "persona_reply_prompt", lambda *_a, **_k: "reply")
-    monkeypatch.setattr(go2_graph, "valid_persona_reply", lambda *_a, **_k: True)
     monkeypatch.setattr("cloud.agents.common.progress.submit_progress", lambda *_a, **_k: None)
     monkeypatch.setattr(go2_graph, "emit_agent_event", lambda *_a, **_k: None)
     monkeypatch.setattr("cloud.agents.common.runner.emit_agent_event", lambda *_a, **_k: None)
@@ -239,7 +265,7 @@ async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evi
     model = ScriptedModel([
         AIMessage(content='', tool_calls=[{'name': 'go2_find_object',
             'args': {'target': '白色猫头鹰'}, 'id': 'find-owl'}]),
-        AIMessage(content='我这就继续去找。'),  # No future motion after a terminal.
+        AIMessage(content='找到附近啦，我已经站稳了。'),
     ])
     monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
     monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
@@ -283,7 +309,8 @@ async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evi
     assert receipt['evidence']['frame_id'] == 3
     assert receipt['scope'] == {'bounds': None, 'mode': 'reachable',
         'session_id': 'new-map', 'source': 'user_task'}
-    assert result['response'] == receipt['message']
+    assert result['response'] == '找到附近啦，我已经站稳了。'
+    assert len(model.inputs) == 2
     assert adapters[0].context is context and adapters[0].bounds is None
     assert adapters[0].calls == ['observe', 'select', 'navigate', 'observe', 'observe', 'approach']
     stored = go2_graph.get_store().get('owl-natural', 'natural-search')
@@ -292,21 +319,6 @@ async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evi
     repeated = await go2_graph.run_go2_loop('natural-search', '去找下室内的白色猫头鹰',
         context=context, run_id='owl-natural')
     assert repeated == result and len(adapters) == 1
-
-
-@pytest.mark.parametrize('reply', [
-    '得先告诉我在哪个房间、哪个范围找？',
-    '搜索范围还没配置好，我这就去看看。',
-    '我已经找到它了。',
-])
-def test_failed_search_reply_does_not_blame_user_or_invent_next_action(reply):
-    from cloud.agents.common.runner import GraphRun
-    from cloud.agents.go2.prompts import valid_search_reply
-    run = GraphRun('failed', 'user', '找猫头鹰', time.time() + 60, status='blocked',
-        steps=[{'tool': 'go2_find_object', 'result': {'result': 'blocked',
-            'reason': 'search_scope_required', 'outcome': 'not_started'}}])
-    assert not valid_search_reply(reply, run)
-    assert valid_search_reply('搜索范围配置尚未就绪，这次还没有开始找。', run)
 
 
 @pytest.mark.asyncio
@@ -336,12 +348,11 @@ async def test_measured_move_reply_uses_persona_and_keeps_actual_distance(entry,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('persona_reply,expected', [
-    ('我往前走了约1.76米，还没到你说的2米呢。后面迈不动了，我已经停稳啦。', 'decision_model'),
-    ('汪，我已经走满2米并停稳啦！', 'runtime'),
-    ('指令已经发出去了，等我看看脚下。', 'runtime'),
+@pytest.mark.parametrize('persona_reply', [
+    '我往前走了约1.76米，还没到你说的2米呢。后面迈不动了，我已经停稳啦。',
+    '汪，目标是2米，只走了176厘米就走不动了，现在已经停下啦。',
 ])
-async def test_partial_movement_preserves_persona_without_inventing_completion(entry, monkeypatch, persona_reply, expected):
+async def test_partial_movement_keeps_receipt_and_natural_persona(entry, monkeypatch, persona_reply):
     model = ScriptedModel([
         AIMessage(content='', tool_calls=[{'name': 'go2_move',
             'args': {'direction': 'forward', 'distance_m': 2.}, 'id': 'move-partial'}]),
@@ -357,23 +368,10 @@ async def test_partial_movement_preserves_persona_without_inventing_completion(e
     context = ExecutionContext('partial-reply', 'visitor', False, expires_at=time.time()+60)
     result = await go2_graph.run_go2_loop('partial-reply', '前进两米', context=context, run_id='partial-reply')
     assert result['result'] == 'blocked'
-    assert result['response'] == (persona_reply if expected == 'decision_model' else message)
-    assert go2_graph.get_store().get('partial-reply', 'partial-reply').reply_source == expected
-
-
-@pytest.mark.parametrize('reply,accepted', [
-    ('我往前走了1.76米，还没到2米，后面迈不动了，已经停稳啦。', True),
-    ('汪，走了176厘米，目标是2米；后面走不动啦，我停下了。', True),
-    ('我往前走了1.76米，还没到2米，已经停稳啦。我这就再走一段。', False),
-    ('我往前走了2米，已经停稳啦！', False),
-])
-def test_move_reply_validation_preserves_measurement_and_no_future_motion(reply, accepted):
-    from cloud.agents.go2.prompts import valid_move_reply
-    from cloud.agents.common.runner import GraphRun
-    run = GraphRun('movement', 'user', '前进两米', time.time()+60, status='partial',
-        steps=[{'tool': 'go2_move', 'result': {'result': 'blocked', 'reason': 'motion_not_observed',
-            'distance_m': 1.761, 'requested_distance_m': 2., 'stop': {'result': 'ok'}}}])
-    assert valid_move_reply(reply, run) is accepted
+    assert result['response'] == persona_reply
+    assert result['tool_results'][0]['result']['distance_m'] == 1.761
+    assert len(model.inputs) == 2
+    assert go2_graph.get_store().get('partial-reply', 'partial-reply').reply_source == 'decision_model'
 
 
 @pytest.mark.asyncio

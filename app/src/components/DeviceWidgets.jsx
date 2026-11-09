@@ -176,6 +176,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
 
   const padRef    = useRef(null);
   const activeRef = useRef(false);
+  const pointerRef = useRef(null);
   const deltaRef  = useRef({ dx: 0, dy: 0 });
   const timerRef  = useRef(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
@@ -183,6 +184,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
 
   const release = useCallback(() => {
     activeRef.current = false;
+    pointerRef.current = null;
     deltaRef.current  = { dx: 0, dy: 0 };
     clearInterval(timerRef.current);
     timerRef.current = null;
@@ -201,11 +203,12 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
     if (d > R) { dx = dx / d * R; dy = dy / d * R; }
     deltaRef.current = { dx: dx / R, dy: dy / R };
     setKnob({ x: dx, y: dy });
-  }, []);
+  }, [R]);
 
   const onDown = useCallback((e) => {
     if (disabled || activeRef.current) return;
     e.currentTarget.setPointerCapture(e.pointerId);
+    pointerRef.current = e.pointerId;
     activeRef.current = true;
     setDrag(true);
     applyPos(e.clientX, e.clientY);
@@ -216,9 +219,14 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
   }, [disabled, onMove, applyPos]);
 
   const onMove_ = useCallback((e) => {
-    if (!activeRef.current || disabled) return;
+    if (!activeRef.current || disabled || pointerRef.current !== e.pointerId) return;
     applyPos(e.clientX, e.clientY);
-  }, [disabled, applyPos]);
+    onMove(deltaRef.current.dx, deltaRef.current.dy);
+  }, [disabled, applyPos, onMove]);
+
+  const onPointerEnd = useCallback(e => {
+    if (activeRef.current && pointerRef.current === e.pointerId) release();
+  }, [release]);
 
   const stopRef = useRef(onStop);
   stopRef.current = onStop;
@@ -229,6 +237,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
     const stop = () => {
       if (!activeRef.current) return;
       activeRef.current = false;
+      pointerRef.current = null;
       clearInterval(timerRef.current);
       deltaRef.current = { dx: 0, dy: 0 };
       setDrag(false);
@@ -281,9 +290,9 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
         }}
         onBlur={() => { if (activeRef.current) release(); }}
         onPointerDown={onDown} onPointerMove={onMove_}
-        onPointerUp={() => { if (activeRef.current) release(); }}
-        onPointerCancel={() => { if (activeRef.current) release(); }}
-        onLostPointerCapture={() => { if (activeRef.current) release(); }}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
+        onLostPointerCapture={onPointerEnd}
       >
         {/* crosshairs */}
         <div style={{ position: "absolute", left: R - 0.5, top: 10, width: 1,

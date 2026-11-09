@@ -10,8 +10,8 @@ from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.models import async_model_clients
-from cloud.agents.common.replies import factual_fallback, finalize_reply
-from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
+from cloud.agents.common.replies import factual_fallback, finalize_reply, valid_reply_format
+from cloud.agents.lamp.prompts import persona_reply_prompt
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.lamp.personality.profile import get_profile
 
@@ -71,7 +71,7 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
         model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
         await finalize_reply(run, model=model,
                              instructions=lambda value: persona_reply_prompt(value, get_profile()),
-                             validate=valid_lamp_reply)
+                             validate=valid_reply_format)
         return {"response": run.response, "persona_error": run.reply_source == "runtime"}
 
     async def publish_node(state: ReplyState) -> ReplyState:

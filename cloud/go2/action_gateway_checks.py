@@ -208,10 +208,12 @@ async def test_joystick_zero_keeps_stop_wire_params_empty(robot):
     from cloud.go2.router import VelocityRequest, go2_velocity
 
     robot.runtime.body("moving", confirmation="observed")
-    robot.move_velocity = MagicMock(return_value={"result": "accepted"})
+    robot.manual_velocity = MagicMock(return_value={"result": "accepted"})
     result = await go2_velocity(VelocityRequest(vx=0, vy=0, vyaw=0), context=VISITOR)
     assert result["result"] == "accepted"
-    robot.move_velocity.assert_called_once_with(0, 0, 0, deadman_s=2.0)
+    args, kwargs = robot.manual_velocity.call_args
+    assert args == (0, 0, 0)
+    assert callable(kwargs['can_continue'])
 
 
 @pytest.mark.asyncio

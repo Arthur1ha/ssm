@@ -12,7 +12,7 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 ```
 
 - `unit_id`：传输单元唯一标识，`{device_id}_{unit}`，如 `esp32_desk_led`。**所有 topic 段、payload 自标识键一律用它。**
-- `device_id`：整机 / 连接，如 `esp32_desk`；仅用于 status / location / rules。
+- `device_id`：整机 / 连接，如 `esp32_desk`；用于 status / location。
 - `type`：项目定义的消息类型；传感输入的业务消息只有 `state`（retained）和 `event`，智能体另可发布 `manifest` 或 `card`，整机发布 `status`。
 - payload 自标识键一律为 `unit_id`。
 
@@ -104,7 +104,7 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 
 任务消息可附带 `trace_id`（用户任务根 ID）、`run_id`（发起智能体运行）和 `request_id`（同伴请求）；ESP32 在回执中回传收到的关联字段，异步 `BLINK` 完成回执也沿用同一组值。这些字段只用于观测，不参与权限判断或设备动作选择。
 
-> 注：ESP32 云端离线时由 `local_rules` 直接调用 `TriggerMap.exec_command` 执行兜底动作（设备内函数调用，不经 MQTT）。
+> 当前固件只订阅灯任务主题，没有离线自动控灯规则；传感器只上报状态和事件。云端离线不触发新的自主动作，已启动的硬件 tick 继续运行。
 
 ### 灯的语义技能（控制面 Card，数据面 HTTP → MQTT）
 
@@ -125,8 +125,9 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 | `ssm/intent/{session_id}` | FastAPI（内部） | `{"text":"...","context":{...},"_mqtt_auth":{"alg":"HMAC-SHA256","timestamp":...,"nonce":"...","signature":"..."}}`；签名绑定完整 topic 与规范化 payload，编排器校验时间窗并拒绝 nonce 重放 |
 | `ssm/session/{session_id}/ended` | FastAPI（内部） | `{"context":{...},"reason":"logout\|expired\|revoked","_mqtt_auth":{...}}`；与 intent 使用相同 HMAC 验证，触发会话历史、任务结果与 Go2 资源清理 |
 | `ssm/feedback/{session_id}` | Cloud | `{"session_id":"...","stage":"planning\|ack\|executing\|step\|question\|done\|partial\|failed\|denied","text":"...","status":"ok\|accepted\|executing\|blocked\|rejected\|timeout\|cancelled\|error\|needs_clarification","run_id":"...","step_id":"...","step_number":1,"tool":"...","result":{},"question":"...","ts":...}`；步骤字段只在对应 stage 出现，API/SSE 只向同一会话转发。`step` 的 `result` 是实际工具结果，`question` 暂停原 `run_id`。 |
-| `ssm/decision/active` | Cloud | `"true"` 或 `"false"` |
-| `ssm/rules/{device_id}` | Cloud（retained）| `[{"id":"...","en":true,"trig":{...},"act":{...}}]` |
+| `ssm/decision/active` | Cloud | `"true"` 或 `"false"`；编排器兼容在线标记，当前 ESP32 固件不订阅它 |
+
+旧 `ssm/rules/{device_id}` 规则下发已停用，当前云端不发布、固件不订阅。用户教导通过 `/api/training` 管理，由云端 Graph 和执行校验层使用。
 
 ### 共享空间要求（当前状态，retained）
 

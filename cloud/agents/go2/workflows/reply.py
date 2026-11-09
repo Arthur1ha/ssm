@@ -9,7 +9,7 @@ from langgraph.graph import START, END, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.runner import GraphRun
-from cloud.agents.common.replies import valid_persona_reply, factual_fallback, finalize_reply
+from cloud.agents.common.replies import valid_reply_format, factual_fallback, finalize_reply
 from cloud.agents.go2.prompts import persona_reply_prompt
 from cloud.agents.go2.personality.behavior import reply_persona
 
@@ -44,10 +44,8 @@ async def run_autonomous_reply_graph(*, run_id: str, action: str, reason: str,
             "只输出要说的话。" if observation else persona_reply_prompt(run, profile))
 
         def validate(answer, value):
-            return (valid_persona_reply(answer, value) and (not observation or
-                (len(answer) <= 160 and "\n" not in answer and "**" not in answer
-                 and not any(term in answer for term in
-                             ("场景描述", "值得记录", "探索点", "exploration target")))))
+            return (valid_reply_format(answer, value) and (not observation or
+                (len(answer) <= 160 and "\n" not in answer and "**" not in answer)))
 
         def fallback(value):
             return ("我刚看了看：" + observation.split("；", 1)[0].rstrip("。") + "。"

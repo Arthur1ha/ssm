@@ -15,15 +15,13 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
-from cloud.agents.lamp.prompts import (decision_messages, persona_reply_prompt,
-                                       valid_lamp_reply, has_unrequested_light_parameters,
-                                       has_internal_terms)
+from cloud.agents.lamp.prompts import decision_messages, persona_reply_prompt
 from cloud.agents.lamp.state import READ_ONLY_TOOLS
 from cloud.agents.lamp.tools.execute import execute_lamp_tool
 from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
-from cloud.agents.common.replies import finalize_reply
+from cloud.agents.common.replies import finalize_reply, valid_reply_format
 from cloud.agents.common.messages import context_message
 from cloud.agents.lamp.personality.profile import get_profile
 from cloud.personality.store import render_identity
@@ -168,9 +166,6 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             status = result.get("result", "unknown")
 
             def publish_text(answer):
-                if (has_unrequested_light_parameters(answer, run.goal)
-                        or has_internal_terms(answer)):
-                    return
                 publish_agent_event("agent_progress", agent_id=unit_id,
                     session_id=event_session, scope="space" if autonomous else "session",
                     space_id=context.space_id, status=status, run_id=run.run_id,
@@ -223,7 +218,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     async def finalize(current: GraphRun) -> GraphRun:
         await finalize_reply(current, model=run_model,
                              instructions=lambda value: persona_reply_prompt(value, get_profile()),
-                             validate=valid_lamp_reply)
+                             validate=valid_reply_format)
         if current.parent_run_id and time.time() >= current.deadline:
             current.response = ""
             current.reply_source = "runtime"

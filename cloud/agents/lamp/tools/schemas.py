@@ -40,18 +40,23 @@ class GetSpaceContext(BaseModel):
 
 
 class RequestPeerSkill(BaseModel):
-    """请求同伴公开技能；接受请求不代表实体动作完成。"""
+    """先用 list_peers 查询，再请求同伴公开技能；仅 ok 表示完成。"""
     target_unit_id: str
     skill_id: str
     params: dict
 
 
 class SendMessage(BaseModel):
-    """给同空间智能体发送短消息；投递成功不代表接受任务。"""
+    """给同空间智能体发短消息；投递成功不表示接受或完成任务。
+
+    邀请游戏时 interaction_kind=game_invite，game_id 取当前可玩列表，
+    content 用自然语言说明玩法，不暴露代号；同伴接受后才按玩法执行动作。
+    由当前人格和情境决定是否邀请，不用闪灯或提前设色冒充邀请。
+    """
     target: str
     content: str = Field(min_length=1, max_length=1000)
     interaction_kind: Literal["message", "game_invite"] = "message"
-    game_id: str | None = None
+    game_id: str | None = Field(default=None, description="邀请时填写 playable_games 中的 ID，仅供工具使用")
 
 
 SCHEMAS = {

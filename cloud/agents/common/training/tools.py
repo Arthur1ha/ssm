@@ -14,40 +14,32 @@ from cloud.agents.common.training.models import ApplyTraining, Definition
 from cloud.agents.common.training.policy import application_parameters
 from cloud.space.execution import ExecutionContext
 
-GUIDANCE = ('通过现有工具理解任意自然语言行为规则；先用 list_training 读取已有规则、未完成草案和设备转换目录。'
-            '由你结合用户原话、历史与事实理解情境和规则适用性，不依赖特定句式、关键词或预设场景清单。'
-            'situation 是开放的自然语言适用情境，不是传感器事件；用户直接表达当前情境即可使用，不要求设备自动识别。'
-            '依据用户意图选择真实支持的动作转换与参数；conditions 只放适用后必须遵守的明确限制。'
-            '用户说以后某场景用现在这档颜色时，把真实当前 RGB 和亮度保存到 defaults，情境保存到 situation；'
-            '不要改成所有开灯或调色都使用这档，也不新增硬件场景状态。'
-            '用户只指定情境与动作而未限制起始状态时，绑定该动作在各合法起始状态的等价转换；不要仅因当前状态固化适用起点。'
-            '用户表达进入某情境时，语义选择对应已保存规则并用 apply_training 按 ID 和当前版本调用；'
-            'overrides 只放用户本次明确修改的参数，不重填或猜测保存的整组颜色。'
-            '用户说以后都这样时修订原规则；只说这次时使用本次 overrides，不改变保存配置。'
-            '每次 create/update 都必须重新给出 name：一句简短、完整、用户可读的规则说明，通常20个汉字以内，适合放在状态转换卡片；'
-            '不重复卡片已有的状态名称，不列场景清单，不用技术字段、枚举值或泛泛的标题，也不能截断关键限制来凑字数。'
-            'effect_text 用简短自然语言说明什么情况下会做什么、限制了什么，完整对应结构化定义，不输出参数或 JSON。'
-            '同一要求的补充必须修改原规则；已有草案时使用 supersedes_proposal_id 修订该草案，未确认的新增草案仍为 create。'
-            '唯一目标少追问，多个目标才澄清；区分临时动作与长期约定，模糊数值给出具体建议供确认。'
-            '只约束用户指明的转换和方向；转换自身的起点已确定时，不把它误加为其它转换的全局允许条件。'
-            '用户说仅在某种情境下限制行为，要区别规则何时适用和动作何时允许，不得把其它情境的动作一起禁止。'
-            '制定规则不要求当前已经满足条件；条件未知时不能编造事实，也不能把当前未触发误说成无法制定规则。'
-            '不要在回复中重复解释卡片已经展示的技术过程。草案由用户在对话卡片确认，不能提前声称规则已保存或行为已改变。'
-            '超出设备当前结构化能力时简短说明具体缺项，不编造转换或识别结果。')
-
 class ListTraining(BaseModel):
-    """读取设备可训练转换和已有教导。"""
+    """读取设备转换目录、已保存教导和未确认草案。
+
+    制定或修订长期约定前先查询；用户表达当前情境时按语义选择已有教导，
+    用 apply_training 应用。不要求固定句式或设备自动识别情境。
+    """
     model_config = ConfigDict(extra='forbid', strict=True)
     unit_id: str
 
 class ProposeTraining(BaseModel):
-    """提出长期教导修改草案；不保存、不确认、不执行。"""
+    """提出长期教导草案，待用户在卡片确认；不保存或执行动作。
+
+    先用 list_training 查询目录和已有记录，只引用真实支持的转换。
+    situation 放自然语言适用情境，defaults 放当前真实参数或用户指定默认值；
+    conditions 仅放用户明确限制，不将情境外的动作一起禁止，不添加硬件场景状态。
+    未限制起点时使用各合法起点的等价转换；制定规则无需当前已满足条件。
+    同一要求应更新原教导；补充未确认草案用 supersedes_proposal_id，保留原 operation。
+    create/update 必须给出完整的新 name 和 effect_text：前者为简短完整的规则句，
+    后者说明情境、动作和限制，不列技术参数或重复状态名。能力缺项须如实说明。
+    """
     model_config = ConfigDict(extra='forbid', strict=True)
     operation: Literal['create', 'update', 'remove']
     unit_id: str
     teaching_id: str | None = None
     base_revision: int | None = Field(default=None, ge=1)
-    name: str | None = None
+    name: str | None = Field(default=None, description="简短完整的规则说明，通常20个汉字以内，不截断关键限制")
     effect_text: str | None = Field(default=None, min_length=1, max_length=1200)
     supersedes_proposal_id: str | None = None
     definition: Definition | None = None

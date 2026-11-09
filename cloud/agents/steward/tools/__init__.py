@@ -179,33 +179,51 @@ class ReadState(_Args):
     """读取传感器与执行器快照。"""
 
 class InvokeSkill(_Args):
-    """按当前 Card 调用一个公开设备技能并等待实体结果。"""
+    """按 list_agents 返回的当前 Card 调用公开技能并等待结果。
+
+    params 遵守该技能声明，不构造传输地址；成功含义以技能契约为准。
+    未确认或受阻时不能以盲走等方式替代。自主活动启动后由设备自主决策。
+    """
     unit_id: str
     skill_id: str
     params: dict[str, Any]
     message: str | None = None
 
 class AwaitResult(_Args):
-    """查询既有设备任务结果。"""
+    """用原 task_id 查询既有任务结果；超时后不换新 ID 重发物理动作。"""
     task_id: str
 
 class SendMessage(_Args):
-    """向同空间智能体发送受限消息。"""
+    """向同空间智能体转达消息；accepted 只表示投递，不表示答应或完成。
+
+    用户指定设备邀请同伴游戏时，先 start_activity，再把原意转达给发起设备，
+    由它自主发出邀请、受邀方自主决定；不要替设备出题或派发物理动作冒充邀请。
+    """
     target: str
     content: str
     reply_to: str | None = None
 
 class StartActivity(_Args):
-    """根据已验证的直接用户请求启动空间活动。"""
+    """仅在经验证的直接用户请求明确要求设备自主活动时调用，无需参数。
+
+    服务端按用户原话启动在线设备的自主模式，不要求逐个指定设备或结束时间。
+    活动不自动过期，下次用户介入由 API 结束；仅报告实际加入情况，包括部分失败。
+    单次命令、情境表达、假设、回忆、询问及同伴消息不构成启动授权。
+    启动后具体动作由设备决定；若用户还指定设备互邀游戏，再用 send_message 转达。
+    """
 
 class SetSpaceConstraint(_Args):
-    """分享用户明确提出的当前空间要求。"""
+    """仅分享经验证的直接用户请求中明确要求多个智能体共同遵守的空间要求。
+
+    text 为用户原话连续片段，targets 用成员 ID 或 ['*']；私人对话和同伴消息不可共享。
+    仅记录后续决策约束，不触发设备动作；用户另有明确即时动作时才继续调用公开技能。
+    """
     text: str
     targets: list[str]
     ttl_s: int = Field(default=300, ge=1, le=3600)
 
 class ClearSpaceConstraints(_Args):
-    """撤销本会话空间要求。"""
+    """用户明确撤销当前空间要求时，移除本会话的共享要求。"""
 
 STEWARD_TOOL_SCHEMAS = {
     "list_agents": ListAgents, "get_space_context": GetSpaceContext,

@@ -294,6 +294,12 @@ class VelocityRequest(BaseModel):
     vx: float = 0.0
     vy: float = 0.0
     vyaw: float = 0.0
+    controller_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    sequence: int | None = Field(default=None, strict=True, ge=1, le=9007199254740991)
+
+
+# Page-scoped ordering survives a stop, so a late HTTP write cannot restart it.
+_velocity_sequences: dict[tuple[str, str], tuple[int, float]] = {}
 
 
 @router.post("/commands")
@@ -347,21 +353,39 @@ async def go2_command_result(request_id: str, context: ExecutionContext = Depend
 
 @router.post("/velocity")
 async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends(require_service_context)):
-    """Sport Move/StopMove 速度控制，无 ack，适合摇杆实时输入。"""
+    """Latest manual target; hardware resampling does not renew user ownership."""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
+    if (req.controller_id is None) != (req.sequence is None):
+        raise HTTPException(status_code=400, detail='controller_id and sequence must be supplied together')
+    key = (context.session_id, req.controller_id) if req.controller_id is not None else None
+    if key is not None:
+        now = time.monotonic()
+        for expired in [item for item, (_, seen) in _velocity_sequences.items() if now - seen > 60]:
+            del _velocity_sequences[expired]
+        previous = _velocity_sequences.get(key)
+        if previous is not None and req.sequence <= previous[0]:
+            return {'result': 'accepted', 'ignored': True, 'reason': 'superseded_velocity'}
+        if previous is None and len(_velocity_sequences) >= 256:
+            raise HTTPException(status_code=429, detail='too many active controllers')
     command = "Move" if any((req.vx, req.vy, req.vyaw)) else "StopMove"
     _check_direct_motion(command, {"x": req.vx, "y": req.vy, "z": req.vyaw}
                          if command == "Move" else {}, context)
     _cancel_pending_peer_requests(context)
+    def can_continue():
+        lease = control_lease.snapshot()
+        return (lease is not None and lease.owner_session_id == context.session_id
+                and (not context.expires_at or context.expires_at > time.time()))
     try:
-        result = go2.move_velocity(req.vx, req.vy, req.vyaw, deadman_s=2.0)
+        result = go2.manual_velocity(req.vx, req.vy, req.vyaw, can_continue=can_continue)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logging.error("[Go2/Velocity] move_velocity 异常: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc))
+    if key is not None:
+        _velocity_sequences[key] = (req.sequence, time.monotonic())
     return result
 
 

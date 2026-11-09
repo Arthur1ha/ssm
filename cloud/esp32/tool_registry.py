@@ -13,7 +13,7 @@ LAMP_SKILLS = {
     "SET_STATE": {"tool": "set_led_state", "id": "set_light_state", "name": "开关灯",
                   "description": "切换灯环的照明状态"},
     "SET_COLOR": {"tool": "set_led_color", "id": "set_light_color", "name": "设置灯光颜色",
-                  "description": "设置 RGB 和亮度；省略亮度时保留当前值"},
+                  "description": "一次设置 RGB 和亮度；省略亮度时保留当前值。相对调节以执行前状态选定目标，颜色和亮度合并一次设置，成功后结束本次调整"},
     "BLINK": {"tool": "blink_led", "id": "blink_light", "name": "闪烁灯光",
               "description": "默认持续闪烁（count=0），直到开灯、关灯或调色；回执确认已启动。仅明确指定正整数次数时，闪完恢复先前灯光并确认完成"},
 }

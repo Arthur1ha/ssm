@@ -36,15 +36,15 @@ class ToolSpec:
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     s.name: s for s in (
         ToolSpec("go2_sport", sport_description(), sport_tool_schema(), motion=True, timeout_s=max(ACTIONS[cmd].timeout_s for cmd in SPORT_COMMANDS) + 10, result_rule="device"),
-        ToolSpec("go2_move", "按里程计闭环执行相对移动：前进、后退、左移或右移提供 distance_m；原地左转或右转提供 angle_deg。speed 是可选速度上限。到量后停稳才完成，受阻返回实际位移和原因；不接受 duration，不把米数换算成时间，不把步数猜成米数", move_tool_schema(), motion=True, timeout_s=70, result_rule="device"),
+        ToolSpec("go2_move", "按里程计闭环执行相对移动：前进、后退、左移或右移提供 distance_m；原地左转或右转提供 angle_deg。speed 是可选速度上限。到量后停稳才完成，受阻返回实际位移和原因；不接受 duration，不把米数换算成时间，不把步数猜成米数。缺少距离或转角时向用户澄清。结果中的 distance_m/angle_deg 是实测量，requested_* 是目标量，stop.result=ok 才确认停稳；未完成时保留目标量和受阻原因，motion_not_observed 不代表从未移动", move_tool_schema(), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_observe", "用摄像头回答当前画面问题", _schema({"question": _string(default="描述你看到的场景")}), timeout_s=32),
         ToolSpec("go2_life", "休息保持连接和姿态；唤醒回待命；开启探索需管理员，停止探索不重放旧任务", life_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_status", "查询设备连接和姿态", _schema({}), timeout_s=3),
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
-        ToolSpec("go2_navigate_to_visible_target", "视觉识别目标并与雷达点云配对，在地图上规划到目标附近的停靠点，停稳后重新观察确认", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
-        ToolSpec("go2_find_object", "在室内寻找地面物品并走到附近；用户任务默认搜索当前定位会话地图的可达区域，已有矩形边界则遵守边界，无需用户提供房间名称或坐标。未发现时换观察点；发现后按可通行路径朝目标方向分段移动，停稳后再看。连续画面粗略判断已在附近并停稳即完成，不要求精确目标坐标或测距。结果不代表可直接触碰目标；未检查区域不代表目标不存在", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
+        ToolSpec("go2_navigate_to_visible_target", "朝当前画面中的目标接近，target 传自然语言描述。视觉识别后与雷达点云配对，规划停靠点，停稳后复核；仅 ok 且复核通过表示安全接近，不代表触碰或精确到达。失败直接报告原因，不用相对移动或坐标导航盲走替代", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
+        ToolSpec("go2_find_object", "在室内寻找地面物品并走到附近；用户任务默认搜索当前定位会话地图的可达区域，已有矩形边界则遵守边界，无需用户提供房间名称或坐标。未发现时换观察点；发现后按可通行路径朝目标方向分段移动，停稳后再看。连续画面粗略判断已在附近并停稳即完成，不要求精确目标坐标或测距。结果不代表可直接触碰目标；未检查区域不代表目标不存在。仅用户明确指定且无法确定房间时澄清。outcome 区分未启动 not_started、暂未识别 not_seen、见过但未接近 seen_not_reached、已接近 nearby；按 message 保留受阻原因。内部范围配置或定位会话问题不要求用户补填房间；终态后不承诺自动继续搜索", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", led_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
@@ -58,7 +58,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "interaction_kind": _string(enum=["message", "game_invite"]),
             "game_id": _string(minLength=1, maxLength=64),
         }, ("target", "content")), timeout_s=5),
-        ToolSpec("request_peer_skill", "请求同伴执行公开技能，等待最终结果；只有 ok 表示目标完成，失败后不要执行依赖动作", _schema({
+        ToolSpec("request_peer_skill", "请求同伴执行公开技能，等待最终结果；只有 ok 表示目标完成，失败后不要执行依赖动作。请求前先 list_peers；超时只用原 request_id 查询，不换新 ID 重发物理动作", _schema({
             "target_unit_id": _string(minLength=1),
             "skill_id": _string(minLength=1),
             "params": {"type": "object"},

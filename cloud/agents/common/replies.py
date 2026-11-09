@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from collections.abc import Callable
 
@@ -37,8 +36,8 @@ def step_kind(step: dict) -> str:
 async def finalize_reply(run: Run, *, model, instructions,
                          validate: Callable | None = None, fallback: Callable | None = None,
                          context: dict | None = None) -> Run:
-    """Validate the existing final; compose once only for a direct tool ending."""
-    validator = validate or valid_persona_reply
+    """Reuse the decision reply; compose once for a direct tool ending."""
+    validator = validate or valid_reply_format
     fallback = fallback or (lambda current: factual_fallback(current.agent_id, current.status, current))
     fields = dict(agent_id=run.agent_id, run_id=run.run_id,
                   trace_id=run.trace_id or run.run_id, session_id=run.session_id)
@@ -60,9 +59,9 @@ async def finalize_reply(run: Run, *, model, instructions,
             run.response, run.reply_source = fallback(run), "runtime"
             return run
         if not validator(answer, run):
-            raise ValueError("invalid_factual_reply")
+            raise ValueError("invalid_reply_format")
         run.response, run.reply_source = answer.strip(), source
-        emit_agent_event("reply.validated", **fields, reply=run.response,
+        emit_agent_event("reply.validated", **fields, reply=run.response, validation="format",
                          reason="decision_final" if source == "decision_model" else "factual_reply",
                          reply_kind="final")
     except Exception as exc:
@@ -72,27 +71,10 @@ async def finalize_reply(run: Run, *, model, instructions,
     return run
 
 
-_COMPLETION_CLAIM = re.compile(
-    r"(?<!没)(?<!未)(?:已完成|已经完成|已执行|已经执行|办妥|搞定|完成了|办好了|做好了|调好了|成功了)"
-)
-
-
-def valid_persona_reply(value: object, run: Run | None = None) -> bool:
-    if not (isinstance(value, str) and bool(value.strip()) and len(value) <= 4000
-            and not value.lstrip().startswith(("{", "[", "```"))):
-        return False
-    if run is None:
-        return True
-    proposals_only = (any(step_kind(step) == "training_proposal" for step in run.steps)
-                      and not any(step_kind(step) == "action" for step in run.steps))
-    if proposals_only and re.search(
-            r"(?<!没)(?<!未)(?:已保存|已经保存|已学会|已经学会|记住了|调好了|已调好)", value):
-        return False
-    if run.status == "partial" and re.search(r"(?:全部|都|所有).{0,5}(?:完成|办妥|搞定|成功)", value):
-        return False
-    if run.status in {"accepted", "executing", "timeout", "blocked", "rejected", "cancelled", "error", "unknown", "needs_clarification"}:
-        return _COMPLETION_CLAIM.search(value) is None
-    return True
+def valid_reply_format(value: object, run: Run | None = None) -> bool:
+    """Check the text envelope only; wording cannot prove device completion."""
+    return (isinstance(value, str) and bool(value.strip()) and len(value) <= 4000
+            and not value.lstrip().startswith(("{", "[", "```")))
 
 
 def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
@@ -101,8 +83,10 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
     if status in {"accepted", "executing", "timeout", "unknown"}:
         return {"go2": "我还没收到动作完成的确认。", "lamp": "我还没收到调灯完成的确认。",
                 "orchestrator": "这项安排尚无完成确认。"}[role]
-    if role == "lamp" and status == "error" and run is not None and not run.steps:
-        return "我这次处理请求出了问题，还没做任何动作。稍后再试。"
+    if status == "error" and run is not None and not run.steps:
+        return {"go2": "我这次没能好好处理你的话，稍后再问我一下。",
+                "lamp": "我这次处理请求出了问题，还没做任何动作。稍后再试。",
+                "orchestrator": "这次对话处理出了问题，请稍后再试。"}[role]
     if run is not None and run.steps:
         results = [(step, step.get("result") or {}) for step in run.steps]
         completed = [step for step, result in results
@@ -120,8 +104,7 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
                              if isinstance(item, dict))
                       for _, result in results)
         if role == "go2" and (offline or status == "offline"):
-            opening = "汪，邀请我收到了，但机身还没连上。" if "邀请" in run.goal else "汪，你的话我听到了，但机身还没连上。"
-            return (opening
+            return ("汪，你的话我听到了，但机身还没连上。"
                     + ("前面的步骤有结果了，后面的动作这次做不了。" if completed
                        else "这次动作没能执行。"))
         if failed:
@@ -138,6 +121,8 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
                           "lamp": "这次没调成。",
                           "orchestrator": "这次安排没能完成。"}[role]
             return prefix + (f"反馈：{reason}。" if reason else "")
+        if role == "lamp" and completed and status == "error":
+            return "已执行的灯光调整已生效，但这次对话处理出了问题。"
         if proposals and not completed:
             return "这项要求已整理好，请核对对话中的修改卡片。"
         if not completed and status == "ok":

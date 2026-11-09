@@ -11,7 +11,7 @@
 2. 云端 API 订阅 manifest、card、status、state、event 等 MQTT 主题，仅为智能体维护设备卡；手机 PWA 经 `/api/devices` 与 `/api/events`（SSE）自动发现和展示智能体
 3. 用户语音/文字 → PWA 请求 `/api/intents` → API 发布 MQTT `ssm/intent/{session_id}` → 编排器逐轮选择一个工具、等待真实结果、继续规划，最后生成人格回复
 4. `reactive` 模式下，传感器事件也可触发云端 ESP32 智能体自主决策；默认 `manual` 不自发控灯
-5. 云端离线时 ESP32 本地规则接管（兜底层）
+5. ESP32 独立执行硬件 tick、任务去重与结果回报；当前固件没有离线自动控灯规则，云端离线不触发新的自主决策
 6. 新智能体（如 Go2 机器狗）通过 A2A Agent Card（`/api/devices/{unit_id}/agent`）暴露能力，供编排器与 PWA 动态发现
 
 ---
@@ -43,7 +43,8 @@ ssm/
 │   ├── bsm.py           ← 硬件驱动层（GPIO/ADC/PWM），只抛事件
 │   ├── ism.py           ← 状态机契约层，只做状态转换
 │   ├── trigger_map.py   ← ★ 唯一耦合点：BSM↔ISM↔MQTT 接线
-│   ├── local_rules.py   ← 云端离线兜底规则
+│   ├── lamp_contract.py← 灯动作、参数与持续闪烁默认值的固件契约
+│   ├── clock.py         ← NTP 校时与 Unix 时间换算
 │   ├── mqtt_client.py   ← MQTT 封装，自动重连 + LWT
 │   ├── boot.py          ← WiFi 连接（先于 main.py 执行）
 │   └── main.py          ← 主循环入口
@@ -51,39 +52,49 @@ ssm/
 │   ├── .env             ← LLM API Key、MQTT 地址、MODEL_LIST（见 .env.example）
 │   ├── api/             ← FastAPI 聚合入口（端口 8082），装配下面所有 router
 │   │   ├── main.py      ← app 装配 + ESP32 MQTT 桥（订阅 manifest/state/event/result）
-│   │   ├── rules.py     ← `/api/rules` 自动化规则 CRUD
+│   │   ├── training.py  ← `/api/training` 教导、草案与确认
+│   │   ├── activity.py  ← 空间活动生命周期与时间线
+│   │   ├── personality.py / people.py ← 人格配置与空间人员库
 │   │   └── devices.py   ← `/api/devices` + `/api/devices/{unit_id}/agent`（★ A2A Agent Card，数据取自 cards/）
 │   ├── cards/           ← ★ A2A 设备卡注册表：registry.py（订阅 card/manifest/status，全局单一真相）、builder.py（manifest→AgentCard）、schema.py
 │   ├── agents/          ← 三角色 Agent Graph 与共享文件检查点、动作账本、回复投影
-│   │   ├── common/      ← 运行图、持久化、模型、事件与回复契约
+│   │   ├── common/      ← 运行图、持久化、模型、事件与回复契约；training/ 统一教导
 │   │   ├── steward/     ← 管家 Graph、人格、工具声明与公开 skill
 │   │   ├── lamp/        ← 灯 Graph、人格、记忆与自主工作流
 │   │   └── go2/         ← Go2 Graph、人格、记忆与自主工作流
 │   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + 逐步任务循环）
 │   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 管家 Graph
 │   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助
-│   │   ├── shared_state.py ← 线程安全传感器/执行器/任务快照（按 manifest agent_type 分桶）
-│   │   ├── devices.json ← 预留：文件型非 MQTT 设备注册表（当前为空，go2 已走 MQTT card）
-│   │   └── rules.json   ← 自动化规则存储
-│   ├── esp32/           ← ESP32 桌面空间智能体（云端侧，原 orchestrator/desk_agent）
+│   │   ├── shared_state.py ← 线程安全 MQTT 传感器/执行器快照与可信会话元数据
+│   │   ├── trusted_context.py ← 签名意图、同伴请求与会话清理校验
+│   │   └── card.py      ← 管家公开能力卡
+│   ├── esp32/           ← 灯的云端服务与设备执行适配
 │   │   ├── service.py   ← 灯实例与自主模式状态、Graph 入口
-│   │   ├── router.py    ← `/api/esp32/autonomy`（灯自主模式 manual/reactive）
+│   │   ├── router.py    ← 自主模式、对话、内部语义任务与物理回执接口
 │   │   ├── state.py     ← ESP32 设备/任务状态
-│   │   ├── tools.py     ← MQTT 发布辅助
-│   │   └── tts.py       ← TTS 合成封装
-│   └── go2/             ← Go2 机器狗智能体（数据面 HTTP；控制面 card/status 仍走 MQTT）
-│       ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
-│       ├── mode/、perception/、tools/ ← 设备侧模式、视觉与执行适配
-│       ├── navigation/  ← astar / frontier / occupancy_grid / navigator / drive
-│       └── connection/  ← webrtc / video / sensors / fsm
+│   │   ├── perception.py / presentation.py ← 传感器事实整理与控制状态投影
+│   │   ├── tool_registry.py / tool_executor.py ← 动作契约、执行校验与回执等待
+│   │   └── tasks.py / physical_tasks.py ← 语义任务与物理派发的持久去重账本
+│   ├── go2/             ← Go2 设备服务（数据面 HTTP；控制面 card/status 走 MQTT）
+│   │   ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
+│   │   ├── service.py / state.py / actions.py ← 模式装配、分层状态与动作契约
+│   │   ├── tasks.py / control.py ← 任务生命周期与运动租约
+│   │   ├── mode/、perception/、tools/ ← 自主调度、视觉与执行适配
+│   │   ├── navigation/  ← 路径规划、地图、目标接近与导航执行
+│   │   └── connection/  ← webrtc / video / sensors / fsm
+│   ├── personality/     ← 三角色共用的人格存储、版本与名称管理
+│   ├── peers/           ← 同伴发现、签名通信、技能请求、权限与互动游戏
+│   ├── space/           ← 空间成员、可信执行上下文、用户约束、活动与人员库
+│   ├── observability/   ← 日志配置、任务关联事件与脱敏
+│   └── storage/         ← 原子 JSON 文件读写与锁
 ├── app/                 ← 用户端 PWA（跑在手机/浏览器）
 │   ├── index.html / manifest.json / sw.js / styles/app.css
 │   └── src/
 │       ├── app.jsx      ← ★ 主 React 应用（单屏聊天中心 + hash 子页、聊天状态）
 │       ├── ApiClient.js / CommandBus.js ← 会话 API/SSE 与设备命令入口
 │       ├── hooks/       ← useSendIntent.js（调用 /api/intents）、useSsmCore.js（设备快照与事件）
-│       ├── pages/       ← FsmDevicePage、DevicesPage、RulesPage（hash 子页）
-│       ├── components/  ← ActivityFeed（活动流气泡）、ChatPanel、DeviceCard、Icon、RulesDrawer
+│       ├── pages/       ← FsmDevicePage、DevicesPage 与状态机图组件
+│       ├── components/  ← ActivityFeed、ChatPanel、DeviceCard、TrainingDrawer、SpacePeopleDrawer
 │       └── utils/       ← agentMeta、audio
 ├── protocol/            ← MQTT 协议契约（单一真实来源）
 │   └── topics.md        ← 所有 topic 格式定义
@@ -96,7 +107,9 @@ ssm/
 └── docs/                ← superpowers/（plans + specs）、research/、*.html 状态机图（无 ARCHITECTURE.md）
 ```
 
-**云端有三个 LLM 智能体**：管家、灯与 Go2 的模型决策分别位于 `cloud/agents/{steward,lamp,go2}/`；`orchestrator/main.py`、`esp32/service.py` 与 `go2/router.py` 接入各自 Graph。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。
+**云端有三个 LLM 智能体**：管家、灯与 Go2 的模型决策分别位于 `cloud/agents/{steward,lamp,go2}/`；`orchestrator/main.py`、`esp32/service.py` 与 `go2/router.py` 接入各自 Graph。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。灯的定性照明目标也可通过内部 HTTP 语义任务交给灯 Graph，物理执行仍走 MQTT。`go2/mode/` 负责自主事件调度，决策 Graph 位于 `agents/go2/workflows/`。
+
+**目录边界**：`agents/` 定义角色决策；`esp32/`、`go2/`、`orchestrator/` 保留服务入口和设备适配；`personality/`、`peers/`、`space/`、`observability/` 提供共享能力。设备发现与在线状态以 MQTT retained card/manifest/status 为准，空间成员配置在 `cloud/space/space.json`；不存在文件型设备能力注册表或旧 `/api/rules` 入口。
 
 **当前接线**（以 `config.py` 为准）：
 
@@ -148,7 +161,7 @@ ssm/
 
 **决策**：分两个面——**控制面**（发现、在线状态、能力声明 card）所有智能体统一走 MQTT（retained + LWT，单一真相）；**数据面**（实际调用）按设备本性选传输：ESP32 走 MQTT `task`/`result`，Go2 走 HTTP/SSE（视频流、地图、流式对话天然需要 HTTP）。
 
-**原因**：天然解耦——新加一个智能体只需发布 manifest/card，其余节点自动感知；编排器宕机不影响 ESP32 本地规则。控制面统一保证"谁在线"只有一套真相；数据面分离让重设备（Go2）保留流式能力。
+**原因**：天然解耦——新加一个智能体只需发布 manifest/card，其余节点自动感知；编排器宕机不影响 ESP32 硬件 tick。控制面统一保证"谁在线"只有一套真相；数据面分离让重设备（Go2）保留流式能力。
 
 **避免**：ESP32 直接调用 HTTP API、编排器直接操作 GPIO、PWA 轮询 REST 状态；把控制面（card/在线状态）做成文件或 HTTP（必须在 MQTT retained）；让 Go2 这类 HTTP 调用**同步阻塞**编排器事件循环（须线程池+超时）。
 

@@ -15,9 +15,9 @@ from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict
 
-from cloud.agents.lamp.prompts import persona_reply_prompt, valid_lamp_reply
+from cloud.agents.common.replies import factual_fallback, valid_reply_format
+from cloud.agents.lamp.prompts import persona_reply_prompt
 from cloud.agents.common.runner import GraphRun
-from cloud.agents.common.replies import factual_fallback
 from cloud.agents.common.messages import observed_tool_messages, reply_messages, role_messages
 from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.observability import emit_agent_event
@@ -301,8 +301,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         prompt = persona_reply_prompt(run, get_profile())
         try:
             answer = model.invoke(reply_messages(prompt, run)).content
-            if not valid_lamp_reply(answer, run):
-                raise ValueError("invalid_fact_claim")
+            if not valid_reply_format(answer, run):
+                raise ValueError("invalid_reply_format")
         except Exception:
             answer = factual_fallback(agent._find_led_unit(), validation_status, run)
         if (state["autonomy_epoch"] == agent._autonomy_epoch

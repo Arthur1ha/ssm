@@ -16,7 +16,7 @@
   │                  │        │  │ orchestrator 编排器       │  │
   │  BSM ← TriggerMap│        │  │ 逐轮规划→执行→核对结果    │  │
   │  ISM ← TriggerMap│        │  │ →生成人格回复             │  │
-  │  本地规则（兜底） │        │  ├──────────────────────────┤  │
+  │  硬件 tick / 回执 │        │  ├──────────────────────────┤  │
   └────────┬─────────┘        │  │ api（FastAPI :8082）      │  │
            │           HTTP   │  │  esp32 桌面智能体          │  │
            │        ◄────────►│  │  go2 机器狗智能体（WebRTC）│  │
@@ -27,7 +27,7 @@
   └─────────────────────────────────────────────────────────────┘
 ```
 
-**控制优先级**：用户指令 > 智能体 > 本地规则（离线兜底）
+**控制优先级**：用户指令优先于自主行为；灯通过让位窗口、Go2 通过运动租约与中断尊重用户介入。当前固件没有离线自动控灯规则。
 
 云端有三个 LLM 智能体，模型决策分别位于 `cloud/agents/{steward,lamp,go2}/graph.py`：
 - **编排器**（`cloud/orchestrator/`，独立进程）：订阅用户意图，经管家 Graph 统筹全局，MQTT 派发到 ESP32、HTTP 委托到 Go2。
@@ -62,15 +62,11 @@
 | `ism.py` | 接口状态机——仅处理状态转换，不涉及硬件 |
 | `lamp_contract.py` | 当前灯固件参数和能力契约，与云端工具及 Card 共用 |
 | `trigger_map.py` | BSM ↔ ISM ↔ MQTT 接线（唯一耦合点） |
-| `agent_manifest.py` | 启动时为已探测到的 unit 发布 retained manifest |
-| `local_rules.py` | 云端智能体离线时的本地自动规则 |
+| `agent_manifest.py` | 为已探测到的智能体发布 retained manifest，并清理旧传感器 manifest |
 | `mqtt_client.py` | MQTT 封装，支持自动重连和 LWT |
 | `main.py` | 主循环入口 |
 
-**本地规则**（`ssm/decision/active = "false"` 时启用）：
-- 光线 DARK/DIM → 暖白光 LED（R=255, G=160, B=60）
-- 光线 BRIGHT → 关灯
-- 检测到声音 → 白色闪烁 ×2（始终生效）
+传感器独立发布 `state/event`，供云端灯 Graph 使用。当前固件只订阅灯任务主题；云端离线时硬件 tick 继续运行，不会根据传感器新增自动控灯动作。
 
 ### 云端服务（`cloud/`）
 
@@ -83,7 +79,7 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 `GO2_FACE_ENROLLMENT_ENABLED` 保护。登记完成后应重新关闭该写开关。
 
 本地只保存 `PersonId`、姓名、关系和人脸数量到
-`cloud/go2/data/memory/people.json`，不会保存原始照片或 embedding。可用
+`cloud/space/data/people.json`（旧 Go2 人员文件仅用于兼容读取），不会保存原始照片或 embedding。可用
 `RUN_TENCENT_FACE_LIVE=1 uv run pytest cloud/go2/tests/test_tencent_face_live.py -q`
 检查人员库版本；该测试默认跳过，也不会创建或删除人员。
 
@@ -114,17 +110,32 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 | `main.py` | MQTT 事件循环：意图 → 逐步任务循环 |
 | `../agents/steward/graph.py` | 逐轮规划、派发、核对结果并生成管家回复 |
 | `tools.py` | MQTT/HTTP 派发与反馈辅助 |
-| `shared_state.py` | 线程安全设备/任务快照（合并 MQTT manifest + `devices.json`） |
-| `devices.json` | 预留：文件型非 MQTT 设备注册表（当前为空 `{}`，go2 已走 MQTT card） |
-| `rules.json` | 自动化规则存储 |
+| `shared_state.py` | 线程安全 MQTT 传感器/执行器快照与可信会话元数据 |
+| `trusted_context.py` | 签名意图、同伴请求与会话清理校验 |
+| `card.py` | 管家公开能力卡 |
 
 > 设备能力卡注册表见 `cloud/cards/`（`registry.py` 订阅 card/manifest/status，是 A2A 单一真相）。
+
+#### 决策、设备服务与共享能力
+
+| 目录 | 职责 |
+|------|------|
+| `agents/` | 三角色的 Graph、提示词、人格、记忆和自主工作流；`common/training/` 提供统一教导 |
+| `esp32/` | 灯服务、自主模式、传感器事实、动作校验、任务去重与 MQTT 回执 |
+| `go2/` | HTTP 服务、WebRTC、视觉、导航、执行校验与自主事件调度；调度器调用 `agents/go2/workflows/` 的 Graph |
+| `personality/` | 三角色共用的人格存储、版本校验和名称管理；具体人格在各自 `agents/*/personality/` |
+| `peers/` | 同伴发现、签名消息、技能请求、协作权限、取消和互动游戏 |
+| `space/` | 空间成员、执行身份、用户要求、活动时间线和人员库 |
+| `observability/` | 结构化日志、任务关联事件与脱敏 |
+| `storage/` | 带锁、原子化的 JSON 文件存储 |
+
+空间成员配置保存在 `cloud/space/space.json`，设备能力与在线状态仍来自 MQTT retained 消息。当前没有文件型设备能力注册表；教导通过 `/api/training` 管理，旧 `/api/rules` 已移除。详细文件说明见 [云端智能体目录与设备互通](docs/architecture/agent-directory-and-peer-messaging.md)。
 
 ### 手机 PWA（`app/`）
 
 无构建步骤的 React 应用（Babel standalone）。浏览器只连接 FastAPI：REST 负责登录、命令与管理，认证 SSE 负责实时设备状态和编排反馈；浏览器不加载 MQTT.js，也不持有 broker 写凭据。
 
-系统只有一个固定空间 `main`。用户点击“创建空间”即可进入并管理规则、邀请与长期资产；体验者扫描邀请二维码获得短期 Cookie 会话，只能使用已有能力。界面形态为**单屏聊天中心 + hash 设备子页**，访客界面不会显示长期配置入口。
+系统只有一个固定空间 `main`。用户点击“创建空间”即可进入并管理教导、邀请与长期资产；体验者扫描邀请二维码获得短期 Cookie 会话，只能使用已有能力。界面形态为**单屏聊天中心 + hash 设备子页**，访客界面不会显示长期配置入口。
 
 ## MQTT 消息协议
 
@@ -144,8 +155,7 @@ Go2 人脸身份使用腾讯云 IAI 3.0 人员库。部署时在 `cloud/.env` �
 - `ssm/task/{unit_id}/{task_id}` —— 任务下发（云端 → 设备）
 - `ssm/result/{unit_id}/{task_id}` —— 任务结果（设备 → 云端，`ok`/`blocked`）
 - `ssm/feedback/{session_id}` —— 编排器渐进式执行反馈
-- `ssm/decision/active` —— 云端在线总开关（`true`/`false`，离线时 ESP32 本地规则接管）
-- `ssm/rules/{device_id}` —— 自动化规则（retained）
+- `ssm/decision/active` —— 编排器兼容在线标记（`true`/`false`），当前固件不据此自动控灯
 - `ssm/agents/{unit_id}/thought` —— 拟人化思考
 
 所有 payload 均为 JSON，每条消息带 `unit_id`（自标识键）和 `ts`（Unix 时间戳）。
@@ -190,7 +200,7 @@ make ps / logs     # 查看进程 / 日志
 ```bash
 cd edge
 mpremote connect <端口> cp boot.py clock.py lamp_contract.py config.py local_config.py probe.py ism.py bsm.py \
-  mqtt_client.py trigger_map.py local_rules.py agent_manifest.py main.py :
+  mqtt_client.py trigger_map.py agent_manifest.py main.py :
 mpremote connect <端口> reset
 ```
 

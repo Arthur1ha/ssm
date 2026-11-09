@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Annotated, Any, Callable, Literal, TypedDict
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_core.messages import AnyMessage, RemoveMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
@@ -139,18 +139,21 @@ async def run_role_graph(
         raise ValueError("GraphRun.agent_id is required")
     tools = [_schema(name, value) for name, value in tool_schemas.items()]
     bound_model = model.bind_tools(tools, parallel_tool_calls=False) if tools else model
-    # Let the provider enforce JSON mode and LangChain validate the reply.
+    # Request JSON mode and let LangChain validate structured decisions.
+    # OpenAI-compatible providers may still return ordinary final prose.
     # Passing this through the SDK's auto-parser would require strict schemas
     # for every business tool, changing their existing optional parameters.
-    bound_model = bound_model.bind(extra_body={"response_format": {"type": "json_object"}})
+    if hasattr(bound_model, "bind"):
+        bound_model = bound_model.bind(extra_body={"response_format": {"type": "json_object"}})
     response_parser = PydanticOutputParser(pydantic_object=DialogueResponse)
+    text_parser = StrOutputParser()
     response_policy = SystemMessage(content=(
-        "每轮最多调用一个业务工具；需要用户补充必要信息或确认时，停止依赖该信息的动作，"
-        "返回 JSON：{\"kind\":\"question\",\"text\":\"向用户提出的一个具体问题\"}，"
-        "由运行图暂停并等待用户回答。已有信息足够时不要反复确认。"
-        "无需调用工具且可以结束本轮时，返回 JSON：{\"kind\":\"final\",\"text\":\"以当前人格直接给用户的最终回复\"}。"
-        "普通闲聊、反问和可选的后续建议不属于必须等待回答的追问。\n"
-        + response_parser.get_format_instructions()
+        "通过原生 tool calling 每轮最多调用一个业务工具；调用时不输出面向用户的文字。"
+        "观察真实结果后再决定下一步，不重复成功的动作。"
+        "缺少必要信息时返回 JSON：{\"kind\":\"question\",\"text\":\"一个具体问题\"}，"
+        "运行图将暂停等待回答。已有信息足够时不要反复确认。"
+        "无需工具或目标完成时返回 JSON：{\"kind\":\"final\",\"text\":\"以当前人格直接回应\"}。"
+        "闲聊、反问或可选建议不属于必须等待回答的追问。"
     ))
     saver = checkpointer or FileCheckpointSaver()
     ledger = effect_ledger or FileEffectLedger()
@@ -211,7 +214,9 @@ async def run_role_graph(
         content = getattr(response, "content", "")
         emit("model.response", turn=turns, output={"content": content, "tool_calls": calls},
              duration_ms=round((time.monotonic() - started) * 1000))
-        if not calls and (not isinstance(content, str) or not content.strip()) and time.time() < current.deadline - 1:
+        if (not calls and not getattr(response, 'invalid_tool_calls', None)
+                and (not isinstance(content, str) or not content.strip())
+                and time.time() < current.deadline - 1):
             emit("model.empty_retry", turn=turns)
             try:
                 response = await asyncio.wait_for(bound_model.ainvoke(messages + [SystemMessage(
@@ -225,6 +230,9 @@ async def run_role_graph(
                 emit("model.response", turn=turns, retry=True,
                      output={"content": content, "tool_calls": calls},
                      duration_ms=round((time.monotonic() - started) * 1000))
+        if getattr(response, "invalid_tool_calls", None):
+            current.status, current.response = "error", "工具调用格式无效，未执行新动作。"
+            return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         if len(calls) > 1:
             current.status, current.response = "blocked", "模型一次请求了多个动作，未执行新动作。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
@@ -235,9 +243,13 @@ async def run_role_graph(
                 try:
                     dialogue = response_parser.invoke(response)
                 except OutputParserException as exc:
-                    emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc))
-                    current.status, current.response = "error", "模型回复格式无效，未执行新动作。"
-                    return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
+                    if content.lstrip().startswith(("{", "[", "```")):
+                        emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc))
+                        current.status, current.response = "error", "模型回复格式无效，未执行新动作。"
+                        return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
+                    # Plain prose can only end this turn. It cannot dispatch
+                    # tools, resume an action, or create a human-input interrupt.
+                    dialogue = DialogueResponse(kind="final", text=text_parser.invoke(response))
                 if dialogue.kind == "question":
                     return {"run": asdict(current),
                             "decision": {"kind": "ask", "question": dialogue.text[:500]}, "turns": turns}

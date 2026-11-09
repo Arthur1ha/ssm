@@ -29,6 +29,7 @@ OBSERVATION_SEGMENT_M = .80
 OBSERVATION_SEGMENT_RAD = .80
 OBSERVATION_SEGMENT_S = 5.0
 TARGET_VIEW_ATTEMPTS = 4
+TELEMETRY_WAIT_S = 3.0
 _request: ContextVar[tuple[str, float] | None] = ContextVar("go2_search_request", default=None)
 _configured_scope: tuple[tuple[float, float, float, float] | None, str] | None = None
 _exploration_coverage = None
@@ -118,7 +119,7 @@ def describe_search_result(result: dict) -> dict:
     seen = bool(result.get("found") or result.get("target_hint")
                 or (result.get("evidence") or {}).get("found"))
     observed = bool((result.get("coverage") or {}).get("observations")
-                    or result.get("evidence") or result.get("steps"))
+                    or result.get("evidence") or result.get("observation") or result.get("steps"))
     result["found"] = seen
     if reason == "stop_unconfirmed":
         outcome, message = "stop_unconfirmed", "搜索已中止，但还没有确认机身停稳；不能继续移动，也不能算找到并接近了目标。"
@@ -134,7 +135,8 @@ def describe_search_result(result: dict) -> dict:
             "search_scope_session_mismatch": "已有搜索边界属于上一次定位，需要重新设置当前会话的边界。",
             "map_session_unavailable": "当前定位会话尚未就绪。",
             "map_session_changed": "定位会话已改变，本次搜索已结束。",
-            "localization_unavailable": "定位数据暂不可用。",
+            "localization_unavailable": "机器狗自身的定位数据暂不可用，暂时不能移动。",
+            "map_unavailable": "导航地图暂不可用，暂时不能移动。",
             "motion_not_observed": "发出移动指令后，没有观察到足够的实际位移或转动。",
             "no_known_free_observation_path": "当前没有可通行的目标接近路径。",
             "coverage_exhausted": "当前没有新的可达观察点，遮挡区域仍未检查。",
@@ -171,6 +173,7 @@ class SearchState(TypedDict, total=False):
     approach_attempts: int
     scope: dict
     last_detection: dict
+    observation_retries: int
 
 
 def build_search_graph(adapter, *, checkpointer=None):
@@ -182,7 +185,7 @@ def build_search_graph(adapter, *, checkpointer=None):
                 "coverage": state.get("coverage", {}), "steps": state.get("steps", 0),
                 "distance_m": state.get("distance_m", 0.0),
                 "target_hint": state.get('target_hint'), "found": bool(detection),
-                "evidence": detection, **extra}}
+                "evidence": detection, "observation": state.get('observation', {}), **extra}}
 
     async def guard(state):
         reason = await adapter.guard(state)
@@ -203,12 +206,21 @@ def build_search_graph(adapter, *, checkpointer=None):
         observation = await adapter.observe(state)
         if observation.get("reason"):
             return terminal(state, observation["reason"])
-        summary = await adapter.record(observation)
-        if summary.get("reason"):
-            return terminal(state, summary["reason"])
         found = observation.get("found") is True and state["mode"] == "find_object"
+        observed = {**state, 'observation': observation,
+                    'last_detection': observation if found else state.get('last_detection', {}),
+                    'target_hint': observation.get('target_hint') or state.get('target_hint')}
+        summary = await adapter.record(observation)
         await adapter.progress("search_candidate" if found else "search_observe", state,
                                observation=observation, coverage=summary)
+        if summary.get('reobserve') and state.get('observation_retries', 0) < 1:
+            return {'observation': observation, 'last_detection': observed['last_detection'],
+                    'target_hint': observed['target_hint'], 'phase': 'observe',
+                    'observation_retries': state.get('observation_retries', 0) + 1}
+        if summary.get("reason"):
+            return {**terminal(observed, summary["reason"], diagnostics=summary.get('diagnostics', {})),
+                    'observation': observation, 'last_detection': observed['last_detection'],
+                    'target_hint': observed['target_hint']}
         return {"observation": observation, "coverage": summary,
                 "last_detection": observation if found else state.get("last_detection", {}),
                 "target_hint": observation.get("target_hint") or state.get("target_hint"),
@@ -400,19 +412,15 @@ class DeviceSearch:
         if lease is None or lease.owner_session_id != self.context.session_id:
             return "control_lease_changed"
         control_lease.heartbeat(self.context)
-        # Initialize the calculation extent once. Refresh it from the fresh
-        # snapshot already required by record/select, not from this 5 Hz
-        # ownership monitor: Navigator and visual capture own telemetry gaps.
-        if self.bounds is None:
-            scope_error = self.refresh_scope()
-            if scope_error:
-                return scope_error
+        # The monitor checks authority, not telemetry readiness. Camera
+        # observation comes first; record/select obtain the navigation snapshot.
         pose = go2.odom
-        if not pose or not (self.bounds[0] <= pose.get("x", math.inf) <= self.bounds[2]
-                            and self.bounds[1] <= pose.get("y", math.inf) <= self.bounds[3]):
+        if self.bounds is not None and pose and not (
+                self.bounds[0] <= pose.get("x", math.inf) <= self.bounds[2]
+                and self.bounds[1] <= pose.get("y", math.inf) <= self.bounds[3]):
             return "outside_search_scope"
         stamp = getattr(go2, "odom_received_at", None)
-        if stamp is not None and stamp != self.last_pose_time and time.monotonic() - stamp <= 1.0:
+        if pose and stamp is not None and stamp != self.last_pose_time and time.monotonic() - stamp <= 1.0:
             if self.last_pose is not None:
                 self.travelled_m += math.hypot(pose["x"] - self.last_pose["x"], pose["y"] - self.last_pose["y"])
             self.last_pose, self.last_pose_time = pose.copy(), stamp
@@ -433,7 +441,8 @@ class DeviceSearch:
                     return {"reason": reason}
                 sample = await asyncio.wait_for(observe_target(
                     state["target"] if state["mode"] == "find_object" else "",
-                    after_frame_id=self.after_frame, after_received_at=self.after_time),
+                    after_frame_id=self.after_frame, after_received_at=self.after_time,
+                    require_pose=state['mode'] != 'find_object'),
                     timeout=min(OBSERVATION_TIMEOUT_S, max(0.01, state["deadline"] - time.time())))
                 reason = await self.guard(state)
                 if reason:
@@ -443,7 +452,8 @@ class DeviceSearch:
                 self.after_time = frame["received_at"]
                 return {"found": bool(sample.get("found")), "frame_id": frame["frame_id"],
                         "image_time": frame["received_at"], "pose": sample["pose"],
-                        "target_hint": make_target_hint(sample),
+                        "pose_reason": sample.get('pose_reason'),
+                        "target_hint": make_target_hint(sample) if sample['pose'] else None,
                         "quality": sample.get("quality", 0.0),
                         "media_ref": sample.get("media_ref") or sample.get("image_url"),
                         "observation": sample.get("observation", {})}
@@ -459,10 +469,33 @@ class DeviceSearch:
                 return {"reason": "observation_timeout"}
 
     async def record(self, observation):
+        from cloud.go2.connection import go2
         from cloud.go2.navigation.navigator import navigator
+        from cloud.observability import emit_agent_event
         snapshot, reason = navigator.snapshot()
+        if snapshot is None and reason in {'localization_unavailable', 'map_unavailable'}:
+            diagnostics = getattr(go2, 'sensor_diagnostics', {})
+            emit_agent_event('navigation.progress', phase='telemetry_wait', task_id=self.task_id,
+                             reason=reason, diagnostics=diagnostics)
+            until = time.monotonic() + TELEMETRY_WAIT_S
+            while snapshot is None and reason in {'localization_unavailable', 'map_unavailable'}:
+                authority = await self.guard({})
+                if authority:
+                    return {'reason': authority, 'unchecked': True}
+                if time.monotonic() >= until:
+                    break
+                await asyncio.sleep(.05)
+                snapshot, reason = navigator.snapshot()
+            emit_agent_event('navigation.progress',
+                             phase='telemetry_ready' if snapshot is not None else 'telemetry_blocked',
+                             task_id=self.task_id, reason=reason,
+                             diagnostics=getattr(go2, 'sensor_diagnostics', {}))
         if snapshot is None:
-            return {"reason": reason, "unchecked": True}
+            return {"reason": reason, "unchecked": True,
+                    'diagnostics': getattr(go2, 'sensor_diagnostics', {})}
+        if observation.get('pose') is None:
+            # Never attach an earlier unlocalized image to a recovered pose.
+            return {'reason': 'localization_unavailable', 'reobserve': True, 'unchecked': True}
         scope_error = self.refresh_scope(snapshot)
         if scope_error:
             return {"reason": scope_error, "unchecked": True}

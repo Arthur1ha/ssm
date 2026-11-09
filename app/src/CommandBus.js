@@ -1,18 +1,18 @@
 /* Device controls share result handling; transport acceptance is never completion. */
 const commandBus = {
-  async command(unitId, action, params = {}) {
+  async command(unitId, action, params = {}, options = {}) {
     const go2Chat = unitId === 'go2' && action === 'chat';
     const deviceChat = action === 'chat' && !go2Chat;
     const taskId = go2Chat ? (params.resume_run_id || params.task_id || `go2_${crypto.randomUUID().replaceAll('-', '')}`) : null;
     const lampRunId = deviceChat ? (params.run_id || `lamp_${crypto.randomUUID().replaceAll('-', '')}`) : null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), deviceChat ? 60000 : 30000);
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? (deviceChat ? 60000 : 30000));
     try {
       const endpoint = go2Chat && params.resume_run_id
         ? `/api/commands/go2/tasks/${encodeURIComponent(params.resume_run_id)}/resume`
         : `/api/commands/${encodeURIComponent(unitId)}`;
       const data = await apiClient.request(endpoint, {
-        method: 'POST', body: go2Chat && params.resume_run_id ? { action, params: { message: params.message, ...(params.selection ? {selection:params.selection} : {}) } } :
+        method: 'POST', keepalive: options.keepalive === true, body: go2Chat && params.resume_run_id ? { action, params: { message: params.message, ...(params.selection ? {selection:params.selection} : {}) } } :
           { action, params: go2Chat ? { ...params, task_id: taskId } :
             deviceChat ? { ...params, run_id: lampRunId } : params }, signal: controller.signal,
       });
@@ -147,26 +147,38 @@ const commandBus = {
     return messages[result?.result] || '未收到有效执行结果';
   },
 
-  // Serialize joystick writes, coalescing movement samples. A release always follows the in-flight sample.
+  // At most two movement writes overlap. A stop gets an immediate extra slot;
+  // page-scoped sequences let the server discard out-of-order arrivals.
   _velocities: new Map(),
   velocity(unitId, action, params, report) {
     let entry = this._velocities.get(unitId);
     if (!entry) {
-      entry = { next: null, running: false };
+      entry = { next: null, running: 0, stopping: 0, sequence: 0,
+        controllerId: crypto.randomUUID().replaceAll('-', '') };
       this._velocities.set(unitId, entry);
     }
-    entry.next = { action, params, report };
-    if (entry.running) return;
-    entry.running = true;
-    const drain = async () => {
+    const stop = !params.vx && !params.vy && !params.vyaw;
+    entry.next = { action, params: { ...params, controller_id: entry.controllerId,
+      sequence: ++entry.sequence }, report, stop };
+    const send = async item => {
+      entry.running++;
+      if (item.stop) entry.stopping++;
       try {
-        while (entry.next) {
-          const item = entry.next;
-          entry.next = null;
-          const result = await this.command(unitId, item.action, item.params);
-          item.report(result);
-        }
-      } finally { entry.running = false; }
+        const result = await this.command(unitId, item.action, item.params,
+          { timeoutMs: 1500, keepalive: item.stop });
+        item.report(result);
+      } finally {
+        entry.running--;
+        if (item.stop) entry.stopping--;
+        drain();
+      }
+    };
+    const drain = () => {
+      if (!entry.next) return;
+      if (entry.running >= 2 && !(entry.next.stop && !entry.stopping)) return;
+      const item = entry.next;
+      entry.next = null;
+      send(item);
     };
     drain();
   },

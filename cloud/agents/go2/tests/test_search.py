@@ -454,7 +454,7 @@ async def test_reachable_scope_follows_map_growth_but_not_session_change(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('reachable', [False, True])
-async def test_scope_monitor_does_not_add_a_freshness_gate_after_initialization(monkeypatch, reachable):
+async def test_scope_monitor_leaves_initial_and_later_telemetry_gaps_to_observation(monkeypatch, reachable):
     from types import SimpleNamespace
     from cloud.agents.go2.workflows.search import DeviceSearch
     from cloud.go2 import connection, control, state as device_state
@@ -473,7 +473,7 @@ async def test_scope_monitor_does_not_add_a_freshness_gate_after_initialization(
     monkeypatch.setattr(navigator, 'snapshot', lambda: ((pose, grid), None))
     adapter = DeviceSearch(context, 'scope-monitor', None if reachable else (-1., -1., 1., 1.), 'map')
     assert await adapter.guard({}) is None
-    assert adapter.bounds == (-1., -1., 1., 1.)
+    assert adapter.bounds == (None if reachable else (-1., -1., 1., 1.))
 
     # Both modes leave gaps to the existing Navigator/capture gates. A new
     # selection still fails without a fresh snapshot; no motion gate is bypassed.
@@ -483,6 +483,135 @@ async def test_scope_monitor_does_not_add_a_freshness_gate_after_initialization(
     assert (await adapter.select({}))['reason'] == 'localization_unavailable'
     robot._odom_session_id = 'new-map'
     assert await adapter.guard({}) == 'map_session_changed'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('found', [False, True])
+async def test_unavailable_localization_preserves_camera_result_before_any_motion(monkeypatch, found):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from cloud.agents.go2.workflows import search
+    from cloud.go2 import connection, control, state as device_state
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.perception import visual_target
+    from cloud.go2 import activity_media
+    from cloud.space.execution import ExecutionContext, use_context
+
+    context = ExecutionContext('camera-first', 'admin', False, expires_at=int(time.time()) + 60)
+    lease = control.ControlLease()
+    lease.acquire(context)
+    monkeypatch.setattr(control, 'control_lease', lease)
+    monkeypatch.setattr(device_state, 'runtime_for', lambda _: None)
+    robot = SimpleNamespace(is_connected=True, _odom_session_id='map', odom={},
+        odom_received_at=None, odom_frame_id='odom', _velocity_command_active=False,
+        sensor_diagnostics={'pose': {'samples': 0, 'age_s': None}})
+    frame_id = 0
+    def frame():
+        nonlocal frame_id
+        frame_id += 1
+        return b'jpeg', {'frame_id': frame_id, 'received_at': time.monotonic(),
+                        'odom_session_id': 'map', 'pose_at_capture': {},
+                        'pose_received_at': None, 'width': 640, 'height': 360}
+    robot.latest_frame_snapshot = frame
+    monkeypatch.setattr(connection, 'go2', robot)
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    monkeypatch.setattr(visual_target, 'image_quality', lambda _: 1.)
+    detect = AsyncMock(return_value={'found': found, 'bbox_1000': [400, 100, 600, 500] if found else None})
+    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
+    monkeypatch.setattr(activity_media, 'save_temporary_snapshot', lambda *_: '/camera/owl')
+    snapshots = []
+    def snapshot():
+        assert detect.await_count == 1  # No map/pose preflight before the camera.
+        snapshots.append(True)
+        return None, 'localization_unavailable'
+    monkeypatch.setattr(navigator, 'snapshot', snapshot)
+    monkeypatch.setattr(search, 'TELEMETRY_WAIT_S', .06)
+    adapter = search.DeviceSearch(context, 'camera-first', None, 'map')
+    adapter.progress = AsyncMock()
+    adapter.navigate = AsyncMock(side_effect=AssertionError('must not move without localization'))
+    with use_context(context):
+        result = search.describe_search_result((await run(adapter))['result'])
+    assert len(snapshots) > 1
+    assert result['reason'] == 'localization_unavailable'
+    assert result['outcome'] == ('seen_not_reached' if found else 'not_seen')
+    assert result['found'] is found
+    assert result['observation']['media_ref'] == '/camera/owl'
+    assert result['diagnostics']['pose']['samples'] == 0
+    assert not adapter.coverage.records
+    adapter.navigate.assert_not_awaited()
+    if found:
+        assert result['evidence']['target_hint'] is None
+
+
+@pytest.mark.asyncio
+async def test_recovered_pose_requires_a_new_localized_image_before_coverage(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.agents.go2.workflows import search
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.navigation.occupancy_grid import OccupancyGrid, FREE
+    adapter, robot = segment_device(monkeypatch)
+    grid = OccupancyGrid({'data': {'frame_id': 'odom', 'resolution': .1,
+        'origin': [-1., -1., -.5], 'width': [20, 20, 10], 'data': {'points': []}}})
+    grid.cells[:] = FREE
+    grid.known_floor[:] = True
+    grid.grid[:] = False
+    grid.map_session = 'map'
+    snapshots = iter([(None, 'localization_unavailable'), ((robot.odom, grid), None)])
+    monkeypatch.setattr(navigator, 'snapshot', lambda: next(snapshots, ((robot.odom, grid), None)))
+    first = {'found': True, 'frame_id': 1, 'pose': None, 'image_time': time.monotonic(),
+             'quality': 1., 'media_ref': '/unlocalized', 'target_hint': None}
+    second = {'found': False, 'frame_id': 2, 'pose': robot.odom,
+              'image_time': time.monotonic()+.01, 'quality': 1.}
+    adapter.observe = AsyncMock(side_effect=[first, second])
+    adapter.progress = AsyncMock()
+    adapter.select = AsyncMock(return_value={'reason': 'coverage_exhausted'})
+    adapter.navigate = AsyncMock(side_effect=AssertionError('must not move'))
+    result = search.describe_search_result((await run(adapter))['result'])
+    assert adapter.observe.await_count == 2
+    assert len(adapter.coverage.records) == 1
+    assert adapter.coverage.records[0]['image_time'] == second['image_time']
+    assert result['outcome'] == 'seen_not_reached'
+    assert result['evidence']['media_ref'] == '/unlocalized'
+    adapter.navigate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telemetry_wait_aborts_when_control_is_lost(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    adapter, _ = segment_device(monkeypatch)
+    monkeypatch.setattr(navigator, 'snapshot', lambda: (None, 'localization_unavailable'))
+    adapter.guard = AsyncMock(return_value='control_lease_changed')
+    assert (await adapter.record({'pose': None}))['reason'] == 'control_lease_changed'
+
+
+@pytest.mark.asyncio
+async def test_camera_pose_pairing_is_checked_before_slow_detection(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import visual_target
+    from cloud.go2 import activity_media
+    from cloud.space.execution import ExecutionContext, use_context
+    now = [time.monotonic()]
+    pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'map'}
+    frame = {'frame_id': 1, 'received_at': now[0], 'pose_received_at': now[0],
+             'pose_at_capture': pose, 'odom_session_id': 'map', 'width': 640, 'height': 360}
+    robot = SimpleNamespace(is_connected=True, _odom_session_id='map', odom=pose,
+                            odom_frame_id='odom', odom_received_at=now[0])
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    monkeypatch.setattr(visual_target, '_capture_view', AsyncMock(return_value=(b'jpeg', frame, 1.)))
+    monkeypatch.setattr(visual_target.time, 'monotonic', lambda: now[0])
+    async def slow_detection(*_):
+        now[0] += 2.
+        robot.odom_received_at = now[0]
+        return {'found': True, 'bbox_1000': [400, 100, 600, 500]}
+    monkeypatch.setattr(visual_target, 'detect_visible_target', slow_detection)
+    monkeypatch.setattr(activity_media, 'save_temporary_snapshot', lambda *_: '/owl')
+    context = ExecutionContext('slow-vision', 'admin', False, expires_at=int(time.time()) + 60)
+    with use_context(context):
+        sample = await visual_target.observe_target('owl', require_pose=False)
+    assert sample['found'] is True and sample['pose'] == pose
+    assert sample['pose_reason'] is None
 
 
 @pytest.mark.asyncio

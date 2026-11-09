@@ -13,10 +13,10 @@ from dataclasses import replace
 from cloud.agents.common.runner import GraphRun, run_role_graph
 from cloud.agents.common.models import async_model_clients
 from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
-from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt, valid_search_reply, valid_move_reply
+from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt
 from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
 from cloud.agents.go2.tools.declarations import READ_ONLY_TOOLS, tool_schemas
-from cloud.agents.common.replies import finalize_reply, valid_persona_reply, factual_fallback
+from cloud.agents.common.replies import finalize_reply, factual_fallback
 from cloud.agents.common.messages import context_message
 from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.models import get_text_llm
@@ -305,11 +305,6 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                 progress_closed, min(run.deadline, time.time() + 4))
         async def finalize(current: GraphRun) -> GraphRun:
             """Validate facts, speak as Go2 and checkpoint the user-visible reply."""
-            def validate(answer, value):
-                return (valid_persona_reply(answer, value)
-                        and valid_search_reply(answer, value)
-                        and valid_move_reply(answer, value))
-
             def fallback(value):
                 last_step = value.steps[-1] if value.steps else {}
                 last_result = last_step.get("result") or {}
@@ -322,7 +317,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             from cloud.agents.go2.personality.profile import get_profile
             await finalize_reply(current, model=get_text_llm,
                                  instructions=lambda value: persona_reply_prompt(value, get_profile()),
-                                 validate=validate, fallback=fallback)
+                                 fallback=fallback)
             publish_allowed = not current.parent_run_id or time.time() < current.deadline
             if not publish_allowed:
                 current.response = ""

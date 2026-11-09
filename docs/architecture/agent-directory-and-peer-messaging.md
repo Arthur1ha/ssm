@@ -15,6 +15,21 @@
 | [`lamp/`](../../cloud/agents/lamp/) | 灯的云端大脑：调灯决策、传感器触发、自主模式和角色回复。 |
 | [`go2/`](../../cloud/agents/go2/) | Go2 的云端大脑：对话、工具选择、记忆、人格和自主探索。 |
 
+`cloud/agents/` 以外仍有当前运行所需的服务和共享模块：
+
+| 目录 | 职责 |
+|---|---|
+| [`cloud/esp32/`](../../cloud/esp32/) | 灯服务实例、自主模式、传感器事实、执行校验、任务去重与实际回执。 |
+| [`cloud/go2/`](../../cloud/go2/) | HTTP 服务、WebRTC、视觉、导航、动作校验和自主事件调度；`mode/free_explore.py` 调用 `agents/go2/workflows/` 的 Graph。 |
+| [`cloud/orchestrator/`](../../cloud/orchestrator/) | 独立 MQTT 进程入口、签名请求校验、线程调度、HTTP 派发和反馈；决策交给管家 Graph。 |
+| [`cloud/personality/`](../../cloud/personality/) | 三角色共用的人格存储、版本校验和名称管理。 |
+| [`cloud/peers/`](../../cloud/peers/) | 同伴发现、签名通信、技能请求、协作权限、取消与互动游戏。 |
+| [`cloud/space/`](../../cloud/space/) | 空间成员、可信执行上下文、用户要求、活动时间线和人员库。 |
+| [`cloud/observability/`](../../cloud/observability/) | 结构化日志、任务关联事件和脱敏。 |
+| [`cloud/storage/`](../../cloud/storage/) | 原子 JSON 文件存储与锁。 |
+
+设备能力与在线状态来自 MQTT retained card/manifest/status；`cloud/space/space.json` 只保存空间成员配置。旧空文件 `cloud/orchestrator/devices.json` 已清理，不再作为回滚资料保留。统一教导位于 `agents/common/training/`，当前没有 `/api/rules` 入口或固件离线自动控灯规则。
+
 ## `common/` 文件
 
 | 文件 | 作用 |
@@ -26,13 +41,16 @@
 | [`effects.py`](../../cloud/agents/common/effects.py) | 有物理效果工具的持久化预留记录，避免恢复时重复动作。 |
 | [`context.py`](../../cloud/agents/common/context.py) | 可信执行上下文与 Graph 会话 ID。 |
 | [`models.py`](../../cloud/agents/common/models.py) | 为三个角色创建文本模型，并创建视觉模型。 |
-| [`replies.py`](../../cloud/agents/common/replies.py) | 提取执行事实、校验完成声明、提供模型不可用时的回退；角色语气由各自 `prompts.py` 决定。 |
+| [`replies.py`](../../cloud/agents/common/replies.py) | 整理真实回执、检查回复格式、提供模型不可用时的回退；角色语气由各自 `prompts.py` 决定，不用关键词判断完成声明。 |
 | [`progress.py`](../../cloud/agents/common/progress.py) | 对已观察到的步骤尝试生成一句人格化进展；调用模型，在后台线程运行，有时限，失败或超时可以不发。 |
 | [`progress_facts.py`](../../cloud/agents/common/progress_facts.py) | 从同一步骤确定性提取少量结构化字段，供前端生成状态文案；不调用模型。 |
-| [`teachings.py`](../../cloud/agents/common/teachings.py) | 保存和读取用户教导；单纯保存不等于自动执行。 |
-| [`teaching_bindings.py`](../../cloud/agents/common/teaching_bindings.py) | 核对教导是否能绑定到设备卡声明的观察条件和自主技能。 |
+| [`training/service.py`](../../cloud/agents/common/training/service.py) | 统一教导的草案、确认、运行期加载与执行校验；单纯保存不等于自动执行。 |
+| [`training/catalog.py`](../../cloud/agents/common/training/catalog.py) | 从设备卡的状态机转换、参数和观察声明派生可训练目录。 |
+| [`training/store.py`](../../cloud/agents/common/training/store.py) | 教导与草案的持久化、版本及分区锁。 |
 
-`common/tests/` 测试检查点、任务循环、执行记录、教导绑定等；`__init__.py` 标识 Python 包。
+`common/tests/` 测试检查点、任务循环和执行记录等；统一教导另有 `training/*_checks.py`。`__init__.py` 标识 Python 包。
+
+提示词按职责维护：角色 `prompts.py` 保留身份、表达和目标边界，`common/messages.py` 统一事实与数据边界，`runner.py` 说明逐轮调用及暂停格式。工具的用途、参数、前置条件和结果含义写在原生工具声明中，由 `bind_tools` 传给模型；Go2 使用 `go2/tools/registry.py`，灯使用 `esp32/tool_registry.py` 和 `lamp/tools/schemas.py`，管家使用 `steward/tools/`，教导使用 `common/training/tools.py`。自然语言回复只做格式检查，实际完成状态始终来自结构化回执；不通过中文正则或关键词猜测语义。
 
 ### `progress.py` 与 `progress_facts.py` 的区别
 
@@ -54,7 +72,7 @@
 |---|---|---|---|
 | 对话入口 | [`graph.py`](../../cloud/agents/steward/graph.py) | [`graph.py`](../../cloud/agents/lamp/graph.py) | [`graph.py`](../../cloud/agents/go2/graph.py) |
 | 决策与最终回复提示 | [`prompts.py`](../../cloud/agents/steward/prompts.py) | [`prompts.py`](../../cloud/agents/lamp/prompts.py) | [`prompts.py`](../../cloud/agents/go2/prompts.py) |
-| 人格与特质 | `personality/profile.py`、`behavior.py` | 同左，另有兼容接口 `soul.py` | 同左，另有兼容与演化接口 `legacy.py` |
+| 人格与特质 | `personality/profile.py`、`behavior.py` | 同左 | 同左；每日特质演化由 `workflows/evolution.py` 调用 profile 存储 |
 | 工具 | 设备卡校验、跨设备派发、协调策略 | 调灯、同伴查询与通信 | 从 Go2 设备工具注册表生成可见工具 |
 | 记忆 | 会话历史与空间上下文 | 事件和每日摘要 | 事件、摘要、命名地点及检索 |
 | 自主行为 | 协调其他角色 | 传感器和 reactive 调光 | 探索、社交和特质演化 |
@@ -75,13 +93,12 @@
 | [`memory/episode.py`](../../cloud/agents/go2/memory/episode.py) | 按日期读写事件记忆。 |
 | [`memory/daily_summary.py`](../../cloud/agents/go2/memory/daily_summary.py) | 读取、生成和保存每日记忆摘要。 |
 | [`memory/spatial.py`](../../cloud/agents/go2/memory/spatial.py) | 保存、查找和删除命名地点。 |
-| [`memory/recall.py`](../../cloud/agents/go2/memory/recall.py) | 按问题筛选有来源标识的相关记忆并限制长度；目前未查到它接入对话主入口。 |
-| [`personality/profile.py`](../../cloud/agents/go2/personality/profile.py) | 人格文案和特质的持久化入口，兼容旧数据迁移。 |
+| [`memory/recall.py`](../../cloud/agents/go2/memory/recall.py) | 按问题筛选有来源标识的相关记忆并限制长度；已接入 `graph.py` 的对话提示组装。 |
+| [`personality/profile.py`](../../cloud/agents/go2/personality/profile.py) | 人格文案、特质的持久化和每日演化入口，复用共享 `ProfileStore`。 |
 | [`personality/behavior.py`](../../cloud/agents/go2/personality/behavior.py) | 把好奇心、外向性和大胆程度转成探索、互动及表达偏好。 |
-| [`personality/legacy.py`](../../cloud/agents/go2/personality/legacy.py) | 兼容旧 `soul` 接口，连接每日特质演化。 |
 | [`workflows/free_explore.py`](../../cloud/agents/go2/workflows/free_explore.py) | 自主探索的动机和任务阶段 Graph；地图与运动安全仍由 `cloud/go2/` 负责。 |
 | [`workflows/social.py`](../../cloud/agents/go2/workflows/social.py) | 判断是否向同伴发消息或游戏邀请，发送前重新核对条件；由 Go2 自主模式调用。 |
-| [`workflows/reply.py`](../../cloud/agents/go2/workflows/reply.py) | 为自主动作、规则和导航结果生成角色回复。 |
+| [`workflows/reply.py`](../../cloud/agents/go2/workflows/reply.py) | 为自主动作、教导和导航结果生成角色回复。 |
 | [`workflows/daily_summary.py`](../../cloud/agents/go2/workflows/daily_summary.py) | 从已记录事件生成每日摘要，避免同一天重复生成。 |
 | [`workflows/evolution.py`](../../cloud/agents/go2/workflows/evolution.py) | 根据摘要计算、校验并保存特质变化。 |
 | [`workflows/spatial_lookup.py`](../../cloud/agents/go2/workflows/spatial_lookup.py) | 对已保存的地点名称做有边界的模型辅助匹配。 |
@@ -98,6 +115,10 @@ Go2 的 `tests/` 包含 `test_daily_summary_graph.py`、`test_evolution_graph.py
 | `send_message` | 发送普通消息或游戏邀请 | `accepted` 只表示请求已投递；不表示对方同意或执行完成 |
 | `request_peer_skill` | 请求同伴执行设备卡公开技能 | 必须核对目标的真实结果；只有 `ok` 才能作为完成事实 |
 
-LangGraph 提供的是**图内协作原语**：子智能体、handoff、自定义工作流，以及 `StateGraph`、`Command`、`Send` 等状态与路由机制。它可以组织同一个 Graph 内的角色协作，但不会自动提供跨独立进程或设备的 MQTT 投递、设备发现、在线状态、签名、重放保护和物理回执。SSM 因此保留 `cloud/peers/` 作为通用通信适配层，三个角色只暴露自己的工具入口；没有必要为了互通再造一套 Agent 循环。
+LangGraph 库提供子图、handoff，以及 `StateGraph`、`Command`、`Send` 等状态与路由原语；`Send` 调度图节点，不是网络消息投递。额外部署 Agent Server 后，还可通过 RemoteGraph 调用远程 Graph，或使用其 A2A 接口发送消息、流式接收结果、查询和取消任务。SSM 当前只依赖 LangGraph 库，没有部署 Agent Server。
 
-参考：[LangChain 多智能体模式](https://docs.langchain.com/oss/python/langchain/multi-agent)、[LangGraph 的 Send 与 Command](https://docs.langchain.com/oss/python/langgraph/graph-api-send-command)。
+这些能力不能直接替换 SSM 的 MQTT retained/LWT 发现、空间授权、消息过期与重放防护、物理执行去重和真实回执。Graph 检查点不代表硬件动作已经完成；恢复或重试仍需现有执行账本保证副作用幂等。
+
+`peers/inbound.py` 中的 Go2 回复生成、`peers/games.py` 中的多阶段游戏流程是适合进一步移到 `agents/*/workflows/` 的候选；本次仅记录边界，没有迁移它们。`messaging.py`、`view.py`、`policy.py` 等仍承担协议与业务适配，不能通过增加 handoff 包直接删除。
+
+参考：[LangChain 多智能体模式](https://docs.langchain.com/oss/python/langchain/multi-agent)、[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、[RemoteGraph](https://docs.langchain.com/langsmith/use-remote-graph)、[Agent Server A2A](https://docs.langchain.com/langsmith/server-a2a)。
