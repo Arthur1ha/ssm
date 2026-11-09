@@ -31,16 +31,20 @@ function TrainingDrawer({unitId,training,onClose,onRevise,agents}) {
   return <div className="training-overlay" onClick={onClose}><section ref={panelRef} className="management-dialog training-drawer" role="dialog" aria-modal="true" aria-label="设备规则" onClick={e => e.stopPropagation()}>
     <header><h2>设备规则</h2><button type="button" className="icon-button" onClick={onClose} aria-label="关闭设备规则"><Icon name="x" size={16}/></button></header>
     <div className="training-drawer__body">
-    {error && <p role="alert">{error}</p>}
+    {error && <p className="training-error" role="alert">{error}</p>}
+    {visibleRecords.length > 0 && <p className="training-drawer__intro">你在对话中教给设备的规则，可以随时修改或删除。</p>}
     {!visibleRecords.length && <p className="asset-empty">{agents && !agents.length ? '添加设备后，直接在对话中告诉它你的要求。' : '还没有规则。直接在对话中告诉设备你希望它怎么做。'}</p>}
     {groups.map(agent => <section key={agent.unit_id} className="training-device-group">
-      {visibleRecords.length > 0 && <h3>{getAgentDisplayName(agent.unit_id)}</h3>}
+      {visibleRecords.length > 0 && <div className="training-device-group__heading">
+        <h3>{getAgentDisplayName(agent.unit_id)}</h3>
+        <span>{visibleRecords.filter(record => record.unit_id === agent.unit_id || (!agents && !record.unit_id)).length} 条规则</span>
+      </div>}
       {visibleRecords.filter(record => record.unit_id === agent.unit_id || (!agents && !record.unit_id)).map(record => <article key={record.teaching_id} className="training-record">
-        <p>{record.summaryText || record.name || record.source_text}</p>
+        <h4 className="training-rule-title">{record.summaryText || record.name || record.source_text}</h4>
         <TrainingRuleSteps record={record}/>
         <div className="training-actions">
-          <button type="button" onClick={() => onRevise(record)}>在对话中修改</button>
-          <button type="button" disabled={removing === record.teaching_id} onClick={async () => {
+          <button type="button" className="btn" onClick={() => onRevise(record)}>在对话中修改</button>
+          <button type="button" className="btn training-actions__delete" disabled={removing === record.teaching_id} onClick={async () => {
             setRemoving(record.teaching_id);
             try { await remove(record); } finally { setRemoving(null); }
           }}>{removing === record.teaching_id ? '正在删除…' : '删除'}</button>

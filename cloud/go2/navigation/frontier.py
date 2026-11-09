@@ -162,20 +162,23 @@ def _reachable(grid, odom, bounds, *, clearance=0.0):
     return costs
 
 
-def select_observation_target(grid, odom, coverage, *, bounds, current=None):
-    """Select reachable position + camera orientation inside an explicit scope.
+def select_observation_target(grid, odom, coverage, *, bounds=None, current=None):
+    """Select a reachable position and camera orientation from the live map.
 
     Dijkstra and boundary clusters consider the entire bounded map. A fixed
     representative budget bounds visual scoring, not destination/path distance.
     """
-    if (bounds is None or len(bounds) != 4 or not all(math.isfinite(v) for v in bounds)
+    if bounds is None:
+        xmin, ymin = (float(value) for value in grid.origin[:2])
+        bounds = (xmin, ymin, xmin + int(grid.width[0]) * float(grid.resolution),
+                  ymin + int(grid.width[1]) * float(grid.resolution))
+    if (len(bounds) != 4 or not all(math.isfinite(v) for v in bounds)
             or bounds[0] >= bounds[2] or bounds[1] >= bounds[3]):
-        return Selection(None, 'search_scope_required')
+        return Selection(None, 'map_extent_invalid')
     session = getattr(grid, 'map_session', None)
     if session and coverage.map_session != session:
         return Selection(None, 'map_session_changed')
-    # Match Navigator's scope mask for the entire route, not just the goal.
-    # The permission boundary contains the robot's body, not only its centre.
+    # Keep the entire robot body inside the available map along the route.
     costs = _reachable(grid, odom, bounds, clearance=TURN_CLEARANCE_M)
     if not costs:
         return Selection(None, 'no_reachable_observation_point')

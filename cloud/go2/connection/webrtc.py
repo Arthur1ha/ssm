@@ -239,7 +239,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         code = status.get("code") if isinstance(status, dict) else None
         return {"result": "ok" if code == 0 and type(enabled) is bool else "unknown",
                 "request_status_code": code, "enabled": enabled if type(enabled) is bool else None,
-                "motion_channel": "SPORT_MOD/Move" if self._move_control_active else "WIRELESS_CONTROLLER",
+                "motion_channel": "SPORT_MOD/Move",
                 "connection_method": "Remote"}
 
     def _finish_pending(self, result: str, error: str) -> None:
@@ -492,21 +492,16 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             {"api_id": 1002, "parameter": {"name": mode}},
         )
 
-    def _publish_velocity(self, vx, vy, vyaw, *, sport):
+    def _publish_velocity(self, vx, vy, vyaw):
         active = any((vx, vy, vyaw))
         try:
-            if sport:
-                self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
-                self._conn.datachannel.pub_sub.publish_without_callback(
-                    RTC_TOPIC['SPORT_MOD'],
-                    data={'header': {'identity': {'id': self._velocity_request_id,
-                                                 'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}},
-                          'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''},
-                    msg_type=DATA_CHANNEL_TYPE['REQUEST'])
-            else:
-                self._conn.datachannel.pub_sub.publish_without_callback(
-                    RTC_TOPIC['WIRELESS_CONTROLLER'],
-                    data={'lx': -vy, 'ly': vx, 'rx': -vyaw, 'ry': 0})
+            self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
+            self._conn.datachannel.pub_sub.publish_without_callback(
+                RTC_TOPIC['SPORT_MOD'],
+                data={'header': {'identity': {'id': self._velocity_request_id,
+                                             'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}},
+                      'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''},
+                msg_type=DATA_CHANNEL_TYPE['REQUEST'])
         except Exception as exc:
             self._cancel_manual_velocity()
             self.is_connected = False
@@ -514,11 +509,11 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             raise RuntimeError(f'发送失败，连接已断开: {exc}') from exc
 
     def move_velocity(self, vx: float, vy: float, vyaw: float, *, deadman_s: float | None = None) -> dict:
-        """Manual control streams Sport Move; zero input sends StopMove.
+        """Stream physical velocities through Sport Move; zero sends StopMove.
 
-        Requests do not wait for an ACK. Wireless sticks are mode-dependent:
-        after BalanceStand they can move the body without walking.
-        Autonomous navigation keeps its existing, calibrated wireless channel.
+        Navigation and manual control use the same m/s and rad/s interface.
+        Wireless sticks are mode-dependent and do not implement that contract.
+        Requests do not wait for an ACK; odometry proves physical progress.
         """
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
@@ -529,8 +524,8 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         )
         if self._command_lock.locked() and any((vx, vy, vyaw)):
             raise CommandBlocked("command_in_flight")
-        was_manual = self._cancel_manual_velocity()
-        self._publish_velocity(vx, vy, vyaw, sport=self._move_control_active or (was_manual and not active))
+        self._cancel_manual_velocity()
+        self._publish_velocity(vx, vy, vyaw)
         self._finish_pending("cancelled", "velocity_override")
         self._motion_epoch += 1
         self._velocity_command_active = active

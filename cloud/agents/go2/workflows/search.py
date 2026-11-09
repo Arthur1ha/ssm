@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import math
 import logging
-import os
 import time
 import traceback
 import uuid
@@ -31,34 +30,7 @@ OBSERVATION_SEGMENT_S = 5.0
 TARGET_VIEW_ATTEMPTS = 4
 TELEMETRY_WAIT_S = 3.0
 _request: ContextVar[tuple[str, float] | None] = ContextVar("go2_search_request", default=None)
-_configured_scope: tuple[tuple[float, float, float, float] | None, str] | None = None
 _exploration_coverage = None
-
-
-def configure_search_scope(bounds, session_id: str, *, mode: str = "bounded") -> dict:
-    """Set an in-memory scope tied to one localization session; never move."""
-    global _configured_scope, _exploration_coverage
-    if not isinstance(session_id, str) or not session_id or mode not in {"bounded", "reachable"}:
-        raise ValueError("invalid_search_scope")
-    if mode == "reachable":
-        if bounds is not None:
-            raise ValueError("reachable_scope_has_no_rectangle")
-        _configured_scope = (None, session_id)
-    elif (not isinstance(bounds, (list, tuple)) or len(bounds) != 4
-            or any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds)
-            or bounds[0] >= bounds[2] or bounds[1] >= bounds[3]):
-        raise ValueError("invalid_search_scope")
-    else:
-        _configured_scope = (tuple(float(v) for v in bounds), session_id)
-    _exploration_coverage = None
-    return configured_search_scope()
-
-
-def configured_search_scope() -> dict | None:
-    scope = _configured_scope
-    return {"bounds": list(scope[0]) if scope[0] is not None else None,
-            "mode": "bounded" if scope[0] is not None else "reachable",
-            "session_id": scope[1]} if scope else None
 
 
 @contextmanager
@@ -68,46 +40,6 @@ def search_request(task_id: str, deadline: float):
         yield
     finally:
         _request.reset(token)
-
-
-def search_bounds() -> tuple[float, float, float, float] | None:
-    """None means explicitly authorized reachable space, never an implicit default."""
-    if _configured_scope is not None:
-        return _configured_scope[0]
-    try:
-        values = tuple(float(v) for v in os.environ.get("GO2_SEARCH_BOUNDS", "").split(","))
-        if len(values) != 4 or not all(math.isfinite(v) for v in values):
-            raise ValueError
-        if values[0] >= values[2] or values[1] >= values[3]:
-            raise ValueError
-        return values
-    except ValueError as exc:
-        raise ValueError("search_scope_required") from exc
-
-
-def resolve_search_scope(context, mode: str, map_session: str) -> dict:
-    """A user search owns a reachable scope for this task, never a global mode.
-
-    Explicit rectangles remain authoritative and cannot cross odom sessions.
-    Autonomous exploration still requires its separately configured scope.
-    """
-    user_search = mode == "find_object" and context.origin_kind == "user_delegated"
-    configured = configured_search_scope()
-    if configured is not None:
-        if configured["session_id"] == map_session:
-            return {**configured, "source": "configured"}
-        if configured["mode"] != "reachable" or not user_search:
-            raise ValueError("search_scope_session_mismatch")
-    elif "GO2_SEARCH_BOUNDS" in os.environ or "GO2_SEARCH_SESSION_ID" in os.environ:
-        bounds = search_bounds()
-        if os.environ.get("GO2_SEARCH_SESSION_ID") != map_session:
-            raise ValueError("search_scope_session_mismatch")
-        return {"bounds": list(bounds), "mode": "bounded", "session_id": map_session,
-                "source": "environment"}
-    elif not user_search:
-        raise ValueError("search_scope_required")
-    return {"bounds": None, "mode": "reachable", "session_id": map_session,
-            "source": "user_task"}
 
 
 def describe_search_result(result: dict) -> dict:
@@ -131,8 +63,6 @@ def describe_search_result(result: dict) -> dict:
                    "已检查部分画面，暂未识别到目标，不能据此判断室内没有。" if observed else
                    "搜索还没有开始。")
         reasons = {
-            "search_scope_required": "搜索范围配置尚未就绪。",
-            "search_scope_session_mismatch": "已有搜索边界属于上一次定位，需要重新设置当前会话的边界。",
             "map_session_unavailable": "当前定位会话尚未就绪。",
             "map_session_changed": "定位会话已改变，本次搜索已结束。",
             "localization_unavailable": "机器狗自身的定位数据暂不可用，暂时不能移动。",
@@ -171,7 +101,6 @@ class SearchState(TypedDict, total=False):
     target_hint: dict | None
     target_views: list[dict]
     approach_attempts: int
-    scope: dict
     last_detection: dict
     observation_retries: int
 
@@ -203,6 +132,7 @@ def build_search_graph(adapter, *, checkpointer=None):
         blocked = await guard(state)
         if blocked:
             return blocked
+        await adapter.progress("search_observing", state)
         observation = await adapter.observe(state)
         if observation.get("reason"):
             return terminal(state, observation["reason"])
@@ -210,9 +140,9 @@ def build_search_graph(adapter, *, checkpointer=None):
         observed = {**state, 'observation': observation,
                     'last_detection': observation if found else state.get('last_detection', {}),
                     'target_hint': observation.get('target_hint') or state.get('target_hint')}
-        summary = await adapter.record(observation)
         await adapter.progress("search_candidate" if found else "search_observe", state,
-                               observation=observation, coverage=summary)
+                               observation=observation)
+        summary = await adapter.record(observation)
         if summary.get('reobserve') and state.get('observation_retries', 0) < 1:
             return {'observation': observation, 'last_detection': observed['last_detection'],
                     'target_hint': observed['target_hint'], 'phase': 'observe',
@@ -234,6 +164,7 @@ def build_search_graph(adapter, *, checkpointer=None):
         blocked = await guard(state)
         if blocked:
             return blocked
+        await adapter.progress("search_rechecking", state)
         confirmed = await adapter.observe(state)
         if confirmed.get("reason"):
             return terminal(state, confirmed["reason"], found=True,
@@ -242,6 +173,7 @@ def build_search_graph(adapter, *, checkpointer=None):
         if confirmed.get("frame_id") == first.get("frame_id"):
             return terminal(state, "confirmation_frame_reused", found=True, evidence=first)
         if not confirmed.get("found"):
+            await adapter.progress("search_observe", state, observation=confirmed)
             return {"observation": confirmed, "phase": "select", "misses": state.get("misses", 0) + 1}
         await adapter.progress("search_confirmed", state, observation=confirmed)
         confirmed = dict(confirmed, nearby_confirmed=(
@@ -254,6 +186,7 @@ def build_search_graph(adapter, *, checkpointer=None):
         blocked = await guard(state)
         if blocked:
             return blocked
+        await adapter.progress("search_selecting", state)
         selected = await adapter.select(state)
         if not selected.get("target"):
             reason = selected.get("reason", "no_reachable_observation")
@@ -262,6 +195,7 @@ def build_search_graph(adapter, *, checkpointer=None):
                             reason == "coverage_exhausted" else "blocked",
                             found=bool(state.get('last_detection') or state.get('target_hint')),
                             evidence=state.get('last_detection') or state.get('observation', {}))
+        await adapter.progress("search_selected", state, candidate=selected["target"])
         return {"candidate": selected["target"], "phase": "navigate"}
 
     async def navigate(state):
@@ -276,6 +210,7 @@ def build_search_graph(adapter, *, checkpointer=None):
             return terminal(state, "distance_budget_exhausted")
         await adapter.progress("search_navigate", state)
         receipt = await adapter.navigate(state)
+        await adapter.progress("search_move_result", state, receipt=receipt)
         distance += max(0.0, float(receipt.get("distance_m", 0)))
         if receipt.get("result") != "ok":
             # A brief telemetry gap stops the segment immediately. Once the
@@ -358,7 +293,7 @@ class DeviceSearch:
         from cloud.go2.navigation.observation_coverage import ObservationCoverage
         from cloud.agents.common.effects import FileEffectLedger
         self.context, self.task_id, self.bounds = context, task_id, bounds
-        self.reachable_scope = bounds is None
+        self.tracks_map_extent = bounds is None
         self.map_session = map_session
         self.coverage = ObservationCoverage(map_session, bounds=bounds)
         self.ledger = FileEffectLedger()
@@ -368,14 +303,15 @@ class DeviceSearch:
         self.last_pose_time = None
         self.travelled_m = 0.0
         self.progress_sequence = 0
+        self.on_observation = None
 
-    def refresh_scope(self, snapshot=None):
-        """Follow current map extent within this task's reachable scope.
+    def refresh_map_extent(self, snapshot=None):
+        """Follow the current map as it grows, without a configured geofence.
 
         Extent is a calculation bound, not evidence that its cells are walkable:
         Selector and Navigator still check obstacles and body clearance.
         """
-        if not self.reachable_scope:
+        if not self.tracks_map_extent:
             return None
         if snapshot is None:
             from cloud.go2.navigation.navigator import navigator
@@ -415,10 +351,6 @@ class DeviceSearch:
         # The monitor checks authority, not telemetry readiness. Camera
         # observation comes first; record/select obtain the navigation snapshot.
         pose = go2.odom
-        if self.bounds is not None and pose and not (
-                self.bounds[0] <= pose.get("x", math.inf) <= self.bounds[2]
-                and self.bounds[1] <= pose.get("y", math.inf) <= self.bounds[3]):
-            return "outside_search_scope"
         stamp = getattr(go2, "odom_received_at", None)
         if pose and stamp is not None and stamp != self.last_pose_time and time.monotonic() - stamp <= 1.0:
             if self.last_pose is not None:
@@ -474,6 +406,7 @@ class DeviceSearch:
         from cloud.observability import emit_agent_event
         snapshot, reason = navigator.snapshot()
         if snapshot is None and reason in {'localization_unavailable', 'map_unavailable'}:
+            await self.progress("search_telemetry", {}, observation=observation)
             diagnostics = getattr(go2, 'sensor_diagnostics', {})
             emit_agent_event('navigation.progress', phase='telemetry_wait', task_id=self.task_id,
                              reason=reason, diagnostics=diagnostics)
@@ -496,9 +429,9 @@ class DeviceSearch:
         if observation.get('pose') is None:
             # Never attach an earlier unlocalized image to a recovered pose.
             return {'reason': 'localization_unavailable', 'reobserve': True, 'unchecked': True}
-        scope_error = self.refresh_scope(snapshot)
-        if scope_error:
-            return {"reason": scope_error, "unchecked": True}
+        extent_error = self.refresh_map_extent(snapshot)
+        if extent_error:
+            return {"reason": extent_error, "unchecked": True}
         recorded = await invoke_blocking(self.coverage.record, snapshot[1], observation["pose"],
                                 observation["image_time"], observation["quality"],
                                 target_result=observation.get("found"))
@@ -512,9 +445,9 @@ class DeviceSearch:
         snapshot, reason = navigator.snapshot()
         if snapshot is None:
             return {"reason": reason}
-        scope_error = self.refresh_scope(snapshot)
-        if scope_error:
-            return {"reason": scope_error}
+        extent_error = self.refresh_map_extent(snapshot)
+        if extent_error:
+            return {"reason": extent_error}
         hint = state.get('target_hint')
         views = state.get('target_views', [])
         if hint:
@@ -618,6 +551,17 @@ class DeviceSearch:
             displacement = math.hypot(end['x']-start['x'], end['y']-start['y'])
             rotation = abs(math.atan2(math.sin(end.get('heading', 0)-start.get('heading', 0)),
                                       math.cos(end.get('heading', 0)-start.get('heading', 0))))
+            turning = candidate.get('view_kind') == 'turn'
+            heading_error = math.atan2(math.sin(candidate['heading']-end.get('heading', 0)),
+                                       math.cos(candidate['heading']-end.get('heading', 0)))
+            if turning and status == 'succeeded':
+                from cloud.go2.actions import MOVE_ANGLE_TOLERANCE_RAD
+                if (not start.get('session_id') or end.get('session_id') != start['session_id']
+                        or not math.isfinite(heading_error)
+                        or abs(heading_error) > MOVE_ANGLE_TOLERANCE_RAD):
+                    result = {'status': 'blocked', 'reason': 'observation_turn_unconfirmed',
+                              'last_trusted_pose': end, 'navigation_receipt': result}
+                    status = 'blocked'
             enough_motion = rotation >= .04 if candidate.get('view_kind') == 'turn' else displacement >= .10
             if (reposition and status == 'succeeded'
                     and result.get('reason') != 'observation_segment_stopped'
@@ -629,6 +573,7 @@ class DeviceSearch:
                 status = 'blocked'
             return {**result, 'result': 'ok' if status == 'succeeded' else
                     'error' if status == 'failed' else status,
+                    **({'rotation_rad': rotation, 'heading_error_rad': heading_error} if turning else {}),
                     'distance_m': max(displacement, (result.get('segment') or {}).get('distance_m', 0.))}
         return await self.effect(state, 'navigate', candidate, invoke)
 
@@ -637,6 +582,7 @@ class DeviceSearch:
         from cloud.go2.navigation.navigator import POSE_STALE_S
         begun = time.monotonic()
         previous, distance, rotation = start, 0., 0.
+        turning = state.get('candidate', {}).get('view_kind') == 'turn'
         while not navigation.done():
             reason = await self.guard(state)
             if reason:
@@ -656,8 +602,12 @@ class DeviceSearch:
             rotation += abs(math.atan2(math.sin(pose['heading']-previous['heading']),
                                       math.cos(pose['heading']-previous['heading'])))
             previous = pose.copy()
-            if (distance >= OBSERVATION_SEGMENT_M or rotation >= OBSERVATION_SEGMENT_RAD
-                    or time.monotonic()-begun >= OBSERVATION_SEGMENT_S):
+            # A viewpoint turn is one measured angular goal. Cutting it into
+            # timed observation legs discards the remaining angle and lets the
+            # next visual plan replace it. Navigator owns angular completion,
+            # no-progress detection and timeout; guards above still stop it.
+            if not turning and (distance >= OBSERVATION_SEGMENT_M or rotation >= OBSERVATION_SEGMENT_RAD
+                                or time.monotonic()-begun >= OBSERVATION_SEGMENT_S):
                 net_distance = math.hypot(pose['x']-start['x'], pose['y']-start['y'])
                 net_rotation = abs(math.atan2(math.sin(pose['heading']-start['heading']),
                                              math.cos(pose['heading']-start['heading'])))
@@ -696,6 +646,7 @@ class DeviceSearch:
     async def progress(self, stage, state, **fields):
         from cloud.api.intents import publish_agent_event
         from cloud.observability import current_event_context
+        from cloud.agents.go2.workflows.search_progress import search_progress_facts
         correlation = current_event_context()
         self.progress_sequence += 1
         observation = fields.get("observation") or state.get("observation") or {}
@@ -706,14 +657,21 @@ class DeviceSearch:
             task_id=self.task_id, run_id=self.task_id, stage=stage,
             trace_id=correlation.get("trace_id"), parent_run_id=correlation.get("parent_run_id"),
             sequence=self.progress_sequence,
-            status=(state.get("result") or {}).get("result", "executing"),
+            status=(fields.get("receipt") or state.get("result") or {}).get("result", "executing"),
             target=state.get("target"), mode=state.get("mode"), coverage=fields.get("coverage", state.get("coverage", {})),
-            reason=(state.get("result") or {}).get("reason"),
-            media_ref=observation.get("media_ref"), source="object_search")
+            **search_progress_facts(stage, state, observation=observation,
+                                    candidate=fields.get("candidate"), receipt=fields.get("receipt")),
+            media_ref=observation.get("media_ref") if stage in {
+                "search_observe", "search_candidate", "search_confirmed"} else None,
+            source="object_search")
+        if (stage in {"search_observe", "search_candidate", "search_confirmed"}
+                and getattr(self, "on_observation", None)):
+            await self.on_observation(observation)
 
 
 async def _run_search(target: str = "", *, mode: str = "find_object", context=None,
-                     task_id: str | None = None, deadline: float | None = None) -> dict:
+                     task_id: str | None = None, deadline: float | None = None,
+                     on_observation=None) -> dict:
     from cloud.agents.common.checkpoint import FileCheckpointSaver
     from cloud.space.execution import current_context, use_context
     from cloud.go2.connection import go2
@@ -746,16 +704,12 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
     session = getattr(go2, "_odom_session_id", None)
     if not session:
         return {"result": "blocked", "reason": "map_session_unavailable"}
-    try:
-        scope = resolve_search_scope(context, mode, session)
-    except ValueError as exc:
-        return {"result": "blocked", "reason": str(exc), "task_id": task_id}
-    bounds = tuple(scope["bounds"]) if scope["bounds"] is not None else None
-    adapter = DeviceSearch(context, task_id, bounds, session)
+    adapter = DeviceSearch(context, task_id, None, session)
+    adapter.on_observation = on_observation
     if mode == "explore":
-        # Segments share bounded coverage until scope or localization changes.
+        # Segments share bounded coverage within the same localization session.
         global _exploration_coverage
-        coverage_key = (context.session_id, session, bounds)
+        coverage_key = (context.session_id, session)
         if _exploration_coverage is not None and _exploration_coverage[0] == coverage_key:
             adapter.coverage = _exploration_coverage[1]
         else:
@@ -768,7 +722,7 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
     session_tasks.track(context.session_id, asyncio.current_task())
     state = {"task_id": task_id, "mode": mode, "target": target,
              "map_session": session, "phase": "observe", "steps": 0, "distance_m": 0.0,
-             "deadline": deadline, "coverage": {}, "scope": scope}
+             "deadline": deadline, "coverage": {}}
     async def monitor():
         while True:
             reason = await adapter.guard(state)
@@ -811,7 +765,6 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
                   "distance_m": round(adapter.travelled_m, 3)}
         result.setdefault("coverage", state.get("coverage", {}))
         result.setdefault("steps", state.get("steps", 0))
-        result.setdefault("scope", scope)
         result.setdefault("target", target)
         result["found"] = bool(result.get("found") or state.get("last_detection"))
         if state.get("last_detection"):
@@ -871,7 +824,8 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
 
 
 async def run_search(target: str = "", *, mode: str = "find_object", context=None,
-                     task_id: str | None = None, deadline: float | None = None) -> dict:
+                     task_id: str | None = None, deadline: float | None = None,
+                     on_observation=None) -> dict:
     """Serialize duplicate tasks before checking their existing effects."""
     from cloud.agents.common.checkpoint import FileCheckpointSaver
     from cloud.space.execution import current_context
@@ -881,5 +835,5 @@ async def run_search(target: str = "", *, mode: str = "find_object", context=Non
     thread_id = f"go2:search:{context.session_id}:{task_id}"
     async with FileCheckpointSaver().async_run_lock(thread_id):
         result = await _run_search(target, mode=mode, context=context,
-                                   task_id=task_id, deadline=deadline)
+                                   task_id=task_id, deadline=deadline, on_observation=on_observation)
         return describe_search_result({"target": target, "mode": mode, "task_id": task_id, **result})

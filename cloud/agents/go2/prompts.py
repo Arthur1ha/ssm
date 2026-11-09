@@ -6,6 +6,7 @@ from cloud.agents.go2.personality.behavior import reply_persona
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.personality.names import agent_names
 from cloud.agents.common.messages import role_messages
+from cloud.agents.common.training.context import DECISION_GUIDANCE, decision_context
 from cloud.agents.go2.prompt_contract import _FIXED_RULES
 from cloud.go2.connection import go2
 from cloud.go2.space_context import prompt_space_context
@@ -23,15 +24,17 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
     )
 
 
-def build_messages(run, *, supplement: str = "", memory: str = ""):
+def build_messages(run, *, supplement: str = "", memory: str = "", space_id: str = "main"):
     """Read latest profile and live device context before every model decision."""
     profile = get_profile()
     context = {"agent_names": agent_names(), "connected": go2.is_connected,
                "personality_traits": profile["traits"],
                "body_state": getattr(go2, "body_state", "unknown"),
                "device_state": go2.state_snapshot() if hasattr(go2, "state_snapshot") else {},
-               "space": prompt_space_context()}
+               "space": prompt_space_context(),
+               "training": decision_context("go2", space_id=space_id,
+                   origin_kind=run.origin_kind or "user_delegated")}
     if memory:
         context["memory"] = memory
-    instructions = (_FIXED_RULES + "\n" + persona_reply_prompt(run, profile))
+    instructions = (_FIXED_RULES + "\n" + DECISION_GUIDANCE + "\n" + persona_reply_prompt(run, profile))
     return role_messages(instructions, run.goal, context=context, supplement=supplement)

@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from cloud.agents.go2.workflows.search import build_search_graph, search_bounds, SEARCH_MAX_STEPS
+from cloud.agents.go2.workflows.search import build_search_graph, SEARCH_MAX_STEPS
 
 
 @pytest.fixture(autouse=True)
@@ -59,39 +59,44 @@ async def run(adapter, **changes):
     return await build_search_graph(adapter).ainvoke(initial(**changes))
 
 
-@pytest.mark.parametrize('actor', ['admin', 'visitor'])
-def test_user_search_scope_is_task_local_and_does_not_enable_exploration(monkeypatch, actor):
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode,origin', [('explore', 'agent_autonomous'), ('find_object', 'user_delegated')])
+@pytest.mark.parametrize('legacy_bounds', [None, '-.1,-.1,.1,.1', 'invalid'])
+async def test_exploration_and_object_search_navigate_without_configured_range(
+        monkeypatch, tmp_path, mode, origin, legacy_bounds):
     from cloud.agents.go2.workflows import search
+    from cloud.go2 import connection, control, state as device_state
+    from cloud.go2.navigation.navigator import navigator
     from cloud.space.execution import ExecutionContext
-    monkeypatch.setattr(search, '_configured_scope', None)
-    monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
-    monkeypatch.delenv('GO2_SEARCH_SESSION_ID', raising=False)
-    context = ExecutionContext('user', actor, False)
-    scope = search.resolve_search_scope(context, 'find_object', 'map')
-    assert scope == {'bounds': None, 'mode': 'reachable', 'session_id': 'map', 'source': 'user_task'}
-    assert search.configured_search_scope() is None
-    with pytest.raises(ValueError, match='search_scope_required'):
-        search.resolve_search_scope(context, 'explore', 'map')
-    autonomous = ExecutionContext('agent', 'admin', False, origin_kind='agent_autonomous')
-    with pytest.raises(ValueError, match='search_scope_required'):
-        search.resolve_search_scope(autonomous, 'find_object', 'map')
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
+    if legacy_bounds is None:
+        monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
+    else:
+        monkeypatch.setenv('GO2_SEARCH_BOUNDS', legacy_bounds)
+    monkeypatch.setenv('GO2_SEARCH_SESSION_ID', 'old-localization')
+    monkeypatch.setattr(search, '_exploration_coverage', None)
+    monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='map'))
+    monkeypatch.setattr(control, 'control_lease', control.ControlLease())
+    monkeypatch.setattr(device_state, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'ok'}))
+    adapters = []
 
+    class Device(Replay):
+        def __init__(self, context, task_id, bounds, map_session):
+            assert bounds is None and map_session == 'map'
+            super().__init__([{'found': False, 'frame_id': 1}, {'found': False, 'frame_id': 2}],
+                             choices=[{'target': {'path_cost_m': .8}}])
+            self.travelled_m, self.coverage = 0., object()
+            adapters.append(self)
 
-def test_new_search_keeps_rectangles_and_never_reuses_old_coordinates(monkeypatch):
-    from cloud.agents.go2.workflows import search
-    from cloud.space.execution import ExecutionContext
-    context = ExecutionContext('user', 'admin', False)
-    monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
-    assert search.resolve_search_scope(context, 'find_object', 'map')['bounds'] == [-1., -1., 1., 1.]
-    with pytest.raises(ValueError, match='search_scope_session_mismatch'):
-        search.resolve_search_scope(context, 'find_object', 'new')
-    monkeypatch.setattr(search, '_configured_scope', (None, 'map'))
-    assert search.resolve_search_scope(context, 'find_object', 'new')['session_id'] == 'new'
-    assert search.configured_search_scope()['session_id'] == 'map'
-    monkeypatch.setattr(search, '_configured_scope', None)
-    monkeypatch.setenv('GO2_SEARCH_BOUNDS', 'invalid')
-    with pytest.raises(ValueError, match='search_scope_required'):
-        search.resolve_search_scope(context, 'find_object', 'new')
+    monkeypatch.setattr(search, 'DeviceSearch', Device)
+    context = ExecutionContext('act_explore', 'visitor', False, origin_kind=origin)
+    result = await search.run_search('owl' if mode == 'find_object' else '', mode=mode, context=context)
+    assert result['reason'] == 'coverage_exhausted'
+    assert 'scope' not in result
+    assert adapters[0].calls == ['observe', 'select', 'navigate', 'observe', 'select']
 
 
 @pytest.mark.asyncio
@@ -215,15 +220,6 @@ async def test_found_photo_survives_failed_approach():
     assert state["result"]["evidence"]["media_ref"] == "/photo"
 
 
-def test_no_implicit_room_or_infinite_bounds(monkeypatch):
-    for bounds in ("", "0,0,inf,1", "1,0,0,1", "0,1,2"):
-        monkeypatch.setenv("GO2_SEARCH_BOUNDS", bounds)
-        with pytest.raises(ValueError, match="search_scope_required"):
-            search_bounds()
-    monkeypatch.setenv("GO2_SEARCH_BOUNDS", "-1,-2,3,4")
-    assert search_bounds() == (-1, -2, 3, 4)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize('stop_result,expected', [('ok','timeout'), ('accepted','accepted')])
 async def test_server_owned_search_deadline_and_retry_do_not_replay(monkeypatch, tmp_path, stop_result, expected):
@@ -234,7 +230,6 @@ async def test_server_owned_search_deadline_and_retry_do_not_replay(monkeypatch,
     from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
-    monkeypatch.setattr(search, '_configured_scope', ((-1.,-1.,1.,1.), 'map'))
     monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='map'))
     lease = control.ControlLease()
     monkeypatch.setattr(control, 'control_lease', lease)
@@ -312,7 +307,6 @@ async def test_failed_node_preserves_completed_coverage_and_logs_safe_diagnostic
     from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
-    monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
     monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='map'))
     monkeypatch.setattr(control, 'control_lease', control.ControlLease())
     runtime = SimpleNamespace(data={'life_state': 'idle'}, exploration_enabled=True,
@@ -392,27 +386,8 @@ async def test_real_navigation_blocked_receipt_survives_search_checkpoint(monkey
     assert restored.values['result']['navigation'] == receipt
 
 
-def test_reachable_scope_is_explicit_and_bounded_default_is_preserved(monkeypatch):
-    from cloud.agents.go2.workflows import search
-    monkeypatch.setattr(search, '_configured_scope', None)
-    monkeypatch.setattr(search, '_exploration_coverage', None)
-    monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
-    with pytest.raises(ValueError, match='search_scope_required'):
-        search.search_bounds()
-    with pytest.raises(ValueError, match='invalid_search_scope'):
-        search.configure_search_scope(None, 'map')
-    search.configure_search_scope((-1, -2, 3, 4), 'map')
-    assert search.search_bounds() == (-1., -2., 3., 4.)
-    assert search.configured_search_scope()['mode'] == 'bounded'
-    search.configure_search_scope(None, 'map', mode='reachable')
-    assert search.search_bounds() is None
-    assert search.configured_search_scope() == {'mode': 'reachable', 'bounds': None, 'session_id': 'map'}
-    with pytest.raises(ValueError, match='reachable_scope_has_no_rectangle'):
-        search.configure_search_scope((-1, -2, 3, 4), 'map', mode='reachable')
-
-
 @pytest.mark.asyncio
-async def test_reachable_scope_follows_map_growth_but_not_session_change(monkeypatch):
+async def test_exploration_follows_map_growth_but_not_session_change(monkeypatch):
     from types import SimpleNamespace
     from cloud.agents.go2.workflows.search import DeviceSearch
     from cloud.space.execution import ExecutionContext
@@ -447,7 +422,7 @@ async def test_reachable_scope_follows_map_growth_but_not_session_change(monkeyp
     assert any(x >= 20 for x, y in adapter.coverage._seen)
 
     expanded.map_session = 'other'
-    assert adapter.refresh_scope((pose, expanded)) == 'map_session_changed'
+    assert adapter.refresh_map_extent((pose, expanded)) == 'map_session_changed'
     monkeypatch.setattr(navigator, 'snapshot', lambda: (None, 'map_unavailable'))
     assert (await adapter.select({}))['reason'] == 'map_unavailable'
 
@@ -623,7 +598,6 @@ async def test_monitor_failure_preserves_completed_navigation_receipt(monkeypatc
     from cloud.space.execution import ExecutionContext
     from cloud.go2.navigation.navigator import navigator
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path))
-    monkeypatch.setattr(search, '_configured_scope', ((-1., -1., 1., 1.), 'map'))
     monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='map'))
     monkeypatch.setattr(control, 'control_lease', control.ControlLease())
     runtime = SimpleNamespace(data={'life_state': 'idle'}, exploration_enabled=True,
@@ -686,6 +660,54 @@ def segment_device(monkeypatch):
         return await invoke()
     adapter.effect = invoke_effect
     return adapter, robot
+
+
+@pytest.mark.asyncio
+async def test_turn_is_not_cut_short_by_translation_segment_limits(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.agents.go2.workflows import search
+    from cloud.go2.navigation.navigator import navigator
+    adapter, robot = segment_device(monkeypatch)
+    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_S', .02)
+    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_M', .01)
+    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_RAD', .05)
+    completed = asyncio.Event()
+
+    async def turning(*args, **kwargs):
+        # Go past all ordinary segment limits while the heading is incomplete.
+        for i in range(1, 9):
+            robot.odom = {**robot.odom, 'x': .02, 'heading': -.075*i}
+            robot.odom_received_at = time.monotonic()
+            await asyncio.sleep(.02)
+        completed.set()
+        return {'status': 'succeeded', 'last_trusted_pose': robot.odom.copy()}
+
+    stop = AsyncMock(return_value={'result': 'ok'})
+    monkeypatch.setattr(navigator, 'go_to_coordinate', turning)
+    monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
+    receipt = await asyncio.wait_for(adapter.navigate(initial(candidate={
+        'x': 0., 'y': 0., 'heading': -.6, 'view_kind': 'turn',
+        'source': 'target_reobservation'})), 1)
+    assert completed.is_set()
+    assert receipt['result'] == 'ok'
+    assert receipt.get('reason') != 'observation_segment_stopped'
+    assert receipt['heading_error_rad'] == pytest.approx(0.)
+    stop.assert_not_awaited()  # Navigator owns its arrival and stop proof.
+
+
+@pytest.mark.asyncio
+async def test_small_turn_cannot_become_success_from_partial_navigation_receipt(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    adapter, robot = segment_device(monkeypatch)
+    monkeypatch.setattr(navigator, 'go_to_coordinate', AsyncMock(return_value={
+        'status': 'succeeded', 'last_trusted_pose': {**robot.odom, 'heading': -.06}}))
+    receipt = await adapter.navigate(initial(candidate={
+        'x': 0., 'y': 0., 'heading': -.35, 'view_kind': 'turn',
+        'source': 'target_reobservation'}))
+    assert receipt['result'] == 'blocked'
+    assert receipt['reason'] == 'observation_turn_unconfirmed'
+    assert receipt['heading_error_rad'] == pytest.approx(-.29)
 
 
 @pytest.mark.asyncio

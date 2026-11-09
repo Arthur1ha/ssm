@@ -654,7 +654,6 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
     from cloud.go2.state import LIFE_ACTIONS
     normalized = action.lower()
     admin_routes = {
-        "set_search_scope": ("/api/go2/navigation/search-scope", "PUT", params),
         "tag_location": ("/api/go2/navigation/locations", "POST", {"name": str(params.get("name") or "").strip()}),
         "set_home": ("/api/go2/navigation/home", "PUT", {}),
     }

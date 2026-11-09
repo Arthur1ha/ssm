@@ -163,7 +163,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             actor=context.actor, persist=context.persist, session_id=session_id,
             episode_store=episode_memory)
         messages = go2_messages(current, supplement=supplemental,
-                                memory=remembered.text if remembered.fragments else "")
+                                memory=remembered.text if remembered.fragments else "",
+                                space_id=context.space_id)
         if selection:
             messages.insert(1, context_message({"training_selection": selection}))
         if task_context is not None:

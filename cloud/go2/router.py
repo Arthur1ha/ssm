@@ -801,44 +801,6 @@ async def nav_state(context=Depends(require_authenticated_read)):
     return {**s, "mode": s["mode"].value if hasattr(s["mode"], "value") else s["mode"]}
 
 
-class SearchScopeRequest(BaseModel):
-    session_id: str
-    bounds: tuple[float, float, float, float] | None = None
-    mode: str = "bounded"
-
-
-@router.get("/navigation/search-scope")
-async def search_scope_state(context=Depends(require_admin_read)):
-    from cloud.agents.go2.workflows.search import configured_search_scope
-    scope = configured_search_scope()
-    session = getattr(go2, "_odom_session_id", None)
-    return {"scope": scope, "session_id": session, "pose": go2.odom,
-            "valid": bool(go2.is_connected and scope and scope.get("session_id") == session)}
-
-
-@router.put("/navigation/search-scope")
-async def set_search_scope(req: SearchScopeRequest,
-                           context: ExecutionContext = Depends(require_service_context)):
-    from cloud.agents.go2.workflows.search import configure_search_scope
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.state import runtime_for
-    if context.actor != "admin" or context.origin_kind != "user_delegated":
-        raise HTTPException(status_code=403, detail="administrator permission required")
-    if context.expires_at <= time.time():
-        raise HTTPException(status_code=403, detail="session expired")
-    if not go2.is_connected or req.session_id != getattr(go2, "_odom_session_id", None):
-        raise HTTPException(status_code=409, detail="search_scope_session_mismatch")
-    runtime = runtime_for(go2)
-    if (navigator.owner_session_id or go2.body_state == "moving"
-            or runtime and runtime.data["life_state"] not in {"idle", "rest"}):
-        raise HTTPException(status_code=409, detail="stop_active_task_before_configuring_scope")
-    try:
-        configure_search_scope(req.bounds, req.session_id, mode=req.mode)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"result": "ok", "session_id": req.session_id, "bounds": req.bounds, "mode": req.mode}
-
-
 @router.get("/navigation/tasks/{task_id}")
 async def nav_task_result(task_id: str, context=Depends(require_authenticated_read)):
     from cloud.go2.navigation.navigator import navigator

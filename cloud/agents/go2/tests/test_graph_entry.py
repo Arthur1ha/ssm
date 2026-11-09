@@ -312,7 +312,6 @@ async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evi
     monkeypatch.setattr(device_state, 'runtime_for', lambda _: None)
     monkeypatch.setattr(connection, 'go2', SimpleNamespace(_odom_session_id='new-map'))
     monkeypatch.setattr(control, 'control_lease', control.ControlLease())
-    monkeypatch.setattr(search, '_configured_scope', None)
     monkeypatch.delenv('GO2_SEARCH_BOUNDS', raising=False)
     monkeypatch.delenv('GO2_SEARCH_SESSION_ID', raising=False)
     monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'ok'}))
@@ -346,15 +345,13 @@ async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evi
     receipt = result['tool_results'][0]['result']
     assert receipt['outcome'] == 'nearby'
     assert receipt['evidence']['frame_id'] == 3
-    assert receipt['scope'] == {'bounds': None, 'mode': 'reachable',
-        'session_id': 'new-map', 'source': 'user_task'}
+    assert 'scope' not in receipt
     assert result['response'] == '找到附近啦，我已经站稳了。'
     assert len(model.inputs) == 2
     assert adapters[0].context is context and adapters[0].bounds is None
     assert adapters[0].calls == ['observe', 'select', 'navigate', 'observe', 'observe', 'approach']
     stored = go2_graph.get_store().get('owl-natural', 'natural-search')
     assert stored.deadline >= now + search.SEARCH_SERVER_TIMEOUT_S
-    assert search.configured_search_scope() is None
     repeated = await go2_graph.run_go2_loop('natural-search', '去找下室内的白色猫头鹰',
         context=context, run_id='owl-natural')
     assert repeated == result and len(adapters) == 1

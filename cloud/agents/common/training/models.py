@@ -51,7 +51,7 @@ Timestamp = Annotated[StrictInt | StrictFloat, Field(ge=0, allow_inf_nan=False)]
 
 
 class ApplyTraining(StrictModel):
-    """按 list_training 返回的教导 ID 和当前版本应用保存的动作参数。
+    """按上下文 training 或 list_training 返回的教导 ID 和当前版本应用保存的动作参数。
 
     用户表达当前情境时按语义选择适用教导；overrides 仅放本次明确修改的参数，
     不猜测或重填保存的整组配置。临时修改不改变原教导；长期修改用 propose_training。

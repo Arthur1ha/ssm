@@ -245,7 +245,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
 
     def messages_for(current: GraphRun):
         messages = decision_messages(current, agent=agent, unit_id=unit_id,
-                                     supplement=text if resume else "")
+                                     supplement=text if resume else "", space_id=context.space_id)
         if selection:
             messages.insert(1, context_message({"training_selection": selection}))
         return messages
@@ -256,9 +256,6 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
         run_model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
         declarations = visible_schemas(lighting_only=lighting_only,
                                       card=cards.get_registry().get_card(unit_id))
-        if context.training_ref:
-            from cloud.agents.common.training.tools import SCHEMAS as training_schemas
-            declarations['apply_training'] = training_schemas['apply_training']
         return await run_role_graph(
             run, model=run_model,
             tool_schemas=declarations,

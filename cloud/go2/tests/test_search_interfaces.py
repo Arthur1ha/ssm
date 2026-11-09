@@ -86,25 +86,9 @@ async def test_router_natural_chat_admits_long_search_without_explicit_skill(mon
     assert now + SEARCH_SERVER_TIMEOUT_S <= captured['deadline'] <= time.time() + SEARCH_SERVER_TIMEOUT_S
 
 
-@pytest.mark.asyncio
-async def test_visitor_cannot_change_search_bounds(monkeypatch):
-    from cloud.api import intents
-    with pytest.raises(HTTPException) as rejected:
-        await intents._dispatch_go2('set_search_scope', {'bounds': [-1, -1, 1, 1]},
-                                    {'actor': 'visitor'})
-    assert rejected.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_scope_rejects_other_localization_session(monkeypatch):
+def test_manual_search_range_endpoints_are_removed():
     from cloud.go2 import router
-    from cloud.space.execution import ExecutionContext
-    monkeypatch.setattr(router.go2, 'is_connected', True)
-    monkeypatch.setattr(router.go2, '_odom_session_id', 'new')
-    context = ExecutionContext('admin', 'admin', True, expires_at=int(time.time()) + 60)
-    with pytest.raises(HTTPException) as rejected:
-        await router.set_search_scope(router.SearchScopeRequest(session_id='old', bounds=(-1,-1,1,1)), context)
-    assert rejected.value.status_code == 409
+    assert not any(route.path.endswith('/navigation/search-scope') for route in router.router.routes)
 
 
 @pytest.mark.asyncio
@@ -164,27 +148,3 @@ async def test_map_diagnostic_planning_does_not_block_sensor_loop(monkeypatch):
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_admin_can_explicitly_configure_reachable_space_without_rectangle(monkeypatch):
-    from types import SimpleNamespace
-    from cloud.go2 import router
-    from cloud.space.execution import ExecutionContext
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2 import state as device_state
-    from cloud.agents.go2.workflows import search
-    monkeypatch.setattr(search, '_configured_scope', None)
-    monkeypatch.setattr(search, '_exploration_coverage', None)
-    monkeypatch.setattr(router, 'go2', SimpleNamespace(is_connected=True,
-        _odom_session_id='current', body_state='standing'))
-    monkeypatch.setattr(navigator, 'owner_session_id', None)
-    monkeypatch.setattr(device_state, 'runtime_for', lambda _: SimpleNamespace(data={'life_state':'idle'}))
-    context = ExecutionContext('operator', 'admin', True, expires_at=int(time.time())+60)
-    req = router.SearchScopeRequest(session_id='current', mode='reachable')
-    result = await router.set_search_scope(req, context)
-    assert result == {'result':'ok', 'session_id':'current', 'bounds':None, 'mode':'reachable'}
-    assert search.configured_search_scope()['mode'] == 'reachable'
-    with pytest.raises(HTTPException) as rejected:
-        await router.set_search_scope(router.SearchScopeRequest(session_id='current'), context)
-    assert rejected.value.status_code == 400

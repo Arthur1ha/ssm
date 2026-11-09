@@ -1,4 +1,4 @@
-"""Full-room coverage, explicit scope, sweep geometry and stable decisions."""
+"""Live-map coverage, sweep geometry and stable decisions."""
 import math
 import numpy as np
 
@@ -59,10 +59,12 @@ def test_same_frame_or_wrong_session_never_adds_coverage_and_walls_occlude():
     assert all(x * grid.resolution < .6 for x, _ in visible)
 
 
-def test_scope_is_required_and_turn_sweep_still_rejects_real_obstacles():
+def test_live_map_supplies_extent_and_turn_sweep_still_rejects_real_obstacles():
     grid = room()
     coverage = ObservationCoverage('a')
-    assert select_observation_target(grid, POSE, coverage, bounds=None).reason == 'search_scope_required'
+    target = select_observation_target(grid, POSE, coverage).target
+    assert target is not None
+    assert grid.is_free(*grid.odom_to_grid(target.x, target.y))
     ix, iy = grid.odom_to_grid(.3, .2)
     grid.obstacles[iy, ix] = True
     result = grid.turn_sweep_details(0., 0., 0., math.pi/2)

@@ -33,17 +33,17 @@ class SocialState:
         self.sent_times: deque[float] = deque()
         self.seen_discoveries: set[str] = set()
         self.topic_times: dict[tuple[str, str], float] = {}
-        self._joined_pending = False
 
-    def reset(self, activity_id: str | None, discoveries: list[dict] = (),
-              *, joined_at: float = 0.0) -> None:
+    def reset(self, activity_id: str | None, discoveries: list[dict] = ()) -> None:
         self.activity_id = activity_id
         self.last_evaluated = 0.0
         self.last_sent = 0.0
         self.sent_times.clear()
         self.topic_times.clear()
-        self.seen_discoveries = {item["event_id"] for item in discoveries if item.get("event_id")}
-        self._joined_pending = bool(activity_id and joined_at >= self._born_at - 1)
+        # Ignore observations predating this process, but keep new discoveries
+        # made before this agent's first evaluation of the activity.
+        self.seen_discoveries = {item["event_id"] for item in discoveries
+                                 if item.get("event_id") and item.get("ts", 0) < self._born_at}
 
     def opportunity(self, activity: dict | None, peers: list[dict], discoveries: list[dict],
                     score: int = 50, *, unit_id: str = "", now: float | None = None) -> dict | None:
@@ -52,30 +52,23 @@ class SocialState:
             score = 50
         activity_id = activity.get("activity_id") if activity and peers else None
         if activity_id != self.activity_id:
-            member = (activity.get("devices") or {}).get(unit_id, {}) if activity else {}
-            # Old snapshots may lack joined_at. In that case only a newly
-            # started activity qualifies, so restarting never replays a join.
-            joined_at = (member.get("joined_at") or activity.get("started_at") or 0
-                         if activity else 0)
-            self.reset(activity_id, discoveries, joined_at=float(joined_at))
+            self.reset(activity_id, discoveries)
         if not activity_id:
             return None
         relevant = [row for row in discoveries if row.get("event_type") in
                     {"observation", "person_identified", "action_result"}
-                    and not row.get("message_id") and row.get("event_id") not in self.seen_discoveries]
+                    and not row.get("message_id") and row.get("event_id") not in self.seen_discoveries
+                    and row.get("activity_id") == activity_id
+                    and isinstance(row.get("ts"), (int, float))
+                    and max(self._born_at, activity.get("started_at", 0)) <= row["ts"] <= instant
+                    and instant - row["ts"] <= 600]
         if relevant:
             return {"kind": "discovery", "event_ids": [row["event_id"] for row in relevant],
                     "discoveries": relevant}
-        if self._joined_pending and score >= 35:
-            return {"kind": "joined", "event_ids": [], "discoveries": []}
-        interval = 300 if score >= 70 else 900 if score >= 35 else None
-        if interval and self.last_evaluated and instant - self.last_evaluated >= interval:
-            return {"kind": "quiet", "event_ids": [], "discoveries": []}
         return None
 
     def evaluated(self, opportunity: dict, *, now: float | None = None) -> None:
         self.last_evaluated = time.time() if now is None else now
-        self._joined_pending = False
         self.seen_discoveries.update(opportunity.get("event_ids") or [])
         if len(self.seen_discoveries) > 100:
             self.seen_discoveries = set(list(self.seen_discoveries)[-100:])

@@ -97,9 +97,10 @@ def _prompt(agent, state: ReactiveState):
         "decision_reason 会合并到现有对话内容中展示给用户，"
         "用自己的性格、第一人称说清我为什么现在作这个决定，不写‘选择理由’或执行报告。"
         "事实归属于观察来源，不声称自己看到了同伴的画面，不编造同伴完整任务情况。"
-        "game_id 只填工具参数，不写入消息正文；邀请时用你的口吻说清规则："
-        "你亮一种颜色，狗在环境里找同色物品，找到了就算狗赢。"
-        "不要提机器狗机身调色或玩法代号。"
+        "game_id 只填工具参数，不写入消息正文；玩法只从当前可玩列表读取，邀请时用自己的口吻说清规则。"
+        "未邀请或未获接受时，不把玩法说成双方已经谈过或正在进行的事情。"
+        "lighting_eligible 为 false 只表示本轮没有常规调光依据，不表示失去开灯能力；"
+        "获接受后的游戏出题由独立任务校验。"
         "当前可玩列表只描述能力，不是发起游戏的理由。可以普通交流或不发消息。邀请不等于游戏完成。"
         "判断游戏输赢只看本局目标导航回执；狗之后自由探索到达别处，不等于找到游戏目标。"
         "观测中的 training_intent 是本次唯一允许启动的已确认教导；若不执行，应说明原因。"
@@ -145,6 +146,9 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if (state["autonomy_epoch"] != agent._autonomy_epoch
                 or not agent._should_act() or not agent._device_online()):
             return {"status": "blocked", "call": None}
+        if not any(state["sense"].get(key) for key in
+                   ("lighting_eligible", "social_opportunity", "training_intent", "training_candidates")):
+            return {"status": "ok", "call": None}
         return {"status": "executing"}
 
     def route_gate(state):
@@ -257,7 +261,12 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                     'steps': [*state.get('steps', []), *receipts]}
         if name in PHYSICAL and (not state["sense"].get("lighting_eligible")
                 or any(step.get("tool") in PHYSICAL for step in state.get("steps", []))):
-            event(state, "tool.rejected", tool=name, reason="lighting_not_eligible")
+            event(state, "tool.result", tool=name, status="blocked",
+                  result={"result": "blocked", "reason": "lighting_not_eligible"})
+            return {"status": "blocked", "call": None}
+        if name == "send_message" and not state["sense"].get("social_opportunity"):
+            event(state, "tool.result", tool=name, status="blocked",
+                  result={"result": "blocked", "reason": "social_discovery_required"})
             return {"status": "blocked", "call": None}
         if name == "request_peer_skill":
             args["request_id"] = call["id"]

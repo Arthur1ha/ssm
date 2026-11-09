@@ -38,7 +38,7 @@ def prepare(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_steward_applies_saved_parameters_and_trusted_reference(context, prepare, monkeypatch):
+async def test_steward_delegates_saved_behavior_and_trusted_reference(context, prepare, monkeypatch):
     from cloud.agents.steward import tools
 
     unit_id = lamp_card()['unit_id']
@@ -59,8 +59,8 @@ async def test_steward_applies_saved_parameters_and_trusted_reference(context, p
     assert result['result'] == 'ok'
     trusted, arguments, step_id = dispatched[0]
     assert {key: trusted[key] for key in REFERENCE} == REFERENCE
-    assert arguments['params'] == PARAMS
-    assert arguments['skill_id'] == 'set_light_color'
+    assert arguments['params'] == {'goal': run.goal}
+    assert arguments['skill_id'] == 'adjust_lighting'
     assert arguments['message'] == run.goal
     assert step_id == 'apply-step' and len(prepare) == 1
 
@@ -183,9 +183,10 @@ class ApplyModel(JsonReplyModel):
         return AIMessage(content='已经按你教的配置调好了。')
 
 
-def test_lamp_graph_dispatches_saved_configuration_without_rewrite(
+def test_lamp_graph_enters_saved_behavior_without_rewrite(
         context, prepare, monkeypatch, tmp_path):
     from cloud.agents.lamp import graph
+    from cloud.agents.lamp.workflows import runtime
 
     for key in ('SSM_CHECKPOINT_DIR', 'SSM_EFFECT_LEDGER_DIR', 'SSM_RUN_INDEX_DIR'):
         monkeypatch.setenv(key, str(tmp_path / key))
@@ -199,26 +200,30 @@ def test_lamp_graph_dispatches_saved_configuration_without_rewrite(
     monkeypatch.setattr('cloud.api.intents.publish_agent_event', lambda *_a, **_k: {})
     sent = []
 
-    def execute(name, params, step_id, **kwargs):
-        sent.append((name, params, kwargs['context']))
+    async def behavior(prepared, trusted, **kwargs):
+        sent.append((prepared, trusted, kwargs))
         return {'result': 'ok', 'task_id': 'physical-configuration'}
 
-    monkeypatch.setattr(graph, 'execute_lamp_tool', execute)
+    monkeypatch.setattr(runtime, 'run_training_behavior', behavior)
+    monkeypatch.setattr(graph, 'execute_lamp_tool', lambda *_a, **_k: pytest.fail('must enter saved workflow'))
     result = graph.run_lamp_loop(agent, '准备看会儿书', unit_id, context,
                                  lambda *_a, **_k: None, run_id='lamp-apply')
     assert result['result'] == 'ok' and '调好了' in result['reply']
     assert model.calls == 2  # One tool decision, one final answer; no rewrite.
-    assert sent[0][0] == 'set_led_color' and sent[0][1] == PARAMS
-    assert sent[0][2].training_ref == 'reading'
-    assert sent[0][2].training_revision == 3
+    prepared, trusted, kwargs = sent[0]
+    assert prepared['action'] == 'SET_COLOR' and prepared['params'] == PARAMS
+    assert {key: prepared[key] for key in REFERENCE} == REFERENCE
+    assert trusted is context and kwargs['agent'] is agent
+    assert kwargs['run_id'] == 'lamp-apply:saved-config'
     replay = graph.run_lamp_loop(agent, '准备看会儿书', unit_id, context,
                                  lambda *_a, **_k: None, run_id='lamp-apply')
     assert replay['result'] == 'ok' and len(sent) == 1 and model.calls == 2
 
 
 @pytest.mark.asyncio
-async def test_go2_graph_maps_saved_action_to_existing_tool(context, prepare, monkeypatch, tmp_path):
+async def test_go2_graph_enters_saved_behavior_without_rewrite(context, prepare, monkeypatch, tmp_path):
     from cloud.agents.go2 import graph
+    from cloud.go2 import service
     from cloud.agents.go2.run_view import Go2RunView
     from cloud.agents.common.checkpoint import FileCheckpointSaver
     from cloud.agents.common.run_index import FileRunIndex
@@ -245,17 +250,20 @@ async def test_go2_graph_maps_saved_action_to_existing_tool(context, prepare, mo
     monkeypatch.setattr(graph, 'get_text_llm', lambda: model)
     sent = []
 
-    async def execute(name, params, *, context):
-        sent.append((name, params, context))
+    async def behavior(prepared, trusted, **kwargs):
+        sent.append((prepared, trusted, kwargs))
         return {'result': 'ok'}
 
-    monkeypatch.setattr(graph, 'execute_tool', execute)
+    monkeypatch.setattr(service, 'run_training_behavior', behavior)
+    monkeypatch.setattr(graph, 'execute_tool', lambda *_a, **_k: pytest.fail('must enter saved workflow'))
     result = await graph.run_go2_loop(context.session_id, '按之前教你的打招呼',
                                       context=context, run_id='go2-apply')
     assert result['result'] == 'ok'
-    assert sent[0][0:2] == ('go2_sport', {'cmd': 'Hello'})
-    assert sent[0][2].training_ref == 'greeting'
-    assert sent[0][2].training_revision == 3 and model.calls == 2
+    prepared, trusted, kwargs = sent[0]
+    assert prepared['action'] == 'Hello' and prepared['params'] == {}
+    assert prepared['training_ref'] == 'greeting' and prepared['training_revision'] == 3
+    assert trusted is context and kwargs['run_id'] == 'go2-apply:saved-config'
+    assert model.calls == 2
     replay = await graph.run_go2_loop(context.session_id, '按之前教你的打招呼',
                                       context=context, run_id='go2-apply')
     assert replay['result'] == 'ok' and len(sent) == 1 and model.calls == 2

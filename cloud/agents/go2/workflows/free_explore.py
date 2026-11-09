@@ -27,6 +27,7 @@ class MotivationState(TypedDict, total=False):
     interrupted: bool
     pending_question: bool
     connected: bool
+    initial_exploration: bool
     should_explore: bool
     should_social: bool
     profile_revision: int
@@ -174,7 +175,7 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
         curiosity = state.get("curiosity", 0) + 1
         social_tick = state.get("social_tick", 0) + 1
         threshold = exploration_interval(profile["traits"]["curiosity"])
-        if curiosity >= threshold:
+        if state.get("initial_exploration") or curiosity >= threshold:
             return {"state": "EXPLORING", "curiosity": 0, "social_tick": social_tick,
                     "should_explore": True, "should_social": False,
                     "profile_revision": profile["revision"]}

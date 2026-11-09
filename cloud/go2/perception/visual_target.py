@@ -255,7 +255,8 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
         observation = json.loads(raw)
         if not isinstance(observation, dict):
             raise ValueError('non-object vision output')
-        fields = (('found', 'bbox_1000', 'proximity', 'proximity_reason') if mode == 'visible_target' else
+        fields = (('scene_summary',) if mode == 'scene' else
+                  ('found', 'bbox_1000', 'proximity', 'proximity_reason', 'scene_summary') if mode == 'visible_target' else
                   ('count', 'static', 'confidence', 'bbox',
                    'ground_contact_visible', 'contact_pixel'))
         emit_agent_event('vision.model', phase='parsed', frame_id=frame.get('frame_id'),
@@ -275,7 +276,10 @@ async def detect_visible_target(jpeg: bytes, target: str, frame: dict) -> dict:
     instruction = (
         '在图像中寻找用户描述的物体。'
         '只输出 JSON：{"found":布尔值,"bbox_1000":[左,上,右,下]或null,'
-        '"proximity":"nearby"或"far"或"uncertain","proximity_reason":"简短画面依据"}。'
+        '"proximity":"nearby"或"far"或"uncertain","proximity_reason":"简短画面依据",'
+        '"scene_summary":"用一句中文描述本张画面实际可见的主要物体和目标位置，不超过80字"}。'
+        'scene_summary 无论是否找到目标都必须提供；只写当前画面可见事实，'
+        '不推测画面外的物体，不提供行动建议。'
         '画面里有任何一个符合描述的物体就设 found=true；若有多个，选画面中最清楚的一个。'
         '看不到符合描述的物体时设 found=false、bbox_1000=null。'
         'bbox_1000 必须用相对于整张图的 0–1000 坐标，左上角为原点，'
@@ -499,7 +503,7 @@ async def observe_target(target: str, *, after_frame_id=None,
     """Detect on one fresh image; absence only describes this view.
 
     No image bytes or point clouds are returned, so the result fits a bounded
-    Graph checkpoint. An empty target collects geometric camera coverage only.
+    Graph checkpoint. An empty target describes the scene for exploration.
     Search may inspect the camera before localization; such a view has no pose
     and cannot establish coverage or authorize a navigation target.
     """
@@ -521,8 +525,16 @@ async def observe_target(target: str, *, after_frame_id=None,
     # Preserve exactly the submitted frame even if model latency or a later
     # pose-stability gate rejects its result. Visitor images remain unpersisted.
     image_path = save_diagnostic_frame(jpeg, frame) if current_context().persist else None
-    observation = (await detect_visible_target(jpeg, target, frame) if target else
-                   {'found': False, 'bbox_1000': None})
+    if target:
+        observation = await detect_visible_target(jpeg, target, frame)
+    else:
+        scene = await _ask_vision(jpeg, "描述当前位置的场景", frame,
+            '只输出 JSON：{"scene_summary":"用一句中文描述本张画面实际可见的主要物体、颜色或新鲜事物，不超过120字"}。'
+            '不推测画面外的物体，不判断通行或到达，不提供行动建议。', 'scene')
+        summary = scene.get('scene_summary')
+        if not isinstance(summary, str) or not summary.strip():
+            raise TargetUnlocalized('vision_result_invalid')
+        observation = {'found': False, 'bbox_1000': None, 'scene_summary': summary.strip()[:240]}
     if type(observation.get('found')) is not bool:
         raise TargetUnlocalized('vision_result_invalid')
     if observation['found']:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import numpy as np
 
 from cloud.go2.actions import move_tool_schema, validate_move_goal
 from cloud.space.execution import ExecutionContext, use_context
@@ -26,7 +27,7 @@ def movement(monkeypatch):
     fault = {'stall': False, 'block_after': None, 'stale_after': None, 'sideways_only': False}
     start = pose.copy()
     grid = SimpleNamespace(frame_id='odom', session_id='map', observed_at=time.monotonic(),
-        has_free_space_evidence=True, resolution=.05,
+        has_free_space_evidence=True, resolution=.05, grid=np.zeros((40, 40), dtype=bool),
         odom_to_grid=lambda x, y: (round(x/.05), round(y/.05)),
         grid_to_odom=lambda x, y: (x*.05, y*.05), is_free=lambda *args: True,
         is_turn_clear=lambda *args: True)
@@ -94,6 +95,71 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
     assert result['result'] == 'ok', result
     assert abs(result['angle_deg'] - 90) <= 3
     assert all(vx == vy == 0 for vx, vy, yaw in movement.commands)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('angle_deg', [-20.5, 20.5, -43., 43.])
+async def test_search_turn_reaches_heading_through_native_packets(movement, angle_deg):
+    """Search uses coordinates without first entering manual move control."""
+    import json
+    from cloud.go2.move_control_checks import robot_at_stand
+    from unitree_webrtc_connect.constants import RTC_TOPIC
+
+    robot, _, packets = robot_at_stand()
+    simulated_move = movement.robot.move_velocity
+
+    def receive(topic, *, data, **_):
+        # Simulate walking only through the native velocity interface. Wireless
+        # sticks depend on firmware mode and cannot prove an odom turn.
+        assert topic == RTC_TOPIC['SPORT_MOD']
+        if data['header']['identity']['api_id'] == 1008:
+            velocity = json.loads(data['parameter'])
+            # Model ineffective low angular commands near the target heading.
+            yaw = velocity['z'] if abs(velocity['z']) >= .35 else 0.
+            simulated_move(velocity['x'], velocity['y'], yaw)
+        else:
+            assert data['header']['identity']['api_id'] == 1003
+            simulated_move(0, 0, 0)
+
+    packets.side_effect = receive
+    movement.robot.move_velocity = robot.move_velocity
+    goal = movement.start['heading'] + math.radians(angle_deg)
+    try:
+        result = await movement.nav.go_to_coordinate(
+            movement.start['x'], movement.start['y'], heading=goal,
+            holonomic=True, speed_limit=.30, minimum_command_speed=.25)
+    finally:
+        if robot.is_connected:
+            robot.move_velocity(0, 0, 0)
+    assert result['status'] == 'succeeded', result
+    assert abs(math.degrees(movement.robot.odom['heading'] - goal)) <= 3.
+    assert all(vx == vy == 0 for vx, vy, _ in movement.commands)
+    assert movement.commands[-1] == (0, 0, 0)
+    assert robot._move_control_active is False
+
+
+@pytest.mark.asyncio
+async def test_heading_drift_while_braking_is_not_confirmed_as_arrival(movement):
+    original = movement.robot.move_velocity
+    turned = False
+    goal = movement.start['heading'] + math.radians(20.5)
+
+    def brake_drift(vx, vy, yaw, **kwargs):
+        nonlocal turned
+        if yaw:
+            turned = True
+        elif turned and not any((vx, vy, yaw)):
+            movement.robot.odom['heading'] = goal - .10
+            turned = False
+        return original(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = brake_drift
+    result = await movement.nav.go_to_coordinate(
+        movement.start['x'], movement.start['y'],
+        heading=goal, holonomic=True)
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'arrival_unconfirmed'
+    assert movement.commands[-1] == (0, 0, 0)
 
 
 @pytest.mark.asyncio

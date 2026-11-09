@@ -132,9 +132,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     const onEvent = event => {
       const item = event.detail || {};
       if (item.agent_id !== unitId) return;
-      const autonomous = item.scope === 'space' && item.source === 'autonomous';
+      const autonomous = item.scope === 'space' && ['autonomous', 'object_search'].includes(item.source);
       const pending = pendingRuns.current.get(item.run_id);
-      if (!autonomous && (item.source !== 'device_chat' || !pending)) return;
+      if (!autonomous && (!['device_chat', 'object_search'].includes(item.source) || !pending)) return;
       const requestId = autonomous ? `auto:${item.run_id || item.event_id}` : pending.key;
       if (item.type === 'agent_reply' && item.text) {
         const replyKey = `${requestId}:${item.event_id}`;

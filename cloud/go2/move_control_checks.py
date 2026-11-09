@@ -97,7 +97,9 @@ async def test_zero_during_activation_cannot_later_enable_control():
     assert (await task)['result'] == 'cancelled'
     assert publish.await_count == 1
     assert robot.runtime.data['control_mode'] == 'normal'
-    assert all(not any(call.kwargs['data'].values()) for call in sticks.call_args_list)
+    assert all(call.args[0] == RTC_TOPIC['SPORT_MOD']
+               and call.kwargs['data']['header']['identity']['api_id'] == 1003
+               and call.kwargs['data']['parameter'] == '' for call in sticks.call_args_list)
 
 
 @pytest.mark.asyncio

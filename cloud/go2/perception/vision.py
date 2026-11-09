@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class PersonInfo(TypedDict):
     detected: bool
+    # Conservative estimate: face and body detections may be the same people.
     count: int
 
 
@@ -77,12 +78,14 @@ def detect(frame_bytes: bytes, prev_person_count: int = -1, frame_id: int = 0) -
     rects, _ = _get_hog().detectMultiScale(
         detect_img, winStride=(8, 8), padding=(4, 4), scale=1.05
     )
-    person_count = len(rects)
-
     faces = _get_face_cascade().detectMultiScale(
         gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
     )
     face_count = len(faces)
+    # Either detector is evidence of a person. Do not sum the counts: a face
+    # and a body may belong to the same person. All presence consumers share
+    # this result, so switching detector sources is not a new appearance.
+    person_count = max(len(rects), face_count)
     scale_x = original_w / _DETECT_W
     scale_y = original_h / _DETECT_H
     face_boxes = [

@@ -40,6 +40,7 @@ class Drive:
     def __init__(self) -> None:
         self._state           = MotivationalState.IDLE
         self._curiosity       = 0
+        self._initial_exploration = False
         self._person_present   = False   # HOG 检测到人体（含远处背景人）
         self._person_engaging  = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
         self._last_person_ts   = 0.0
@@ -143,16 +144,18 @@ class Drive:
                                                      text=str(text)[:500], **facts)
         return None
 
-    def _record_scene_observation(self, text: str, coordinate: tuple[float, float]) -> dict | None:
+    def _record_scene_observation(self, text: str, coordinate: tuple[float, float] | None,
+                                  **facts) -> dict | None:
         """Share the first scene and later scenes reached in a different area."""
         activity_id = self._activity_id()
         if not activity_id or not text.strip() or text.startswith("无可用视频帧"):
             return None
-        area = ("area", round(coordinate[0] / 2), round(coordinate[1] / 2))
+        area = (("area", round(coordinate[0] / 2), round(coordinate[1] / 2))
+                if coordinate is not None else ("unlocalized_view",))
         if not self._observation_gate.should_reply(
                 activity_id, completed=True, material_key=area):
             return None
-        event = self._activity_event("observation", self._scene_summary(text))
+        event = self._activity_event("observation", self._scene_summary(text), **facts)
         if event:
             self._observation_gate.mark_replied(activity_id, completed=True, material_key=area)
         return event
@@ -508,17 +511,20 @@ class Drive:
         graph = build_motivation_graph(profile_loader=get_profile, checkpointer=saver)
         thread_id = "go2:motivation:" + uuid.uuid4().hex
         self._wake = asyncio.Event()
+        self._wake.set()
         while True:
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=1)
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
-            if self.user_interrupt or self._pending_question_id or time.time() < self._vision_retry_after:
+            if self.user_interrupt or self._pending_question_id:
                 continue
-            if self._events:
+            if self._events and not self._initial_exploration:
                 event = self._events.popleft()
                 await self._handle_event(event, graph, saver, thread_id)
+                continue
+            if time.time() < self._vision_retry_after:
                 continue
 
             async with saver.async_run_lock(thread_id):
@@ -529,6 +535,7 @@ class Drive:
                      "pending_event": {},
                      "interrupted": self.user_interrupt,
                      "pending_question": bool(self._pending_question_id),
+                     "initial_exploration": self._initial_exploration,
                      "connected": go2.is_connected},
                     {"configurable": {"thread_id": thread_id}}, durability="sync")
             self._curiosity = tick.get("curiosity", self._curiosity)
@@ -540,6 +547,7 @@ class Drive:
                 try:
                     await self._do_explore()
                 finally:
+                    self._initial_exploration = False
                     self._state = MotivationalState.IDLE
             elif tick.get("should_social"):
                 self.submit_event({"event_id": "social:" + uuid.uuid4().hex,
@@ -795,12 +803,60 @@ class Drive:
         """Lifecycle entry; the shared graph owns exploration decisions."""
         if self.user_interrupt or self._pending_question_id or time.time() < self._vision_retry_after:
             return
-        from cloud.agents.go2.workflows.search import run_search
-        result = await run_search(mode="explore", context=self._context)
+        from cloud.agents.go2.workflows.search import run_search, OBSERVATION_TIMEOUT_S
+        generation, owner = self._generation, self.owner_session_id
+        last_observation = None
+
+        def current():
+            return (generation == self._generation and owner == self.owner_session_id
+                    and go2.is_connected and not self.user_interrupt
+                    and (not owner or not owner.startswith("act_") or self._activity_id() == owner))
+
+        async def share(observation):
+            nonlocal last_observation
+            if not current():
+                return
+            summary = (observation.get("observation") or {}).get("scene_summary")
+            if not isinstance(summary, str) or not summary.strip():
+                return
+            pose = observation.get("pose") or {}
+            coordinate = (pose["x"], pose["y"]) if "x" in pose and "y" in pose else None
+            event = self._record_scene_observation(summary, coordinate,
+                frame_id=observation.get("frame_id"), media_ref=observation.get("media_ref"),
+                source="go2.camera")
+            if event:
+                self._last_observation = summary
+                last_observation = event
+
+        result = await run_search(mode="explore", context=self._context, on_observation=share)
+        if not current():
+            return
+        # Localization may be unavailable at entry. A fresh camera
+        # observation remains useful, without granting any movement permission.
+        if self._initial_exploration and result.get("reason") == "map_session_unavailable":
+            from cloud.go2.perception.visual_target import observe_target
+            from cloud.space.execution import use_context
+            try:
+                with use_context(self._context):
+                    sample = await asyncio.wait_for(observe_target("", require_pose=False),
+                                                    timeout=OBSERVATION_TIMEOUT_S)
+                await share({**sample, "frame_id": sample["frame"]["frame_id"]})
+            except Exception as exc:
+                logger.warning("[Drive] entry observation unavailable: %s", exc)
+            if not current():
+                return
+            self._activity_event("action_result", "自主探索尚未开始，定位尚未就绪。",
+                action="explore", task_id=result.get("task_id"), status=result["result"],
+                reason=result["reason"])
         self._last_tool_result = result
         self._last_action_ts = time.time()
-        if result.get("reason") in {"coverage_exhausted", "no_reachable_observation_point", "search_scope_required", "search_scope_session_mismatch"}:
+        if result.get("reason") in {"coverage_exhausted", "no_reachable_observation_point", "map_session_unavailable"}:
             self._vision_retry_after = time.time() + 60
+        if current() and last_observation:
+            try:
+                await self._evaluate_social(last_observation)
+            except Exception:
+                logger.exception("[Drive/Social] observation sharing decision failed")
 
     async def _do_social(self) -> None:
         """Social opportunity uses the same bounded event handling checkpoint."""
@@ -866,6 +922,8 @@ class Drive:
             runtime.exploration_enabled = True
         self._state            = MotivationalState.IDLE
         self._curiosity        = 0
+        self._initial_exploration = True
+        self._vision_retry_after = 0.0
         self._person_present   = False
         self._person_engaging  = False
         self._task             = asyncio.create_task(self._run_loop())

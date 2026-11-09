@@ -86,6 +86,36 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(() => device(true, 'remount'));
     await page.waitForFunction(() => !document.querySelector('input').disabled);
     assert.match(await page.$eval('.chat-messages', node => node.textContent), /已经调好了/);
+    // Long device tools publish their own source. Keep their in-flight
+    // observations, decisions and screenshot in the same request transcript.
+    await page.type('.chat-panel input', '去找猫头鹰');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => sent.length === 2);
+    await page.evaluate(() => {
+      const run_id = sent[1].run_id;
+      const event = (stage, text, more = {}) => apiClient.dispatchEvent(new CustomEvent('server-event', {
+        detail:{type:'agent_progress',agent_id:lamp.unit_id,run_id,task_id:run_id,
+          source:'object_search',scope:'session',event_id:stage,stage,text,...more},
+      }));
+      event('search_observing', '正在观察当前位置，识别猫头鹰。');
+      event('search_observe', '这次画面暂未识别到猫头鹰。画面观察：前方有椅子和纸箱。',
+        {media_ref:'/api/search-photo'});
+      event('search_selected', '当前视野仍有未检查区域，已选定可达的边界观察点。');
+      // A following outer-Graph update must not hide the search record.
+      apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
+        agent_id:lamp.unit_id,run_id,source:'device_chat',stage:'dispatching',event_id:'outer-progress',
+        tool:'go2_find_object'}}));
+    });
+    await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('前方有椅子和纸箱'));
+    const searching = await page.$eval('.run-process-summary:last-of-type', node => ({
+      open:node.open,text:node.textContent,photos:node.querySelectorAll('img').length,
+    }));
+    assert.equal(searching.open, true);
+    assert.match(searching.text, /可达的边界观察点/);
+    assert.doesNotMatch(searching.text, /停止搜索/);
+    assert.equal(searching.photos, 1);
+    await page.evaluate(() => finishCommand({result:'blocked',reply:'本次搜索结束，遮挡区域仍未确认。'}));
+    await page.waitForFunction(() => !document.querySelector('input').disabled);
     if (process.env.SCREENSHOT_DIR) {
       fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
       await page.screenshot({path:process.env.SCREENSHOT_DIR+'/device-chat.png'});

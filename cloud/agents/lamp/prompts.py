@@ -8,6 +8,7 @@ from cloud.agents.lamp.personality.profile import get_profile
 from cloud.personality.store import render_identity
 from cloud.personality.names import agent_names
 from cloud.agents.common.messages import role_messages
+from cloud.agents.common.training.context import DECISION_GUIDANCE, decision_context
 from cloud.space.context import get_space_context
 
 
@@ -27,7 +28,8 @@ def planning_prompt() -> str:
     )
 
 
-def decision_messages(run, *, agent, unit_id: str, supplement: str = ""):
+def decision_messages(run, *, agent, unit_id: str, supplement: str = "",
+                      space_id: str = "main"):
     """Build the current Graph runner's per-turn, freshly loaded context."""
     from cloud.peers.games import playable_games
 
@@ -37,10 +39,12 @@ def decision_messages(run, *, agent, unit_id: str, supplement: str = ""):
              for game in playable_games((space.get("activity") or {}).get("activity_id"),
                                         unit_id, peer["unit_id"])]
     profile = get_profile()
-    instructions = planning_prompt() + "\n" + persona_reply_prompt(run, profile)
+    instructions = planning_prompt() + "\n" + DECISION_GUIDANCE + "\n" + persona_reply_prompt(run, profile)
     return role_messages(instructions, run.goal, supplement=supplement,
                          context={"lamp": agent._state.actuator_snapshot(), "space": space,
-                                  "agent_names": agent_names(), "playable_games": games})
+                                  "agent_names": agent_names(), "playable_games": games,
+                                  "training": decision_context(unit_id, space_id=space_id,
+                                      origin_kind=run.origin_kind or "user_delegated")})
 
 
 def persona_reply_prompt(run, profile: dict | None = None) -> str:

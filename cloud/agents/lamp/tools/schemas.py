@@ -83,8 +83,9 @@ def visible_schemas(*, lighting_only: bool, card: dict | None = None) -> dict:
 
     allowed = PHYSICAL_TOOLS if lighting_only else SCHEMAS.keys()
     schemas = {name: schema for name, schema in SCHEMAS.items() if name in allowed}
+    from cloud.agents.common.training.tools import SCHEMAS as training_schemas
+    schemas["apply_training"] = training_schemas["apply_training"]
     if not lighting_only:
-        from cloud.agents.common.training.tools import SCHEMAS as training_schemas
         schemas.update(training_schemas)
     if card is not None:
         declared = {(skill.get("invoke") or {}).get("action"): skill

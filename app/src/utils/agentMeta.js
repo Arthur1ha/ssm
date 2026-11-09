@@ -78,7 +78,16 @@ function getAgentOpeningLine(agent) {
 }
 
 function describeRunProgress(event, compact = false) {
+  if (event.source === 'object_search' && typeof event.text === 'string' && event.text.trim()) {
+    return event.text.trim();
+  }
   const searchStage = {
+    search_observing: '正在观察当前位置，识别画面内容',
+    search_rechecking: '正在用新画面复核目标',
+    search_selecting: '正在根据观察与可通行区域选择下一观察点',
+    search_selected: '已选定下一观察点，准备移动',
+    search_telemetry: '画面已观察，正在等待定位或地图反馈',
+    search_move_result: '本段移动结果已更新',
     search_observe: '正在搜索，观察当前位置', search_candidate: '发现疑似目标，正在复核',
     search_confirmed: '已确认目标', search_navigate: '正在前往下一观察点',
     search_approach: '正在靠近目标', search_finished: event.status === 'ok'
@@ -90,8 +99,7 @@ function describeRunProgress(event, compact = false) {
       distance_budget_exhausted: '搜索路程预算已用完', step_budget_exhausted: '观察次数已达上限',
       coverage_complete: '可观察区域已检查，遮挡区域仍未确认', no_reachable_observation: '没有可达的观察点',
       calibration_unavailable: '已发现目标，尚缺相机实测标定，无法确认接近位置',
-      search_scope_required: '请先设置允许搜索的范围', stop_unconfirmed: '停止指令尚未得到设备确认',
-      search_scope_session_mismatch: '定位会话已变化，请重新确认搜索范围',
+      stop_unconfirmed: '停止指令尚未得到设备确认',
       no_reachable_observation_point: '没有可达的观察点，部分区域尚未检查',
       coverage_exhausted: '可观察区域已检查，遮挡区域仍未确认',
       cancelled: '用户已中断', authorization_expired: '本次操作授权已到期',

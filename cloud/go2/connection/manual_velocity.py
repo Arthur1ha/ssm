@@ -97,7 +97,7 @@ class ManualVelocityControl:
             dt = min(loop.time() - self._manual_velocity_at, 2 * _INTERVAL_S)
             self._manual_velocity_at = loop.time()
             velocity = slew_velocity(self._manual_velocity_current, self._manual_velocity_target, dt)
-            self._publish_velocity(*velocity, sport=True)
+            self._publish_velocity(*velocity)
             self._manual_velocity_current = velocity
             self._manual_velocity_handle = loop.call_later(_INTERVAL_S, self._tick_manual_velocity)
         except (ValueError, RuntimeError):

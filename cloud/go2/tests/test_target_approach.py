@@ -133,12 +133,14 @@ def test_bad_sample_timing_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_search_observation_empty_target_does_not_call_model(monkeypatch):
+async def test_exploration_describes_scene_without_selecting_a_search_target(monkeypatch):
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
     frame = {'pose_at_capture': pose, 'odom_session_id': 's', 'frame_id': 2, 'received_at': 2.}
     monkeypatch.setattr(vision, '_capture_still', AsyncMock(return_value=(b'jpeg', frame, 1.)))
     detect = AsyncMock(side_effect=AssertionError('no model needed'))
     monkeypatch.setattr(vision, 'detect_visible_target', detect)
+    describe = AsyncMock(return_value={'scene_summary': '桌子旁有红色盒子。'})
+    monkeypatch.setattr(vision, '_ask_vision', describe)
     monkeypatch.setattr(vision, '_live_pose', lambda _: pose)
     monkeypatch.setattr(vision, 'save_diagnostic_frame', lambda *_: None)
     from cloud.go2 import activity_media
@@ -146,6 +148,8 @@ async def test_search_observation_empty_target_does_not_call_model(monkeypatch):
     result = await vision.observe_target('')
     assert result['found'] is False and result['quality'] == 1
     assert 'jpeg' not in result
+    assert result['observation']['scene_summary'] == '桌子旁有红色盒子。'
+    assert describe.await_args.args[-1] == 'scene'
     detect.assert_not_awaited()
 
 
