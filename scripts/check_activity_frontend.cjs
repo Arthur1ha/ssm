@@ -78,6 +78,16 @@ assert.equal(activityTaskRows([planned,running,result]).length,1);
 assert.equal(activityTaskRows([result,running])[0].status,'timeout','A progress replay downgraded a receipt');
 assert.equal(activityTaskRows([result,{...result,event_id:'other',action:'go2_observe'}]).length,2,'Different actions in a run were merged');
 assert.equal(activityTaskRows([result,{...result,event_id:'repeated'}]).length,2,'Repeated receipts were erased');
+const searchSteps = ['search_observing','search_observe','search_selected','search_observe'].map((stage,index) =>
+  event('search-step-'+index,'search_progress',{stage,task_id:'activity-search',source:'object_search',
+    text:stage === 'search_observe' ? '前方有纸箱。' : '搜索步骤 '+stage,
+    media_ref:stage === 'search_observe' ? '/api/activity-photo-'+index : null}));
+assert.equal(activityTaskRows(projectActivityEvents([...searchSteps,
+  {...result,task_id:'activity-search',status:'ok'}])).length,5,
+  'Search completion erased its individual observations and steps');
+assert.equal(projectActivityEvents([...searchSteps,event('scene-copy','observation',{
+  source:'go2.camera',text:'前方有纸箱。',media_ref:'/api/activity-photo-1'})]).length,4,
+  'A shared scene duplicated a search photo');
 assert.equal(activityRelatedEvents(result,events).messages.length,2);
 assert.equal(activityRelatedEvents(invite,events).task.length,3);
 assert.equal(activityRelatedEvents({...result,task_id:'unlinked',trigger_message_id:null},events).messages.length,0,
@@ -112,6 +122,44 @@ if(replay){
   console.log(`PASS: latest recorded activity replay (${replay.events.length} raw events, one lamp setup summary).`);
 }
 console.log('PASS: explicit message/task relationships, physical freshness, action grouping and unconfirmed results.');
+
+// New SSE feedback can arrive between the member card's ten-second age ticks.
+// Keep hook state across renders and advance wall time without firing the timer.
+{
+  let wallTime = now, hookValue, ageTick;
+  context.Date = class extends Date { static now() { return wallTime * 1000; } };
+  context.apiClient = {devicesSynced:true};
+  context.setInterval = callback => { ageTick = callback; return 1; };
+  context.clearInterval = () => {};
+  context.React = {
+    useState(initial) {
+      if (hookValue === undefined) hookValue = typeof initial === 'function' ? initial() : initial;
+      return [hookValue, value => { hookValue = typeof value === 'function' ? value(hookValue) : value; }];
+    },
+    useEffect(effect) { if (!ageTick) effect(); },
+    createElement(type, props, ...children) { return {type, props:props || {}, children}; },
+  };
+  const labels = node => Array.isArray(node) ? node.flatMap(labels)
+    : node && typeof node === 'object' ? node.props?.className === 'activity-member__state'
+      ? node.children.filter(value => typeof value === 'string') : labels(node.children) : [];
+  const render = (receivedAt, connected = true) => labels(context.ActivityMembers({
+    activity, agents:[go2], connected,
+    unitData:{go2:{state:{...states.go2.state,_received_at:receivedAt}}},
+    getName:id => id,
+  }))[0];
+  assert.equal(render(now),'玩耍 · 站立');
+  for (const seconds of [6,9,16,19]) {
+    wallTime = now + seconds;
+    if (seconds === 16) ageTick();
+    assert.equal(render(wallTime),'玩耍 · 站立','Fresh feedback flickered to unknown between age ticks');
+  }
+  wallTime = now + 90;
+  ageTick();
+  assert.equal(render(now + 19),'状态待确认','Silent devices must still age out');
+  assert.equal(render(wallTime,false),'状态待确认','A lost SSE connection must remain unconfirmed');
+  assert.equal(render(wallTime + 10),'状态待确认','Actual future timestamps must still be rejected');
+  console.log('PASS: fresh Go2 feedback between age ticks stays visible; stale, disconnected and future feedback stays unconfirmed.');
+}
 
 async function browserChecks() {
   const puppeteer = require('puppeteer');
@@ -329,6 +377,8 @@ async function browserChecks() {
     home.on('request',request=>{
       if(request.isNavigationRequest() && request.url()==='http://ssm.test/') request.respond({status:200,
         contentType:'text/html',body:'<html lang="zh-CN"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div></body></html>'});
+      else if(new URL(request.url()).pathname.startsWith('/api/activity-photo-'))request.respond({status:200,
+        contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#475569"/></svg>'});
       else if(request.url().startsWith('data:'))request.continue();
       else if(request.url().endsWith('/favicon.ico'))request.respond({status:204,body:''});
       else {errors.push('Unexpected home network: '+request.url());request.abort();}
@@ -352,6 +402,8 @@ async function browserChecks() {
         if(endpoint==='/api/activity/current')return {activity,latest_activity_id:activity.activity_id};
         if(endpoint==='/api/activity/'+activity.activity_id+'/events')return {activity,events};
         if(endpoint==='/api/agents/names')return {};
+        if(endpoint==='/api/intents'){window.__homeIntentCount=(window.__homeIntentCount || 0)+1;
+          return {trace_id:'tr_home',event_id:'home-request'};}
         throw Error('Unexpected API: '+endpoint);
       };
       ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App,{
@@ -361,6 +413,42 @@ async function browserChecks() {
     assert.equal(await home.$$('.space-activity').then(nodes=>nodes.length),1);
     assert.equal(await home.evaluate(()=>location.hash),'');
     assert(await home.$eval('.home-activity-input-note',e=>e.textContent.includes('发送新指令')));
+    // Activity progress must not enter either the global search feed or an
+    // unrelated request that is currently waiting for its own SSE feedback.
+    await home.type('.chat-panel input','查看当前情况');
+    await home.keyboard.press('Enter');
+    await home.waitForFunction(()=>window.__homeIntentCount === 1);
+    await home.evaluate(({activity,searchSteps})=>{
+      const emit = detail => apiClient.dispatchEvent(new CustomEvent('server-event',{detail}));
+      searchSteps.forEach(step=>{
+        emit({type:'agent_progress',scope:'space',source:'object_search',agent_id:'go2',
+          run_id:'activity-search',task_id:'activity-search',event_id:step.event_id,
+          activity_id:activity.activity_id,stage:step.stage,text:step.text,media_ref:step.media_ref});
+        emit({...step,type:'activity',activity_id:activity.activity_id});
+      });
+      emit({type:'agent_reply',scope:'session',source:'orchestrator',agent_id:'cloud_orchestrator',
+        trace_id:'tr_home',event_id:'home-final',text:'当前情况已反馈。'});
+    },{activity,searchSteps});
+    await home.waitForFunction(()=>document.querySelectorAll('.space-activity img').length === 2);
+    await home.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('当前情况已反馈。'));
+    assert.equal(await home.$$eval('.run-process-summary',rows=>rows.some(row=>
+      /前方有纸箱|搜索步骤/.test(row.textContent))),false,'Activity steps escaped into the conversation');
+    assert.equal(await home.$$eval('.chat-messages img',rows=>rows.every(row=>row.closest('.space-activity'))),true,
+      'An activity photo escaped its card');
+    assert.equal(await home.$$eval('.space-activity__timeline img',rows=>rows.length),2);
+    assert.match(await home.$eval('.space-activity__timeline',el=>el.textContent),/搜索步骤 search_selected/);
+    for(const width of [320,390,1280]){
+      await home.setViewport({width,height:844});
+      assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,
+        'Activity photos overflow the viewport');
+    }
+    // Autonomous searches outside an activity still retain their own feed.
+    await home.evaluate(()=>apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
+      type:'agent_progress',scope:'space',source:'object_search',agent_id:'go2',
+      run_id:'standalone-search',event_id:'standalone-step',stage:'search_selected',text:'独立搜索的下一步。'}})));
+    await home.waitForFunction(()=>[...document.querySelectorAll('.run-process-summary')]
+      .some(row=>row.textContent.includes('独立搜索的下一步')));
+    console.log('PASS: activity photos and search steps stay inside their card during a pending chat; standalone search stays in chat.');
     assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-activity-390.png')});
     assert.deepEqual(errors,[]);

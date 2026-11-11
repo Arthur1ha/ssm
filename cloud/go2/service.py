@@ -115,7 +115,7 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
         runtime = runtime_for(go2)
         if (result.get('result') == 'ok' and runtime is not None
                 and resolved['step_index'] + 1 < len(prepared['steps'])
-                and not runtime.active_reason() and runtime.data['life_state'] == 'idle'):
+                and not runtime.active_reason() and runtime.life_task_available):
             own_life = runtime.begin_life('play', trusted.session_id, run_id)
 
     def observe(receipt):

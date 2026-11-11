@@ -654,6 +654,8 @@ class DeviceSearch:
         publish_agent_event("agent_progress", agent_id="go2",
             session_id="" if autonomous else self.context.session_id,
             scope="space" if autonomous else "session", space_id=self.context.space_id,
+            activity_id=(self.context.session_id if autonomous
+                         and self.context.session_id.startswith("act_") else None),
             task_id=self.task_id, run_id=self.task_id, stage=stage,
             trace_id=correlation.get("trace_id"), parent_run_id=correlation.get("parent_run_id"),
             sequence=self.progress_sequence,

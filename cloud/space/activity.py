@@ -332,7 +332,7 @@ class ActivityStore:
 
     def _record_event_locked(self, activity_id: str, event_type: str, *, unit_id: str = "",
                              text: str = "", **facts: Any) -> dict[str, Any]:
-        allowed = {"message", "proposal", "response", "observation", "person_identified", "action", "action_progress",
+        allowed = {"message", "proposal", "response", "observation", "person_identified", "search_progress", "action", "action_progress",
                    "action_result", "question",
                    "started", "ended", "device_joined", "device_left"}
         if event_type not in allowed:
@@ -346,7 +346,7 @@ class ActivityStore:
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
                                  "interaction_kind", "game_id",
                                  "question_id", "action", "physical_stop", "reason",
-                                 "source", "confidence", "source_event_id", "display"}})
+                                 "source", "confidence", "source_event_id", "display", "stage"}})
         trigger = facts.get("trigger_message_id")
         if isinstance(trigger, str) and 0 < len(trigger) <= 120:
             event["trigger_message_id"] = trigger

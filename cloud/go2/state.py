@@ -45,6 +45,7 @@ LIFE_GUARDS = {
     "connected": "Go2 未连接",
     "active": "机器狗正在休息，请先唤醒",
     "idle": "生活状态忙碌",
+    "no_life_task": "生活状态忙碌",
     "stable": "等待有效设备反馈",
     "standing": "需要已确认站立",
     "no_body_action": "身体动作待确认",
@@ -62,7 +63,7 @@ STATE_REASON_LABELS = {
 }
 LIFE_ACTION_SPECS = {spec.action: spec for spec in (
     LifeActionSpec("request_rest", "休息", "activity", ("active",), "rest",
-                   ("connected", "active", "idle", "stable", "no_body_action", "no_motion", "not_remote")),
+                   ("connected", "active", "no_life_task", "stable", "no_body_action", "no_motion", "not_remote")),
     LifeActionSpec("wake", "唤醒", "activity", ("rest",), "active", ("connected",)),
     LifeActionSpec("start_explore", "开启探索", "life", ("idle",), "explore",
                    ("connected", "active", "stable", "standing", "no_body_action", "idle"), "admin"),
@@ -78,7 +79,7 @@ LIFE_VIEWS = {
     "life": {
         "idle": {"label": "待命", "description": "等待用户或现有自主策略接纳任务。", "type": "generic"},
         "play": {"label": "互动", "description": "已接纳的互动任务正在进行。", "type": "generic"},
-        "explore": {"label": "探索", "description": "已接纳探索任务，停下观察时也可保持探索。", "type": "generic"},
+        "explore": {"label": "探索", "description": "自由探索正在运行，观察、规划和轮次间等待均保持探索。", "type": "generic"},
     },
 }
 LIFE_TASK_STATES = ("play", "explore")
@@ -101,7 +102,8 @@ def life_transitions(region):
             # Keep the remaining guards beside the trigger that needs them.
             guard_labels = {"stable": "姿态已确认", "standing": "站立已确认",
                             "no_body_action": "无待确认动作", "no_motion": "无运动任务",
-                            "not_remote": "非遥控", "exploring": "探索已开启", "idle": "待命"}
+                            "not_remote": "非遥控", "exploring": "探索已开启", "idle": "待命",
+                            "no_life_task": "无进行中的任务"}
             rule_conditions = ["收到" + spec.label + "指令"]
             if spec.required_actor == "admin":
                 rule_conditions[0] = "收到管理员的" + spec.label + "指令"
@@ -122,13 +124,19 @@ def life_transitions(region):
                 **({"available_only": True} if source == spec.target else {}),
             })
     if region == "life":
-        for target in LIFE_TASK_STATES:
-            transitions.extend([
-                {"src": "idle", "dst": target, "trigger": "task_accepted", "label": "接到" + LIFE_VIEWS["life"][target]["label"] + "任务",
-                 "trigger_condition": LIFE_VIEWS["life"][target]["label"] + "任务已接纳"},
-                {"src": target, "dst": "idle", "trigger": "task_finished", "label": LIFE_VIEWS["life"][target]["label"] + "结束",
-                 "trigger_condition": LIFE_VIEWS["life"][target]["label"] + "任务结束，且无待确认的任务动作"},
-            ])
+        transitions.extend([
+            {"src": "idle", "dst": "explore", "trigger": "exploration_started", "label": "自主探索启动",
+             "trigger_condition": "自由探索已启动，且当前可活动、无互动任务"},
+            {"src": "explore", "dst": "idle", "trigger": "exploration_stopped", "label": "自主探索停止",
+             "trigger_condition": "探索许可已撤销，且无待确认的探索任务动作"},
+            {"src": "play", "dst": "idle", "trigger": "task_finished", "label": "互动结束",
+             "trigger_condition": "互动任务结束，且无待确认的任务动作、无有效探索许可"},
+            {"src": "play", "dst": "explore", "trigger": "task_finished", "label": "恢复探索",
+             "trigger_condition": "互动任务结束，且无待确认的任务动作、探索许可仍有效"},
+        ])
+        for source in ("idle", "explore"):
+            transitions.append({"src": source, "dst": "play", "trigger": "task_accepted", "label": "接到互动任务",
+                                "trigger_condition": "互动任务已接纳"})
     return transitions
 
 
@@ -145,7 +153,7 @@ class Go2State:
                          control_mode='normal', autonomy_mode='manual',
                          navigation_active=False, velocity_requested=False,
                          life_owner=None, life_task_id=None, life_finish_requested=False,
-                         exploration_enabled=False, last_transition=None)
+                         exploration_enabled=False, exploration_owner=None, last_transition=None)
 
     @property
     def exploration_enabled(self):
@@ -153,7 +161,23 @@ class Go2State:
 
     @exploration_enabled.setter
     def exploration_enabled(self, value):
-        self.commit('exploration_intent', exploration_enabled=bool(value))
+        self.set_exploration(value, self.data['exploration_owner'])
+
+    @property
+    def life_task_available(self):
+        """An exploration strategy between segments can yield to a new task."""
+        with self._lock:
+            return self.data['life_state'] == 'idle' or (
+                self.data['life_state'] == 'explore' and self.data['life_task_id'] is None)
+
+    @synchronized
+    def set_exploration(self, enabled, owner=None):
+        enabled = bool(enabled)
+        changes = dict(exploration_enabled=enabled, exploration_owner=owner if enabled else None)
+        if not self.active_reason() and self.life_task_available:
+            changes.update(life_state='explore' if enabled else 'idle',
+                           life_owner=owner if enabled else None)
+        self.commit('exploration_started' if enabled else 'exploration_stopped', **changes)
 
     @synchronized
     def commit(self, event, **changes):
@@ -173,7 +197,8 @@ class Go2State:
                        body_state=None, body_confirmation='unknown', body_observation_source=None,
                        pending_action=None, life_finish_requested=False,
                        body_observed_at=None, body_telemetry_fresh=False, navigation_active=False, velocity_requested=False, control_mode='normal', life_owner=None, life_task_id=None,
-                       autonomy_mode='manual', exploration_enabled=False, activity_state='active' if value == 'online' else None,
+                       autonomy_mode='manual', exploration_enabled=False, exploration_owner=None,
+                       activity_state='active' if value == 'online' else None,
                        life_state='idle' if value == 'online' else None)
         if value == 'connecting':
             changes.update(epoch=uuid.uuid4().hex, revision=-1)
@@ -208,7 +233,7 @@ class Go2State:
         stable = d['body_state'] in STABLE_BODY_STATES and d['body_confirmation'] in {'observed', 'previous_observation'}
         conditions = {
             "connected": d["connected"], "active": not active_reason,
-            "idle": d["life_state"] == "idle", "stable": stable,
+            "idle": d["life_state"] == "idle", "no_life_task": self.life_task_available, "stable": stable,
             "standing": d["body_state"] == "standing",
             "no_body_action": not d["pending_action"],
             "no_motion": not (navigation_busy or d["navigation_active"] or d["velocity_requested"]),
@@ -228,7 +253,8 @@ class Go2State:
         reason = self.life_reasons(navigation_busy=navigation_busy)['request_rest']
         if reason:
             raise ValueError(reason)
-        self.commit('request_rest', exploration_enabled=False, activity_state=LIFE_ACTION_SPECS['request_rest'].target, life_state=None,
+        self.commit('request_rest', exploration_enabled=False, exploration_owner=None,
+                    activity_state=LIFE_ACTION_SPECS['request_rest'].target, life_state=None,
                     life_owner=None, life_task_id=None)
 
     @synchronized
@@ -236,7 +262,8 @@ class Go2State:
         reason = self.life_reasons()['wake']
         if reason:
             raise ValueError(reason)
-        self.commit('wake', exploration_enabled=False, activity_state=LIFE_ACTION_SPECS['wake'].target, life_state='idle', life_owner=None, life_task_id=None)
+        self.commit('wake', exploration_enabled=False, exploration_owner=None,
+                    activity_state=LIFE_ACTION_SPECS['wake'].target, life_state='idle', life_owner=None, life_task_id=None)
 
     @synchronized
     def begin_life(self, state, owner, task_id):
@@ -251,7 +278,7 @@ class Go2State:
 
     @synchronized
     def finish_life(self, token):
-        if token != (self.data['epoch'], self.data['life_task_id']):
+        if self.data['life_task_id'] is None or token != (self.data['epoch'], self.data['life_task_id']):
             return False
         pending = self.data['pending_action']
         if pending and pending.get('life_task_id') == self.data['life_task_id']:
@@ -259,8 +286,11 @@ class Go2State:
             # physical action. Its observation callback releases this task.
             self.commit('task_waiting_for_body', life_finish_requested=True)
             return False
-        self.commit('task_finished', life_state='idle' if self.data['activity_state'] == 'active' else None,
-                    life_owner=None, life_task_id=None, life_finish_requested=False)
+        active = self.data['activity_state'] == 'active'
+        exploring = active and self.exploration_enabled
+        self.commit('task_finished', life_state=('explore' if exploring else 'idle') if active else None,
+                    life_owner=self.data['exploration_owner'] if exploring else None,
+                    life_task_id=None, life_finish_requested=False)
         return True
 
     @synchronized

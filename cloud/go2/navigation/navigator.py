@@ -120,7 +120,7 @@ class Navigator:
             raise ValueError(runtime.active_reason() or 'body_not_ready')
         self.stop()
         self.task_id = uuid.uuid4().hex
-        if runtime is not None and runtime.data['life_state'] == 'idle':
+        if runtime is not None and runtime.life_task_available:
             self._life_tokens[self.task_id] = runtime.begin_life('play', owner_session_id, self.task_id)
         self.status = "accepted"
         self.reason = None

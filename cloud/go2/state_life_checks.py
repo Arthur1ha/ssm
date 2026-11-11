@@ -205,7 +205,8 @@ def graph_runtime(tmp_path, monkeypatch, model):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cancel', [False, True])
-async def test_real_graph_owns_play_while_waiting_and_releases_on_terminal(tmp_path, monkeypatch, cancel):
+@pytest.mark.parametrize('exploring', [False, True])
+async def test_real_graph_owns_play_while_waiting_and_releases_on_terminal(tmp_path, monkeypatch, cancel, exploring):
     from langchain_core.messages import AIMessage
     entered, proceed = asyncio.Event(), asyncio.Event()
     class Model(JsonReplyModel):
@@ -216,6 +217,8 @@ async def test_real_graph_owns_play_while_waiting_and_releases_on_terminal(tmp_p
             await proceed.wait()
             return AIMessage(content='我在这里。')
     robot, graph, context = graph_runtime(tmp_path, monkeypatch, Model())
+    if exploring:
+        robot.runtime.set_exploration(True, context.session_id)
     task = asyncio.create_task(graph.run_go2_loop(context.session_id, '聊一会', context=context,
                                                 run_id='life-wait', publish_reply=False))
     await asyncio.wait_for(entered.wait(), timeout=2)
@@ -229,7 +232,7 @@ async def test_real_graph_owns_play_while_waiting_and_releases_on_terminal(tmp_p
     else:
         proceed.set()
         await task
-    assert robot.state_snapshot()['life_state'] == 'idle'
+    assert robot.state_snapshot()['life_state'] == ('explore' if exploring else 'idle')
     assert robot.state_snapshot()['life_task_id'] is None
 
 
@@ -290,6 +293,7 @@ async def test_explore_handoff_waits_old_navigation_cleanup_and_fresh_stop(monke
     navigator = SimpleNamespace(_task=old, owner_session_id=owner,
                                 stop=lambda **kwargs: old.cancel())
     def stop_drive(**kwargs):
+        robot.runtime.exploration_enabled = False
         robot.runtime.finish_life(token)
         return True
     drive = SimpleNamespace(_task=None, owner_session_id=owner, stop=stop_drive)
@@ -363,17 +367,100 @@ def test_invalid_body_frame_does_not_refresh_stale_pose(invalid):
     assert after['revision'] == before['revision']
 
 
-def test_exploration_intent_changes_gate_revision_even_while_idle():
+def test_exploration_permission_keeps_explore_between_tasks_and_changes_gate_revision():
     robot = robot_at()
     before = robot.state_snapshot()
     robot.runtime.exploration_enabled = True
     enabled = robot.state_snapshot()
     assert enabled['revision'] > before['revision']
+    assert enabled['life_state'] == 'explore'
+    assert enabled['life_task_id'] is None
+    assert robot.runtime.finish_life((enabled['epoch'], None)) is False
     assert 'stop_explore' in enabled['available_life_actions']
     robot.runtime.exploration_enabled = False
     stopped = robot.state_snapshot()
     assert stopped['revision'] > enabled['revision']
+    assert stopped['life_state'] == 'idle'
     assert 'stop_explore' not in stopped['available_life_actions']
+
+
+@pytest.mark.asyncio
+async def test_drive_entry_and_blocked_segment_keep_explore_until_explicit_stop(monkeypatch):
+    import importlib
+    module = importlib.import_module('cloud.go2.mode.free_explore')
+    nav_module = importlib.import_module('cloud.go2.navigation.navigator')
+    robot = robot_at()
+    monkeypatch.setattr(module, 'go2', robot)
+    monkeypatch.setattr(nav_module, 'navigator', SimpleNamespace(stop=MagicMock()))
+    drive = module.Drive()
+    waiting = asyncio.Event()
+    monkeypatch.setattr(drive, '_run_loop', waiting.wait)
+    segment = AsyncMock(return_value={'result': 'blocked', 'reason': 'map_session_unavailable'})
+    monkeypatch.setattr(drive, '_do_explore_owned', segment)
+    drive.start('act_explore')
+    task = drive._task
+    try:
+        assert robot.state_snapshot()['life_state'] == 'explore'
+        assert robot.state_snapshot()['life_owner'] == 'act_explore'
+        await drive._do_explore()
+        segment.assert_awaited_once()
+        assert robot.state_snapshot()['life_state'] == 'explore'
+        assert robot.state_snapshot()['life_task_id'] is None
+        assert robot.state_snapshot()['body_state'] == 'standing'
+        token = robot.runtime.begin_life('play', 'act_explore', 'peer-task')
+        await drive._do_explore()
+        segment.assert_awaited_once()  # An interaction cannot be overwritten by a new segment.
+        assert robot.state_snapshot()['life_state'] == 'play'
+        robot.runtime.finish_life(token)
+        assert robot.state_snapshot()['life_state'] == 'explore'
+    finally:
+        drive.stop()
+        await asyncio.gather(task, return_exceptions=True)
+    assert robot.state_snapshot()['life_state'] == 'idle'
+    assert robot.state_snapshot()['exploration_enabled'] is False
+
+
+@pytest.mark.parametrize('stop', [False, True])
+def test_interaction_waits_for_body_then_restores_only_valid_exploration(stop):
+    state = Go2State()
+    state.connection('online')
+    state.set_exploration(True, 'activity-owner')
+    token = state.begin_life('play', 'interaction-owner', 'interaction')
+    state.commit('body_action', pending_action={'request_id': 'body', 'life_task_id': 'interaction'})
+    assert state.finish_life(token) is False
+    assert state.snapshot()['life_state'] == 'play'
+    if stop:
+        state.set_exploration(False)
+        assert state.snapshot()['life_state'] == 'play'
+    state.finish_body_action('body', 'ok', phase='completed', confirmation='observed')
+    snapshot = state.snapshot()
+    assert snapshot['life_state'] == ('idle' if stop else 'explore')
+    assert snapshot['life_owner'] == (None if stop else 'activity-owner')
+    assert snapshot['life_task_id'] is None
+    assert state.finish_life(token) is False
+
+
+def test_exploration_never_reappears_after_disconnect_rest_or_wake():
+    state = Go2State()
+    state.connection('online')
+    state.set_exploration(True, 'activity-owner')
+    old = state.begin_life('explore', 'activity-owner', 'segment')
+    state.connection('offline')
+    assert state.snapshot()['life_state'] is None
+    state.connection('connecting')
+    state.connection('online')
+    assert state.finish_life(old) is False
+    assert state.snapshot()['life_state'] == 'idle'
+    assert state.snapshot()['exploration_owner'] is None
+    state.body('standing', confirmation='observed')
+    state.set_exploration(True, 'activity-owner')
+    state.request_rest()
+    assert state.exploration_enabled is False
+    state.set_exploration(True, 'activity-owner')
+    assert state.snapshot()['life_state'] is None
+    state.wake()
+    assert state.snapshot()['life_state'] == 'idle'
+    assert state.exploration_enabled is False
 
 
 @pytest.mark.asyncio

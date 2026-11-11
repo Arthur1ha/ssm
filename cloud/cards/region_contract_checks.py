@@ -105,7 +105,8 @@ def test_go2_declares_task_events_and_one_body_topology():
     assert machine["execution_field"] == "pending_action"
     assert regions["body"]["available_actions_field"] == "available_actions"
     automatic = {(edge["src"], edge["dst"]) for edge in regions["life"]["transitions"] if not edge.get("action")}
-    assert {("idle", "play"), ("play", "idle"), ("idle", "explore"), ("explore", "idle")} <= automatic
+    assert {("idle", "play"), ("play", "idle"), ("idle", "explore"), ("explore", "idle"),
+            ("explore", "play"), ("play", "explore")} <= automatic
     permission_stop = next(edge for edge in regions["life"]["transitions"]
                            if edge.get("availability_key") == "stop_explore" and edge["src"] == "idle")
     assert permission_stop["dst"] == "idle" and permission_stop["available_only"] is True

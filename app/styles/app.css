@@ -806,6 +806,8 @@ body {
 .space-activity__item:last-child::before { display: none; }
 .space-activity__time { color: var(--color-text-dim); font: 9px var(--font-mono); line-height: 1.6; white-space: nowrap; }
 .space-activity__content { min-width: 0; }
+.space-activity__photo { display: block; width: fit-content; max-width: 100%; margin-top: 8px; }
+.space-activity__photo img { display: block; max-width: 100%; max-height: 220px; border-radius: 8px; }
 .space-activity__speaker { margin: 0 0 4px; color: #9de8ff; font-size: 10px; font-weight: 600; }
 .space-activity__bubble { display: inline-block; max-width: 100%; padding: 8px 11px; border: 1px solid rgba(75,212,255,.19); border-radius: 10px; background: rgba(75,212,255,.055); color: var(--color-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .space-activity__bubble a, .space-activity__observation a { display: inline-block; margin-left: 8px; color: #9de8ff; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }

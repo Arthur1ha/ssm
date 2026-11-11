@@ -62,6 +62,8 @@ window.ActivityFeed = ActivityFeed;
 
 function activityEventKind(event = {}) {
   const type = String(event.event_type || '').toLowerCase();
+  if (type === 'search_progress') return ['search_observe', 'search_candidate', 'search_confirmed']
+    .includes(event.stage) ? 'observation' : 'status';
   if (type.includes('question')) return 'question';
   if (type.includes('observation') || type.includes('observed') || type === 'person_identified') return 'observation';
   if (type.includes('message') || type.includes('proposal') || type.includes('reply')) return 'message';
@@ -105,6 +107,12 @@ function projectActivityEvents(events) {
   for (const event of events) {
     if (event.display === false) continue;
     if (event.event_type === 'started') continue; // The activity heading already says this.
+    // Search steps are individual records, even when they share a task and
+    // repeat a description while inspecting a different camera frame.
+    if (event.event_type === 'search_progress') { visible.push(event); continue; }
+    if (event.event_type === 'observation' && event.source === 'go2.camera'
+      && activityMediaUrl(event) && events.some(item => item.event_type === 'search_progress' && item.display !== false
+        && item.unit_id === event.unit_id && activityMediaUrl(item) === activityMediaUrl(event))) continue;
     if (event.event_type === 'response' && event.status === 'ok') continue;
     // Message delivery is already expressed under the conversation. It is not
     // another device action and does not deserve its own progress row.
@@ -305,7 +313,6 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
             {kind === 'message' || kind === 'question' ? <>
               <div className="space-activity__bubble" data-decision-reason={basis ? true : undefined}>{activityDecisionText(event,
                 text || (kind === 'question' ? '需要你帮忙看一下。' : '发送了一条消息'))}
-                {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
               </div>
               {(receipt || linkedTask || basis) && <div className="space-activity__message-meta">
                 {receipt && <span className="space-activity__receipt">{receipt}</span>}
@@ -317,7 +324,6 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
               </button>}
             </> : kind === 'observation' ? <div className="space-activity__observation">
               <span>观察</span><p>{text || '一条新观察'}</p>
-              {mediaUrl && <a href={mediaUrl} target="_blank" rel="noopener noreferrer">查看截图</a>}
             </div> : <div className={actionEvent ? 'space-activity__action' : 'space-activity__status'}
               data-outcome={actionEvent ? event.status || 'executing' : undefined}>
               <p data-decision-reason={basis ? true : undefined}>{activityDecisionText(event, activityStatusText(event, name, true))}</p>
@@ -325,6 +331,9 @@ function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
               {actionEvent && <button type="button" className="space-activity__evidence-link"
                 onClick={() => setSelectedEvent(event)}>查看变化依据<Icon name="arrow" size={12}/></button>}
             </div>}
+            {mediaUrl && <a className="space-activity__photo" href={mediaUrl} target="_blank" rel="noopener noreferrer">
+              <img src={mediaUrl} alt="机器狗观察照片" loading="lazy"/>
+            </a>}
           </div>
         </div>;
       })}

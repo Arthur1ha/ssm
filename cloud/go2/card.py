@@ -49,7 +49,7 @@ def _publish_go2_state() -> None:
             "available_life_actions", "life_blocked_reasons", "pending_action", "ts",
             "last_action", "body_observation_source", "body_observed_at",
             "available_manual_actions", "blocked_manual_actions",
-            "body_telemetry_fresh", "exploration_enabled", "last_transition",
+            "body_telemetry_fresh", "exploration_enabled", "exploration_owner", "last_transition",
         )
         state = {key: snapshot[key] for key in fields if key in snapshot}
         state.update(unit_id="go2", ts=snapshot.get("ts", time.time()))
@@ -225,7 +225,7 @@ def _build_go2_card() -> dict:
             "state_field": "autonomy_mode",
             "options": [
                 {"value": "manual",       "label": "待命", "description": "不自主巡游，仍响应用户命令和已教导的事件动作"},
-                {"value": "free_explore", "label": "允许自主探索", "description": "允许现有自主策略发起探索，当前生活状态另行显示；休息和显式停止后不会自动重放任务"},
+                {"value": "free_explore", "label": "允许自主探索", "description": "自主探索启动后持续显示探索，互动任务接管时显示互动；休息和显式停止后不会自动重放任务"},
             ],
             "get": "/api/go2/autonomy",
             "set_action": "set_mode",

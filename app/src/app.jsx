@@ -146,6 +146,8 @@ function App({ session, logout, refreshSession }) {
   useEffect(() => {
     const onEvent = event => {
       const item = event.detail || {};
+      // Activity-owned progress and media are persisted in its timeline.
+      if (item.scope === 'space' && item.activity_id) return;
       if (item.type === 'agent_progress' && item.scope === 'space'
           && item.source === 'object_search' && item.run_id) {
         appendProcess(`search-${item.run_id}`, 'go2', processEventText(item), item.event_id,

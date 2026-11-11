@@ -272,7 +272,7 @@ async def execute_action(command: str, params: dict | None = None, *,
     params = checked['params']
     runtime = runtime_for(go2)
     token = None
-    if command != "StopMove" and runtime is not None and runtime.data['life_state'] == 'idle':
+    if command != "StopMove" and runtime is not None and runtime.life_task_available:
         token = runtime.begin_life('play', context.session_id, life_task_id or 'command_' + uuid.uuid4().hex)
     dispatch_epoch = runtime.data['epoch'] if runtime is not None else None
     dispatch_life_id = runtime.data['life_task_id'] if runtime is not None else None
@@ -381,7 +381,7 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
     started = time.monotonic()
     runtime = runtime_for(go2)
     life_token = None
-    if spec.motion and name not in {'go2_life', 'go2_sport'} and runtime is not None and runtime.data['life_state'] == 'idle':
+    if spec.motion and name not in {'go2_life', 'go2_sport'} and runtime is not None and runtime.life_task_available:
         life_token = runtime.begin_life('play', context.session_id, 'tool_' + str(id(asyncio.current_task())))
     try:
         with use_context(context):

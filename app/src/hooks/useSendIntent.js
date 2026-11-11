@@ -32,6 +32,7 @@ function useSendIntent() {
       if (!active) return;
       const outer = event.detail || {};
       const payload = outer.payload || outer.data || outer;
+      if (payload.scope === 'space') return;
       if (!active.traceId) {
         if (payload.trace_id && active.pendingEvents.length < 100) active.pendingEvents.push(payload);
         return;

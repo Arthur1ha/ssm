@@ -790,7 +790,8 @@ class Drive:
 
     async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:
         runtime = runtime_for(go2)
-        if runtime is not None and (runtime.active_reason() or not runtime.exploration_enabled):
+        if runtime is not None and (runtime.active_reason() or not runtime.exploration_enabled
+                                    or not runtime.life_task_available):
             return
         token = runtime.begin_life('explore', self.owner_session_id, 'explore_' + __import__('uuid').uuid4().hex) if runtime else None
         try:
@@ -877,7 +878,7 @@ class Drive:
             stopped = self.stop(owner_session_id=owner_session_id)
             if stopped and allowed and paused[0] is not None:
                 self._paused_exploration = paused
-                runtime.exploration_enabled = True
+                runtime.set_exploration(True, paused[0])
             return stopped
         finally:
             self._pause_in_progress = False
@@ -893,7 +894,7 @@ class Drive:
                 or runtime.data['autonomy_mode'] != 'free_explore'):
             self._paused_exploration = None
             return False
-        if (runtime.active_reason() or runtime.data['life_state'] != 'idle'
+        if (runtime.active_reason() or not runtime.life_task_available
                 or runtime.data['control_mode'] != 'normal' or go2.pending_action
                 or go2.body_state != 'standing' or go2.body_ready_reason()):
             return False
@@ -919,7 +920,7 @@ class Drive:
         if runtime is not None:
             if runtime.active_reason():
                 return
-            runtime.exploration_enabled = True
+            runtime.set_exploration(True, owner_session_id)
         self._state            = MotivationalState.IDLE
         self._curiosity        = 0
         self._initial_exploration = True

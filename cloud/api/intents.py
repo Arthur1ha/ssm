@@ -319,6 +319,20 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
              "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
              "step_id": step_id or None, "source": source,
              "text": text.strip(), "ts": time.time(), **facts}
+    if (event_type == "agent_progress" and scope == "space"
+            and source == "object_search" and agent_id == "go2"):
+        from cloud.space.activity import get_activity_store
+        from cloud.go2.router import get_activity_mode_owner
+        activity_id = event.get("activity_id")
+        activity = get_activity_store().current(space_id)
+        # Bind to the originating execution context, never to whichever
+        # activity happens to be current when a delayed search update arrives.
+        if (activity_id and activity and activity.get("activity_id") == activity_id
+                and get_activity_mode_owner() == activity_id):
+            get_activity_store().record_event(activity_id, "search_progress", unit_id=agent_id,
+                text=event["text"], status=status, task_id=facts.get("task_id") or run_id,
+                stage=facts.get("stage"), media_ref=facts.get("media_ref"), source=source,
+                source_event_id=event["event_id"])
     if scope == "space" and source == "autonomous" and agent_id in {"go2", "esp32_desk_led"}:
         from cloud.space.activity import get_activity_store
         activity = get_activity_store().current(space_id)

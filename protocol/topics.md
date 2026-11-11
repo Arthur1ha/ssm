@@ -49,9 +49,9 @@ ssm/agents/{device_id}/{type} # 整机级（status / location）
 - `connected`、`connection_state=offline|connecting|online`；服务的 status/LWT 仍决定发现在线状态，WebRTC 控制连接由这些字段表示。
 - `activity_state=active|rest|null`；`life_state=idle|play|explore|null`，休息或离线时生活区域不激活。
 - `body_state` 为 12 个业务身体状态；未取得可靠反馈时为 `null`（无已确认姿态，不是额外状态节点），`body_confirmation` 区分已确认与待确认；休息保留身体事实。
-- `control_mode=normal|remote` 与实际 `moving` 独立；`autonomy_mode=manual|free_explore` 是配置，不能推断当前生活状态。
+- `control_mode=normal|remote` 与实际 `moving` 独立；`autonomy_mode=manual|free_explore` 是配置。自由探索实际启动后，`life_state=explore` 覆盖观察、规划、移动和轮次间等待；互动任务接管时为 `play`，结束且探索许可仍有效时回到 `explore`。休息、断连和显式停止撤销探索许可，不能只凭模式配置恢复探索。
 - `pending_action`、`available_actions`、`blocked_actions`、`available_life_actions`、`life_blocked_reasons` 描述真实执行阶段和当前门禁；可附带 `life_owner`、`life_task_id` 供任务追溯。
-- 可选 `last_action` 保存最近动作终态，包含动作名、关联 ID、阶段、结果与确认依据；`body_observation_source`、`body_observed_at`、`body_telemetry_fresh` 解释身体观测来源与新鲜度。`exploration_enabled` 表示当前探索许可，和 `autonomy_mode` 配置及 `life_state` 当前任务分别表达。`last_transition` 提供最近事实变化原因。
+- 可选 `last_action` 保存最近动作终态，包含动作名、关联 ID、阶段、结果与确认依据；`body_observation_source`、`body_observed_at`、`body_telemetry_fresh` 解释身体观测来源与新鲜度。`exploration_enabled` 表示当前探索许可，`exploration_owner` 记录该许可归属；无具体任务时，持续探索的 `life_task_id=null`、`life_owner=exploration_owner`。具体任务仍按自身 ID 和真实回执结束；一轮结束不撤销探索许可。`last_transition` 提供最近事实变化原因。
 
 `body_observation_source=joint_posture` 表示结合当前连接的关节、IMU 和平面运动反馈检查姿态，不是仅靠高度或开机默认值。当前动作阶段可由本次发送后的关节运动证据进入 `executing`；`last_action.phase=completed|recovered|rejected|error` 与 `result` 分开解释：恢复到可靠姿态不等于之前超时或取消的动作已经成功。动作目录声明 `completion=joint_posture` 时，仅在相应真实观测可用时等待完成；缺少该反馈仍返回请求接受且保持未确认。
 

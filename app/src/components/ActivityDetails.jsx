@@ -1,11 +1,14 @@
 /* Live device facts stay separate from the historical evidence of one action. */
 function ActivityMembers({activity, events = [], agents = [], unitData = {}, connected, getName = getAgentDisplayName}) {
-  const [now, setNow] = React.useState(() => Date.now() / 1000);
+  const [, refreshAge] = React.useState(0);
   React.useEffect(() => {
     // Age the displayed feedback without polling the device or API.
-    const timer = setInterval(() => setNow(Date.now() / 1000), 10000);
+    const timer = setInterval(() => refreshAge(value => value + 1), 10000);
     return () => clearInterval(timer);
   }, []);
+  // SSE updates also render between ticks; compare their timestamps to the
+  // current clock, otherwise new feedback can look more than five seconds ahead.
+  const now = Date.now() / 1000;
   const ids = [...new Set([...Object.keys(activity?.devices || {}), ...events.map(event => event.unit_id)])]
     .filter(id => id && id !== 'cloud_orchestrator');
   if (!ids.length) return <p className="activity-members__empty">正在确认参与的伙伴…</p>;

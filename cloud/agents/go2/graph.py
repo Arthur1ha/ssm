@@ -192,7 +192,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 await prepare_user_interaction(context)
             except ValueError as exc:
                 return {'result': 'blocked', 'error': str(exc), 'run_id': run.run_id}
-        if runtime.data['life_state'] == 'idle':
+        if runtime.life_task_available:
             interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
 
     training_attempt_start = len(run.steps)
@@ -244,7 +244,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         runtime = runtime_for(go2)
         if (name not in READ_ONLY_TOOLS and name != 'go2_life' and runtime is not None
                 and not TOOL_REGISTRY[name].motion):
-            if not runtime.active_reason() and runtime.data['life_state'] == 'idle':
+            if not runtime.active_reason() and runtime.life_task_available:
                 interaction_token = runtime.begin_life('play', context.session_id, run.run_id)
         # A life command is itself the requested task, so release this Graph's
         # completed interaction before evaluating idle-only rest.
