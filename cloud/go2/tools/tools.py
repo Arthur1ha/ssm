@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 from dataclasses import asdict, is_dataclass
@@ -64,9 +65,14 @@ _OBSERVE_SYSTEM_PROMPT = (
 
 async def go2_observe(question: str = "描述你看到的场景") -> str:
     from langchain_core.messages import SystemMessage
-    frame_b64 = go2.latest_frame_b64()
-    if not frame_b64:
+    from cloud.go2.perception.vision import frame_is_fresh
+    captured = go2.latest_frame_snapshot()
+    if captured is None:
         return "无可用视频帧，请确认 Go2 已连接且视频流正常"
+    jpeg, meta = captured
+    if not frame_is_fresh({"ts": meta.get("captured_at")}):
+        return "视频帧已过期，请等待新画面后重试"
+    frame_b64 = base64.b64encode(jpeg).decode("ascii")
     resp = await get_vision_llm().ainvoke([
         SystemMessage(content=_OBSERVE_SYSTEM_PROMPT),
         HumanMessage(content=[
@@ -214,7 +220,6 @@ def _identity_result(snapshot) -> dict:
     payload["result"] = {
         "recognized": "ok",
         "unknown": "ok",
-        "candidate": "ok",
         "idle": "ok",
         "rejected": "rejected",
         "disabled": "disabled",

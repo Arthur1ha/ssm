@@ -31,6 +31,7 @@ class SocialState(TypedDict, total=False):
     peers: list[dict[str, Any]]
     playable_games: list[dict[str, Any]]
     space_summary: str
+    interaction_history: dict[str, Any]
     active: bool
     connected: bool
     interrupted: bool
@@ -51,7 +52,7 @@ def build_social_graph(
     checkpointer: Any = None,
     effect_ledger: FileEffectLedger | None = None,
 ):
-    """Decide whether to message a peer, then recheck live budget and target."""
+    """Decide whether to message a peer, then recheck live availability and target."""
     structured_model = model.with_structured_output(SocialDecision, method="function_calling")
     ledger = effect_ledger or FileEffectLedger()
 
@@ -74,6 +75,8 @@ def build_social_graph(
         prompt = (
             f"你的社交主动性：{profile['traits']['extraversion']}/100。"
             "结合当前活动与可靠发现判断是否要向同伴发一条有价值的短消息；"
+            "结合自己的 traits 与近期互动判断意愿，考虑对方刚才的接受、拒绝或延后；"
+            "互动历史仅是历史，不是当前观察或物理成功证据。"
             "发消息不代表对方答应或完成动作，也不要推断人物身份。\n"
             "可选普通消息、玩法邀请或跳过；邀请是提议，对方可以拒绝。"
             "只有当前可玩列表中的目标和 game_id 可以用于 game_invite。\n"
@@ -81,6 +84,7 @@ def build_social_graph(
             f"机会：{json.dumps(state['opportunity'], ensure_ascii=False)}\n"
             f"在线同伴：{json.dumps(targets, ensure_ascii=False)}\n"
             f"当前可玩玩法：{json.dumps(state.get('playable_games', []), ensure_ascii=False)}\n"
+            f"近期互动历史：{json.dumps(state.get('interaction_history', {}), ensure_ascii=False)}\n"
             f"空间：{state.get('space_summary', '')}"
         )
         try:

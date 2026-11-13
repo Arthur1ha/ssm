@@ -36,16 +36,17 @@ class ScriptedModel(JsonReplyModel):
 async def test_event_proposal_retry_preserves_trigger_and_can_repair_parameters(entry, monkeypatch):
     from copy import deepcopy
     from cloud.agents.common.training import tools
-    definition = {'transition_ids': ['tr_sit'], 'origins': ['agent_autonomous'],
-                  'conditions': [], 'cooldown_s': None, 'defaults': {},
+    definition = {'steps': [{'transition_ids': ['tr_sit'], 'conditions': [],
+                             'defaults': {'unsupported_count': 2}}],
+                  'origins': ['agent_autonomous'], 'cooldown_s': None,
                   'trigger': {'event_id': 'vision.owner_recognized',
-                              'where': {}, 'params': {'recognized': True}}}
+                              'where': {'recognized': True}}}
     original = {'operation': 'create', 'unit_id': 'go2', 'name': '看到主人就坐下',
                 'effect_text': '确认主人后自动坐下', 'definition': definition}
     dropped = deepcopy(original)
     dropped['definition']['trigger'] = None
     fixed = deepcopy(original)
-    fixed['definition']['trigger'] = {'event_id': 'vision.owner_recognized', 'where': {'recognized': True}, 'params': {}}
+    fixed['definition']['steps'][0]['defaults'] = {}
     replies = [AIMessage(content='', tool_calls=[{'name': 'propose_training',
         'id': 'attempt-' + str(index), 'args': args}]) for index, args in enumerate((original, dropped, fixed))]
     model = ScriptedModel([*replies, AIMessage(content='草案已准备，请确认。')])
@@ -58,7 +59,7 @@ async def test_event_proposal_retry_preserves_trigger_and_can_repair_parameters(
         posts.append(payload)
         if len(posts) == 1:
             raise tools.TrainingAPIError('invalid_definition', status_code=422,
-                                         details={'details': 'recognized belongs in trigger.where'})
+                                         details={'details': 'unsupported action parameter'})
         return {'proposal_id': 'corrected-draft'}
     monkeypatch.setattr(tools, 'internal_api_call', api)
     context = ExecutionContext('retry-session', 'admin', True, expires_at=int(time.time())+60)
@@ -66,7 +67,7 @@ async def test_event_proposal_retry_preserves_trigger_and_can_repair_parameters(
     assert len(posts) == 2, result
     assert posts[-1]['definition']['trigger'] == fixed['definition']['trigger']
     results = [step['result'] for step in result['tool_results']]
-    assert results[0]['details']['details'] == 'recognized belongs in trigger.where'
+    assert results[0]['details']['details'] == 'unsupported action parameter'
     assert results[1]['error'].startswith('event_trigger_changed_on_retry')
     assert results[2]['result'] == 'ok'
 
@@ -172,8 +173,8 @@ async def test_rule_revisions_use_existing_graph_and_preserve_rule_reference(ent
     """An arbitrary follow-up revises its selected draft/rule through native tools."""
     from cloud.agents.common.training import tools as training_tools
 
-    definition = {'transition_ids': ['tr_greeting'], 'origins': ['user_delegated'],
-                  'conditions': [], 'cooldown_s': 45, 'defaults': {}, 'trigger': None}
+    definition = {'steps': [{'transition_ids': ['tr_greeting'], 'conditions': [], 'defaults': {}}],
+                  'origins': ['user_delegated'], 'cooldown_s': 45, 'trigger': None}
     record = {'teaching_id': 'rule_greeting', 'revision': 4,
               'definition': {**definition, 'cooldown_s': 20}, 'name': '挥手后间隔20秒'}
     previous = {'proposal_id': 'draft_greeting', 'operation': 'create',

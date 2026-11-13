@@ -42,6 +42,14 @@ def listener(monkeypatch, tmp_path):
         calls.append((name, params, context, request_id))
         return {'result': 'accepted'}
     monkeypatch.setattr(events, 'execute_tool', execute)
+    async def run_behavior(prepared, context, *, run_id, availability):
+        # Unit tests stop at the whole-behavior boundary. The bound_listener
+        # tests below exercise the real workflow and physical receipt ledger.
+        edge = next(edge for edge in prepared['catalog']['transitions']
+                    if edge['id'] in prepared['steps'][0]['transition_ids'])
+        return await events.execute_tool('go2_sport', {'cmd': edge['action']},
+                                         context=context, request_id=run_id)
+    monkeypatch.setattr(service, 'run_training_behavior', run_behavior)
     listener = events.PersonTeachingListener()
     listener.configure(connected=True)
     return listener, robot, snapshot, drive, calls
@@ -60,6 +68,8 @@ def bound_listener(device, monkeypatch, tmp_path):
     monkeypatch.setenv('SSM_TRAINING_DIR', str(tmp_path / 'training'))
     monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path / 'checkpoints'))
     monkeypatch.setattr(service, '_send_loaded_ack', lambda *a: True)
+    from cloud.go2.card import _build_go2_card
+    monkeypatch.setattr(service, '_target', lambda *a: _build_go2_card())
     monkeypatch.setattr(events, 'go2', robot)
     monkeypatch.setattr(events, 'control_lease', lease)
     monkeypatch.setattr('cloud.go2.control.control_lease', lease)
@@ -405,6 +415,33 @@ async def test_another_users_control_lease_does_not_become_teaching_authority(li
 
 
 @pytest.mark.asyncio
+async def test_appearance_waits_for_body_telemetry_without_requiring_reentry(listener):
+    adapter, _, snapshot, _, calls = listener
+    snapshot['body_telemetry_fresh'] = False
+    adapter.on_vision_frame(frame(1, True))
+    assert calls == [] and adapter._waiting_appearance is not None
+    snapshot['body_telemetry_fresh'] = True
+    adapter.on_vision_frame(frame(2, True))
+    await flush(adapter)
+    assert len(calls) == 1
+    adapter.on_vision_frame(frame(3, True))
+    await flush(adapter)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_user_takeover_discards_appearance_waiting_for_telemetry(listener):
+    adapter, _, snapshot, _, calls = listener
+    snapshot['body_telemetry_fresh'] = False
+    adapter.on_vision_frame(frame(1, True))
+    adapter.interrupt()
+    snapshot['body_telemetry_fresh'] = True
+    adapter.on_vision_frame(frame(2, True))
+    await flush(adapter)
+    assert calls == [] and adapter._waiting_appearance is None
+
+
+@pytest.mark.asyncio
 async def test_bound_event_reuses_command_ledger_and_manual_hello_stays_available(bound_listener):
     from cloud.go2.tools.executor import execute_tool
     adapter, robot, _, f = bound_listener
@@ -416,7 +453,7 @@ async def test_bound_event_reuses_command_ledger_and_manual_hello_stays_availabl
              'ts': now, 'deadline': now + 5}
     await adapter.handle_event(event, context)
     await adapter.handle_event(event, context)
-    assert robot.send_command.await_count == 1
+    assert robot.send_command.await_count == 1, adapter.last_result
     assert adapter.last_result['replayed'] is True
     manual = replace(context, actor='admin', persist=True, origin_kind='user_delegated',
                      trigger_mode_epoch=None)
@@ -424,7 +461,7 @@ async def test_bound_event_reuses_command_ledger_and_manual_hello_stays_availabl
     assert robot.send_command.await_count == 2
     stale = replace(context, trigger_ref=f['records'][0]['teaching_id'],
                     trigger_revision=f['records'][0]['revision'],
-                    trigger_transition_id=f['records'][0]['definition']['transition_ids'][0])
+                    trigger_transition_id=f['records'][0]['definition']['steps'][0]['transition_ids'][0])
     blocked = await execute_tool('go2_sport', {'cmd': 'Hello'}, context=stale, request_id='stale-event')
     assert blocked['result'] == 'blocked'
     assert blocked['reasons'][0]['code'] == 'autonomy_unavailable'
@@ -491,10 +528,11 @@ def save_owner_teaching(f, action):
     from cloud.agents.common.training import store
     record = deepcopy(f['records'][0])
     edge = next(edge for edge in f['catalog']['transitions'] if edge['action'] == action)
+    record['definition']['steps'][0]['transition_ids'] = [edge['id']]
     record['definition'].update(
-        transition_ids=[edge['id']], cooldown_s=None,
+        cooldown_s=None,
         situation='摄像头确认面前是主人时',
-        trigger={'event_id': 'vision.owner_recognized', 'where': {'recognized': True}, 'params': {}})
+        trigger={'event_id': 'vision.owner_recognized', 'where': {'recognized': True}})
     with store.partition_lock('go2', space_id='main', write=True) as data:
         data['records'][record['teaching_id']] = record
 
@@ -528,7 +566,8 @@ async def test_provider_identity_reaches_graph_and_original_executor(bound_liste
     person = SimpleNamespace(person_id='owner-1', name='主人', role='owner')
     provider = SimpleNamespace(search_persons=AsyncMock(return_value=FaceSearchResult(
         (FaceCandidate('owner-1', '主人', 99),))))
-    skill = IdentitySkill(provider, SimpleNamespace(get=lambda _: person), lambda: (None, None))
+    source_frame = {**face_frame(1), 'faces': {'count': 1, 'boxes': [(0, 0, 100, 100)]}}
+    skill = IdentitySkill(provider, SimpleNamespace(get=lambda _: person), lambda: (source_frame, b'jpeg'))
     monkeypatch.setattr(skill, '_get_face_crop', lambda: b'fresh-face')
     skill.add_callback(service._on_identity_event)
     adapter.on_vision_frame(face_frame(1))
@@ -596,9 +635,10 @@ async def test_inflight_identity_for_departed_face_is_discarded(monkeypatch):
         entered.set()
         await release.wait()
         return FaceSearchResult((FaceCandidate('owner-1', '主人', 99),))
+    source_frame = {**face_frame(1), 'faces': {'count': 1, 'boxes': [(0, 0, 100, 100)]}}
     skill = IdentitySkill(SimpleNamespace(search_persons=search),
         SimpleNamespace(get=lambda _: SimpleNamespace(person_id='owner-1', name='主人', role='owner')),
-        lambda: (None, None))
+        lambda: (source_frame, b'jpeg'))
     monkeypatch.setattr(skill, '_get_face_crop', lambda: b'old-face')
     observations = []
     skill.add_callback(lambda event: observations.append(event.current.status))
@@ -660,7 +700,8 @@ async def test_person_presence_cannot_authorize_an_owner_event(bound_listener):
     record = store.list_records('go2', space_id='main')[0]
     context = replace(adapter._context, trigger_mode_epoch=adapter._generation,
         trigger_ref=record['teaching_id'], trigger_revision=record['revision'],
-        trigger_transition_id=record['definition']['transition_ids'][0],
+        trigger_transition_id=record['definition']['steps'][0]['transition_ids'][0],
+        trigger_step_index=0,
         trigger_situation_confirmed=True, expires_at=int(time.time()+30))
     result = await execute_tool('go2_sport', {'cmd': 'Sit'}, context=context,
                                 request_id='wrong-observation')

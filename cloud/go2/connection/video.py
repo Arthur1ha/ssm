@@ -3,8 +3,12 @@ import base64
 import io
 import logging
 import time
+from cloud.agents.common.runner import invoke_blocking
 
 logger = logging.getLogger(__name__)
+
+JPEG_QUALITY = 90
+ENCODE_INTERVAL_S = 0.1  # Keep recognition detail; bound encoding work to 10 fps.
 
 
 class Go2Video:
@@ -21,8 +25,7 @@ class Go2Video:
         return self._frame_ready
 
     async def _consume_video(self, track) -> None:
-        loop = asyncio.get_event_loop()
-        logger.info("[Go2/Video] 采集开始")
+        logger.info("[Go2/Video] 采集开始 JPEG=%d max_fps=%.0f", JPEG_QUALITY, 1 / ENCODE_INTERVAL_S)
         last_encode = 0.0
         session = getattr(self, '_odom_session_id', None)
         while self.is_connected and session == getattr(self, '_odom_session_id', None):
@@ -38,17 +41,17 @@ class Go2Video:
                 logger.warning("[Go2/Video] track 结束: %s", e)
                 break
             now = time.monotonic()
-            if now - last_encode < 0.04:  # ~25fps
+            if now - last_encode < ENCODE_INTERVAL_S:
                 continue
             try:
                 img = frame.to_image()
 
                 def encode():
                     buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=40)
+                    img.save(buf, format="JPEG", quality=JPEG_QUALITY)
                     return buf.getvalue()
 
-                encoded = await loop.run_in_executor(None, encode)
+                encoded = await invoke_blocking(encode)
                 if session != getattr(self, '_odom_session_id', None) or not self.is_connected:
                     break
                 self._latest_frame = encoded

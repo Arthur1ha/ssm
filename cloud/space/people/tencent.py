@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .provider import (
+    FACE_MATCH_THRESHOLD,
     CreatedPerson,
     DuplicateFaceCandidate,
     FaceCandidate,
@@ -35,14 +36,12 @@ class TencentFaceProvider:
         group_id: str,
         *,
         timeout: float = 5.0,
-        face_match_threshold: float = 80.0,
     ) -> None:
         if not group_id:
             raise FaceProviderNotConfigured("missing_group_id", "未配置腾讯云人员库")
         self._client = client
         self.group_id = group_id
         self.timeout = timeout
-        self.face_match_threshold = face_match_threshold
 
     async def _call(self, method: Callable, request: Any) -> Any:
         # 每次调用使用短生命周期私有池。Python 3.13.12 + requests 环境中，
@@ -118,7 +117,7 @@ class TencentFaceProvider:
         req.MaxPersonNum = 3
         req.MinFaceSize = 80
         req.QualityControl = 2
-        req.FaceMatchThreshold = self.face_match_threshold
+        req.FaceMatchThreshold = FACE_MATCH_THRESHOLD
         req.NeedPersonInfo = 1
         resp = await self._call(self._client.SearchPersons, req)
         candidates: list[FaceCandidate] = []
@@ -195,5 +194,4 @@ def create_tencent_face_provider_from_env() -> TencentFaceProvider:
         client,
         group_id,
         timeout=timeout,
-        face_match_threshold=float(os.getenv("GO2_FACE_CANDIDATE_SCORE", "80")),
     )

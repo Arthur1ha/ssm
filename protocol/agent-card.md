@@ -43,6 +43,16 @@ Go2 的 `states` 仅声明实际姿态和动作，不声明 `unknown` 或“姿�
 
 灯的云端字段通过 `/api/devices`、设备 API 与全局 `/api/events` SSE 的统一展示投影附加到 `state`。`control_ts` 是该投影自己的变化游标，控制事实不变时保持不变；每次配置、让位截止时间或到期状态改变时严格递增。消费者将物理 `ts` 与 `control_ts` 分别合并：新控制事件可复用旧物理时间，后续物理上报也不能清除较新的控制字段。`control_ts` 不刷新物理观测的新鲜度，`online` 仍由 MQTT status/LWT 决定；`ism`、RGB、亮度和原始 `ts` 仍来自边缘。该投影不会成为第二份物理状态存储或写入 `ssm/agents/{unit_id}/state`。
 
+## Go2 人物与身份观察
+
+Go2 的 `vision.person_presence`、`vision.face_presence` 和 `vision.owner_recognized` 使用新鲜相机观察。
+检测帧的 `ts` 为采集时间，`source_frame_id` / `camera_session_id` 标识原始帧与连接会话；
+重复帧不产生新观察，超过 5 秒的观察不能证明当前有人或当前身份。
+身份匹配分达到 80 且对应本地登记人员才返回 `recognized`；无匹配返回 `unknown`（陌生人），
+无人脸、多脸、小脸、过期画面和服务错误不能作为陌生人或主人的证据。
+身份结果的 `ts` / `frame_id` 指向实际用于匹配的检测帧，最多有效 5 秒；人脸框连续性不能替代身份复核。
+临时服务故障不改变 Card 中配置性的身份能力声明，也不改变已确认教导的能力哈希；运行时错误由身份接口报告。
+
 ## Go2 相对移动
 
 公开 `go2_move` / `MOVE` 技能使用 `direction`、`distance_m`、`angle_deg` 和可选 `speed`。前进、后退、左移、右移必须提供 `distance_m`（0.1–5 米）；原地左转、右转必须提供 `angle_deg`（5–180 度），两个目标参数互斥。`speed` 是平移速度或转向角速度上限。删除移动的 `duration` 参数，旧定时请求拒绝，不用速度乘时间推测走距；LED 等其他技能的持续时间不变。

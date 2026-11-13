@@ -605,9 +605,10 @@ async def go2_mind_last_decision(context=Depends(require_authenticated_read)):
 @router.get("/vision")
 async def go2_vision_latest(context=Depends(require_authenticated_read)):
     """返回最近一次 OpenCV 检测的结构化结果。"""
-    if vision_loop.latest is None:
+    frame, _ = vision_loop.latest_frame_pair()
+    if frame is None:
         raise HTTPException(status_code=503, detail="暂无检测数据，请确认 Go2 已连接")
-    return vision_loop.latest
+    return frame
 
 
 @router.get("/vision/stream")

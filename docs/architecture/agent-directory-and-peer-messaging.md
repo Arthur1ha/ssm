@@ -119,6 +119,6 @@ LangGraph 库提供子图、handoff，以及 `StateGraph`、`Command`、`Send` �
 
 这些能力不能直接替换 SSM 的 MQTT retained/LWT 发现、空间授权、消息过期与重放防护、物理执行去重和真实回执。Graph 检查点不代表硬件动作已经完成；恢复或重试仍需现有执行账本保证副作用幂等。
 
-`peers/inbound.py` 中的 Go2 回复生成、`peers/games.py` 中的多阶段游戏流程是适合进一步移到 `agents/*/workflows/` 的候选；本次仅记录边界，没有迁移它们。`messaging.py`、`view.py`、`policy.py` 等仍承担协议与业务适配，不能通过增加 handoff 包直接删除。
+`peers/inbound.py` 保留通用收信分发，`peers/games/` 按游戏维护规则、玩法、策略说明与执行适配，由统一注册表汇总；模型决策继续调用 `agents/*/workflows/` 的既有 Graph。`messaging.py`、`view.py`、`policy.py` 等仍承担协议与业务适配，不能通过增加 handoff 包直接删除。
 
 参考：[LangChain 多智能体模式](https://docs.langchain.com/oss/python/langchain/multi-agent)、[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、[RemoteGraph](https://docs.langchain.com/langsmith/use-remote-graph)、[Agent Server A2A](https://docs.langchain.com/langsmith/server-a2a)。

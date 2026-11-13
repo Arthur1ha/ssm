@@ -39,7 +39,13 @@ def person_greeting_fixture():
     record = hello_cooldown(60)
     from cloud.go2.card import _build_go2_card
     catalog = catalog_for(_build_go2_card())
-    record['definition']['trigger'] = {'event_id': 'vision.person_presence', 'where': {'detected': True}, 'params': {}}
+    definition = record['definition']
+    record.update(schema_version=2, definition={
+        'steps': [{key: definition[key] for key in ('transition_ids', 'conditions', 'defaults')}],
+        'origins': definition['origins'], 'cooldown_s': definition['cooldown_s'],
+        'trigger': {'event_id': 'vision.person_presence', 'where': {'detected': True}},
+        'situation': None,
+    })
     return {'catalog': catalog, 'records': [record], 'event': {'id': 'vision.person_presence', 'event_id': 'frame:1', 'ts': 100, 'values': {'detected': True}}, 'facts': {'state_fresh': True, 'state': {'body_state': 'standing'}}}
 
 

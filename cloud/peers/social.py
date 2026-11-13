@@ -1,16 +1,11 @@
-"""Per-agent, activity-scoped opportunities and limits for voluntary messages."""
+"""Per-agent, activity-scoped discovery deduplication for voluntary messages."""
 
 from __future__ import annotations
 
 import time
-from collections import deque
 from typing import Any
 
 from cloud.space.activity import get_activity_store
-
-_MIN_SEND_GAP = 300
-_WINDOW = 1800
-_MAX_SENDS = 3
 
 
 def activity_peers(unit_id: str, peers: list[dict[str, Any]]) -> tuple[dict | None, list[dict]]:
@@ -30,16 +25,12 @@ class SocialState:
         self.activity_id: str | None = None
         self.last_evaluated = 0.0
         self.last_sent = 0.0
-        self.sent_times: deque[float] = deque()
         self.seen_discoveries: set[str] = set()
-        self.topic_times: dict[tuple[str, str], float] = {}
 
     def reset(self, activity_id: str | None, discoveries: list[dict] = ()) -> None:
         self.activity_id = activity_id
         self.last_evaluated = 0.0
         self.last_sent = 0.0
-        self.sent_times.clear()
-        self.topic_times.clear()
         # Ignore observations predating this process, but keep new discoveries
         # made before this agent's first evaluation of the activity.
         self.seen_discoveries = {item["event_id"] for item in discoveries
@@ -74,17 +65,13 @@ class SocialState:
             self.seen_discoveries = set(list(self.seen_discoveries)[-100:])
 
     def can_send(self, target: str, topic: str, *, now: float | None = None) -> bool:
-        instant = time.time() if now is None else now
-        while self.sent_times and self.sent_times[0] <= instant - _WINDOW:
-            self.sent_times.popleft()
-        key = (target, topic.strip().lower()[:100])
-        last_topic = self.topic_times.get(key)
-        return (bool(self.activity_id) and (not self.last_sent or instant - self.last_sent >= _MIN_SEND_GAP)
-                and len(self.sent_times) < _MAX_SENDS
-                and (last_topic is None or instant - last_topic >= _WINDOW))
+        """Keep the activity gate; callers recheck live peers and task availability.
+
+        Timing and topic repetition are context for the agent, not send quotas.
+        The arguments remain compatible with the existing dispatch adapters.
+        """
+        return bool(self.activity_id)
 
     def sent(self, target: str, topic: str, *, now: float | None = None) -> None:
         instant = time.time() if now is None else now
         self.last_sent = instant
-        self.sent_times.append(instant)
-        self.topic_times[(target, topic.strip().lower()[:100])] = instant

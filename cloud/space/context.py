@@ -76,6 +76,19 @@ def get_space_context(
     context = {"peers": peers, "environment": environment,
                "constraints": requirements.list_for(unit_id, now=instant),
                "activity": activity, "recent_discoveries": discoveries}
+    # Interaction history informs willingness to talk/play; it is never fresh
+    # observation evidence or confirmation of current physical state.
+    events = (activity_store.events(activity["activity_id"])
+              if activity and callable(getattr(activity_store, "events", None)) else [])
+    context["interaction_history"] = {
+        "kind": "history",
+        "events": [{key: row[key] for key in (
+            "event_id", "event_type", "ts", "unit_id", "target_unit_id", "text",
+            "message_id", "reply_to", "reply_kind", "interaction_kind", "game_id",
+            "status", "result", "task_id") if key in row}
+            for row in events if row.get("activity_id") == activity["activity_id"]
+            and row.get("event_type") in {"message", "response", "action_result"}][-12:]
+    }
     from cloud.space.decisions import decision_evidence
     context["decision_evidence"] = decision_evidence(context, now=instant)
     return context

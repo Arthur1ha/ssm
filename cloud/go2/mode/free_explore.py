@@ -44,6 +44,7 @@ class Drive:
         self._person_present   = False   # HOG 检测到人体（含远处背景人）
         self._person_engaging  = False   # 人脸检测到（近距且面向镜头，表示主动互动意图）
         self._last_person_ts   = 0.0
+        self._last_vision_ts   = 0.0
         self._last_action_ts   = 0.0
         self._social_tick      = 0
         self.user_interrupt    = False
@@ -249,6 +250,8 @@ class Drive:
             return
         if not activity or not peers:
             return
+        from cloud.go2.perception.identity import identity_skill
+        opportunity = {**opportunity, "identity": identity_skill.context()}
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.go2.workflows.social import build_social_graph
         from cloud.peers.games import playable_games
@@ -279,6 +282,7 @@ class Drive:
         thread_id = "go2:social:" + run_id
         state = {"run_id": run_id, "activity_id": activity_id,
                  "activity": context["activity"], "opportunity": opportunity,
+                 "interaction_history": context.get("interaction_history", {}),
                  "peers": peers, "space_summary": prompt_space_context(),
                  "playable_games": [{"target": peer["unit_id"], **game}
                                     for peer in peers for game in playable_games(
@@ -439,7 +443,7 @@ class Drive:
         return {
             "state":          self._state.value,
             "curiosity":      self._curiosity,
-            "person_present": self._person_present,
+            "person_present": self._person_present and 0 <= time.time() - self._last_vision_ts <= 5,
             "last_action_ts": self._last_action_ts,
             "owner_session_id": self.owner_session_id,
         }
@@ -453,6 +457,10 @@ class Drive:
         _person_engaging：人脸检测到，表示对方近距且面向镜头，判定为主动互动意图
         人脸检测可能误判，不能让它独占自由探索或中断地图导航。
         """
+        from cloud.go2.perception.vision import frame_is_fresh
+        if not frame_is_fresh(frame) or frame['ts'] <= self._last_vision_ts:
+            return
+        self._last_vision_ts = frame['ts']
         persons = frame.get('persons') or {}
         detected = persons.get('detected')
         if type(detected) is not bool or not isinstance(frame.get('faces'), dict):
@@ -494,7 +502,8 @@ class Drive:
         self._identity = event.current
 
     def _identity_context(self) -> str:
-        current = self._identity
+        from cloud.go2.perception.identity import identity_skill
+        current = identity_skill.current
         if current and current.status == "recognized":
             return f"当前人物：{current.name}（{current.role}，置信分 {current.score:.1f}）"
         if current and current.status == "unknown":
@@ -531,7 +540,7 @@ class Drive:
                 tick = await graph.ainvoke(
                     {"state": self._state.value, "curiosity": self._curiosity,
                      "social_tick": self._social_tick,
-                     "person_engaging": self._person_engaging,
+                     "person_engaging": self._person_engaging and 0 <= time.time() - self._last_vision_ts <= 5,
                      "pending_event": {},
                      "interrupted": self.user_interrupt,
                      "pending_question": bool(self._pending_question_id),
@@ -571,8 +580,7 @@ class Drive:
         if event.get("interaction_kind") == "game_invite":
             from cloud.peers.games import get_game
             game = get_game(event.get("game_id"))
-            public_event["game"] = ({"game_id": game.game_id, "name": game.name,
-                                     "description": game.description} if game else None)
+            public_event["game"] = (game.metadata() if game else None)
         async with saver.async_run_lock(thread_id):
             result = await graph.ainvoke({"pending_event": public_event,
                 "space_summary": prompt_space_context(),
@@ -699,7 +707,7 @@ class Drive:
                 return
             acceptance_sent_at = time.time()
             acceptance = messenger.send_message(
-                "go2", message["sender"], "我接受寻找同色物品。请先选颜色并设置灯，确认后我再找。",
+                "go2", message["sender"], game.acceptance,
                 reply_to=event["message_id"], reply_kind="accepted")
             if acceptance.get("result") != "accepted":
                 messenger.send_result(event["message_id"], "unknown",
@@ -927,6 +935,7 @@ class Drive:
         self._vision_retry_after = 0.0
         self._person_present   = False
         self._person_engaging  = False
+        self._last_vision_ts   = 0.0
         self._task             = asyncio.create_task(self._run_loop())
         self._loop = asyncio.get_running_loop()
         self._generation += 1

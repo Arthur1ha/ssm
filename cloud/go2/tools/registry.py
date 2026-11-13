@@ -47,7 +47,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_find_object", "在室内寻找地面物品并走到附近；用户任务默认搜索当前定位会话地图的可达区域，已有矩形边界则遵守边界，无需用户提供房间名称或坐标。未发现时换观察点；发现后按可通行路径朝目标方向分段移动，停稳后再看。连续画面粗略判断已在附近并停稳即完成，不要求精确目标坐标或测距。结果不代表可直接触碰目标；未检查区域不代表目标不存在。仅用户明确指定且无法确定房间时澄清。outcome 区分未启动 not_started、暂未识别 not_seen、见过但未接近 seen_not_reached、已接近 nearby；按 message 保留受阻原因。内部范围配置或定位会话问题不要求用户补填房间；终态后不承诺自动继续搜索", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", led_tool_schema(), timeout_s=8, result_rule="device"),
-        ToolSpec("go2_recognize_person", "识别当前面前的人", _schema({}), timeout_s=32, result_rule="identity"),
+        ToolSpec("go2_recognize_person", "识别当前面前的人；匹配分达到80且对应已登记人员才确认身份。status=unknown 表示未匹配登记人员，称为陌生人或其他人；无脸、图像不合格或服务失败按错误说明，不推断身份", _schema({}), timeout_s=32, result_rule="identity"),
         ToolSpec("go2_list_people", "列出空间人员库", _schema({}), roles=("admin",), timeout_s=5),
         ToolSpec("list_peers", "查询当前空间其他智能体的在线状态与公开技能；请求协作前先查询", _schema({}), timeout_s=5),
         ToolSpec("get_space_context", "重新读取当前空间的同伴、环境与有效用户要求", _schema({}), timeout_s=5),

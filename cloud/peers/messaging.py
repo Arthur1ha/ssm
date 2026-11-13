@@ -164,12 +164,12 @@ class AgentMessenger:
             elif current_activity_id:
                 payload["activity_id"] = current_activity_id
             if interaction_kind == "game_invite":
-                from cloud.peers.games import (game_is_playable, get_game,
-                                               valid_color_hunt_invitation)
+                from cloud.peers.games import game_is_playable, get_game
                 if not game_is_playable(payload.get("activity_id"), sender, target, game_id):
                     return {"result": "blocked", "error": "game_unavailable"}
-                if game_id == "color_hunt" and not valid_color_hunt_invitation(payload["content"]):
-                    payload["content"] = get_game(game_id).invitation
+                game = get_game(game_id)
+                if game.valid_invitation and not game.valid_invitation(payload["content"]):
+                    payload["content"] = game.invitation
                 payload["interaction_kind"] = interaction_kind
                 payload["game_id"] = game_id
             if interaction_kind == "game_invite" or decision_reason is not None or evidence_refs is not None:

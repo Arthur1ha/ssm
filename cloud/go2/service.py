@@ -260,14 +260,15 @@ def _on_identity_event(event: IdentityEvent) -> None:
         current.status == "recognized"
         and (previous.status != "recognized" or previous.person_id != current.person_id)
     )
-    identity_absent = previous.status == "recognized" and current.status == "idle"
+    identity_absent = (previous.status == "recognized" and current.status == "idle"
+                       and current.error_code == "face_absent")
     if identity_changed and may_record_episode:
         episode_memory.add(
             EventType.IDENTITY_CHANGE,
             f"识别到{current.name}（{current.role}，置信分 {current.score:.1f}）",
         )
     elif identity_absent and may_record_episode:
-        episode_memory.add(EventType.IDENTITY_CHANGE, f"{previous.name}已离开画面")
+        episode_memory.add(EventType.IDENTITY_CHANGE, f"画面中已未再检测到{previous.name}的人脸")
 
     if identity_changed and current.role == "owner":
         from cloud.space.activity import get_activity_store
@@ -329,7 +330,7 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
         drive.start(owner_session_id=owner_session_id, context=context)
 
     if any((_active_identity_cb, _active_rule_cb, _active_drive_cb)):
-        vision_loop.start(lambda: go2._latest_frame)
+        vision_loop.start(lambda: go2.latest_frame_snapshot())
     else:
         vision_loop.stop()
 

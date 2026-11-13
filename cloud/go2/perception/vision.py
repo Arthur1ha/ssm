@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import math
 import time
 from collections import OrderedDict
-from typing import Callable, TypedDict
+from typing import Callable, NotRequired, TypedDict
 
 import cv2
 import numpy as np
+from cloud.agents.common.runner import invoke_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,8 @@ class FaceInfo(TypedDict):
 class VisionFrame(TypedDict):
     frame_id: int
     ts: float
+    source_frame_id: NotRequired[int]
+    camera_session_id: NotRequired[str]
     persons: PersonInfo
     faces: FaceInfo
     changed: bool
@@ -37,7 +41,23 @@ class VisionFrame(TypedDict):
 _hog: cv2.HOGDescriptor | None = None
 _face_cascade: cv2.CascadeClassifier | None = None
 
-_DETECT_W, _DETECT_H = 320, 240
+FRAME_MAX_AGE_S = 5.0
+_BODY_DETECT_WIDTH = 320
+_FACE_DETECT_WIDTH = 640
+
+
+def frame_is_fresh(frame: dict | None, *, now: float | None = None) -> bool:
+    ts = frame.get("ts") if isinstance(frame, dict) else None
+    return (type(ts) in (int, float) and math.isfinite(ts)
+            and 0 <= (time.time() if now is None else now) - ts <= FRAME_MAX_AGE_S)
+
+
+def _resize_for_detection(img, max_width):
+    height, width = img.shape[:2]
+    if width <= max_width:
+        return img
+    return cv2.resize(img, (max_width, max(1, round(height * max_width / width))),
+                      interpolation=cv2.INTER_AREA)
 
 
 class VisionFaceRejected(ValueError):
@@ -72,12 +92,15 @@ def detect(frame_bytes: bytes, prev_person_count: int = -1, frame_id: int = 0) -
     if img is None:
         raise VisionFaceRejected("invalid_jpeg", "视频帧不是有效 JPEG")
     original_h, original_w = img.shape[:2]
-    detect_img = cv2.resize(img, (_DETECT_W, _DETECT_H))
-    gray = cv2.cvtColor(detect_img, cv2.COLOR_BGR2GRAY)
+    body_img = _resize_for_detection(img, _BODY_DETECT_WIDTH)
+    face_img = _resize_for_detection(img, _FACE_DETECT_WIDTH)
+    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
 
-    rects, _ = _get_hog().detectMultiScale(
-        detect_img, winStride=(8, 8), padding=(4, 4), scale=1.05
-    )
+    rects = ()
+    if body_img.shape[0] >= 128 and body_img.shape[1] >= 64:
+        rects, _ = _get_hog().detectMultiScale(
+            body_img, winStride=(8, 8), padding=(4, 4), scale=1.05
+        )
     faces = _get_face_cascade().detectMultiScale(
         gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
     )
@@ -86,8 +109,8 @@ def detect(frame_bytes: bytes, prev_person_count: int = -1, frame_id: int = 0) -
     # and a body may belong to the same person. All presence consumers share
     # this result, so switching detector sources is not a new appearance.
     person_count = max(len(rects), face_count)
-    scale_x = original_w / _DETECT_W
-    scale_y = original_h / _DETECT_H
+    scale_x = original_w / face_img.shape[1]
+    scale_y = original_h / face_img.shape[0]
     face_boxes = [
         (
             max(0, round(int(x) * scale_x)),
@@ -151,7 +174,7 @@ def select_enrollment_face(frame: VisionFrame, frame_bytes: bytes) -> bytes:
     if len(boxes) == 0:
         raise VisionFaceRejected("no_face", "画面中没有检测到人脸")
     if len(boxes) != 1:
-        raise VisionFaceRejected("multiple_faces", "登记时画面中必须恰好有一张人脸")
+        raise VisionFaceRejected("multiple_faces", "身份识别时画面中必须恰好有一张人脸")
     if min(boxes[0][2], boxes[0][3]) < 80:
         raise VisionFaceRejected("face_too_small", "人脸过小，请靠近镜头后重试")
     return crop_face_jpeg(frame_bytes, boxes[0])
@@ -164,7 +187,7 @@ OnFrameCallback = Callable[[VisionFrame], None]
 
 class VisionLoop:
     """
-    每隔 interval 秒从 frame_provider 取最新帧，在线程池中运行 OpenCV 检测，
+    每隔 interval 秒从 frame_provider 取最新帧，在后台线程中运行 OpenCV 检测，
     将结果广播给所有已注册的回调。
 
     与其他模块完全解耦：通过 frame_provider 依赖注入帧来源，
@@ -179,6 +202,7 @@ class VisionLoop:
         self._prev_person_count: int = -1
         self._next_frame_id = 1
         self._frames: OrderedDict[int, bytes] = OrderedDict()
+        self._last_source: tuple | None = None
 
     def add_callback(self, cb: OnFrameCallback) -> None:
         if cb not in self._callbacks:
@@ -190,10 +214,11 @@ class VisionLoop:
         except ValueError:
             pass
 
-    def start(self, frame_provider: Callable[[], bytes | None]) -> None:
+    def start(self, frame_provider: Callable[[], tuple[bytes, dict] | None]) -> None:
         if self._task and not self._task.done():
             return
         self._prev_person_count = -1
+        self._last_source = None
         self._task = asyncio.create_task(self._run(frame_provider))
         logger.info("[Vision] 检测循环已启动（间隔 %.1fs）", self.interval)
 
@@ -203,6 +228,7 @@ class VisionLoop:
             self._task = None
         self.latest = None
         self._prev_person_count = -1
+        self._last_source = None
         self._frames.clear()
         logger.info("[Vision] 检测循环已停止")
 
@@ -213,31 +239,51 @@ class VisionLoop:
 
     def latest_frame_pair(self) -> tuple[VisionFrame | None, bytes | None]:
         frame = self.latest
+        if not frame_is_fresh(frame):
+            return None, None
         return frame, self.get_frame(frame["frame_id"] if frame else None)
 
-    async def _run(self, frame_provider: Callable[[], bytes | None]) -> None:
-        loop = asyncio.get_event_loop()
+    async def _sample(self, captured: tuple[bytes, dict] | None) -> None:
+        """Process one new source frame; repeated/stalled captures are not events."""
+        if captured is None:
+            return
+        frame_bytes, meta = captured
+        observed = {"ts": meta.get("captured_at")}
+        if not frame_is_fresh(observed):
+            return
+        source = (meta.get("odom_session_id"), meta.get("frame_id"))
+        if (not isinstance(source[0], str) or not source[0]
+                or type(source[1]) is not int
+                or self._last_source is not None and source[0] == self._last_source[0]
+                and source[1] <= self._last_source[1]):
+            return
+        if self._last_source is not None and source[0] != self._last_source[0]:
+            self._prev_person_count = -1
+        frame_id = self._next_frame_id
+        self._next_frame_id += 1
+        result: VisionFrame = await invoke_blocking(
+            detect, frame_bytes, self._prev_person_count, frame_id)
+        # Detection time must never renew a captured observation.
+        result.update(ts=observed["ts"], source_frame_id=source[1], camera_session_id=source[0])
+        if not frame_is_fresh(result):
+            return
+        self._last_source = source
+        self._frames[frame_id] = frame_bytes
+        while len(self._frames) > 2:
+            self._frames.popitem(last=False)
+        self._prev_person_count = result["persons"]["count"]
+        self.latest = result
+        for cb in list(self._callbacks):
+            try:
+                cb(result)
+            except Exception as exc:
+                logger.warning("[Vision] 回调异常: %s", exc)
+
+    async def _run(self, frame_provider: Callable[[], tuple[bytes, dict] | None]) -> None:
         while True:
             await asyncio.sleep(self.interval)
-            frame_bytes = frame_provider()
-            if frame_bytes is None:
-                continue
             try:
-                frame_id = self._next_frame_id
-                self._next_frame_id += 1
-                result: VisionFrame = await loop.run_in_executor(
-                    None, detect, frame_bytes, self._prev_person_count, frame_id
-                )
-                self._frames[frame_id] = frame_bytes
-                while len(self._frames) > 2:
-                    self._frames.popitem(last=False)
-                self._prev_person_count = result["persons"]["count"]
-                self.latest = result
-                for cb in list(self._callbacks):
-                    try:
-                        cb(result)
-                    except Exception as exc:
-                        logger.warning("[Vision] 回调异常: %s", exc)
+                await self._sample(frame_provider())
             except Exception as exc:
                 logger.warning("[Vision] 检测失败: %s", exc)
 

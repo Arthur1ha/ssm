@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+FACE_MATCH_THRESHOLD = 80.0
+
+
 @dataclass(frozen=True)
 class FaceCandidate:
     person_id: str

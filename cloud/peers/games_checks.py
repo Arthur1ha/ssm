@@ -15,6 +15,89 @@ from cloud.peers.messaging import AgentMessenger
 from cloud.space.execution import ExecutionContext
 
 
+def test_registry_exposes_each_games_rules_and_strategy():
+    """A new game needs no role-specific catalogue or prompt branch."""
+    from cloud.peers.games import get_game
+
+    async def execute(*_args):
+        pass
+
+    game = Game("example", "示例", "示例玩法", ("other_lamp", "other_dog"),
+                lambda *_args: True, execute, rules="示例规则", strategy="示例策略")
+    with (patch("cloud.space.activity.get_activity_store", return_value=SimpleNamespace(
+            current=lambda: {"activity_id": "act_test", "status": "active", "devices": {
+                participant: {"status": "joined"} for participant in game.participants}})),
+          patch.dict(GAMES, {game.game_id: game}, clear=True)):
+        assert get_game("example") is game
+        items = playable_games("act_test", *game.participants)
+        assert items == [game.metadata()]
+        items[0]["rules"] = "changed by caller"
+        assert game.rules == "示例规则"
+        assert playable_games("act_test", *reversed(game.participants)) == []
+        assert playable_games("expired", *game.participants) == []
+
+
+def test_acceptance_dispatch_uses_registered_participants():
+    from unittest.mock import Mock
+    from cloud.peers.inbound import handle_api_peer_message
+
+    hook = Mock()
+    game = Game("example", "示例", "示例玩法", ("other_lamp", "other_dog"),
+                lambda *_args: True, AsyncMock(), on_acceptance=hook)
+    original = {"game_id": game.game_id, "interaction_kind": "game_invite",
+                "sender": "other_lamp", "target": "other_dog"}
+    messenger = SimpleNamespace(get_status=lambda _id: original)
+    message = {"kind": "message", "reply_to": "invite", "reply_kind": "accepted",
+               "sender": "other_dog", "target": "other_lamp"}
+    with patch.dict(GAMES, {game.game_id: game}, clear=True):
+        handle_api_peer_message(messenger, message, None)
+        hook.assert_called_once_with(messenger, message, None)
+        hook.reset_mock()
+        handle_api_peer_message(messenger, {**message, "sender": "outsider"}, None)
+        hook.assert_not_called()
+        original["sender"] = "outsider"
+        handle_api_peer_message(messenger, message, None)
+        hook.assert_not_called()
+
+
+def test_arbitration_receives_game_strategy_without_a_game_specific_prompt():
+    from cloud.agents.go2.workflows.free_explore import build_motivation_graph
+
+    messages = []
+
+    class Model:
+        def with_structured_output(self, *_args, **_kwargs):
+            return self
+
+        async def ainvoke(self, prompt):
+            messages.extend(prompt)
+            return {"choice": "decline", "reason": "当前任务优先"}
+
+    metadata = {"game_id": "example", "rules": "示例独立规则", "strategy": "示例独立策略"}
+    graph = build_motivation_graph(
+        profile_loader=lambda: {"revision": 1, "traits": {}}, model=Model())
+    result = asyncio.run(graph.ainvoke({"connected": True, "pending_event": {
+        "kind": "peer_message", "interaction_kind": "game_invite", "game": metadata}}))
+    assert result["event_decision"] == "decline"
+    assert "示例独立规则" in messages[1].content
+    assert "示例独立策略" in messages[1].content
+    assert "寻找同色物品" not in messages[0].content
+
+
+def test_existing_color_hunt_contracts():
+    """Make the existing executable checks visible to pytest as well."""
+    check()
+    check_invitation_needs_no_existing_color()
+    check_game_commands_do_not_start_user_hold()
+    check_delegated_game_handoff()
+    check_lamp_sets_color_after_acceptance()
+    check_no_observation_no_game_color()
+    asyncio.run(check_graph_handoff())
+    asyncio.run(check_graph_handoff("odom_stopped_near_mapped_stop"))
+    asyncio.run(check_game_waits_for_lamp_setup())
+    asyncio.run(check_navigation_reason_is_narration_only())
+
+
 class _Activity:
     def __init__(self) -> None:
         self.value = {"activity_id": "act_test", "status": "active",
@@ -43,7 +126,8 @@ def check() -> None:
     store, mqtt, delivered = _Activity(), _Mqtt(), []
     game = Game("color_hunt", "寻找同色物品", "灯亮颜色，狗找同色物品；找到就算狗赢",
                 ("esp32_desk_led", "go2"), lambda _sender, _target: True,
-                lambda *_args: None, "我换灯色，你找同色物品。")
+                lambda *_args: None, "我换灯色，你找同色物品。",
+                valid_invitation=GAMES["color_hunt"].valid_invitation)
     with (patch("cloud.space.activity.get_activity_store", return_value=store),
           patch.dict("cloud.peers.games.GAMES", {"color_hunt": game}, clear=True)):
         messenger = AgentMessenger(mqtt, None, None,
@@ -115,7 +199,7 @@ def check() -> None:
 def check_invitation_needs_no_existing_color() -> None:
     store = _Activity()
     with (patch("cloud.space.activity.get_activity_store", return_value=store),
-          patch("cloud.peers.games.live_lamp_color", return_value=None)):
+          patch("cloud.peers.games.color_hunt.live_lamp_color", return_value=None)):
         assert [item["game_id"] for item in playable_games(
             "act_test", "esp32_desk_led", "go2")] == ["color_hunt"]
 
@@ -241,8 +325,8 @@ def check_lamp_sets_color_after_acceptance() -> None:
                                 run_user_loop=run_lamp)
         activity = SimpleNamespace(record_event=lambda *args, **kwargs: events.append((args, kwargs)))
         color = {"rgb": rgb, "brightness": 180, "as_of": time.time() + 1}
-        with (patch("cloud.peers.games.activity_allows", return_value=True),
-              patch("cloud.peers.games.live_lamp_color", return_value=color),
+        with (patch("cloud.peers.games.color_hunt.activity_allows", return_value=True),
+              patch("cloud.peers.games.color_hunt.live_lamp_color", return_value=color),
               patch("cloud.space.context.get_space_context", return_value=space),
               patch("cloud.esp32.service.get_agent", return_value=agent),
               patch("cloud.api.intents._dispatch_mqtt_task", side_effect=lambda *a, **k:
@@ -270,7 +354,7 @@ def check_no_observation_no_game_color() -> None:
                             run_user_loop=AsyncMock())
     space = _observed_space()
     space["recent_discoveries"] = []
-    with (patch("cloud.peers.games.activity_allows", return_value=True),
+    with (patch("cloud.peers.games.color_hunt.activity_allows", return_value=True),
           patch("cloud.space.context.get_space_context", return_value=space),
           patch("cloud.esp32.service.get_agent", return_value=agent),
           patch("cloud.api.intents._dispatch_mqtt_task") as dispatch,
@@ -332,8 +416,8 @@ async def check_graph_handoff(confirmation: str = "odom_stopped_and_visual_reche
             {"tool": "go2_navigate_to_visible_target", "params": {"target": "白色盒子"}, "result": {
                 "result": "ok", "confirmation": confirmation}}]}
 
-    with (patch("cloud.peers.games.activity_allows", return_value=True),
-          patch("cloud.peers.games.live_lamp_color", side_effect=lambda _source: {
+    with (patch("cloud.peers.games.color_hunt.activity_allows", return_value=True),
+          patch("cloud.peers.games.color_hunt.live_lamp_color", side_effect=lambda _source: {
               "rgb": lamp_rgb[0], "source": "esp32_desk_led", "as_of": time.time()}),
           patch("cloud.go2.connection.go2", SimpleNamespace(is_connected=True, send_command=AsyncMock(return_value={"result": "ok"}))),
           patch("cloud.go2.navigation.navigator.navigator._snapshot", return_value=(({}, object()), None)),
@@ -379,7 +463,7 @@ async def check_navigation_reason_is_narration_only() -> None:
 
 
 async def check_game_waits_for_lamp_setup() -> None:
-    from cloud.peers.games import _run_color_hunt
+    from cloud.peers.games.color_hunt import _run_color_hunt
 
     receipts = []
     drive = SimpleNamespace(_active_goal={"event_id": "game_wait"},
@@ -394,7 +478,7 @@ async def check_game_waits_for_lamp_setup() -> None:
         "activity_id": "act_test", "source": "esp32_desk_led",
         "deadline": time.time() + 30,
         "message": {"sender": "esp32_desk_led"}, "messenger": messenger}
-    with (patch("cloud.peers.games.activity_allows", return_value=True),
+    with (patch("cloud.peers.games.color_hunt.activity_allows", return_value=True),
           patch("cloud.agents.go2.graph.run_go2_loop", new_callable=AsyncMock) as graph):
         await _run_color_hunt(drive, event, "peer_game_wait")
     graph.assert_not_awaited()

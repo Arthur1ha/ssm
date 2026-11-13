@@ -52,6 +52,7 @@ class _ObservationTeachingListener:
         self._task: asyncio.Task | None = None
         self._dispatching_task: asyncio.Task | None = None
         self._pending_appearance: tuple[dict, ExecutionContext] | None = None
+        self._waiting_appearance: tuple[float, str] | None = None
         self._context = ExecutionContext(
             'go2-teachings', 'visitor', False, origin_kind='agent_autonomous')
         self.last_result: dict | None = None
@@ -76,6 +77,7 @@ class _ObservationTeachingListener:
         """Discard pending observations when a user takes over the device."""
         self._generation += 1
         self._pending_appearance = None
+        self._waiting_appearance = None
         if (self._task is not None and not self._task.done()
                 and self._task is not self._dispatching_task):
             self._task.cancel()
@@ -117,7 +119,7 @@ class _ObservationTeachingListener:
             person = self._recognized_person
             if (person is None or person.status != 'recognized' or person.role != 'owner'
                     or person.person_id != context.trigger_person_id
-                    or not 0 <= time.time() - person.ts <= TEACHING_JUDGMENT_TIMEOUT_S):
+                    or not 0 <= time.time() - person.ts <= 5):
                 return False
         return (self._enabled
                 and self._presence is True
@@ -157,13 +159,31 @@ class _ObservationTeachingListener:
                 self.interrupt()
             return
         if self._observation_id == 'vision.owner_recognized':
+            self._try_waiting_appearance()
             return  # Only the trusted identity callback can create this event.
-        if previous is True or not self._can_start(self._context):
+        if previous is not True:
+            self._waiting_appearance = (ts, str(frame['frame_id']))
+        self._try_waiting_appearance()
+
+    def _try_waiting_appearance(self) -> None:
+        """Wait briefly for fresh body telemetry, never queue behind physical work."""
+        waiting = self._waiting_appearance
+        if waiting is None:
             return
-        self._submit(ts, str(frame['frame_id']))
+        if (not 0 <= time.time() - waiting[0] <= 5
+                or self._dispatching_task is not None or self._blocked(self._context)):
+            self._waiting_appearance = None
+            return
+        if self._can_start(self._context):
+            self._waiting_appearance = None
+            self._submit(*waiting)
 
     def on_identity_event(self, identity_event) -> None:
         person = identity_event.current
+        if person.status == 'searching':
+            # A refresh does not revoke still-fresh evidence. Its original
+            # timestamp remains checked at every step; it is never extended.
+            return
         previous = self._recognized_person
         self._recognized_person = None
         if person.status != 'recognized' or person.role != 'owner':
@@ -181,8 +201,8 @@ class _ObservationTeachingListener:
         if person.person_id == self._last_person_id:
             return
         self._last_person_id = person.person_id
-        if self._can_start(self._context):
-            self._submit(person.ts, person.person_id)
+        self._waiting_appearance = (person.ts, person.person_id)
+        self._try_waiting_appearance()
 
     def _submit(self, ts: float, source_id: str) -> None:
         self._generation += 1
