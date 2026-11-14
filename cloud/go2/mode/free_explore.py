@@ -122,6 +122,24 @@ class Drive:
             "activity_id": message.get("activity_id"),
             "message": message, "messenger": messenger})
 
+    def submit_accepted_game(self, message: dict, original: dict, messenger,
+                             color: dict | None = None) -> bool:
+        """Queue an accepted outbound invitation, without inviting a second time."""
+        if (message.get("target") != "go2" or message.get("reply_kind") != "accepted"
+                or message.get("reply_to") != original.get("message_id")
+                or (original.get("sender"), original.get("target")) != ("go2", message.get("sender"))):
+            return False
+        return self.submit_event({"event_id": message["message_id"],
+            "message_id": message["message_id"], "kind": "peer_message",
+            "source": message["sender"], "content": message.get("content", ""),
+            "interaction_kind": "game_invite", "game_id": original.get("game_id"),
+            "ts": time.time(), "deadline": min(message["deadline"], original["deadline"]),
+            "activity_id": message.get("activity_id"), "message": message, "messenger": messenger,
+            "game_preaccepted": True,
+            **({"prepared_color": color} if color is not None else {}),
+            "original_invitation_id": original["message_id"],
+            "decision": {"choice": "accept", "reason": "outbound_invitation_accepted"}})
+
     @staticmethod
     def _result_text(result: dict) -> str:
         return str(result.get("message") or result.get("error") or result.get("result"))
@@ -238,12 +256,16 @@ class Drive:
         activity, peers = activity_peers("go2", context["peers"])
         profile = get_profile()
         score = profile["traits"]["extraversion"]
+        from cloud.peers.games.base import game_invitation_ready
         opportunity = self._social_state.opportunity(
-            activity, peers, context["recent_discoveries"], score, unit_id="go2")
+            activity, peers, context["recent_discoveries"], score, unit_id="go2",
+            idle_ready=game_invitation_ready(activity_id, "go2", "esp32_desk_led"))
         if local_observation and local_observation.get("event_id") and peers:
             if local_observation["event_id"] not in self._social_state.seen_discoveries:
                 opportunity = {"kind": "own_observation",
-                               "event_ids": [local_observation["event_id"]],
+                               "event_ids": list(dict.fromkeys([
+                                   *((opportunity or {}).get("event_ids") or []),
+                                   local_observation["event_id"]])),
                                "discoveries": [{"summary": local_observation.get("text", "")[:240],
                                                 "event_id": local_observation["event_id"]}]}
         if not opportunity:
@@ -268,9 +290,11 @@ class Drive:
                         and go2.is_connected)
 
         async def deliver(target: str, content: str, *, interaction_kind: str = "message",
-                          game_id: str | None = None) -> dict:
+                          game_id: str | None = None, decision_reason: str | None = None,
+                          evidence_refs: list[str] | None = None) -> dict:
             outcome = (send_message(target, content, interaction_kind=interaction_kind,
-                                    game_id=game_id) if interaction_kind == "game_invite"
+                                    game_id=game_id, decision_reason=decision_reason,
+                                    evidence_refs=evidence_refs) if interaction_kind == "game_invite"
                        else send_message(target, content))
             return outcome if isinstance(outcome, dict) else {"result": "error"}
 
@@ -283,6 +307,7 @@ class Drive:
         state = {"run_id": run_id, "activity_id": activity_id,
                  "activity": context["activity"], "opportunity": opportunity,
                  "interaction_history": context.get("interaction_history", {}),
+                 "decision_evidence": context.get("decision_evidence", []),
                  "peers": peers, "space_summary": prompt_space_context(),
                  "playable_games": [{"target": peer["unit_id"], **game}
                                     for peer in peers for game in playable_games(
@@ -533,6 +558,13 @@ class Drive:
                 event = self._events.popleft()
                 await self._handle_event(event, graph, saver, thread_id)
                 continue
+            from cloud.api.main import get_agent_messenger
+            messenger = get_agent_messenger()
+            if messenger is not None and messenger.has_pending_game("go2"):
+                # Preserve the idle slot while the peer decides/prepares.
+                # User/teaching/accepted-game events above retain priority;
+                # the existing message deadline releases unanswered invites.
+                continue
             if time.time() < self._vision_retry_after:
                 continue
 
@@ -598,6 +630,10 @@ class Drive:
         event = self._events[0]
         if event.get("kind") != "peer_message":
             return False
+        if event.get("interaction_kind") == "game_invite":
+            # Games may be accepted only while idle; they never take over a
+            # real navigation task simply because the social model says yes.
+            return False
         decision = await self._decide_event(event)
         event["decision"] = decision
         return decision["choice"] == "accept"
@@ -654,6 +690,11 @@ class Drive:
             if event.get("kind") == "peer_message":
                 event["messenger"].send_result(event["message_id"], "cancelled", reason="message_expired")
             return
+        if event.get("interaction_kind") == "game_invite":
+            from cloud.peers.games.base import game_invitation_ready
+            if not game_invitation_ready(event.get("activity_id"), event.get("source"), "go2"):
+                event["messenger"].send_result(event["message_id"], "rejected", reason="game_participant_busy")
+                return
         decision = event.get("decision") or await self._decide_event(event, graph, saver, thread_id)
         if event["kind"] == "social":
             await self._do_social()
@@ -691,10 +732,11 @@ class Drive:
             # MQTT QoS 1 can redeliver after a process restart. Reserve before
             # any game step so an unconfirmed prior run never repeats motion.
             from cloud.agents.common.effects import FileEffectLedger
+            invitation_id = event.get("original_invitation_id") or event["message_id"]
             try:
                 reservation = FileEffectLedger().reserve(
-                    "go2", "go2:game:" + event["message_id"],
-                    event["message_id"], "execute", game.game_id,
+                    "go2", "go2:game:" + invitation_id,
+                    invitation_id, "execute", game.game_id,
                     {"activity_id": activity_id, "sender": message["sender"]})
             except (OSError, ValueError) as exc:
                 logger.warning("[Drive] game reservation unavailable: %s", type(exc).__name__)
@@ -705,19 +747,29 @@ class Drive:
                 messenger.send_result(event["message_id"], "unknown",
                                       reason="prior_game_execution_unconfirmed")
                 return
-            acceptance_sent_at = time.time()
-            acceptance = messenger.send_message(
-                "go2", message["sender"], game.acceptance,
-                reply_to=event["message_id"], reply_kind="accepted")
-            if acceptance.get("result") != "accepted":
-                messenger.send_result(event["message_id"], "unknown",
-                                      reason="acceptance_delivery_unconfirmed")
-                return
-            event["acceptance_message_id"] = acceptance["message_id"]
-            event["acceptance_sent_at"] = acceptance_sent_at
+            if not event.get("game_preaccepted"):
+                from cloud.peers.games.base import game_invitation_ready
+                if not game_invitation_ready(activity_id, message["sender"], "go2"):
+                    messenger.send_result(event["message_id"], "rejected", reason="game_participant_busy")
+                    return
+                acceptance_sent_at = time.time()
+                # The arbitration Graph supplies the dog's own response;
+                # game metadata defines rules, not a fixed conversational line.
+                acceptance = messenger.send_message(
+                    "go2", message["sender"], str(decision.get("reason") or "decision_unavailable")[:1000],
+                    reply_to=event["message_id"], reply_kind="accepted", deadline=event["deadline"])
+                if acceptance.get("result") != "accepted":
+                    messenger.send_result(event["message_id"], "unknown",
+                                          reason="acceptance_delivery_unconfirmed")
+                    return
+                event["acceptance_message_id"] = acceptance["message_id"]
+                event["acceptance_sent_at"] = acceptance_sent_at
         self._active_goal = {"kind": "peer_message", "event_id": event["event_id"],
                              "task_id": task_id, "deadline": event["deadline"]}
         messenger.send_progress(event["message_id"], task_id)
+        if event.get("game_preaccepted"):
+            # The original receiver (lamp) will relay the final real result.
+            messenger.send_progress(event["original_invitation_id"], task_id)
         if game is not None:
             try:
                 await game.execute(self, event, task_id)
@@ -803,10 +855,18 @@ class Drive:
             return
         token = runtime.begin_life('explore', self.owner_session_id, 'explore_' + __import__('uuid').uuid4().hex) if runtime else None
         try:
-            return await self._do_explore_owned(observe_question)
+            observation = await self._do_explore_owned(observe_question)
         finally:
             if token:
                 runtime.finish_life(token)
+        # Consume the existing fresh observation only after this exploration
+        # task has relinquished its life token, so idle-only invitations can
+        # actually be considered. No timer or forced invitation is added.
+        if observation and not self.user_interrupt and go2.is_connected:
+            try:
+                await self._evaluate_social(observation)
+            except Exception:
+                logger.exception("[Drive/Social] observation sharing decision failed")
 
     async def _do_explore_owned(self, observe_question: str = "描述当前位置看到的场景") -> None:
         """Lifecycle entry; the shared graph owns exploration decisions."""
@@ -861,11 +921,7 @@ class Drive:
         self._last_action_ts = time.time()
         if result.get("reason") in {"coverage_exhausted", "no_reachable_observation_point", "map_session_unavailable"}:
             self._vision_retry_after = time.time() + 60
-        if current() and last_observation:
-            try:
-                await self._evaluate_social(last_observation)
-            except Exception:
-                logger.exception("[Drive/Social] observation sharing decision failed")
+        return last_observation if current() else None
 
     async def _do_social(self) -> None:
         """Social opportunity uses the same bounded event handling checkpoint."""

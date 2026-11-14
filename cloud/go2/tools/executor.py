@@ -46,6 +46,7 @@ def validate_params(schema: dict, params: object) -> dict:
         valid = (isinstance(value, str) if kind == "string" else
                  isinstance(value, int) and not isinstance(value, bool) if kind == "integer" else
                  isinstance(value, dict) if kind == "object" else
+                 isinstance(value, list) if kind == "array" else
                  isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value))
         if not valid:
             raise ValueError(f"{key} must be {kind}")
@@ -55,6 +56,12 @@ def validate_params(schema: dict, params: object) -> dict:
             raise ValueError(f"{key} is too short")
         if kind == "string" and "maxLength" in definition and len(value) > definition["maxLength"]:
             raise ValueError(f"{key} is too long")
+        if kind == "array":
+            if len(value) < definition.get("minItems", 0) or len(value) > definition.get("maxItems", math.inf):
+                raise ValueError(f"{key} has invalid item count")
+            if "items" in definition:
+                for item in value:
+                    validate_params({"properties": {"item": definition["items"]}}, {"item": item})
         if kind in {"integer", "number"}:
             if "minimum" in definition and value < definition["minimum"]:
                 raise ValueError(f"{key} is below minimum")

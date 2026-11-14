@@ -15,7 +15,7 @@ from cloud.space.freshness import state_observed_at
 _VALUES = ("connection_state", "activity_state", "life_state", "body_state",
            "body_confirmation", "control_mode", "autonomy_mode", "epoch", "revision",
            "state_schema_version", "ism", "connected", "battery_soc", "brightness",
-           "r", "g", "b", "value", "level", "detected", "presence")
+           "r", "g", "b", "count", "value", "level", "detected", "presence")
 _MAX_UNITS = 24
 
 

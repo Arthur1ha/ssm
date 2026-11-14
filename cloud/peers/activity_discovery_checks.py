@@ -163,7 +163,9 @@ async def test_exploration_observation_reaches_lamp_context_before_search_finish
         return {"result": "blocked", "reason": "coverage_exhausted"}
 
     monkeypatch.setattr(search, "run_search", explore)
-    await drive._do_explore_owned()
+    # The wrapper releases the exploration life task before social invitations
+    # are evaluated; observations are still shared during the search itself.
+    await drive._do_explore()
     assert len(store.recent_discoveries("esp32_desk_led")) == 1
     drive._evaluate_social.assert_awaited_once()
 

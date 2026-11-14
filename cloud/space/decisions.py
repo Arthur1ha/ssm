@@ -23,7 +23,7 @@ _STATE_LABELS = {
     "life_state": "任务状态", "body_state": "身体姿态",
     "autonomy_mode": "自主模式", "control_mode": "控制模式",
     "ism": "灯光状态", "brightness": "亮度", "battery_soc": "电量",
-    "r": "红", "g": "绿", "b": "蓝", "level": "光线级别",
+    "r": "红", "g": "绿", "b": "蓝", "count": "闪烁次数", "level": "光线级别",
     "detected": "检测到信号", "presence": "有人", "value": "读数",
 }
 _STATE_VALUES = {
@@ -67,9 +67,9 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
         if not isinstance(summary, str) or not summary.strip():
             return
         if kind in {"peer_state", "environment", "activity", "constraint"}:
-            # Facts changing while the model decides invalidate its reference.
-            # A heartbeat with the same values only refreshes freshness, so it
-            # must not invalidate a long-running model call on every receipt.
+            # The fingerprint identifies the observed values. Execution can
+            # resolve this reference against the server's saved model-turn
+            # context, without relabeling a newer reading as that observation.
             fingerprint = hashlib.sha256(summary.strip().encode()).hexdigest()[:16]
             ref = f"{ref}:{fingerprint}"
         item = {"ref": str(ref), "kind": kind, "source": str(source),
@@ -131,7 +131,8 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
 
 
 def resolve_decision(space: dict, reason: str, refs: list[str], *,
-                     require_observation: bool = False) -> dict:
+                     require_observation: bool = False,
+                     observed_space: dict | None = None) -> dict:
     """Reject missing/stale references; never trust model-written evidence text."""
     if not isinstance(reason, str) or not reason.strip() or len(reason) > MAX_REASON:
         raise ValueError("decision_reason_required")
@@ -139,7 +140,23 @@ def resolve_decision(space: dict, reason: str, refs: list[str], *,
             or not all(isinstance(ref, str) and 0 < len(ref) <= 200 for ref in refs)
             or len(set(refs)) != len(refs)):
         raise ValueError("decision_evidence_required")
-    catalog = {item["ref"]: item for item in decision_evidence(space)}
+    instant = time.time()
+    current_evidence = decision_evidence(space, now=instant)
+    if observed_space is not None:
+        # This snapshot is supplied by the trusted Graph, never by tool args.
+        # Observations may remain valid across a sensor update, but a changed
+        # activity or user requirement must trigger a fresh decision.
+        activity_keys = ("activity_id", "revision", "context", "status")
+        current_activity, observed_activity = space.get("activity") or {}, observed_space.get("activity") or {}
+        if any(current_activity.get(key) != observed_activity.get(key) for key in activity_keys):
+            raise ValueError("decision_context_changed")
+        evidence = decision_evidence(observed_space, now=instant)
+        if ({item["ref"] for item in current_evidence if item["kind"] == "constraint"}
+                != {item["ref"] for item in evidence if item["kind"] == "constraint"}):
+            raise ValueError("decision_context_changed")
+    else:
+        evidence = current_evidence
+    catalog = {item["ref"]: item for item in evidence}
     if any(ref not in catalog for ref in refs):
         raise ValueError("decision_evidence_unavailable")
     selected = [catalog[ref] for ref in refs]

@@ -42,7 +42,7 @@ def teachings(monkeypatch, tmp_path):
     monkeypatch.setattr(robot, "prompt_space_context", lambda: {})
     monkeypatch.setattr(robot.go2, "state_snapshot", lambda: {"body_state": "lying"})
     agent = SimpleNamespace(_state=SimpleNamespace(actuator_snapshot=lambda: {
-        cards["lamp"]["unit_id"]: {"state": {"ism": "OFF", "brightness": 0}}}))
+        cards["lamp"]["unit_id"]: {"state": {"ism": "OFF", "brightness": 0, "ts": time.time()}}}))
     session = {"session_id": "teaching-session", "space_id": "main", "actor": "admin",
                "expires_at": time.time() + 300}
     session["training_source"] = service.UserText(session["session_id"], "原会话的教学原话")

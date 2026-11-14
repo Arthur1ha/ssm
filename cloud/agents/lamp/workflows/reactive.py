@@ -146,7 +146,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
 
     def gate(state):
         if (state["autonomy_epoch"] != agent._autonomy_epoch
-                or not agent._should_act() or not agent._device_online()):
+                or not agent._should_act() or not agent._device_online()
+                or getattr(agent, '_peer_game_id', None)):
             return {"status": "blocked", "call": None}
         if not any(state["sense"].get(key) for key in
                    ("lighting_eligible", "social_opportunity", "training_intent", "training_candidates")):
@@ -190,7 +191,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if state.get("turns", 0) >= 4:
             return {"status": "blocked", "call": None}
         if (state["autonomy_epoch"] != agent._autonomy_epoch
-                or not agent._should_act() or not agent._device_online()):
+                or not agent._should_act() or not agent._device_online()
+                or getattr(agent, '_peer_game_id', None)):
             return {"status": "blocked", "call": None}
         prompt = _prompt(agent, state)
         event(state, "model.request", stage="lamp_reactive", input=prompt)
@@ -221,7 +223,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
     def act(state):
         call = state["call"]
         if (state["autonomy_epoch"] != agent._autonomy_epoch
-                or not agent._should_act() or not agent._device_online()):
+                or not agent._should_act() or not agent._device_online()
+                or getattr(agent, '_peer_game_id', None)):
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
         intent = state['sense'].get('training_intent')
@@ -426,7 +429,8 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     from cloud.space.context import get_space_context
 
     now = time.time() if now is None else now
-    if not agent._should_act() or not agent._device_online():
+    if (not agent._should_act() or not agent._device_online()
+            or getattr(agent, '_peer_game_id', None)):
         return None
     if (event.get('eligible_at_arrival') is False or
             event.get('autonomy_epoch', agent._autonomy_epoch) != agent._autonomy_epoch):
@@ -506,9 +510,14 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
                                       sense.get("light_available") and sense["proactive_hints"])
     space = get_space_context(agent._find_led_unit(), state=agent._state)
     activity, eligible = activity_peers(agent._find_led_unit(), space["peers"])
+    from cloud.peers.games.base import game_invitation_ready
+    idle_ready = bool(activity and any(game_invitation_ready(
+        activity["activity_id"], agent._find_led_unit(), peer["unit_id"])
+        for peer in eligible))
     opportunity = agent._social_state.opportunity(
         activity, eligible, space["recent_discoveries"],
-        profile["traits"]["social_initiative"], unit_id=agent._find_led_unit())
+        profile["traits"]["social_initiative"], unit_id=agent._find_led_unit(),
+        idle_ready=idle_ready)
     if opportunity:
         sense["social_opportunity"] = opportunity
     rule_sig = candidates[0]['event_id'] if candidates else None

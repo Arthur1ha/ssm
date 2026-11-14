@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -172,6 +173,24 @@ def _on_esp32_message(client, userdata, msg):
             _esp32_state.store_task_result(task_id, payload)
 
     elif len(parts) == 4 and parts[1] == "task":
+        # Orchestrator dispatches can arrive directly over MQTT. Track them
+        # alongside local sends; validated result handling above releases them.
+        if (parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
+                and re.fullmatch(r"task_[A-Fa-f0-9]{32}", parts[3])
+                and isinstance(payload, dict)
+                and payload.get("task_id") in (None, parts[3])
+                and payload.get("unit_id") in (None, parts[2])):
+            from cloud.esp32.physical_tasks import observed_result
+            try:
+                recorded = observed_result(parts[3])
+            except (OSError, ValueError, TypeError):
+                recorded = None
+                logger.warning("Lamp task receipt unavailable for %s", parts[3])
+            if recorded and recorded.get("result") in {"ok", "blocked", "rejected", "error", "cancelled"}:
+                # A delayed QoS duplicate can outlive the bounded in-memory
+                # result cache. Reuse its durable receipt before marking busy.
+                _esp32_state.store_task_result(parts[3], recorded)
+            _esp32_state.mark_task_pending(parts[3])
         # 识别用户/编排器命令；灯自身的游戏设色与变色不能触发用户让位，
         # reactive 模式触发让位窗口，避免自主调光立刻翻掉用户设置。
         if (parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")

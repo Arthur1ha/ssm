@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 from cloud.agents.common.runner import GraphRun as Run
 from cloud.agents.common.messages import reply_messages
+from cloud.agents.common.outcomes import effective_steps, outcome_summary
 from cloud.observability import emit_agent_event
 
 logger = logging.getLogger(__name__)
@@ -88,13 +89,13 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
                 "lamp": "我这次处理请求出了问题，还没做任何动作。稍后再试。",
                 "orchestrator": "这次对话处理出了问题，请稍后再试。"}[role]
     if run is not None and run.steps:
-        results = [(step, step.get("result") or {}) for step in run.steps]
+        results = [(step, step.get("result") or {}) for step in effective_steps(run.steps)]
         completed = [step for step, result in results
                      if step_kind(step) == "action" and result.get("result") == "ok"]
         proposals = [step for step, result in results
                      if step_kind(step) == "training_proposal" and result.get("result") == "ok"]
         failed = [result for _, result in results if result.get("result") in
-                  {"blocked", "rejected", "error", "timeout", "unknown", "cancelled"}]
+                  {"blocked", "rejected", "error", "timeout", "unknown", "cancelled", "partial"}]
         offline = any(result.get("device_connected") is False
                       or result.get("device_fsm") == "offline"
                       or result.get("error") in {"device_precondition", "robot_disconnected", "offline"}
@@ -164,6 +165,8 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
 def reply_facts(run: Run) -> dict:
     """Give each role the same observations without prescribing its voice."""
     return {"goal": run.goal, "status": run.status,
+             "outcomes": outcome_summary(run.steps),
+             **({"initial_context": run.initial_context} if getattr(run, "initial_context", {}) else {}),
              "steps": [{"tool": step.get("tool"), "params": step.get("params"),
                         "kind": step_kind(step), "effectful": step.get("effectful"),
                         "result": step.get("result") or {"result": "unknown"}}

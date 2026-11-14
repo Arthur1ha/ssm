@@ -13,6 +13,24 @@ class ESP32State:
         self._manifests           = {}
         self._capability_registry = {}
         self._task_results        = {}
+        # Request timeouts are uncertain outcomes, not permission to start a
+        # game. Keep unresolved dispatches separate from the bounded cache.
+        self._pending_tasks       = set()
+
+    def mark_task_pending(self, task_id: str) -> None:
+        """Record a dispatch before publish, or its MQTT loopback.
+
+        A fast terminal receipt may arrive before the task loops back. That
+        late loopback must never make the completed request busy again.
+        """
+        with self._lock:
+            previous = self._task_results.get(task_id, {})
+            if previous.get("result") not in {"ok", "blocked", "rejected", "error", "cancelled"}:
+                self._pending_tasks.add(task_id)
+
+    def has_pending_tasks(self) -> bool:
+        with self._lock:
+            return bool(self._pending_tasks)
 
     def on_manifest(self, unit_id: str, payload: dict):
         with self._lock:
@@ -36,9 +54,11 @@ class ESP32State:
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:
             previous = self._task_results.get(task_id, {})
-            if previous.get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout"):
+            if previous.get("result") in ("ok", "blocked", "rejected", "error", "cancelled"):
                 return
-            self._task_results[task_id] = result
+            self._task_results[task_id] = dict(result)
+            if result.get("result") in {"ok", "blocked", "rejected", "error", "cancelled"}:
+                self._pending_tasks.discard(task_id)
             if len(self._task_results) > 256:
                 self._task_results.pop(next(iter(self._task_results)))
             self._result_ready.notify_all()

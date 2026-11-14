@@ -111,6 +111,9 @@ def _publish_go2_reply_ack(messenger, message: dict) -> None:
 
 def handle_api_peer_message(messenger, message: dict, state) -> None:
     """Called by AgentMessenger's worker, never by the MQTT network callback."""
+    if message.get("kind") == "result":
+        _relay_reverse_game_result(messenger, message)
+        return
     if message.get("kind") != "message":
         return
     if (message.get("reply_to")
@@ -121,8 +124,9 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
         original = messenger.get_status(message.get("reply_to")) or {}
         game = get_game(original.get("game_id"))
         if (game and game.on_acceptance
-                and (original.get("sender"), original.get("target")) == game.participants
-                and (message.get("target"), message.get("sender")) == game.participants):
+                and game.allows_pair(original.get("sender"), original.get("target"))
+                and (message.get("target"), message.get("sender")) ==
+                    (original.get("sender"), original.get("target"))):
             game.on_acceptance(messenger, message, state)
         return
     # Ordinary replies never start another peer turn.
@@ -148,6 +152,20 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
     )
     if context.expires_at <= time.time():
         messenger.send_result(message["message_id"], "cancelled", reason="message_expired")
+        return
+    if message.get("interaction_kind") == "game_invite" and target != "go2":
+        from cloud.peers.games import get_game
+        from cloud.peers.games.base import game_invitation_ready
+        game = get_game(message.get("game_id"))
+        if (not game or not game.allows_pair(message.get("sender"), target)
+                or not game.available(message.get("sender"), target)):
+            messenger.send_result(message["message_id"], "rejected", reason="game_unavailable")
+        elif not game_invitation_ready(activity_id, message.get("sender"), target):
+            messenger.send_result(message["message_id"], "rejected", reason="game_participant_busy")
+        elif game.on_invitation:
+            game.on_invitation(messenger, message, state)
+        else:
+            messenger.send_result(message["message_id"], "rejected", reason="game_receiver_unavailable")
         return
     text = _peer_input(message, messenger)
     try:
@@ -184,3 +202,27 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
 
 
 from cloud.peers.games.color_hunt import _handle_color_hunt_acceptance
+
+
+def _relay_reverse_game_result(messenger, message: dict) -> None:
+    """The lamp relays its courier's real result to the dog's original invite."""
+    from cloud.peers.games import get_game
+    accepted = messenger.get_status(message.get("message_id")) or {}
+    original_id = accepted.get("reply_to")
+    original = messenger.get_status(original_id) if original_id else None
+    if not original:
+        return
+    game = get_game(original.get("game_id"))
+    if (not game or not game.bidirectional
+            or original.get("interaction_kind") != "game_invite"
+            or accepted.get("reply_kind") != "accepted"
+            or (original.get("sender"), original.get("target")) != tuple(reversed(game.participants))
+            or (accepted.get("sender"), accepted.get("target")) != game.participants
+            or (message.get("sender"), message.get("target")) != tuple(reversed(game.participants))
+            or accepted.get("activity_id") != original.get("activity_id")
+            or original.get("state") not in {"waiting_start", "waiting_result"}):
+        return
+    result = accepted.get("result") or {}
+    if result.get("result") in {"ok", "blocked", "rejected", "cancelled", "unknown", "error"}:
+        messenger.send_result(original_id, result["result"], task_id=accepted.get("task_id"),
+                              reason=result.get("reason"))

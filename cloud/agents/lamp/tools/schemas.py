@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from cloud.esp32.tool_registry import TOOL_DECLARATIONS
 
 
-def _physical_schema(name: str, tool: str, params_schema: dict | None = None):
+def _physical_schema(name: str, tool: str, params_schema: dict | None = None, *,
+                     include_evidence: bool = True, require_evidence: bool = False):
     declaration = TOOL_DECLARATIONS[tool]
     schema = declaration["params_schema"] if params_schema is None else params_schema
     fields = {}
@@ -22,10 +23,13 @@ def _physical_schema(name: str, tool: str, params_schema: dict | None = None):
         limits = {field: definition[source] for source, field in
                   (("minimum", "ge"), ("maximum", "le")) if source in definition}
         fields[key] = (annotation, Field(default=... if required else None, **limits))
-    fields["decision_reason"] = (str | None, Field(default=None, max_length=300,
-        description="本次选择的简短事实理由；游戏出题必须填写"))
-    fields["evidence_refs"] = (list[str] | None, Field(default=None, max_length=8,
-        description="引用当前 space.decision_evidence 的 ref；游戏出题必须含观察依据"))
+    if include_evidence or require_evidence:
+        fields["decision_reason"] = (str if require_evidence else str | None,
+            Field(default=... if require_evidence else None, min_length=1, max_length=300,
+                  description="本次选择的简短事实理由；游戏出题必须填写"))
+        fields["evidence_refs"] = (list[str] if require_evidence else list[str] | None,
+            Field(default=... if require_evidence else None, min_length=1, max_length=8,
+                  description="引用本轮 space.decision_evidence 的 ref；游戏出题必须含观察依据"))
     return create_model(name, __doc__=declaration["description"],
                         __config__=ConfigDict(extra="forbid", strict=True), **fields)
 
@@ -78,7 +82,8 @@ SCHEMAS = {
 }
 
 
-def visible_schemas(*, lighting_only: bool, card: dict | None = None) -> dict:
+def visible_schemas(*, lighting_only: bool, card: dict | None = None,
+                    user_delegated: bool = False, game_setup: bool = False) -> dict:
     from cloud.agents.lamp.state import PHYSICAL_TOOLS
 
     allowed = PHYSICAL_TOOLS if lighting_only else SCHEMAS.keys()
@@ -87,14 +92,15 @@ def visible_schemas(*, lighting_only: bool, card: dict | None = None) -> dict:
     schemas["apply_training"] = training_schemas["apply_training"]
     if not lighting_only:
         schemas.update(training_schemas)
-    if card is not None:
-        declared = {(skill.get("invoke") or {}).get("action"): skill
-                    for skill in card.get("skills", [])}
-        for name in PHYSICAL_TOOLS & schemas.keys():
-            action = TOOL_DECLARATIONS[name]["action"]
-            if action not in declared:
-                schemas.pop(name)
-            else:
-                schemas[name] = _physical_schema(SCHEMAS[name].__name__, name,
-                                                 declared[action]["params_schema"])
+    declared = ({(skill.get("invoke") or {}).get("action"): skill
+                 for skill in card.get("skills", [])} if card is not None else None)
+    for name in PHYSICAL_TOOLS & schemas.keys():
+        action = TOOL_DECLARATIONS[name]["action"]
+        if declared is not None and action not in declared:
+            schemas.pop(name)
+        else:
+            params = declared[action]["params_schema"] if declared is not None else None
+            schemas[name] = _physical_schema(SCHEMAS[name].__name__, name, params,
+                include_evidence=game_setup or not user_delegated,
+                require_evidence=game_setup)
     return schemas

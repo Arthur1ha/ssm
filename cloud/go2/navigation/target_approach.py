@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from cloud.agents.common.runner import invoke_blocking
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 import time
 
@@ -36,6 +38,36 @@ APPROACH_COMMAND_LIMIT = .30
 APPROACH_COMMAND_FLOOR = .25
 
 
+
+
+_expected_visual_target: ContextVar[dict | None] = ContextVar(
+    'expected_visual_target', default=None)
+
+
+@contextmanager
+def expect_visual_target(location: dict | None):
+    """Constrain target identity with a trusted, previous localization receipt.
+
+    Fresh localization and a free route remain necessary before movement.
+    This reference is absent from model/browser tool parameter schemas.
+    """
+    if location is not None and not isinstance(location, dict):
+        raise ValueError('invalid_target_reference')
+    token = _expected_visual_target.set(dict(location) if location is not None else None)
+    try:
+        yield
+    finally:
+        _expected_visual_target.reset(token)
+
+
+async def _stop_approach(context, *, bounded: bool):
+    if bounded:
+        owner = control_lease.snapshot()
+        if owner is not None and owner.owner_session_id != context.session_id:
+            # A direct user action can own the lease while Navigator is idle.
+            # An old game's extra cleanup must not stop that new session.
+            return {'result': 'accepted', 'reason': 'control_lease_changed'}
+    return await navigator.stop_and_confirm(owner_session_id=context.session_id)
 
 
 async def _localize_with_reobservation(target, locate, context, bounds, receipts, hint_state,
@@ -144,8 +176,51 @@ def _same_target(first: dict, second: dict) -> bool:
             and math.hypot(first['x'] - second['x'], first['y'] - second['y']) <= 0.35)
 
 
+def _path_prefix_waypoint(path, grid, start: dict, goal: tuple,
+                          max_advance_m: float) -> tuple[float, float, float]:
+    """Select a point along the planned free path, measured from actual odom."""
+    points = [grid.grid_to_odom(*cell) for cell in path[1:-1]]
+    points.append((goal[0], goal[1]))
+    x, y, distance = start['x'], start['y'], 0.0
+    for nx, ny in points:
+        length = math.hypot(nx - x, ny - y)
+        if distance + length > max_advance_m:
+            fraction = (max_advance_m - distance) / length
+            return x + (nx - x) * fraction, y + (ny - y) * fraction, max_advance_m
+        x, y, distance = nx, ny, distance + length
+    return x, y, distance
+
+
+async def _bounded_navigation(operation, context, start: dict,
+                              max_advance_m: float) -> dict:
+    """Stop a replanned detour from consuming more than the earned distance."""
+    task = asyncio.create_task(operation)
+    previous, travelled = start, 0.0
+    try:
+        while True:
+            snapshot, reason = navigator.snapshot()
+            if reason:
+                raise TargetUnlocalized(reason)
+            pose, _ = snapshot
+            if pose.get('session_id') != start.get('session_id'):
+                raise TargetUnlocalized('odom_session_mismatch')
+            travelled += math.hypot(pose['x'] - previous['x'], pose['y'] - previous['y'])
+            previous = pose.copy()
+            # Match navigation's ordinary positional completion tolerance.
+            if travelled > max_advance_m + .05:
+                raise TargetUnlocalized('advance_budget_exceeded')
+            if task.done():
+                return {**task.result(), 'travelled_distance_m': round(travelled, 3)}
+            await asyncio.wait({task}, timeout=.1)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None,
-                                     target_hint: dict | None = None) -> dict:
+                                     target_hint: dict | None = None,
+                                     max_advance_m: float | None = None) -> dict:
     """Confirm on different stationary frames, approach, stop and recheck.
 
     Bounds, when provided by a search, are (min_x,min_y,max_x,max_y) in the
@@ -154,6 +229,10 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
     if not isinstance(target, str) or not target.strip() or len(target) > 100:
         return {'result': 'blocked', 'reason': 'invalid_target', 'target_hint': target_hint,
                 'observation_moves': []}
+    if max_advance_m is not None and (type(max_advance_m) not in (int, float)
+            or not math.isfinite(max_advance_m) or not .15 <= max_advance_m <= 1.0):
+        return {'result': 'blocked', 'reason': 'invalid_advance_budget',
+                'target': target, 'observation_moves': []}
     if not go2.is_connected:
         return {'result': 'blocked', 'reason': 'disconnected', 'target_hint': target_hint,
                 'observation_moves': []}
@@ -163,6 +242,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
     task_pose = None
     observation_moves = []
     hint_state = {'hint': target_hint}
+    movement_started = False
 
     def remember_navigation(receipt):
         nonlocal navigation, task_pose
@@ -185,8 +265,13 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         _authorize(context)
         retry_reason = None
         while True:
-            location, pose, _ = await _localize_with_reobservation(
-                target, locate, context, bounds, observation_moves, hint_state, retry_reason)
+            if max_advance_m is None:
+                location, pose, _ = await _localize_with_reobservation(
+                    target, locate, context, bounds, observation_moves, hint_state, retry_reason)
+            else:
+                # A game win buys only one bounded advance. Looking for depth
+                # must never add the normal approach's exploratory movement.
+                location, pose, _ = await _await_authorized(locate(target), context)
             _authorize(context, renew=True)
             try:
                 confirmed, pose, _ = await _await_authorized(locate(
@@ -194,7 +279,8 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                     after_received_at=location['source_received_at']), context)
             except TargetUnlocalized as exc:
                 if (exc.reason not in {'object_returns_unavailable', 'target_not_visible'}
-                        or len(observation_moves) >= REOBSERVE_MAX_STEPS):
+                        or len(observation_moves) >= REOBSERVE_MAX_STEPS
+                        or max_advance_m is not None):
                     raise
                 retry_reason = exc.reason
                 continue
@@ -202,6 +288,12 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                 raise TargetUnlocalized('target_confirmation_mismatch')
             break
         location = confirmed
+        expected = _expected_visual_target.get() if max_advance_m is not None else None
+        if expected is not None:
+            if expected.get('odom_session_id') != location.get('odom_session_id'):
+                raise TargetUnlocalized('odom_session_mismatch')
+            if not _same_target(expected, location):
+                raise TargetUnlocalized('target_confirmation_mismatch')
         task_pose = pose
         snapshot, reason = navigator.snapshot()
         if reason:
@@ -229,8 +321,39 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                            minimum_command_speed=APPROACH_COMMAND_FLOOR)
         if bounds is not None:
             options['bounds'] = bounds
+        advance_start = current_pose.copy()
+        waypoint = stop
+        if max_advance_m is not None:
+            # Plan to the real standoff before taking a prefix; a straight
+            # odom step toward a visible target does not prove a free route.
+            planned = await _await_authorized(invoke_blocking(
+                navigator._plan_path,
+                {'x': stop['x'], 'y': stop['y'], **options}, grid, current_pose), context)
+            if not planned:
+                raise TargetUnlocalized('no_known_free_path')
+            path, planned_grid, goal = planned
+            fresh, reason = navigator.snapshot()
+            if reason:
+                raise TargetUnlocalized(reason)
+            if fresh[0].get('session_id') != location['odom_session_id']:
+                raise TargetUnlocalized('odom_session_mismatch')
+            visual_target._ensure_stable(current_pose, fresh[0])
+            x, y, planned_distance = _path_prefix_waypoint(
+                path, planned_grid, current_pose, goal, max_advance_m)
+            waypoint = {'x': x, 'y': y,
+                        'heading': math.atan2(location['y'] - y, location['x'] - x),
+                        'planned_distance_m': planned_distance}
+            options.update(heading=waypoint['heading'], holonomic=True,
+                           face_target=(location['x'], location['y']),
+                           speed_limit=APPROACH_COMMAND_LIMIT,
+                           minimum_command_speed=APPROACH_COMMAND_FLOOR,
+                           arrival_tolerance_m=.05)
+        movement = navigator.go_to_coordinate(waypoint['x'], waypoint['y'], **options)
+        if max_advance_m is not None:
+            movement = _bounded_navigation(movement, context, advance_start, max_advance_m)
+        movement_started = True
         navigation = await _await_authorized(
-            navigator.go_to_coordinate(stop['x'], stop['y'], **options), context,
+            movement, context,
             on_result=remember_navigation)
         task_pose = navigation.get('last_trusted_pose') or task_pose
         if navigation.get('status') != 'succeeded':
@@ -246,21 +369,44 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
             after_received_at=stopped_at), context)
         if not _same_target(location, verified):
             raise TargetUnlocalized('arrival_target_mismatch')
+        if expected is not None and not _same_target(expected, verified):
+            raise TargetUnlocalized('arrival_target_mismatch')
         distance = math.hypot(pose['x'] - verified['x'], pose['y'] - verified['y'])
-        if not STANDOFF_M - STANDOFF_TOLERANCE_M <= distance <= STANDOFF_M + STANDOFF_TOLERANCE_M:
+        arrived = STANDOFF_M - STANDOFF_TOLERANCE_M <= distance <= STANDOFF_M + STANDOFF_TOLERANCE_M
+        if not arrived and max_advance_m is None:
             raise TargetUnlocalized('arrival_standoff_mismatch')
         bearing = math.atan2(verified['y'] - pose['y'], verified['x'] - pose['x'])
         if abs(math.atan2(math.sin(bearing - pose['heading']), math.cos(bearing - pose['heading']))) > 0.30:
             raise TargetUnlocalized('arrival_heading_mismatch')
         _authorize(context, renew=True)
-        return {'result': 'ok', 'target': target, 'confirmation': 'odom_stopped_and_visual_recheck',
+        bounded_result = {}
+        if max_advance_m is not None:
+            # Waypoint completion is progress only; fresh target distance and
+            # facing are independently required to award arrival.
+            if pose.get('session_id') != advance_start.get('session_id'):
+                raise TargetUnlocalized('odom_session_mismatch')
+            advance_distance = math.hypot(
+                pose['x'] - advance_start['x'], pose['y'] - advance_start['y'])
+            if advance_distance > max_advance_m + .05:
+                raise TargetUnlocalized('advance_budget_exceeded')
+            if not arrived and advance_distance < .05:
+                raise TargetUnlocalized('advance_not_observed')
+            bounded_result = {'arrived': arrived, 'max_advance_m': max_advance_m,
+                              'advance_waypoint': waypoint,
+                              'travelled_distance_m': navigation.get('travelled_distance_m'),
+                              'advance_distance_m': round(advance_distance, 3),
+                              'last_trusted_pose': pose}
+        return {'result': 'ok', 'target': target,
+                'confirmation': 'odom_stopped_and_visual_recheck' if arrived else 'odom_stopped_and_visual_progress',
                 'target_location': verified, 'navigation': navigation, 'stop': stop,
                 'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                 'distance_to_target_m': round(distance, 3),
                 'front_clearance_to_contact_m': round(distance - visual_target.ROBOT_HALF_LENGTH_M, 3),
-                'message': f'已到「{target}」附近，停稳后已重新确认目标。'}
+                'message': (f'已到「{target}」附近，停稳后已重新确认目标。' if arrived else
+                            f'已按本轮距离向「{target}」推进，停稳后已复核目标，尚未到达。'),
+                **bounded_result}
     except asyncio.CancelledError:
-        await navigator.stop_and_confirm(owner_session_id=context.session_id)
+        await _stop_approach(context, bounded=max_advance_m is not None)
         raise
     except TargetUnlocalized as exc:
         if observation_moves and task_pose is None:
@@ -268,8 +414,9 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         stop_result = None
         if exc.reason in {'authorization_expired', 'control_lease_changed',
                           'odom_session_mismatch', 'map_session_changed', 'map_mismatch',
-                          'disconnected', 'stop_unconfirmed', 'arrival_unconfirmed'}:
-            stop_result = await navigator.stop_and_confirm(owner_session_id=context.session_id)
+                          'disconnected', 'stop_unconfirmed', 'arrival_unconfirmed',
+                          'advance_budget_exceeded'} or (max_advance_m is not None and movement_started):
+            stop_result = await _stop_approach(context, bounded=max_advance_m is not None)
         unconfirmed = stop_result is not None and stop_result.get('result') != 'ok'
         if unconfirmed:
             return {'result': 'accepted', 'reason': 'stop_unconfirmed', 'target': target,

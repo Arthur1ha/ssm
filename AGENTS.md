@@ -271,7 +271,7 @@ make logs
 make trace-task ID=<session_id>
 
 # 相关契约示例；*_checks.py 必须显式传入才能被默认 pytest 发现
-uv run python -m pytest cloud/cards/region_contract_checks.py cloud/esp32/capability_chain_checks.py cloud/agents/common/training/semantic_checks.py -q
+uv run python -m pytest cloud/cards/region_contract_checks.py cloud/esp32/capability_chain_checks.py cloud/agents/common/training/context_checks.py -q
 
 # 需要全量回归时，同时包含现有 *_checks.py
 uv run python -m pytest cloud -o 'python_files=test_*.py *_test.py *_checks.py' -q

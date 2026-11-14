@@ -15,7 +15,7 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
-from cloud.agents.lamp.prompts import decision_messages, persona_reply_prompt
+from cloud.agents.lamp.prompts import capture_lamp_baseline, decision_messages, persona_reply_prompt
 from cloud.agents.lamp.state import READ_ONLY_TOOLS
 from cloud.agents.lamp.tools.execute import execute_lamp_tool
 from cloud.agents.lamp.tools.schemas import visible_schemas
@@ -47,8 +47,17 @@ def _response(run, *, runtime_reply: bool = False) -> dict:
 def _public_status(run: GraphRun) -> str:
     if run.status != "partial":
         return run.status
-    return next((step["result"]["result"] for step in reversed(run.steps)
-                 if step.get("result", {}).get("result") != "ok"), "error")
+    from cloud.agents.common.outcomes import completed_status, effective_steps
+
+    if completed_status(run.steps) == "ok":
+        return "ok"
+    remaining = effective_steps(run.steps)
+    if any((step.get("result") or {}).get("result") == "ok"
+           and step.get("effectful") is not False for step in remaining):
+        return "partial"
+    return next(((step.get("result") or {}).get("result", "error")
+                 for step in reversed(remaining)
+                 if (step.get("result") or {}).get("result") != "ok"), "error")
 
 
 def stable_reply_event_id(run: GraphRun, status: str) -> str | None:
@@ -130,6 +139,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                          agent_id=unit_id, session_id=context.session_id,
                          origin_kind=run.origin_kind, input=text,
                          entry="lamp_semantic" if lighting_only else "lamp_chat")
+    capture_lamp_baseline(run, agent=agent, unit_id=unit_id)
     if context.origin_kind == "user_delegated":
         agent.mark_user_command(unit_id)
 
@@ -206,7 +216,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                                         "proposal_attempts": run.steps[training_attempt_start:-1]})
         return execute_lamp_tool(name, params, step_id, agent=agent, unit_id=unit_id,
                                  context=context, dispatch=dispatch,
-                                 lighting_only=lighting_only, run_id=run.run_id)
+                                 lighting_only=lighting_only, run_id=run.run_id,
+                                 decision_space=run.decision_space)
 
     def reconcile(name, params, step_id):
         if name in READ_ONLY_TOOLS:
@@ -245,7 +256,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
 
     def messages_for(current: GraphRun):
         messages = decision_messages(current, agent=agent, unit_id=unit_id,
-                                     supplement=text if resume else "", space_id=context.space_id)
+                                     supplement=text if resume else "", space_id=context.space_id,
+                                     lighting_only=lighting_only)
         if selection:
             messages.insert(1, context_message({"training_selection": selection}))
         return messages
@@ -255,7 +267,9 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
         nonlocal run_model
         run_model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
         declarations = visible_schemas(lighting_only=lighting_only,
-                                      card=cards.get_registry().get_card(unit_id))
+                                      card=cards.get_registry().get_card(unit_id),
+                                      user_delegated=context.origin_kind == "user_delegated",
+                                      game_setup=context.session_id.startswith("peer_game_color_"))
         return await run_role_graph(
             run, model=run_model,
             tool_schemas=declarations,

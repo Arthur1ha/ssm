@@ -598,6 +598,10 @@ def _dispatch_mqtt_task(
     emit_agent_event("device.command", task_id=task_id, target_unit_id=unit_id,
                      action=action, params=params, transport="mqtt",
                      status="pending_publish")
+    if unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"):
+        # Mark before publish: the MQTT callback can receive a result before
+        # publish returns. A failed/uncertain send is not physical completion.
+        _esp32_state.mark_task_pending(task_id)
     _mqtt_publish(f"ssm/task/{unit_id}/{task_id}", payload)
     return task_id
 

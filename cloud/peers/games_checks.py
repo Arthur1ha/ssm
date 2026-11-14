@@ -185,7 +185,7 @@ def check() -> None:
             store.value["activity_id"] = "act_test"
             assert messenger.send_message("esp32_desk_led", "go2", "来玩",
                 interaction_kind="game_invite", game_id="color_hunt", **invitation_basis)["result"] == "accepted"
-            assert json.loads(mqtt.sent[-1][1])["content"] == game.invitation
+            assert json.loads(mqtt.sent[-1][1])["content"] == "来玩"
             store.value["devices"]["go2"]["status"] = "left"
             assert playable_games("act_test", "esp32_desk_led", "go2") == []
             assert messenger.send_message("esp32_desk_led", "go2", "来玩",
@@ -199,9 +199,10 @@ def check() -> None:
 def check_invitation_needs_no_existing_color() -> None:
     store = _Activity()
     with (patch("cloud.space.activity.get_activity_store", return_value=store),
+          patch("cloud.peers.games.registry.game_invitation_ready", return_value=True),
           patch("cloud.peers.games.color_hunt.live_lamp_color", return_value=None)):
         assert [item["game_id"] for item in playable_games(
-            "act_test", "esp32_desk_led", "go2")] == ["color_hunt"]
+            "act_test", "esp32_desk_led", "go2")] == ["color_hunt", "push_delivery", "rps_siege"]
 
 
 def check_game_commands_do_not_start_user_hold() -> None:

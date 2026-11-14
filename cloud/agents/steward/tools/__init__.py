@@ -15,6 +15,7 @@ from cloud.agents.steward.tools.coordination import allows_step
 from cloud.agents.steward.tools.card import validate_public_skill
 from cloud.peers.cancellation import peer_coordination_cancelled
 from cloud.agents.steward.tools.policy import http_timeout_for, skill_requires_persistence
+from cloud.agents.steward.tools.state import read_cached_state, steward_space_context
 from cloud.space.registry import DEFAULT_SPACE_ID, get_space_cards, get_space_registry
 from cloud.space.context import get_space_context
 from cloud.space.constraints import get_constraint_store
@@ -176,7 +177,11 @@ class GetSpaceContext(_Args):
     """读取可信空间现状。"""
 
 class ReadState(_Args):
-    """读取传感器与执行器快照。"""
+    """读取当前空间传感器与执行器的 MQTT 缓存快照，不向硬件发起实时查询。
+
+    观察含来源、时间和 current/stale/unknown 新鲜度；过期或未知数据不表示当前事实。
+    result=ok 仅表示读取成功，不确认动作完成；任务未确认时用 await_result 按原 task_id 查询。
+    """
 
 class InvokeSkill(_Args):
     """按 list_agents 返回的当前 Card 调用公开技能并等待结果。
@@ -283,8 +288,8 @@ def make_executor(run, context: dict, resume: bool = False):
         if name == "get_space_context":
             if args:
                 return {"result": "rejected", "error": "invalid_arguments"}
-            return {"result": "ok", "space": get_space_context(
-                "cloud_orchestrator", state=transport._state, registry=transport._registry)}
+            return {"result": "ok", "space": steward_space_context(
+                state=transport._state, registry=transport._registry)}
         if name == "start_activity":
             if (args or resume or context.get("origin_kind", "user_delegated") != "user_delegated"
                     or context.get("peer_request_id") or not context.get("event_id")
@@ -359,8 +364,7 @@ def make_executor(run, context: dict, resume: bool = False):
                 return {"result": "error", "error": "constraint_publish_failed"}
             return {"result": "ok"}
         if name == "read_state":
-            return {"result": "ok", "sensors": transport._state.sensor_snapshot() if transport._state else {},
-                    "actuators": transport._state.actuator_snapshot() if transport._state else {}}
+            return read_cached_state(transport._state, registry=transport._registry)
         if name == "invoke_skill":
             if args.get("unit_id") == "go2" and args.get("skill_id") == "go2_move" and any(
                 step.get("tool") == "invoke_skill"
@@ -373,18 +377,23 @@ def make_executor(run, context: dict, resume: bool = False):
             return await invoke_blocking(_invoke_skill, context, args, step_id, run.deadline)
         if name == "await_result":
             task_id = args.get("task_id")
-            original = next((s.get("result") for s in run.steps
+            original_step = next((s for s in run.steps
                              if s.get("tool") == "invoke_skill"
                              and (s.get("result") or {}).get("task_id") == task_id), None)
-            if not isinstance(task_id, str) or original is None:
+            if not isinstance(task_id, str) or original_step is None:
                 return {"result": "rejected", "error": "unknown_task_id"}
+            original = original_step["result"]
             endpoint = original.get("query_endpoint")
             if endpoint:
                 return await invoke_blocking(
                     transport.do_http_task_status, endpoint, task_id, context,
                     min(5, max(0.1, run.deadline - time.time())))
+            unit_id = original.get("unit_id") or (original_step.get("params") or {}).get("unit_id")
+            if not isinstance(unit_id, str) or not unit_id:
+                return {"result": "rejected", "error": "task_target_unavailable"}
             return await invoke_blocking(
-                _wait_mqtt_result, task_id, session_id, min(run.deadline, time.time() + 20))
+                _wait_mqtt_result, task_id, session_id, min(run.deadline, time.time() + 20),
+                unit_id=unit_id)
         return {"result": "rejected", "error": "unknown_tool"}
     return execute
 

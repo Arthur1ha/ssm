@@ -9,7 +9,7 @@ from cloud.esp32.physical_tasks import stable_task_id
 
 def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: str,
                       context, dispatch, lighting_only: bool,
-                      run_id: str) -> dict:
+                      run_id: str, decision_space: dict | None = None) -> dict:
     # Optional Pydantic fields may arrive as null; omission preserves the
     # existing device protocol's strict parameter contract.
     params = {key: value for key, value in params.items() if value is not None}
@@ -40,17 +40,19 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
         reason = params.pop("decision_reason", None)
         refs = params.pop("evidence_refs", None)
         game_setup = context.session_id.startswith("peer_game_color_")
-        decision_space = None
+        current_space = None
         if game_setup or reason is not None or refs is not None:
             from cloud.space.context import get_space_context
             from cloud.space.decisions import resolve_decision
             try:
-                decision_space = get_space_context(unit_id, state=agent._state)
+                current_space = get_space_context(unit_id, state=agent._state)
                 decision_basis = resolve_decision(
-                    decision_space, reason, refs,
-                    require_observation=game_setup)
+                    current_space, reason, refs,
+                    require_observation=game_setup,
+                    observed_space=decision_space)
             except ValueError as exc:
-                return {"result": "rejected", "error": str(exc)}
+                return {"result": "rejected", "error": str(exc),
+                        "execution_phase": "preflight"}
         from cloud.cards.registry import get_registry
         card = get_registry().get_card(unit_id)
         if not card:
@@ -61,7 +63,7 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
             from cloud.space.activity import get_activity_store
             store = get_activity_store()
             activity = store.current()
-            activity_id = (decision_space.get("activity") or {}).get("activity_id")
+            activity_id = (current_space.get("activity") or {}).get("activity_id")
             if (not activity_id or (activity or {}).get("activity_id") != activity_id
                     or not activity_allows(activity_id, unit_id, "go2")
                     or not agent._should_act() or not agent._device_online()):

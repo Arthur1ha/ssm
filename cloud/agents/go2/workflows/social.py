@@ -1,4 +1,4 @@
-"""Isolated Go2 peer-social decision Graph; not wired to production Drive."""
+"""Go2 peer-social decisions, grounded in the current space evidence catalogue."""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ class SocialDecision(BaseModel):
     decision: Literal["send_message", "skip"]
     target: str = ""
     content: str = Field(default="", max_length=1000)
-    reason: str = ""
+    reason: str = Field(default="", max_length=300)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=8)
     interaction_kind: Literal["message", "game_invite"] = "message"
     game_id: str = ""
 
@@ -32,6 +33,7 @@ class SocialState(TypedDict, total=False):
     playable_games: list[dict[str, Any]]
     space_summary: str
     interaction_history: dict[str, Any]
+    decision_evidence: list[dict[str, Any]]
     active: bool
     connected: bool
     interrupted: bool
@@ -80,11 +82,15 @@ def build_social_graph(
             "发消息不代表对方答应或完成动作，也不要推断人物身份。\n"
             "可选普通消息、玩法邀请或跳过；邀请是提议，对方可以拒绝。"
             "只有当前可玩列表中的目标和 game_id 可以用于 game_invite。\n"
+            "游戏邀请必须填写 reason 和 evidence_refs：用自己的口吻简短说明为何现在邀请，"
+            "引用当前 decision_evidence 中确实存在的 ref，不能自填观察事实。"
+            "idle 等机会 ID 只是调度信号，不是证据引用；普通交流不强制引用。\n"
             f"活动：{json.dumps(state.get('activity'), ensure_ascii=False)}\n"
             f"机会：{json.dumps(state['opportunity'], ensure_ascii=False)}\n"
             f"在线同伴：{json.dumps(targets, ensure_ascii=False)}\n"
             f"当前可玩玩法：{json.dumps(state.get('playable_games', []), ensure_ascii=False)}\n"
             f"近期互动历史：{json.dumps(state.get('interaction_history', {}), ensure_ascii=False)}\n"
+            f"decision_evidence：{json.dumps(state.get('decision_evidence', []), ensure_ascii=False)}\n"
             f"空间：{state.get('space_summary', '')}"
         )
         try:
@@ -121,6 +127,8 @@ def build_social_graph(
             return {"status": "blocked"}
         interaction_kind = decision.get("interaction_kind", "message")
         game_id = decision.get("game_id") if interaction_kind == "game_invite" else None
+        grounding = ({"decision_reason": decision.get("reason"),
+                      "evidence_refs": decision.get("evidence_refs", [])} if game_id else {})
         if game_id:
             from cloud.peers.games import game_is_playable
             if not game_is_playable(state["activity_id"], "go2", target, game_id):
@@ -133,7 +141,8 @@ def build_social_graph(
             reservation = ledger.reserve("go2", f"go2:social:{run_id}", run_id,
                                          "send_message", "send_message",
                                          {"target": target, "content": content,
-                                          "interaction_kind": interaction_kind, "game_id": game_id})
+                                          "interaction_kind": interaction_kind, "game_id": game_id,
+                                          **grounding})
         except ValueError:
             return {"status": "rejected", "delivery": {"result": "rejected",
                                                        "error": "effect_id_conflict"}}
@@ -144,7 +153,7 @@ def build_social_graph(
             try:
                 if game_id:
                     outcome = await send_message(target, content,
-                        interaction_kind="game_invite", game_id=game_id)
+                        interaction_kind="game_invite", game_id=game_id, **grounding)
                 else:
                     outcome = await send_message(target, content)
             except Exception as exc:

@@ -79,6 +79,48 @@ class AgentMessenger:
             while len(table) > _MAX_PENDING:
                 table.pop(next(iter(table)))
 
+    def _game_pair_pending(self, sender: str, target: str, *, exclude: str | None = None) -> bool:
+        """Reuse existing message reservations to serialize crossed invitations."""
+        pair = {sender, target}
+        now = self._now()
+        return any(row.get("interaction_kind") == "game_invite"
+                   and row.get("message_id") != exclude
+                   and {row.get("sender"), row.get("target")} == pair
+                   and row.get("deadline", 0) > now
+                   and row.get("state") in {"waiting_reply", "waiting_start", "waiting_result"}
+                   for row in self._outgoing.values())
+
+    def has_pending_game(self, unit_id: str) -> bool:
+        """Let an idle device await a reply instead of starting new exploration."""
+        with self._lock:
+            self._trim(self._now())
+            return any(unit_id in {row.get("sender"), row.get("target")}
+                       and row.get("interaction_kind") == "game_invite"
+                       and row.get("deadline", 0) > self._now()
+                       and row.get("state") in {"waiting_reply", "waiting_start", "waiting_result"}
+                       for row in self._outgoing.values())
+
+    def _message_ttl(self, payload: dict) -> int:
+        """A registered game's lifetime also covers its correlated replies.
+
+        Ordinary messages retain the existing limit. A reply cannot choose a
+        game lifetime: it must reference this messenger's actual message rows.
+        """
+        from cloud.peers.games import get_game
+        row = payload
+        for _ in range(3):
+            if row.get("interaction_kind") == "game_invite":
+                game = get_game(row.get("game_id"))
+                return min(900, max(300, game.invitation_ttl_s)) if game else 300
+            reference = row.get("reply_to") or row.get("message_id")
+            if not isinstance(reference, str):
+                break
+            previous = self._outgoing.get(reference) or self._inbound.get(reference)
+            if not previous or previous is row:
+                break
+            row = previous
+        return 300
+
     def _publish(self, payload: dict) -> bool:
         topic = f"ssm/agents/{payload['target']}/message"
         try:
@@ -125,8 +167,11 @@ class AgentMessenger:
         if (deadline is not None and (isinstance(deadline, bool)
                 or not isinstance(deadline, (int, float)) or not math.isfinite(deadline))):
             return {"result": "blocked", "error": "invalid_deadline"}
-        default_ttl = 300 if interaction_kind == "game_invite" else 60
-        expires = min(now + 300, deadline if deadline is not None else now + default_ttl)
+        with self._lock:
+            ttl = self._message_ttl({"interaction_kind": interaction_kind,
+                                    "game_id": game_id, "reply_to": reply_to})
+        default_ttl = ttl if interaction_kind == "game_invite" else 60
+        expires = min(now + ttl, deadline if deadline is not None else now + default_ttl)
         if expires <= now:
             return {"result": "blocked", "error": "message_expired"}
         with self._lock:
@@ -168,6 +213,12 @@ class AgentMessenger:
                 if not game_is_playable(payload.get("activity_id"), sender, target, game_id):
                     return {"result": "blocked", "error": "game_unavailable"}
                 game = get_game(game_id)
+                if game.requires_idle:
+                    from cloud.peers.games.base import game_invitation_ready
+                    if self._game_pair_pending(sender, target):
+                        return {"result": "blocked", "error": "game_invitation_pending"}
+                    if not game_invitation_ready(payload.get("activity_id"), sender, target):
+                        return {"result": "blocked", "error": "game_participants_busy"}
                 if game.valid_invitation and not game.valid_invitation(payload["content"]):
                     payload["content"] = game.invitation
                 payload["interaction_kind"] = interaction_kind
@@ -261,7 +312,8 @@ class AgentMessenger:
             return {key: item.get(key) for key in (
                 "message_id", "conversation_id", "sender", "target", "state", "received",
                 "task_id", "result", "deadline", "updated_at",
-                "interaction_kind", "game_id", "activity_id", "decision_basis")}
+                "interaction_kind", "game_id", "activity_id", "decision_basis",
+                "reply_to", "reply_kind", "content")}
 
     def handle_message(self, topic: str, raw: bytes | str) -> bool:
         """Return whether this topic is an agent message, even if rejected."""
@@ -294,11 +346,13 @@ class AgentMessenger:
                 or not isinstance(message_id, str) or not _ID.fullmatch(message_id)
                 or not isinstance(conversation_id, str) or not _ID.fullmatch(conversation_id)
                 or isinstance(deadline, bool) or not isinstance(deadline, (int, float))
-                or not now < deadline <= now + 300
+                or not now < deadline <= now + 900
                 or not self._allowed(target, sender)):
             return True
         with self._lock:
             self._trim(now)
+            if deadline > now + self._message_ttl(payload):
+                return True
             if kind == "message":
                 content = payload.get("content")
                 reply_to = payload.get("reply_to")
@@ -317,9 +371,14 @@ class AgentMessenger:
                     from cloud.peers.games import activity_allows, get_game
                     game = get_game(game_id)
                     if (reply_to is not None or payload.get("reply_kind") != "reply"
-                            or game is None or (sender, target) != game.participants
+                            or game is None or not game.allows_pair(sender, target)
                             or not activity_allows(payload.get("activity_id"), sender, target)):
                         return True
+                    if game.requires_idle:
+                        from cloud.peers.games.base import game_invitation_ready
+                        if (self._game_pair_pending(sender, target, exclude=message_id)
+                                or not game_invitation_ready(payload.get("activity_id"), sender, target)):
+                            return True
                 if interaction_kind == "game_invite" or "decision_basis" in payload:
                     basis = payload.get("decision_basis")
                     if (not isinstance(basis, dict) or not isinstance(basis.get("evidence"), list)

@@ -5,6 +5,7 @@ import logging
 import queue
 import threading
 import time
+from contextlib import nullcontext
 
 from cloud.esp32.perception import sense as sense_sensors
 
@@ -22,10 +23,14 @@ async def run_training_behavior(prepared, context, *, run_id, agent, dispatch=No
     from cloud.esp32.physical_tasks import stable_task_id
 
     unit_id = prepared['unit_id']
-    active = getattr(agent, '_training_behavior_run_id', None)
-    if active is not None and active != run_id:
-        return {'result': 'blocked', 'error': 'training_behavior_busy'}
-    agent._training_behavior_run_id = run_id
+    with getattr(agent, '_conversation_lock', nullcontext()):
+        active = getattr(agent, '_training_behavior_run_id', None)
+        if active is not None and active != run_id:
+            return {'result': 'blocked', 'error': 'training_behavior_busy'}
+        if (context.origin_kind == 'agent_autonomous'
+                and getattr(agent, '_peer_game_id', None)):
+            return {'result': 'blocked', 'error': 'peer_game_active'}
+        agent._training_behavior_run_id = run_id
     command_epoch = getattr(agent, '_command_epoch', 0)
     autonomy_epoch = getattr(agent, '_autonomy_epoch', 0)
 
@@ -129,6 +134,24 @@ class ReactiveMind:
 
     def _dispatch_tool(self, tool_name: str, params: dict, led_unit: str,
                        *, task_id: str | None = None) -> bool:
+        """Keep ordinary reactive work outside a game's lamp reservation."""
+        reserves_output = tool_name in {'set_led_state', 'set_led_color', 'blink_led',
+                                        'request_peer_skill'}
+        with getattr(self, '_conversation_lock', nullcontext()):
+            if getattr(self, '_peer_game_id', None):
+                self._last_reactive_tool_result = {'result': 'blocked', 'error': 'peer_game_active'}
+                return False
+            if reserves_output:
+                self._reactive_dispatches = getattr(self, '_reactive_dispatches', 0) + 1
+        try:
+            return self._dispatch_reactive_tool(tool_name, params, led_unit, task_id=task_id)
+        finally:
+            if reserves_output:
+                with getattr(self, '_conversation_lock', nullcontext()):
+                    self._reactive_dispatches -= 1
+
+    def _dispatch_reactive_tool(self, tool_name: str, params: dict, led_unit: str,
+                                *, task_id: str | None = None) -> bool:
         """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
 
         set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
@@ -200,7 +223,7 @@ class ReactiveMind:
                     unit_id=led_unit, tool=tool_name, params=params,
                     context=ExecutionContext("lamp-autonomous", "agent", False,
                                              "main", "agent_autonomous", 0),
-                    mode_available=self._should_act(),
+                    mode_available=self._should_act() and not getattr(self, '_peer_game_id', None),
                 )
                 self._last_reactive_tool_result = result
                 if result.get("result") not in {"ok", "accepted"}:
@@ -217,13 +240,15 @@ class ReactiveMind:
                 from cloud.space.execution import ExecutionContext
                 card = get_registry().get_card(led_unit)
                 def preflight(current, arguments):
-                    if not self._should_act():
+                    if not self._should_act() or getattr(self, '_peer_game_id', None):
                         return "autonomy_unavailable"
                     if not card:
                         return "lamp_unavailable"
                     return None
                 def dispatch(_uid, _action, arguments, _ctx, _src, *, task_id=None):
                     from cloud.api.intents import _dispatch_mqtt_task
+                    if not self._should_act() or getattr(self, '_peer_game_id', None):
+                        raise PermissionError('peer_game_active_or_autonomy_unavailable')
                     return _dispatch_mqtt_task(
                         _uid, _action, arguments,
                         {"session_id": "agent_auto", "actor": "agent", "persist": False},

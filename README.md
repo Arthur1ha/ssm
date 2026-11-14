@@ -160,13 +160,23 @@ Go2 视频保留接收帧原尺寸，JPEG 质量为 90，编码上限 10 帧/秒
 - **空间活动**保存用户原话、设备实际加入模式、消息、观察、动作及回执。活动通过 API 或管家工具启动，为灯选择 `reactive`、Go2 选择 `free_explore`；用户再次介入会结束当前活动，切回活动持有设备的 `manual` 并记录停止结果。活动没有默认到期时间，重启恢复不重放历史动作。
 - **同伴协作**区分定向消息与单技能调用。消息受签名、成员身份、期限和去重校验；发出邀请不表示对方接受或动作完成。`color_hunt` 由模型结合新鲜观察决定是否邀请、选色与找物，不按固定延时或预设剧情执行。需要决策依据时，工具校验 `decision_reason/evidence_refs`，时间线保存当时的来源与摘要。
 
-互动游戏在 `cloud/peers/games/` 按游戏分文件管理：每个文件定义该游戏的规则、玩法、策略说明、可用条件与执行入口，统一注册表负责汇总。自主社交没有固定发送间隔、次数配额或同话题冷却；现有 Graph 结合人格 traits、当前环境、任务及近期互动决定是否邀请或回应。新事件仍须去重，邀请和动作仍须遵循活动、任务与真实回执约束。
+互动游戏在 `cloud/peers/games/` 按游戏分文件管理：每个文件定义该游戏的规则、玩法、策略说明、可用条件与执行入口，统一注册表负责汇总。找颜色、猜拳攻灯和配送均声明双向邀请，发起方不决定角色：灯和狗任意一方都可以提议，另一方自主接受、拒绝或延后。只有双方同处有效活动、在线且没有正在执行或等待确认的任务时才可邀请和开局；Go2 在探索轮次之间无具体任务、无导航或运动时可参与，休息、手动控制、动作未确认或等待用户补充时不可开局。灯的常亮、熄灭或持续闪烁本身不等于云端任务忙碌，实际会话、教导和物理回执等待分别检查。
+
+自主社交没有固定发送间隔、次数配额或同话题冷却；双方进入空闲段以及新观察可提供一次重新判断的机会，现有 Graph 结合人格 traits、当前环境、任务及近期互动决定邀请、交流或保持安静。空闲不代表愿意接受；同一空闲段不会按时间反复催发邀请，同一对设备的待处理邀请也会阻止交叉发起第二局。找颜色支持灯邀请狗和狗邀请灯两个执行方向；双方同意后仍由灯依据真实观察选色并确认物理回执、狗寻找并以停稳和视觉复核确认结果。
 
 新增游戏时：
 
-1. 在 `cloud/peers/games/<game_id>.py` 定义 `GAME = Game(...)`，参考 `color_hunt.py`。填写 `description`（玩法简介）、`rules`（规则与完成判据）、`strategy`（适合邀请/接受的情境），以及 `participants`（邀请方、接收方）、`available` 和异步 `execute`。
+1. 在 `cloud/peers/games/<game_id>.py` 定义 `GAME = Game(...)`，参考 `color_hunt.py`。填写 `description`（玩法简介）、`rules`（规则与完成判据）、`strategy`（适合邀请/接受的情境），以及 `participants`（参与双方）、`available` 和异步 `execute`。`bidirectional=True` 允许双方互邀，`requires_idle=True` 在邀请和接受开局前核验真实任务占用；未指定时保持已有单向游戏兼容。
 2. 在 `cloud/peers/games/registry.py` 导入该 `GAME` 并加入 `GAMES` 的汇总项。规则和策略随可玩列表及邀请上下文进入现有 Graph，无需逐个修改角色提示词。
-3. 按需提供 `invitation`、`acceptance` 文案、`valid_invitation` 校验和 `on_acceptance` 准备回调；执行复用已有 Graph、设备工具与真实回执。补充该玩法的模拟回归，勿用现有运行资产验证。
+3. 按需提供 `on_invitation`（灯收到游戏邀请的处理入口）及 `on_acceptance` 准备回调；问答和意愿由既有角色 Graph 生成，规则不复制到角色提示词，不把狗的邀请重写成灯的固定口吻。执行复用已有 Graph、设备工具与真实回执，保留原邀请 ID 去重及结果关联。补充该玩法的模拟回归，勿用现有运行资产验证。
+
+猜拳攻灯 `rps_siege` 的规则和执行入口在 [`cloud/peers/games/rps_siege.py`](cloud/peers/games/rps_siege.py)，角色选择在 `rps_decisions.py`，双向邀请适配在 `rps_lifecycle.py`。双方开局自行选择并公布石头／剪刀／布的表达：灯选三个可区分的亮灯颜色，狗从当前动作契约中选三个不同的动作，不规定颜色或动作映射。双方确认本局映射、回合数（1–12）、单次推进上限（0.15–1 米）及灯本体或灯旁固定标记作为终点，随后冻结约定。每轮双方私下锁定选择再依次展示，只有灯与狗的真实动作回执都确认才结算；狗赢可沿已有可通行路径推进一次，灯赢或平局不推进，平局也计回合。分段推进使用 `go2_navigate_to_visible_target(max_advance_m=...)`，部分推进返回 `arrived=false`；抵达须停稳并以新鲜画面复核同一目标，终点沿用现有视觉接近策略的安全停靠距离，不要求碰灯。抵达后灯确认关灯才算狗获胜；回合耗尽仍未抵达则灯守擂成功。游戏期间灯暂停普通自主调光，失败、结果未知、用户介入、断连或定位会话改变会中断，不判技术故障为输赢，也不重放旧物理动作。
+
+可在聊天中提出“让灯和狗玩一局猜拳攻灯”，沿用现有活动及同伴邀请入口；双方仍自主判断是否接受。游戏注册项的 `invitation_ttl_s` 默认 300 秒，猜拳攻灯为 900 秒，包含准备、出拳与导航；关联接受和结果沿用原期限，普通消息保持原有限制。回合数是本局规则，900 秒是执行截止时间，超时不判灯获胜。当前只做模拟与代码检查，真实模型决策质量、动作和导航效果需实机验收。
+
+配送游戏 `push_delivery` 已接入可玩列表，规则与执行入口在 [`cloud/peers/games/push_delivery.py`](cloud/peers/games/push_delivery.py)，角色决策和双向邀请分别在 `delivery_decisions.py`、`delivery_lifecycle.py`。流程为：任一方自主邀请 → 对方接受并确认角色（灯负责指挥、Go2 负责找货与配送）→ 灯公布货物特征 → 狗自主搜索并按原任务回执核对货物 → 狗报告找到并等待目的地指令 → 灯根据新的区域观察选择配送区域及颜色 → 双方确认本单货物、目的地与灯色 → 灯亮出颜色并核对真实回执 → 狗按同一订单逐步靠近、尝试用腿推送 → 同一货物进入指定区域、狗停稳且新鲜画面复核后报告送达。送达不等于签收。货物按特征搜索，不要求预先放在狗面前；邀请、选货、选区、问答及下一步行动由角色模型通过既有 LangGraph 机制决定，不预排固定对白或行动剧本。
+
+**配送不再要求推板，当前开放的是腿部推送尝试，实机效果待验收。** `go2_push_cargo` 工具复用原有受控步态前进，每次请求 0.1–0.25 米，仍检查真实站姿、运动权限、任务账本、地图与机身通路，不绕过障碍或清除货物占据；没有新增专用踢腿动作。推送适配在 `cloud/go2/navigation/cargo_push.py`，配对感知在 `cloud/go2/perception/cargo.py`：用停稳画面定位唯一货物和完整可见的有色地面配送区域，以真实雷达测量货物位置，并用图像颜色区域和几何包含关系复核入区。机器人走动、画面框变化或普通导航成功均不能替代货物移动及送达证据。货物与配送区域需在尝试推送时可辨认，方向不合、通路受阻、货物丢失或反馈不足会如实结束，不盲推。游戏期间灯暂停普通自主调光；用户介入、灯色改变、断连、定位会话改变或整局 900 秒期限到达会中断，重启不重放旧订单。可在聊天中提出“让灯和狗玩指挥官与送货员”，也可在活动要求中描述实际货物与区域。
 
 静态状态图以 `state_machine.regions` 为唯一拓扑，运行值从 state/SSE 合并；Go2 使用 `epoch/revision` 排序。灯的 `control_state` 与 `control_ts` 是云端控制投影，不能覆盖物理灯状态或刷新传感器事实。协议细节见 [Agent Card 契约](protocol/agent-card.md) 和 [MQTT topics](protocol/topics.md)。
 
@@ -317,8 +327,8 @@ Mosquitto 只服务 ESP32、FastAPI 与编排器等内部节点；当前模板�
 优先运行改动相关的现有检查。Python 使用 pytest；`*_checks.py` 不在默认文件发现规则内，需显式传入，或使用下列发现规则包含它们：
 
 ```bash
-# 示例：状态图、能力链与教导语义契约
-uv run python -m pytest cloud/cards/region_contract_checks.py cloud/esp32/capability_chain_checks.py cloud/agents/common/training/semantic_checks.py -q
+# 示例：状态图、能力链与当前教导上下文契约
+uv run python -m pytest cloud/cards/region_contract_checks.py cloud/esp32/capability_chain_checks.py cloud/agents/common/training/context_checks.py -q
 
 # 需要全量回归时，同时发现 test_*.py、*_test.py 和 *_checks.py
 uv run python -m pytest cloud -o 'python_files=test_*.py *_test.py *_checks.py' -q

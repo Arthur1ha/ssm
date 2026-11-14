@@ -129,16 +129,25 @@ async def go2_navigate_to_coordinate(x: float, y: float) -> dict:
             "error" if result["status"] == "failed" else result["status"], **result}
 
 
-async def go2_navigate_to_visible_target(target: str, decision_reason: str | None = None) -> dict:
+async def go2_navigate_to_visible_target(target: str, decision_reason: str | None = None,
+                                       max_advance_m: float | None = None) -> dict:
     """Navigate a target; decision narration never changes physical parameters."""
     from cloud.go2.navigation.target_approach import navigate_to_visible_target
-    return await navigate_to_visible_target(target)
+    if max_advance_m is None:
+        return await navigate_to_visible_target(target)
+    return await navigate_to_visible_target(target, max_advance_m=max_advance_m)
 
 
 async def go2_find_object(target: str) -> dict:
     """Await the one server-owned search graph, including final arrival proof."""
     from cloud.agents.go2.workflows.search import run_search
     return await run_search(target)
+
+
+async def go2_push_cargo(cargo: str, destination: str, distance_m: float = .15) -> dict:
+    """One guarded gait advance; only actual cargo/zone evidence proves delivery."""
+    from cloud.go2.navigation.cargo_push import push_cargo
+    return await push_cargo(cargo, destination, distance_m)
 
 
 def go2_list_locations() -> str:
@@ -189,7 +198,8 @@ def get_space_context() -> dict:
 
 
 def send_message(target: str, content: str, reply_to: str | None = None,
-                 interaction_kind: str = "message", game_id: str | None = None) -> dict:
+                 interaction_kind: str = "message", game_id: str | None = None,
+                 decision_reason: str | None = None, evidence_refs: list[str] | None = None) -> dict:
     """Send an agent message under this process's fixed Go2 identity."""
     from cloud.api.main import get_agent_messenger
     messenger = get_agent_messenger()
@@ -199,7 +209,9 @@ def send_message(target: str, content: str, reply_to: str | None = None,
     if context.origin_kind == "user_delegated" and context.expires_at <= time.time():
         return {"result": "blocked", "error": "session_expired"}
     return messenger.send_message("go2", target, content, reply_to,
-                                  interaction_kind=interaction_kind, game_id=game_id)
+                                  interaction_kind=interaction_kind, game_id=game_id,
+                                  **({"decision_reason": decision_reason, "evidence_refs": evidence_refs}
+                                     if interaction_kind == "game_invite" else {}))
 
 
 async def request_peer_skill(target_unit_id: str, skill_id: str, params: dict,
@@ -241,6 +253,7 @@ TOOL_FN_MAP = {
     "go2_navigate_to_coordinate": go2_navigate_to_coordinate,
     "go2_navigate_to_visible_target": go2_navigate_to_visible_target,
     "go2_find_object": go2_find_object,
+    "go2_push_cargo": go2_push_cargo,
     "go2_list_locations":         go2_list_locations,
     "go2_set_led":                go2_set_led,
     "go2_recognize_person":       go2_recognize_person,

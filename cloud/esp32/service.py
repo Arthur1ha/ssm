@@ -63,6 +63,43 @@ class ESP32Agent(ReactiveMind):
         self._reply_gate = AutonomousReplyGate()
         from cloud.peers.social import SocialState
         self._social_state = SocialState()
+        self._conversation_lock = threading.Lock()
+        self._conversations = 0
+        self._peer_game_id: str | None = None
+        self._reactive_dispatches = 0
+
+    def begin_peer_game(self, game_id: str) -> bool:
+        """Reserve lamp output for one game without changing autonomy mode."""
+        with self._conversation_lock:
+            if (getattr(self, '_peer_game_id', None) is not None or self._conversations
+                    or getattr(self, '_reactive_dispatches', 0)
+                    or getattr(self, "_training_behavior_run_id", None)
+                    or self._state.has_pending_tasks()
+                    or not self._should_act() or not self._device_online()):
+                return False
+            self._peer_game_id = game_id
+            # Discard sensor decisions that were planned before this claim.
+            self._autonomy_epoch += 1
+        return True
+
+    def end_peer_game(self, game_id: str) -> None:
+        """Release only the caller's claim; never reclaim a user's mode."""
+        with self._conversation_lock:
+            if getattr(self, '_peer_game_id', None) == game_id:
+                self._peer_game_id = None
+                self._autonomy_epoch += 1
+
+    def is_busy_for_game(self) -> bool:
+        """Read actual work ownership; reactive social deliberation is free.
+
+        Lighting state and autonomy mode do not prove that a conversation,
+        teaching, or unconfirmed physical task has finished.
+        """
+        with self._conversation_lock:
+            busy = (self._conversations > 0 or getattr(self, '_peer_game_id', None) is not None
+                    or getattr(self, '_reactive_dispatches', 0) > 0
+                    or bool(getattr(self, "_training_behavior_run_id", None)))
+        return busy or self._state.has_pending_tasks()
 
     def get_autonomy_mode(self) -> str:
         """返回当前自主模式：manual（仅听命令）/ reactive（自发调光）。"""
@@ -144,10 +181,16 @@ class ESP32Agent(ReactiveMind):
                       deadline: float | None = None, selection: dict | None = None) -> dict:
         """Run the active lamp conversation loop."""
         from cloud.agents.lamp.graph import run_lamp_loop
-        return run_lamp_loop(self, text, unit_id, context, dispatch,
-                             lighting_only=lighting_only, run_id=run_id,
-                             resume=resume, trace_id=trace_id,
-                             parent_run_id=parent_run_id, deadline=deadline, selection=selection)
+        with self._conversation_lock:
+            self._conversations += 1
+        try:
+            return run_lamp_loop(self, text, unit_id, context, dispatch,
+                                 lighting_only=lighting_only, run_id=run_id,
+                                 resume=resume, trace_id=trace_id,
+                                 parent_run_id=parent_run_id, deadline=deadline, selection=selection)
+        finally:
+            with self._conversation_lock:
+                self._conversations -= 1
 
     def _make_llm(self):
         return get_text_model("lamp")

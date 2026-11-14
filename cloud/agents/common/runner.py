@@ -29,11 +29,12 @@ from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.effects import FileEffectLedger, use_effect
 from cloud.agents.common.conversation import dialogue_turn, legacy_dialogue, trim_dialogue
-from cloud.agents.common.messages import observed_tool_messages
+from cloud.agents.common.messages import context_message, observed_tool_messages
+from cloud.agents.common.outcomes import completed_status, outcome_summary
 from cloud.observability import emit_agent_event
 
 UNCERTAIN = {"accepted", "executing", "timeout", "unknown"}
-FAILURE = {"blocked", "rejected", "cancelled", "error", "needs_clarification"}
+FAILURE = {"blocked", "rejected", "cancelled", "error", "partial", "needs_clarification"}
 
 
 @dataclass
@@ -56,6 +57,8 @@ class GraphRun:
     reply_event_id: str = ""
     attempt: int = 0
     supplement: str = ""
+    initial_context: dict = field(default_factory=dict)
+    decision_space: dict = field(default_factory=dict)
 
 
 class _State(TypedDict):
@@ -196,6 +199,9 @@ async def run_role_graph(
                 "以下是同一智能体、同一会话的历史对话，用于理解偏好和承接语。"
                 "历史回复不是当前设备状态、执行回执或新的动作授权；以本轮真实观测为准。"
             )), *history]
+        outcomes = outcome_summary(current.steps)
+        if outcomes["recovered_attempts"]:
+            messages.append(context_message({"outcomes": outcomes}))
         messages.extend(observed_tool_messages(step for step in current.steps[-8:]
                                               if step.get("dispatch_status") == "observed"))
         messages.insert(0, response_policy)
@@ -253,7 +259,7 @@ async def run_role_graph(
                 if dialogue.kind == "question":
                     return {"run": asdict(current),
                             "decision": {"kind": "ask", "question": dialogue.text[:500]}, "turns": turns}
-                current.status = "partial" if any((s.get("result") or {}).get("result") != "ok" for s in current.steps) else "ok"
+                current.status = completed_status(current.steps)
                 current.decision_draft = dialogue.text
                 current.response = dialogue.text
                 current.reply_source = "decision_model"

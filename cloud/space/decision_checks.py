@@ -126,3 +126,46 @@ def test_changed_fact_invalidates_old_reference(space, kind):
         space["constraints"][0]["text"] = "暂时不要玩游戏"
     with pytest.raises(ValueError, match="unavailable"):
         resolve_decision(space, "继续之前的选择", [ref])
+
+
+def test_model_turn_observation_survives_a_new_sensor_reading(space):
+    observed = deepcopy(space)
+    ref = fact_ref(observed, "environment")
+    space["environment"][0]["values"]["r"] = 255
+    space["environment"][0]["as_of"] = 1000
+    basis = resolve_decision(space, "依据刚才的蓝光观察", [ref], observed_space=observed)
+    assert basis["evidence"][0]["as_of"] == 999
+    assert "红：0" in basis["evidence"][0]["summary"]
+    assert ref != fact_ref(space, "environment")
+
+
+def test_model_turn_snapshot_does_not_extend_observation_freshness(space, monkeypatch):
+    observed = deepcopy(space)
+    ref = fact_ref(observed, "environment")
+    monkeypatch.setattr("cloud.space.decisions.time.time", lambda: 1061)
+    space["environment"][0]["as_of"] = 1061
+    with pytest.raises(ValueError, match="unavailable"):
+        resolve_decision(space, "依据之前的蓝光", [ref], observed_space=observed)
+
+
+@pytest.mark.parametrize("change", ["activity", "revision", "context", "constraint"])
+def test_model_turn_snapshot_cannot_override_new_activity_or_user_requirement(space, change):
+    observed = deepcopy(space)
+    if change == "activity":
+        space["activity"]["activity_id"] = "act_new"
+    elif change == "revision":
+        space["activity"]["revision"] = 2
+    elif change == "context":
+        space["activity"]["context"] = "先别玩了"
+    else:
+        space["constraints"][0]["text"] = "现在不要调灯"
+    with pytest.raises(ValueError, match="context_changed"):
+        resolve_decision(space, "选择白色", ["evt_owl"],
+                         observed_space=observed, require_observation=True)
+
+
+def test_saved_model_turn_catalog_is_recomputed_from_server_facts(space):
+    observed = deepcopy(space)
+    observed["decision_evidence"] = [{"ref": "invented", "kind": "observation"}]
+    with pytest.raises(ValueError, match="unavailable"):
+        resolve_decision(space, "选择白色", ["invented"], observed_space=observed)

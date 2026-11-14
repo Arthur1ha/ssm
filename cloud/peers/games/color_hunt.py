@@ -31,7 +31,7 @@ def live_lamp_color(source: str) -> dict | None:
 
 
 def _color_hunt_available(sender: str, target: str) -> bool:
-    return (sender, target) == ("esp32_desk_led", "go2")
+    return {sender, target} == {"esp32_desk_led", "go2"}
 
 
 def _color_name(rgb: tuple[int, int, int]) -> str | None:
@@ -62,6 +62,14 @@ def valid_color_hunt_invitation(text: str) -> bool:
 
 async def _wait_for_lamp_color(event: dict, drive: object) -> tuple[dict | None, str]:
     """Wait for the lamp's edge-confirmed color result on Go2's acceptance."""
+    if event.get("game_preaccepted"):
+        # Only the trusted acceptance adapter adds this after the lamp's
+        # physical setup succeeds. A message body cannot set this flag.
+        prepared = event.get("prepared_color")
+        current = live_lamp_color("esp32_desk_led")
+        if prepared and current and current["rgb"] == prepared["rgb"]:
+            return current, ""
+        return None, "lamp_color_unknown_or_stale"
     messenger = event["messenger"]
     acceptance_id = event.get("acceptance_message_id")
     if not acceptance_id:
@@ -324,6 +332,8 @@ def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
     from cloud.space.activity import get_activity_store
 
     original = messenger.get_status(message["reply_to"]) or {}
+    if (original.get("sender"), original.get("target")) == ("go2", "esp32_desk_led"):
+        return _queue_reverse_color_hunt(messenger, message, original)
     activity_id = message.get("activity_id")
     if (original.get("interaction_kind") != "game_invite"
             or original.get("game_id") != "color_hunt"
@@ -335,6 +345,154 @@ def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
         messenger.send_result(message["message_id"], "rejected",
                               reason="invalid_game_acceptance")
         return
+    return _prepare_lamp_color(messenger, message, state)
+
+
+def _queue_reverse_color_hunt(messenger, message: dict, original: dict) -> None:
+    from cloud.go2.mode.free_explore import drive
+    from cloud.peers.games.base import game_invitation_ready
+    from cloud.space.activity import get_activity_store
+    from cloud.esp32.physical_tasks import get as get_physical_task
+
+    activity_id = message.get("activity_id")
+    if (original.get("interaction_kind") != "game_invite"
+            or original.get("game_id") != "color_hunt"
+            or original.get("state") not in {"waiting_start", "waiting_result"}
+            or (message.get("sender"), message.get("target")) != ("esp32_desk_led", "go2")
+            or original.get("activity_id") != activity_id
+            or min(message.get("deadline", 0), original.get("deadline", 0)) <= time.time()
+            or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
+        messenger.send_result(message["message_id"], "rejected", reason="invalid_game_acceptance")
+        return
+    # This event can only be emitted by the real preparation helper after it
+    # has checked edge results, fresh state and the actual observation refs.
+    prepared = next((item for item in reversed(get_activity_store().events(activity_id))
+                     if item.get("game_id") == "color_hunt"
+                     and item.get("trigger_message_id") == message["reply_to"]
+                     and item.get("event_type") == "action_result"
+                     and item.get("action") == "set_led_color" and item.get("status") == "ok"), None)
+    color = live_lamp_color("esp32_desk_led")
+    recorded = (prepared or {}).get("state_at_event") or {}
+    values = recorded.get("values") or {}
+    receipt = (get_physical_task(prepared["task_id"], unit_id="esp32_desk_led",
+                                session_id="peer_game_color_" + original["conversation_id"])
+               if prepared and prepared.get("task_id") else None)
+    if (not prepared or not color or not receipt or receipt.get("result") != "ok"
+            or recorded.get("status") != "current"
+            or tuple(values.get(key) for key in ("r", "g", "b")) != color["rgb"]
+            or values.get("brightness") != color["brightness"]
+            or not 0 <= time.time() - prepared.get("ts", 0) <= 60):
+        messenger.send_result(message["message_id"], "rejected", reason="lamp_color_not_confirmed")
+        return
+    if not drive.submit_accepted_game(message, original, messenger, color):
+        messenger.send_result(message["message_id"], "rejected", reason="go2_autonomy_inactive")
+
+
+def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
+    """The lamp may accept, defer or decline a dog's signed invitation."""
+    from cloud.agents.common.effects import FileEffectLedger
+    from cloud.peers.games.base import game_invitation_ready
+    from cloud.esp32.service import get_agent
+
+    activity_id = message.get("activity_id")
+    if (message.get("game_id") != "color_hunt"
+            or message.get("interaction_kind") != "game_invite"
+            or (message.get("sender"), message.get("target")) != ("go2", "esp32_desk_led")
+            or message.get("deadline", 0) <= time.time()
+            or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
+        messenger.send_result(message["message_id"], "rejected", reason="game_participant_busy_or_expired")
+        return
+    agent = get_agent()
+    if agent is None:
+        messenger.send_result(message["message_id"], "blocked", reason="lamp_agent_unavailable")
+        return
+    try:
+        reservation = FileEffectLedger().reserve(
+            "esp32_desk_led", "lamp:game:" + message["message_id"], message["message_id"],
+            "accept", "color_hunt", {"activity_id": activity_id, "sender": "go2"})
+        if reservation["reservation"] != "new":
+            messenger.send_result(message["message_id"], "unknown", reason="prior_game_execution_unconfirmed")
+            return
+        decision = _lamp_invitation_decision(agent, message)
+        if decision.get("event_decision") != "accept":
+            reason = str(decision.get("decision_reason") or "decision_unavailable")[:200]
+            messenger.send_result(message["message_id"], "rejected", reason=reason)
+            messenger.send_message("esp32_desk_led", "go2", reason,
+                                   reply_to=message["message_id"], reply_kind="declined")
+            return
+        if (time.time() >= message["deadline"]
+                or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
+            messenger.send_result(message["message_id"], "cancelled", reason="game_participant_busy_or_expired")
+            return
+
+        class PreparationResult:
+            result = None
+
+            def send_progress(self, *_args, **_kwargs):
+                pass
+
+            def send_result(self, _message_id, result, *, task_id=None, reason=None):
+                self.result = {"result": result, "task_id": task_id, "reason": reason}
+
+        preparation = PreparationResult()
+        _prepare_lamp_color(preparation, {**message, "reply_to": message["message_id"]}, state)
+        result = preparation.result or {"result": "unknown", "reason": "lamp_color_not_confirmed"}
+        if result["result"] != "ok":
+            messenger.send_result(message["message_id"], result["result"], reason=result.get("reason"))
+            return
+        if (not activity_allows(activity_id, "go2", "esp32_desk_led")
+                or time.time() >= message["deadline"]
+                or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
+            messenger.send_result(message["message_id"], "cancelled", reason="activity_ended_or_expired")
+            return
+        response = str(decision.get("decision_reason") or "").strip()
+        if not response:
+            messenger.send_result(message["message_id"], "unknown", reason="acceptance_response_unavailable")
+            return
+        sent = messenger.send_message("esp32_desk_led", "go2", response,
+                                      reply_to=message["message_id"], reply_kind="accepted",
+                                      deadline=message["deadline"])
+        if sent.get("result") != "accepted":
+            messenger.send_result(message["message_id"], "unknown", reason="acceptance_delivery_unconfirmed")
+    except Exception as exc:
+        logger.exception("lamp game acceptance failed id=%s", message["message_id"])
+        messenger.send_result(message["message_id"], "error", reason=type(exc).__name__)
+
+
+def _lamp_invitation_decision(agent, message: dict) -> dict:
+    """Reuse the checkpointed arbitration Graph with the lamp's own persona."""
+    from cloud.agents.common.checkpoint import FileCheckpointSaver
+    from cloud.agents.common.models import async_model_clients
+    from cloud.agents.go2.workflows.free_explore import build_motivation_graph
+    from cloud.agents.lamp.personality.profile import get_profile
+    from cloud.space.context import get_space_context
+
+    saver = FileCheckpointSaver()
+    thread_id = "lamp:game:" + message["message_id"]
+
+    @async_model_clients()
+    async def decide():
+        model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
+        graph = build_motivation_graph(profile_loader=get_profile, model=model,
+                                       checkpointer=saver, role_name="灯")
+        async with saver.async_run_lock(thread_id):
+            return await graph.ainvoke({"connected": agent._device_online(),
+                "pending_event": {"kind": "peer_message", "event_id": message["message_id"],
+                    "content": message.get("content", ""), "deadline": message["deadline"],
+                    "interaction_kind": "game_invite", "game": GAME.metadata()},
+                "space_summary": json.dumps(get_space_context("esp32_desk_led", state=agent._state),
+                                            ensure_ascii=False)},
+                {"configurable": {"thread_id": thread_id}}, durability="sync")
+    return asyncio.run(decide())
+
+
+def _prepare_lamp_color(messenger, message: dict, state) -> None:
+    """Shared physical setup after either side has accepted the same game."""
+    from cloud.space.context import get_space_context
+    from cloud.space.decisions import decision_evidence, resolve_decision
+    from cloud.space.activity import get_activity_store
+
+    activity_id = message.get("activity_id")
     from cloud.esp32.service import get_agent
     from cloud.api.intents import _dispatch_mqtt_task
     agent = get_agent()
@@ -470,16 +628,18 @@ GAME = Game(
     name="寻找同色物品",
     description="灯亮一种颜色，狗在环境里找对应颜色的物品；找到了就算狗赢。",
     participants=("esp32_desk_led", "go2"),
+    bidirectional=True,
+    requires_idle=True,
     available=_color_hunt_available,
     execute=_run_color_hunt,
-    invitation="来玩个找颜色的游戏？我会亮一种颜色，你去环境里找同色的物品，找到了就算你赢。",
-    rules=("狗接受后灯才重新选色并核对真实回执，邀请时的旧灯色不是接受前置条件。"
+    rules=("灯或狗都可邀请，双方均无未完成任务且空闲时才可发起；接收方依据人格、当前事实自主接受、拒绝或延后。"
+           "双方确认接受后灯才重新选色并核对真实回执，邀请时的旧灯色不是接受前置条件。"
            "狗行动前须确认新灯色和安全路径；须导航确认停稳并视觉复核同一目标才算找到。"
            "判断输赢只看本局目标导航回执，之后自由探索到达别处不等于找到游戏目标。"),
     strategy=("结合自己的 traits、当前活动、同伴状态及新鲜环境观察决定是否邀请或接受。"
               "有清楚可辨认的同色静止物品可寻找时适合提议；有可玩项本身不是邀请理由。"
               "接受后灯依据真实环境观察自主选色，狗依据新观察自主选择候选，不预设颜色或物品。"),
-    valid_invitation=valid_color_hunt_invitation,
     on_acceptance=_handle_color_hunt_acceptance,
-    acceptance="我接受寻找同色物品。请先选颜色并设置灯，确认后我再找。",
+    on_invitation=_handle_color_hunt_invitation,
+    acceptance="",
 )

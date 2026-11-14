@@ -33,6 +33,9 @@ def bus(monkeypatch, space):
         "esp32_desk_led": {"status": "joined"}, "go2": {"status": "joined"}}}
     store = SimpleNamespace(current=lambda: record, record_event=Mock(return_value={"recorded": True}))
     monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: store)
+    # These checks isolate evidence validation; live owner/task gates have
+    # separate coverage in game_readiness_checks.py.
+    monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready", lambda *_: True)
     sent, delivered = [], []
     mqtt = SimpleNamespace(publish=lambda topic, body, **_: sent.append((topic, body)) or
                            SimpleNamespace(rc=0))
