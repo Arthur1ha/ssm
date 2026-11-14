@@ -19,7 +19,7 @@ from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
 from cloud.agents.common.views import load_run, pin_completed_run
 from cloud.agents.common.models import get_text_model, async_model_clients
-from cloud.agents.common.replies import finalize_reply
+from cloud.agents.steward.replies import finalize_steward_reply
 from cloud.agents.common.messages import context_message
 from cloud.agents.common.progress import submit_progress
 from cloud.agents.common.progress_facts import step_progress_facts
@@ -171,8 +171,11 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                                 min(run.deadline, time.time() + 4))
 
     async def finalize(current: Run) -> Run:
-        return await finalize_reply(current, model=model,
-                                    instructions=lambda value: reply_prompt(value, get_profile()))
+        from cloud.agents.steward.device_replies import publish_device_replies
+        await publish_device_replies(current, context=context, transport=transport,
+                                     model_factory=get_text_model)
+        return await finalize_steward_reply(
+            current, model=model, instructions=lambda value: reply_prompt(value, get_profile()))
 
     def messages_for(current: Run):
         messages = build_messages(current, supplemental)

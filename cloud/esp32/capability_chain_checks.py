@@ -20,7 +20,7 @@ from cloud.esp32 import physical_tasks
 from cloud.esp32.card import adjust_lighting_skill, lighting_goal
 from cloud.esp32.state import ESP32State
 from cloud.esp32.tool_executor import execute_physical
-from cloud.esp32.tool_registry import LAMP_SKILLS, TOOL_DECLARATIONS, valid_lamp_params
+from cloud.esp32.tool_registry import LAMP_SKILLS, TOOL_DECLARATIONS, normalize_brightness, valid_lamp_params
 from cloud.space.execution import ExecutionContext
 from edge import ism, lamp_contract
 from edge.lamp_contract import ACTION_SCHEMAS, FSM_VERSION, capabilities
@@ -376,6 +376,29 @@ def edge_lamp(monkeypatch):
 
     return SimpleNamespace(driver=driver, bridge=bridge, machine=machine, pixels=pixels,
                            events=events, tick=tick, command=command)
+
+
+def test_color_from_dark_lights_requested_rgb_and_retains_it_when_reopened(edge_lamp):
+    lamp = edge_lamp
+    requested = {"r": 160, "g": 40, "b": 220}
+    params = normalize_brightness("SET_COLOR", requested, {"ism": "OFF", "brightness": 0})
+    lamp.command("color", "SET_COLOR", params)
+    assert lamp.bridge._last_led_snapshot == ("ON", 160, 40, 220, lamp_contract.DEFAULT_ON_BRIGHTNESS)
+    assert lamp.events[-1][1]["result"] == "ok"
+    lamp.command("off", "SET_STATE", {"state": "OFF"})
+    lamp.command("on", "SET_STATE", {"state": "ON"})
+    assert lamp.bridge._last_led_snapshot == ("ON", 160, 40, 220, lamp_contract.DEFAULT_ON_BRIGHTNESS)
+
+
+def test_color_keeps_existing_brightness_and_explicit_zero(edge_lamp):
+    requested = {"r": 160, "g": 40, "b": 220}
+    current = {"ism": "ON", "brightness": 120}
+    assert normalize_brightness("SET_COLOR", requested, current)["brightness"] == 120
+    # Explicit values also include defaults supplied by confirmed teachings.
+    params = {**requested, "brightness": 0}
+    assert normalize_brightness("SET_COLOR", params, current) == params
+    edge_lamp.command("explicit_zero", "SET_COLOR", params)
+    assert edge_lamp.bridge._last_led_snapshot == ("OFF", 0, 0, 0, 0)
 
 
 @pytest.mark.parametrize("action,params,target", [

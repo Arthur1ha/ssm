@@ -4,7 +4,7 @@
 from clock import unix_time
 from ism import State, Trigger
 from config import DEVICE_ID, UNIT_LIGHT, UNIT_IR, UNIT_SOUND, UNIT_LED
-from lamp_contract import BLINK_DEFAULT, valid_params
+from lamp_contract import BLINK_DEFAULT, DEFAULT_ON_BRIGHTNESS, valid_params
 
 _LED_STATE_TRIG = {
     "OFF":    Trigger.CMD_OFF,
@@ -20,7 +20,7 @@ class TriggerMap:
         self._ism_ir     = ism_ir
         self._mqtt       = mqtt
         self._pending_blink = None
-        self._last_on = (255, 255, 255, 200)
+        self._last_on = (255, 255, 255, DEFAULT_ON_BRIGHTNESS)
         self._blink_restore = None
         self._blink_id = None
         self._blink_config = None
@@ -49,7 +49,7 @@ class TriggerMap:
             trigger = _LED_STATE_TRIG.get(params.get("state"))
         if action == "SET_COLOR":
             color = (params.get("r", 255), params.get("g", 255),
-                     params.get("b", 255), params.get("brightness", 200))
+                     params.get("b", 255), params.get("brightness", DEFAULT_ON_BRIGHTNESS))
             if color[3] == 0 or not any(color[:3]):
                 trigger = Trigger.CMD_OFF
         if not trigger or not self._ism_led.allows(trigger):

@@ -31,7 +31,7 @@ SSM Card 是 MQTT retained 控制面的能力声明。`ssm/agents/{unit_id}/card
 - `execution_field`、`last_execution_field` 指向实时快照中的当前请求和最近终态结果。请求包含 `command`、可选 `label`、`phase` 和关联 ID；终态还可包含 `result`、`confirmation` 和完成时间。它们不会将请求接受投影成物理姿态确认。
 - `freshness_field` 指向主区域的实时布尔新鲜度字段；为 `false` 时该区域普通动作受限，旧观测可继续显示。其他区域仍使用自己的动作门禁，不能因身体遥测过期禁用唤醒或停止探索。控制面 `online`、设备连接、新鲜度与动作完成是不同事实。
 - 转移可用 `completion` 描述设备完成依据。`unavailable` 表示尚未具备可靠完成确认，图中有目标节点不代表该动作可以自动串联。`trigger_condition` 是唯一转换条件文案；卡片使用方向表示结果，多条触发用“或”，同条内的必要条件用“且”。
-- 可选 `state_machine.diagram={width,height,sections:[{label,top}]}` 定义白板尺寸、分隔线与小标题；区域的 `diagram_group`、`node_radius` 和归一化 `layout` 坐标决定可见节点的分组、大小和位置。这些展示字段不改变运行状态、动作参数或权限。Go2 将休息、待命、互动、探索置于上方“行为”，姿态和动作置于下方；连接仍只在设备标题显示。
+- 可选 `state_machine.diagram={width,height,sections:[{label,top}]}` 定义白板尺寸、分隔线与小标题；区域的 `diagram_group`、`node_radius` 和归一化 `layout` 坐标决定可见节点的分组、大小和位置。这些展示字段不改变运行状态、动作参数或权限。Go2 通过 `diagram.media_position="left"` 在白板左上竖排小尺寸视频和地图缩略图，两者使用相同的 16:9 外框，内容等比容纳并可点击放大；休息、待命、互动、探索置于右上“行为”，姿态和动作置于下方；连接仍只在设备标题显示。未声明媒体位置的旧 Card 沿用顶部媒体行，避免新前端遮挡旧坐标中的节点。
 
 Go2 的连接、任务开始／结束、运动开始／停稳和姿态恢复均声明自动边。身体命令边描述可请求的目标或动作阶段；实际状态高亮来自同一连接的真实观测和执行阶段，不由点击、RPC 接受或固定延时推断。
 
@@ -68,7 +68,7 @@ Go2 的 `vision.person_presence`、`vision.face_presence` 和 `vision.owner_reco
 | `led_color` / `color_swatches` | `action` | `/api/commands/{unit_id}`，可选 `swatches` |
 | `connection` | `status_endpoint`、`connect_action`、`disconnect_action` | 状态读取同源端点，动作走命令 API |
 | `joystick` | `action` | 命令 API 串行发送速度与停止 |
-| `video` | 同源 `endpoint` | 同源视频快照 |
+| `video` | 同源 `endpoint` | 优先读取同源 MJPEG 流，失败时回退到 `endpoint/snapshot?preview=true` 轻量快照；隐藏、断连或卸载时取消读取 |
 | `map` | 同源 `endpoint` | 同源地图图像 |
 
 摇杆可声明 `node_state`、`enter_action`、`exit_action`：选择对应节点时展开，或在已进入遥控时保持展开。节点和出入命令必须属于绑定区域的声明能力；进入命令被接受不会直接启用摇杆，仍等待实时 `enabled_when` 与动作门禁。双摇杆分别控制平移与转向，并合并为同一个速度向量；分别松手只清零对应分量，全部松手发送零速度，退出遥控发送停止命令。

@@ -221,11 +221,20 @@ async def set_activity_mode(mode: str, activity_id: str) -> dict:
         return {"ok": False, "mode": get_autonomy_mode(), "reason": "motion_busy"}
     if _activity_mode_owner == activity_id and get_autonomy_mode() == mode:
         return {"ok": True, "mode": mode, "owner": activity_id}
-    _activity_mode_owner = activity_id
     activity_context = ExecutionContext(activity_id, "visitor", False,
                                         "main", "agent_autonomous", 0)
+    from cloud.space.activity import get_activity_store
+    activity = get_activity_store().current()
+    if (not activity or activity.get("activity_id") != activity_id
+            or activity.get("status") not in {"starting", "active", "partial"}):
+        return {"ok": False, "mode": get_autonomy_mode(), "reason": "activity_not_current"}
+    activity_request = {"activity_id": activity_id,
+                        "source_event_id": activity.get("source_event_id"),
+                        "content": activity.get("context") or activity.get("text") or ""}
+    _activity_mode_owner = activity_id
     try:
-        _configure_vision_consumers(mode, owner_session_id=activity_id, context=activity_context)
+        _configure_vision_consumers(mode, owner_session_id=activity_id, context=activity_context,
+                                    activity_request=activity_request)
     except Exception:
         _activity_mode_owner = None
         try:
@@ -302,7 +311,8 @@ async def _initialize_identity_vision() -> None:
     _configure_vision_consumers(get_autonomy_mode())
 
 
-def _configure_vision_consumers(mode: str, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
+def _configure_vision_consumers(mode: str, owner_session_id: str = "system", context: ExecutionContext | None = None,
+                                *, activity_request: dict | None = None) -> None:
     """教学与身份独立于巡游模式，只有 Drive 消费者跟随自由探索。"""
     global _active_rule_cb, _active_drive_cb, _active_identity_cb
     drive.stop()
@@ -327,7 +337,8 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
     if mode == "free_explore" and (runtime is None or runtime.data['activity_state'] == 'active'):
         _active_drive_cb = drive.on_vision_frame
         vision_loop.add_callback(_active_drive_cb)
-        drive.start(owner_session_id=owner_session_id, context=context)
+        drive.start(owner_session_id=owner_session_id, context=context,
+                    activity_request=activity_request)
 
     if any((_active_identity_cb, _active_rule_cb, _active_drive_cb)):
         vision_loop.start(lambda: go2.latest_frame_snapshot())

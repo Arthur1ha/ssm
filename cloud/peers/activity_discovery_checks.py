@@ -62,7 +62,7 @@ async def test_entry_explores_immediately_but_still_respects_interrupt_and_conne
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initial", [True, False])
-async def test_entry_explores_first_and_later_retry_cooldown_does_not_block_proposals(
+async def test_queued_proposal_precedes_initial_exploration_and_retry_cooldown(
         monkeypatch, tmp_path, initial):
     from cloud.agents.common import checkpoint
     saver = checkpoint.FileCheckpointSaver(tmp_path)
@@ -86,7 +86,7 @@ async def test_entry_explores_first_and_later_retry_cooldown_does_not_block_prop
     drive._handle_event = handle
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(drive._run_loop(), timeout=3)
-    assert order == (["explore", "proposal"] if initial else ["proposal"])
+    assert order == ["proposal"]
 
 
 def test_lamp_entry_does_not_call_model_or_send_message(monkeypatch):

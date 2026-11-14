@@ -69,12 +69,13 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     activity_id, deadline = event.get("activity_id"), event["deadline"]
     agent = get_agent()
     if agent is None or not _available(LAMP, DOG):
-        messenger.send_result(event["message_id"], "blocked", reason="delivery_service_unavailable")
+        messenger.send_result(event["message_id"], "blocked", task_id=task_id,
+                              reason="delivery_service_unavailable")
         return
     context = replace(drive._context, expires_at=int(deadline), persist=False)
     owner = "delivery:" + invitation_id
     if not agent.begin_peer_game(owner):
-        messenger.send_result(event["message_id"], "blocked", reason="lamp_busy")
+        messenger.send_result(event["message_id"], "blocked", task_id=task_id, reason="lamp_busy")
         return
     epochs = agent._autonomy_epoch, agent._command_epoch
     odom_session = getattr(go2, "_odom_session_id", None)

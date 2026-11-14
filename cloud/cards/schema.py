@@ -72,7 +72,7 @@ class StateMachine(TypedDict):
     last_execution_field: NotRequired[str]  # 最近终态结果，值为 {command,label,result,...}
     reason_labels: NotRequired[dict[str, str]]  # 设备声明的不可用原因文案
     freshness_field: NotRequired[str]  # state 中的布尔新鲜度字段；false 时禁止普通动作
-    diagram: NotRequired[dict]  # {width,height,sections:[{label,top}]}，仅影响白板布局
+    diagram: NotRequired[dict]  # {width,height,sections:[{label,top}],media_position?:"left"}，仅影响白板布局
 
 
 class SkillInvoke(TypedDict):

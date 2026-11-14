@@ -4,6 +4,7 @@
 FSM_VERSION = 3
 BYTE_MIN = 0
 BYTE_MAX = 255
+DEFAULT_ON_BRIGHTNESS = 200
 BLINK_MIN = 0
 BLINK_MAX = 20
 BLINK_DEFAULT = 0  # Continuous until another lighting command; positive = cycles.

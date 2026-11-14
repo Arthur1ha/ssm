@@ -239,6 +239,27 @@ body {
 .device-whiteboard__media-tile { position: relative; width: 100%; height: 100%; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface-1); }
 .device-whiteboard__media-empty { display: grid; place-items: center; height: 100%; font-size: 10px; color: var(--color-text-dim); }
 .device-whiteboard__canvas { position: relative; flex: 0 1 auto; height: clamp(150px, calc(100cqw * var(--board-graph-ratio, 1)), 52dvh); min-height: 0; overflow: hidden; background-image: radial-gradient(var(--color-border-strong) .7px, transparent .7px); background-size: 20px 20px; }
+/* Keep the media inset aligned with the Card's canvas, including when the
+   viewport height limits the graph. Both thumbnails share a 16:9 frame. */
+.device-whiteboard__frame { display: contents; }
+.device-whiteboard--inset-media .device-whiteboard__frame {
+  display: flex; justify-content: center; container-type: size; min-height: 0; flex: 0 1 auto;
+  height: clamp(150px, calc(100cqw * var(--board-graph-ratio)), 52dvh);
+}
+.device-whiteboard--inset-media .device-whiteboard__canvas {
+  width: min(100cqw, calc(100cqh / var(--board-graph-ratio)));
+  height: 100%; flex: 0 0 auto;
+}
+.device-whiteboard--inset-media .device-whiteboard__media {
+  position: absolute; z-index: 1; top: 4.5%; left: 2%; width: 34%;
+  flex-direction: column; gap: 1.8cqh; padding: 0;
+}
+.device-whiteboard--inset-media .device-whiteboard__media-slot {
+  flex: none; width: 100%; max-width: none; height: auto;
+}
+.device-whiteboard--inset-media .device-whiteboard__media-tile {
+  height: auto; aspect-ratio: 16 / 9;
+}
 .fsm-whiteboard { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .fsm-whiteboard__viewport { display: block; width: 100%; flex: 1 1 auto; min-height: 0; touch-action: none; user-select: none; cursor: grab; }
 .fsm-whiteboard__viewport:active { cursor: grabbing; }

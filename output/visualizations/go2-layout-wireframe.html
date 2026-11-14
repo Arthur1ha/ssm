@@ -1,0 +1,46 @@
+<div id="go2-layout-wireframe" class="viz-dotted-background">
+  <style>
+    #go2-layout-wireframe { color-scheme: light dark; padding: 12px; font-family: system-ui, sans-serif; color: light-dark(#292929,#e8e8e8); }
+    #go2-layout-wireframe * { box-sizing: border-box; }
+    #go2-layout-wireframe .screen { background: light-dark(#fff,#202020); border: 1px solid light-dark(#aaa,#777); border-radius: 10px; padding: 18px; }
+    #go2-layout-wireframe .heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid light-dark(#ccc,#555); font-size: 14px; }
+    #go2-layout-wireframe .heading strong { font-size: 17px; font-weight: 500; }
+    #go2-layout-wireframe .board { margin-top: 16px; padding: 14px; border: 1px dashed light-dark(#aaa,#777); }
+    #go2-layout-wireframe .top { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,2fr); gap: 22px; align-items: stretch; }
+    #go2-layout-wireframe .media { display: grid; gap: 12px; align-content: start; }
+    #go2-layout-wireframe .preview { border: 1px solid light-dark(#aaa,#777); background: light-dark(#f5f5f5,#292929); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; aspect-ratio: 16/9; font-size: 14px; }
+    #go2-layout-wireframe .preview.map { aspect-ratio: 4/3; }
+    #go2-layout-wireframe .small { color: light-dark(#666,#bbb); font-size: 12px; }
+    #go2-layout-wireframe .behavior { display: flex; flex-direction: column; justify-content: center; gap: 18px; }
+    #go2-layout-wireframe .label { font-size: 13px; color: light-dark(#666,#bbb); }
+    #go2-layout-wireframe .nodes { display: grid; grid-template-columns: 1fr 1fr; gap: 26px 20px; justify-items: center; position: relative; padding: 4px 0; }
+    #go2-layout-wireframe .node { border: 1px solid light-dark(#777,#aaa); border-radius: 50%; width: clamp(50px,10vw,78px); aspect-ratio: 1; display: grid; place-items: center; background: light-dark(#fff,#202020); font-size: 14px; }
+    #go2-layout-wireframe .body { border-top: 1px solid light-dark(#ccc,#555); margin-top: 20px; padding-top: 14px; }
+    #go2-layout-wireframe .body-sketch { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 14px; padding: 18px 0 8px; }
+    #go2-layout-wireframe .body-node { border: 1px solid light-dark(#aaa,#777); border-radius: 50%; width: 52px; height: 52px; display: grid; place-items: center; font-size: 13px; }
+    #go2-layout-wireframe .body-note { text-align: center; font-size: 12px; color: light-dark(#666,#bbb); margin-top: 8px; }
+    #go2-layout-wireframe .feedback { border-top: 1px solid light-dark(#ccc,#555); margin-top: 14px; padding-top: 10px; font-size: 12px; color: light-dark(#666,#bbb); }
+    @media(max-width:440px) { #go2-layout-wireframe {padding:4px;} #go2-layout-wireframe .screen {padding:10px;} #go2-layout-wireframe .board {padding:10px;} #go2-layout-wireframe .top {gap:12px;grid-template-columns:minmax(0,1fr) minmax(0,1.7fr);} #go2-layout-wireframe .nodes {gap:16px 10px;} #go2-layout-wireframe .behavior {gap:10px;} #go2-layout-wireframe .preview {font-size:12px;} }
+  </style>
+  <section class="screen" aria-label="机器狗页面布局线框图">
+    <div class="heading"><strong>‹　Go2 机器狗</strong><span>连接状态</span></div>
+    <div class="board" aria-label="状态机白板">
+      <div class="top">
+        <div class="media" aria-label="左侧：缩小的视频与地图">
+          <div class="preview"><span>视频</span><span class="small">缩小预览</span></div>
+          <div class="preview map"><span>地图</span><span class="small">缩小预览</span></div>
+        </div>
+        <div class="behavior" aria-label="右侧：四个行为节点">
+          <div class="label">行为</div>
+          <div class="nodes"><div class="node">休息</div><div class="node">待命</div><div class="node">探索</div><div class="node">互动</div></div>
+        </div>
+      </div>
+      <div class="body">
+        <div class="label">姿态与动作</div>
+        <div class="body-sketch" aria-label="原有姿态与动作区，简化示意"><span class="body-node">趴卧</span><span>…</span><span class="body-node">站立</span><span>…</span><span class="body-node">坐下</span></div>
+        <div class="body-note">保留原有节点与连线，此处仅示意位置</div>
+      </div>
+      <div class="feedback">动作执行反馈</div>
+    </div>
+  </section>
+</div>

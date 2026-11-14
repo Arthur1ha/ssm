@@ -46,44 +46,177 @@ function MediaWidget({ label, title, ready = true, emptyText, children, footer }
   </>;
 }
 
+// The server emits bounded JPEG parts. Network chunks need not match part boundaries.
+async function readMjpegFrames(response, acceptFrame) {
+  const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(response.headers.get('content-type') || '');
+  if (!boundary || !response.body?.getReader) throw new Error('video stream unavailable');
+  const marker = `--${boundary[1] || boundary[2]}`;
+  const decoder = new TextDecoder('ascii');
+  const reader = response.body.getReader();
+  const MAX_FRAME_BYTES = 2 * 1024 * 1024;
+  const MAX_HEADER_BYTES = 4096;
+  let buffer = new Uint8Array(0);
+  let frameLength = null;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (buffer.length + value.length > MAX_FRAME_BYTES * 2 + MAX_HEADER_BYTES) {
+        throw new Error('video stream buffer limit');
+      }
+      const combined = new Uint8Array(buffer.length + value.length);
+      combined.set(buffer); combined.set(value, buffer.length); buffer = combined;
+      let latest = null;
+      while (buffer.length) {
+        if (frameLength === null) {
+          let end = -1;
+          for (let i = 0; i + 3 < Math.min(buffer.length, MAX_HEADER_BYTES); i++) {
+            if (buffer[i] === 13 && buffer[i + 1] === 10 && buffer[i + 2] === 13 && buffer[i + 3] === 10) { end = i; break; }
+          }
+          if (end < 0) {
+            if (buffer.length >= MAX_HEADER_BYTES) throw new Error('invalid video part header');
+            break;
+          }
+          const header = decoder.decode(buffer.subarray(0, end)).trim();
+          const length = /^content-length:\s*(\d+)\s*$/im.exec(header);
+          if (!header.startsWith(marker + '\r\n') || !length) throw new Error('invalid video part');
+          frameLength = Number(length[1]);
+          if (!frameLength || frameLength > MAX_FRAME_BYTES) throw new Error('video frame limit');
+          buffer = buffer.subarray(end + 4);
+        }
+        if (buffer.length < frameLength) break;
+        latest = buffer.slice(0, frameLength);
+        buffer = buffer.subarray(frameLength);
+        frameLength = null;
+      }
+      // A delayed network read may contain many frames; paint the newest one.
+      if (latest) acceptFrame(new Blob([latest], { type: 'image/jpeg' }));
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+function loadMediaImage(blob, signal) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    const dispose = () => URL.revokeObjectURL(url);
+    const decodeTimer = setTimeout(() => { cleanup(); dispose(); reject(new Error('media decode timed out')); }, 4000);
+    const cleanup = () => {
+      clearTimeout(decodeTimer);
+      image.onload = null; image.onerror = null;
+      signal.removeEventListener('abort', abort);
+    };
+    const abort = () => { cleanup(); dispose(); reject(new DOMException('Media cancelled', 'AbortError')); };
+    image.onload = () => { cleanup(); resolve({ image, url, dispose }); };
+    image.onerror = () => { cleanup(); dispose(); reject(new Error('media decode failed')); };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    image.src = url;
+  });
+}
+
 function VideoCanvas({ connected, endpoint = '/api/go2/video' }) {
   const { useRef, useEffect } = React;
-  const canvasRef  = useRef(null);
-  const activeRef  = useRef(false);
+  const canvasRef = useRef(null);
 
   useEffect(() => {
     if (!connected) return;
-    activeRef.current = true;
-
-    const tick = async () => {
-      if (!activeRef.current) return;
-      try {
-        const res = await fetch(`${endpoint}/snapshot?_=${Date.now()}`);
-        if (res.ok) {
-          const blob = await res.blob();
-          const url  = URL.createObjectURL(blob);
-          const img  = new Image();
-          img.onload = () => {
-            const c = canvasRef.current;
-            if (c) c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-            URL.revokeObjectURL(url);
-            if (activeRef.current) requestAnimationFrame(tick);
-          };
-          img.onerror = () => { URL.revokeObjectURL(url); if (activeRef.current) setTimeout(tick, 200); };
-          img.src = url;
-          return;
-        }
-      } catch (_) {}
-      if (activeRef.current) setTimeout(tick, 200);
+    // Effect-local ownership prevents an old fetch from reviving on reconnect.
+    let active = true;
+    let controller = null;
+    let timer = null;
+    let watchdog = null;
+    let generation = 0;
+    let snapshotUntil = 0;
+    const clear = () => {
+      const canvas = canvasRef.current;
+      canvas?.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
     };
-
-    tick();
-    return () => { activeRef.current = false; };
+    const run = async () => {
+      if (!active || document.hidden) return;
+      const current = ++generation;
+      controller = new AbortController();
+      const requestController = controller;
+      const signal = requestController.signal;
+      const owned = () => active && current === generation && !document.hidden;
+      const touch = () => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => requestController.abort(), 8000);
+      };
+      let pending = null;
+      let paintPromise = null;
+      const paint = async () => {
+        try {
+          while (pending && owned() && !signal.aborted) {
+            const blob = pending; pending = null;
+            const frame = await loadMediaImage(blob, signal);
+            try {
+              const canvas = canvasRef.current;
+              if (canvas && owned() && !signal.aborted) {
+                canvas.getContext('2d').drawImage(frame.image, 0, 0, canvas.width, canvas.height);
+              }
+            } finally { frame.dispose(); }
+          }
+        } catch (_) { requestController.abort(); }
+        finally { paintPromise = null; }
+      };
+      const accept = blob => {
+        if (!owned() || signal.aborted) return;
+        pending = blob; touch();
+        if (!paintPromise) paintPromise = paint();
+      };
+      touch();
+      try {
+        if (Date.now() < snapshotUntil) {
+          const [path, query = ''] = endpoint.split('?');
+          const response = await fetch(`${path}/snapshot?${query ? query + '&' : ''}preview=true&_=${Date.now()}`, {
+            credentials: 'same-origin', cache: 'no-store', signal,
+          });
+          if (!response.ok) throw new Error('video unavailable');
+          accept(await response.blob());
+          await paintPromise;
+        } else {
+          const response = await fetch(endpoint, { credentials: 'same-origin', cache: 'no-store', signal });
+          if (!response.ok) throw new Error('video unavailable');
+          await readMjpegFrames(response, accept);
+          throw new Error('video stream ended');
+        }
+      } catch (_) {
+        if (owned()) {
+          snapshotUntil = Date.now() + 15000;
+          clear();
+        }
+      } finally {
+        requestController.abort();
+        if (current === generation) {
+          clearTimeout(watchdog);
+          if (owned()) timer = setTimeout(run, Date.now() < snapshotUntil ? 200 : 1000);
+        }
+      }
+    };
+    const stop = () => {
+      clearTimeout(timer); clearTimeout(watchdog);
+      generation++; controller?.abort();
+    };
+    const onVisibility = () => {
+      stop(); clear();
+      if (!document.hidden) { snapshotUntil = 0; run(); }
+    };
+    run();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      active = false;
+      stop(); clear();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [connected, endpoint]);
 
-  return React.createElement("canvas", {
+  return React.createElement('canvas', {
     ref: canvasRef, width: 640, height: 360,
-    style: { width: "100%", height: "100%", display: "block", objectFit: "contain" },
+    style: { width: '100%', height: '100%', display: 'block', objectFit: 'contain' },
   });
 }
 
@@ -100,38 +233,41 @@ function MapWidget({ connected, endpoint }) {
     let inFlight = false;
     let currentUrl = '';
     let controller = null;
+    let staleTimer = null;
 
+    const expire = () => {
+      if (!active) return;
+      setImageUrl('');
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      currentUrl = '';
+    };
     const refresh = async () => {
       if (!active || inFlight || document.hidden) return;
       inFlight = true;
       controller = new AbortController();
+      const requestController = controller;
+      const timeout = setTimeout(() => requestController.abort(), 8000);
       let nextUrl = '';
       try {
         const separator = endpoint.includes('?') ? '&' : '?';
         const response = await fetch(`${endpoint}${separator}_=${Date.now()}`, {
-          credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+          credentials: 'same-origin', cache: 'no-store', signal: requestController.signal,
         });
         if (!response.ok) throw new Error('map unavailable');
-        nextUrl = URL.createObjectURL(await response.blob());
-        const image = new Image();
-        await new Promise((resolve, reject) => {
-          image.onload = resolve;
-          image.onerror = reject;
-          image.src = nextUrl;
-        });
-        if (!active) return;
+        const frame = await loadMediaImage(await response.blob(), requestController.signal);
+        nextUrl = frame.url;
+        if (!active || requestController.signal.aborted || document.hidden) return;
         const previousUrl = currentUrl;
         currentUrl = nextUrl;
         nextUrl = '';
         setImageUrl(currentUrl);
+        clearTimeout(staleTimer);
+        staleTimer = setTimeout(expire, 8000);
         if (previousUrl) setTimeout(() => URL.revokeObjectURL(previousUrl), 100);
       } catch (_) {
-        if (active && !document.hidden) {
-          setImageUrl('');
-          if (currentUrl) URL.revokeObjectURL(currentUrl);
-          currentUrl = '';
-        }
+        // Keep a recent map across a brief error; its expiry still runs.
       } finally {
+        clearTimeout(timeout);
         if (nextUrl) URL.revokeObjectURL(nextUrl);
         inFlight = false;
       }
@@ -142,11 +278,12 @@ function MapWidget({ connected, endpoint }) {
       else refresh();
     };
     refresh();
-    const timer = setInterval(refresh, 2000);
+    const timer = setInterval(refresh, 1000);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       active = false;
       clearInterval(timer);
+      clearTimeout(staleTimer);
       controller?.abort();
       document.removeEventListener('visibilitychange', onVisibility);
       if (currentUrl) URL.revokeObjectURL(currentUrl);

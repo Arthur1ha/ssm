@@ -33,6 +33,29 @@ class ScriptedModel(JsonReplyModel):
 
 
 @pytest.mark.asyncio
+async def test_delegated_native_skill_returns_facts_without_model_or_device_reply(entry, monkeypatch):
+    model = ScriptedModel([])
+    monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
+    monkeypatch.setattr(go2_graph, "runtime_for", lambda _: None)
+    monkeypatch.setattr("cloud.go2.mode.free_explore.drive.resume_after_user", lambda: None)
+
+    async def execute(name, params, **kwargs):
+        assert name == "go2_status"
+        return {"result": "ok", "connected": True}
+
+    monkeypatch.setattr(go2_graph, "execute_tool", execute)
+    context = ExecutionContext("delegated-session", "admin", False,
+                               expires_at=int(time.time()) + 60)
+    result = await go2_graph.run_go2_loop(
+        context.session_id, "内部查询连接", context=context,
+        skill_id="go2_status", params={}, run_id="status-child", parent_run_id="parent")
+    assert result["result"] == "ok" and result["response"] == ""
+    assert result["tool_results"][0]["result"]["connected"] is True
+    assert model.inputs == []
+    assert not any(event == "agent_reply" for event, _ in entry)
+
+
+@pytest.mark.asyncio
 async def test_event_proposal_retry_preserves_trigger_and_can_repair_parameters(entry, monkeypatch):
     from copy import deepcopy
     from cloud.agents.common.training import tools

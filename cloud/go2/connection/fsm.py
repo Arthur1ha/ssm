@@ -293,7 +293,9 @@ class Go2FSM:
                 # change an unconfirmed/cancelled action into a success.
                 self._complete_observed_action(candidate, result='cancelled' if
                     pending['phase'] != 'timeout' else 'timeout', phase='recovered')
-            elif observation.get('acknowledged') and observation['motion_seen'] and candidate == target:
+            elif observation['motion_seen'] and candidate == target:
+                # A missing RPC ACK cannot invalidate fresh physical evidence
+                # for the only in-flight action in this connection generation.
                 self._complete_observed_action(candidate)
             return
         self.runtime.body(candidate, confirmation='observed', source='joint_posture')

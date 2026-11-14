@@ -41,7 +41,9 @@ def get_store() -> Go2RunView:
 
 
 def _result(run: GraphRun) -> dict:
-    steps = [{"tool": s["tool"], "result": s.get("result") or {"result": "unknown"},
+    steps = [{"tool": s["tool"], "params": s.get("params") or {},
+              "effectful": s.get("effectful", s["tool"] not in READ_ONLY_TOOLS),
+              "result": s.get("result") or {"result": "unknown"},
               "step_id": s["step_id"]} for s in run.steps]
     status = run.status
     if status == "partial":
@@ -153,6 +155,11 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                          agent_id="go2", session_id=session_id,
                          origin_kind=run.origin_kind, input=message,
                          entry="/api/go2/chat")
+
+    # The coordinating run owns the single device reply for this user turn.
+    # Keep ordinary device chats and autonomous runs on their existing path.
+    delegated = bool(run.parent_run_id) and context.origin_kind == "user_delegated"
+    publish_reply = publish_reply and not delegated
 
 
     def build_messages(current: GraphRun):
@@ -268,7 +275,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                              device_snapshot_at=time.time(),
                              completion_basis=(result.get("confirmation") or "webrtc_result")
                              if result.get("result") == "ok" else "tool_boundary")
-        return result
+        return {**result, "physical_state": go2.state_snapshot()}
 
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
                       parent_run_id=run.parent_run_id or None, agent_id="go2",
@@ -322,6 +329,10 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                 progress_closed, min(run.deadline, time.time() + 4))
         async def finalize(current: GraphRun) -> GraphRun:
             """Validate facts, speak as Go2 and checkpoint the user-visible reply."""
+            if delegated:
+                current.response = current.decision_draft if initial_tool is None else ""
+                current.reply_source = "decision_model" if current.response else "runtime"
+                return current
             def fallback(value):
                 last_step = value.steps[-1] if value.steps else {}
                 last_result = last_step.get("result") or {}
@@ -375,7 +386,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 on_step=on_step, on_progress=progress,
                 effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
                 initial_tool=initial_tool, resume=resume,
-                terminal_tools=frozenset({"go2_navigate_to_visible_target", "go2_find_object"}),
+                terminal_tools=frozenset({"go2_navigate_to_visible_target", "go2_find_object"}
+                    | ({initial_tool[0]} if delegated and initial_tool else set())),
                 resume_value=message if resume else None, checkpointer=view.checkpointer)
         except asyncio.CancelledError:
             progress_closed.set()

@@ -28,6 +28,7 @@ class SocialState:
         self.seen_discoveries: set[str] = set()
         self._idle_ready = False
         self._idle_episode = 0
+        self._completed_turn: dict | None = None
 
     def reset(self, activity_id: str | None, discoveries: list[dict] = ()) -> None:
         self.activity_id = activity_id
@@ -35,10 +36,28 @@ class SocialState:
         self.last_sent = 0.0
         self._idle_ready = False
         self._idle_episode = 0
+        self._completed_turn = None
         # Ignore observations predating this process, but keep new discoveries
         # made before this agent's first evaluation of the activity.
         self.seen_discoveries = {item["event_id"] for item in discoveries
                                  if item.get("event_id") and item.get("ts", 0) < self._born_at}
+
+    def peer_turn_completed(self, activity_id: str, message_id: str, game_id: str) -> None:
+        """A completed real turn can reoffer its deferred invite once idle.
+
+        This is a scheduling fact, never a camera observation or permission.
+        """
+        if self.activity_id != activity_id:
+            self.reset(activity_id)
+        self._completed_turn = {"kind": "peer_turn_completed",
+            "event_ids": ["peer_turn:" + message_id], "trigger_message_id": message_id,
+            "game_id": game_id,
+            "summary": "上一协作轮已结束；当时提出的玩法邀请因任务占用未发送，现在可结合当前事实重新判断。"}
+
+    def has_completed_turn(self, activity_id: str | None) -> bool:
+        return bool(activity_id and self.activity_id == activity_id and self._completed_turn
+                    and not all(event_id in self.seen_discoveries
+                                for event_id in self._completed_turn["event_ids"]))
 
     def opportunity(self, activity: dict | None, peers: list[dict], discoveries: list[dict],
                     score: int = 50, *, unit_id: str = "", now: float | None = None,
@@ -55,6 +74,8 @@ class SocialState:
             self._idle_episode += 1
         self._idle_ready = idle_ready
         idle_id = f"idle:{activity_id}:{self._idle_episode}"
+        if idle_ready and self.has_completed_turn(activity_id):
+            return {**self._completed_turn, "event_ids": [*self._completed_turn["event_ids"], idle_id]}
         relevant = [row for row in discoveries if row.get("event_type") in
                     {"observation", "person_identified", "action_result"}
                     and not row.get("message_id") and row.get("event_id") not in self.seen_discoveries

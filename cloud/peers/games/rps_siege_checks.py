@@ -13,6 +13,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from cloud.peers.games import rps_siege
+from cloud.peers.messaging import AgentMessenger
 from cloud.space.execution import ExecutionContext
 
 
@@ -178,6 +179,43 @@ async def test_lamp_defends_without_navigation_or_switch_off(game_harness):
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
     h.messenger.send_result.assert_called_once_with(
         "msg_test_rps", "ok", task_id="task_test_rps", reason="lamp_defended")
+
+
+@pytest.mark.parametrize("reason", ["lamp_agent_unavailable", "map_unavailable",
+                                    "localization_unavailable", "lamp_busy"])
+async def test_preflight_failure_completes_announced_task(game_harness, monkeypatch, reason):
+    h = game_harness
+    if reason == "lamp_agent_unavailable":
+        monkeypatch.setattr(sys.modules["cloud.esp32.service"], "get_agent", lambda: None)
+    elif reason == "lamp_busy":
+        h.agent.begin_peer_game = Mock(return_value=False)
+    else:
+        h.navigator.snapshot = lambda: (None, reason)
+
+    # Exercise the real progress/result validator. A plain Mock hid the
+    # missing-task-ID rejection that left live invitations waiting forever.
+    transport = AgentMessenger(None, None, None, set(), lambda _message: None)
+    transport._publish = Mock(return_value=True)
+    transport._inbound[h.event["message_id"]] = {
+        "sender": rps_siege.LAMP, "target": "go2", "deadline": h.event["deadline"],
+        "conversation_id": h.event["message_id"],
+    }
+    try:
+        transport.send_progress(h.event["message_id"], "task_test_rps")
+        h.messenger.send_result.side_effect = transport.send_result
+        await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
+        payload = transport._publish.call_args.args[0]
+        assert payload["kind"] == "result" and payload["result"] == "blocked"
+        assert payload["task_id"] == "task_test_rps" and payload["reason"] == reason
+        assert payload["message_id"] == h.event["message_id"]
+    finally:
+        transport.close()
+    assert not h.calls and not h.decisions
+    h.drive._advance_task.assert_not_awaited()
+    assert h.agent._peer_game_id is None
+    assert any(entry["event_type"] == "action_result" and entry["status"] == "blocked"
+               and entry["task_id"] == "task_test_rps" and "无法开局" in entry["text"]
+               for entry in h.timeline)
 
 
 async def test_unconfirmed_gesture_cannot_score_advance_or_win(game_harness):

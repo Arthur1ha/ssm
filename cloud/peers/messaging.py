@@ -100,6 +100,34 @@ class AgentMessenger:
                        and row.get("state") in {"waiting_reply", "waiting_start", "waiting_result"}
                        for row in self._outgoing.values())
 
+    def has_pending_conversation(self, unit_id: str, target: str | None = None,
+                                 *, exclude: str | None = None) -> bool:
+        """Reserve a pair while a real message is queued or awaits its reply.
+
+        Replies and results stay on the same rows; expiry releases the pair.
+        This gates new topics, never progress/results or the current reply.
+        """
+        with self._lock:
+            from cloud.space.activity import get_activity_store
+            activity_id = (get_activity_store().current() or {}).get("activity_id")
+            now = self._now()
+            self._trim(now)
+            for table, pending in ((self._outgoing, {"waiting_reply", "waiting_start", "waiting_result"}),
+                                   (self._inbound, {"queued", "waiting_result"})):
+                for row in table.values():
+                    pair = {row.get("sender"), row.get("target")}
+                    if (unit_id in pair and (target is None or target in pair)
+                            and row.get("message_id") != exclude
+                            and row.get("activity_id") == activity_id
+                            and row.get("deadline", 0) > now and row.get("state") in pending):
+                        return True
+            return False
+
+    def get_received_task_id(self, message_id: str) -> str | None:
+        """Read the receiver's existing reservation for terminal/error paths."""
+        with self._lock:
+            return (self._inbound.get(message_id) or {}).get("task_id")
+
     def _message_ttl(self, payload: dict) -> int:
         """A registered game's lifetime also covers its correlated replies.
 
@@ -148,8 +176,25 @@ class AgentMessenger:
         activity_id: str | None = None,
         decision_reason: str | None = None,
         evidence_refs: list[str] | None = None,
+        expect_reply: bool = True,
     ) -> dict:
         now = self._now()
+        if (deadline is not None and (isinstance(deadline, bool)
+                or not isinstance(deadline, (int, float)) or not math.isfinite(deadline))):
+            return {"result": "blocked", "error": "invalid_deadline"}
+        if type(expect_reply) is not bool:
+            return {"result": "blocked", "error": "invalid_reply_expectation"}
+        from cloud.peers.turns import current_peer_turn
+        turn = current_peer_turn(self, sender, target)
+        if turn is not None:
+            if turn.sent:
+                return {"result": "blocked", "error": "peer_turn_already_replied"}
+            if interaction_kind == "message":
+                if reply_to not in (None, turn.message["message_id"]):
+                    return {"result": "blocked", "error": "peer_turn_reply_mismatch"}
+                reply_to = turn.message["message_id"]
+                deadline = min(turn.message["deadline"],
+                               turn.message["deadline"] if deadline is None else deadline)
         if sender not in self._local_ids:
             return {"result": "blocked", "error": "sender_not_local"}
         if not isinstance(content, str) or not content.strip() or len(content) > _MAX_CONTENT:
@@ -164,9 +209,6 @@ class AgentMessenger:
             return {"result": "blocked", "error": "invalid_interaction"}
         if not self._allowed(sender, target):
             return {"result": "blocked", "error": "target_offline_or_outside_space"}
-        if (deadline is not None and (isinstance(deadline, bool)
-                or not isinstance(deadline, (int, float)) or not math.isfinite(deadline))):
-            return {"result": "blocked", "error": "invalid_deadline"}
         with self._lock:
             ttl = self._message_ttl({"interaction_kind": interaction_kind,
                                     "game_id": game_id, "reply_to": reply_to})
@@ -180,6 +222,9 @@ class AgentMessenger:
             if reply_to and (parent is None or parent["sender"] != target
                              or parent["target"] != sender or parent["deadline"] <= now):
                 return {"result": "blocked", "error": "invalid_reply_to"}
+            if (not reply_to and interaction_kind == "message"
+                    and self.has_pending_conversation(sender, target)):
+                return {"result": "blocked", "error": "peer_conversation_pending"}
             if parent:
                 conversation_id = parent["conversation_id"]
                 round_number = parent["round"] + 1
@@ -217,7 +262,13 @@ class AgentMessenger:
                     from cloud.peers.games.base import game_invitation_ready
                     if self._game_pair_pending(sender, target):
                         return {"result": "blocked", "error": "game_invitation_pending"}
+                    if self.has_pending_conversation(sender, target):
+                        if turn is not None:
+                            turn.deferred_game = game_id
+                        return {"result": "blocked", "error": "peer_conversation_pending"}
                     if not game_invitation_ready(payload.get("activity_id"), sender, target):
+                        if turn is not None:
+                            turn.deferred_game = game_id
                         return {"result": "blocked", "error": "game_participants_busy"}
                 if game.valid_invitation and not game.valid_invitation(payload["content"]):
                     payload["content"] = game.invitation
@@ -230,8 +281,12 @@ class AgentMessenger:
                     return {"result": "rejected", "error": str(exc)}
             if not self._publish(payload):
                 return {"result": "error", "error": "mqtt_publish_failed"}
-            self._outgoing[message_id] = {**payload, "state": "waiting_reply", "received": False,
+            self._outgoing[message_id] = {**payload, "state": "waiting_reply" if expect_reply else "answered", "received": False,
                                           "task_id": None, "result": None, "updated_at": now}
+            if parent is not None:
+                parent["state"] = "answered"
+            if turn is not None:
+                turn.sent = True
             activity_event = None
             if payload.get("activity_id") and "cloud_orchestrator" not in self._local_ids:
                 from cloud.space.activity import get_activity_store
@@ -246,7 +301,8 @@ class AgentMessenger:
             if activity_event is None and self._on_visible_message is not None:
                 self._on_visible_message(dict(payload))
         return {"result": "accepted", "message_id": message_id,
-                "conversation_id": payload["conversation_id"], "state": "waiting_reply"}
+                "conversation_id": payload["conversation_id"],
+                "state": "waiting_reply" if expect_reply else "answered"}
 
     def _send_update(self, message_id: str, *, kind: str, task_id: str | None = None,
                      result: str | None = None, reason: str | None = None) -> dict:
@@ -279,6 +335,9 @@ class AgentMessenger:
                 return {"result": "error", "error": "mqtt_publish_failed"}
             if kind == "progress":
                 original["task_id"] = task_id
+                original["state"] = "waiting_result"
+            elif kind == "result":
+                original["state"] = result
         return {"result": "accepted", "message_id": message_id}
 
     def send_progress(self, message_id: str, task_id: str) -> dict:
@@ -406,7 +465,7 @@ class AgentMessenger:
                 elif round_number != 1 or conversation_id != message_id:
                     return True
                 self._seen[message_id] = now
-                self._inbound[message_id] = dict(payload)
+                self._inbound[message_id] = {**payload, "state": "queued"}
                 activity_event = None
                 if (payload.get("activity_id") and "cloud_orchestrator" not in self._local_ids
                         and sender not in self._local_ids):

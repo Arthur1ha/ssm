@@ -43,7 +43,8 @@ def robot_at(state="standing", code=0):
 async def test_new_actions_use_declared_sport_mapping_without_claiming_completion(command, source, api_id, target):
     robot, sent = robot_at(source)
     result = await robot.send_command(command)
-    assert sent[0][1] == {"api_id": api_id}
+    assert sent[0][1]['api_id'] == api_id
+    assert type(sent[0][1]['id']) is int
     assert result["result"] == "accepted"
     assert result["confirmation_scope"] == "request"
     assert result["completion_supported"] is False

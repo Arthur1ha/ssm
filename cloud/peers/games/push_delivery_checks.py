@@ -228,6 +228,20 @@ async def delivery_harness(monkeypatch):
                            cargo_contexts=cargo_contexts, search_evidence=search_evidence)
 
 
+@pytest.mark.parametrize("reason", ["delivery_service_unavailable", "lamp_busy"])
+async def test_preflight_failure_keeps_announced_task_id(delivery_harness, monkeypatch, reason):
+    h = delivery_harness
+    if reason == "delivery_service_unavailable":
+        monkeypatch.setattr(sys.modules["cloud.esp32.service"], "get_agent", lambda: None)
+    else:
+        h.agent.begin_peer_game = Mock(return_value=False)
+    await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
+    h.messenger.send_result.assert_called_once_with(
+        h.event["message_id"], "blocked", task_id="task_delivery", reason=reason)
+    assert not h.calls
+    h.drive._advance_task.assert_not_awaited()
+
+
 async def test_delivery_orders_find_report_destination_signal_and_real_push(delivery_harness):
     h = delivery_harness
     await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")

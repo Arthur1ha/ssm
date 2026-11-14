@@ -1,8 +1,9 @@
 """
-机器人内驱动系统：空闲时按好奇心定期探索地图边界。
-视觉与 LLM 处理互动和到达后的场景描述，不控制地图导航的启动或停止。
+机器人内驱动系统：活动目标经既有 Graph 仲裁，独立自由探索沿用好奇心机会。
+Graph 选择观察、交流或探索；真实运动权限、避障和停止确认仍由设备适配负责。
 """
 import asyncio
+import json
 import logging
 import re
 import time
@@ -111,13 +112,14 @@ class Drive:
         return True
 
     def submit_peer_message(self, message: dict, messenger) -> bool:
-        if message.get("target") != "go2" or message.get("reply_to"):
+        if message.get("target") != "go2":
             return False
         return self.submit_event({"event_id": message["message_id"],
             "message_id": message["message_id"], "kind": "peer_message",
             "source": message.get("sender"), "content": message.get("content", ""),
             "interaction_kind": message.get("interaction_kind", "message"),
             "game_id": message.get("game_id"),
+            "reply_to": message.get("reply_to"), "reply_kind": message.get("reply_kind"),
             "ts": time.time(), "deadline": message["deadline"],
             "activity_id": message.get("activity_id"),
             "message": message, "messenger": messenger})
@@ -243,7 +245,7 @@ class Drive:
 
     async def _evaluate_social(self, local_observation: dict | None = None) -> None:
         """A separate, non-motion decision at a Drive safety checkpoint."""
-        if (self.user_interrupt or self._pending_question_id or not go2.is_connected
+        if (self.user_interrupt or self._pending_question_id or self._events or not go2.is_connected
                 or time.time() < self._social_retry_after):
             return
         activity_id = self._activity_id()
@@ -252,6 +254,10 @@ class Drive:
             return
         from cloud.space.context import get_space_context
         from cloud.api.main import _esp32_state
+        from cloud.api.main import get_agent_messenger
+        messenger = get_agent_messenger()
+        if messenger is not None and messenger.has_pending_conversation("go2"):
+            return
         context = get_space_context("go2", state=_esp32_state)
         activity, peers = activity_peers("go2", context["peers"])
         profile = get_profile()
@@ -286,6 +292,8 @@ class Drive:
                         and target in {peer["unit_id"] for peer in latest_peers}
                         and self._social_state.can_send(target, topic)
                         and self._activity_id() == activity_id_to_check
+                        and not self._events
+                        and (messenger is None or not messenger.has_pending_conversation("go2", target))
                         and not self.user_interrupt and not self._pending_question_id
                         and go2.is_connected)
 
@@ -554,18 +562,30 @@ class Drive:
             self._wake.clear()
             if self.user_interrupt or self._pending_question_id:
                 continue
-            if self._events and not self._initial_exploration:
+            if self._events:
                 event = self._events.popleft()
-                await self._handle_event(event, graph, saver, thread_id)
+                if event.get("kind") in {"activity_started", "activity_observed", "activity_progress"}:
+                    await self._handle_activity_event(event, saver, thread_id)
+                else:
+                    await self._handle_event(event, graph, saver, thread_id)
                 continue
             from cloud.api.main import get_agent_messenger
             messenger = get_agent_messenger()
-            if messenger is not None and messenger.has_pending_game("go2"):
+            if messenger is not None and (messenger.has_pending_game("go2")
+                    or messenger.has_pending_conversation("go2")):
                 # Preserve the idle slot while the peer decides/prepares.
                 # User/teaching/accepted-game events above retain priority;
                 # the existing message deadline releases unanswered invites.
                 continue
+            if self._social_state.has_completed_turn(self._activity_id()):
+                await self._evaluate_social()
+                continue
             if time.time() < self._vision_retry_after:
+                continue
+            if self._activity_id():
+                # The existing social Graph deduplicates fresh-fact and idle
+                # opportunities. An activity goal never implies a room patrol.
+                await self._do_social()
                 continue
 
             async with saver.async_run_lock(thread_id):
@@ -600,7 +620,8 @@ class Drive:
         from cloud.agents.go2.workflows.free_explore import build_motivation_graph
         saver = saver or FileCheckpointSaver()
         try:
-            model = get_text_llm() if event.get("kind") == "peer_message" else None
+            model = get_text_llm() if event.get("kind") in {
+                "peer_message", "activity_started", "activity_observed", "activity_progress"} else None
         except Exception:
             model = None
         graph = build_motivation_graph(profile_loader=get_profile,
@@ -608,23 +629,107 @@ class Drive:
         thread_id = thread_id or "go2:event:" + uuid.uuid4().hex
         public_event = {key: event.get(key) for key in
                         ("event_id", "kind", "source", "content", "deadline", "activity_id",
-                         "interaction_kind", "game_id")}
+                         "interaction_kind", "game_id", "reply_to", "reply_kind")}
         if event.get("interaction_kind") == "game_invite":
             from cloud.peers.games import get_game
             game = get_game(event.get("game_id"))
             public_event["game"] = (game.metadata() if game else None)
+        activity_request = {}
+        if self._activity_id():
+            from cloud.space.activity import get_activity_store
+            activity = get_activity_store().current() or {}
+            if activity.get("activity_id") == self._activity_id():
+                activity_request = {"activity_id": activity["activity_id"],
+                                    "source_event_id": activity.get("source_event_id"),
+                                    "content": activity.get("context") or activity.get("text") or ""}
+        space_summary = prompt_space_context()
+        opportunity = None
+        if event.get("kind") in {"activity_started", "activity_observed", "activity_progress"}:
+            from cloud.peers.games.base import game_invitation_ready
+            space = json.loads(space_summary)
+            activity, peers = activity_peers("go2", space.get("peers") or [])
+            opportunity = self._social_state.opportunity(activity, peers,
+                space.get("recent_discoveries") or [], unit_id="go2",
+                idle_ready=game_invitation_ready(self._activity_id(), "go2", "esp32_desk_led"))
         async with saver.async_run_lock(thread_id):
             result = await graph.ainvoke({"pending_event": public_event,
-                "space_summary": prompt_space_context(),
+                "activity_request": activity_request,
+                "space_summary": space_summary,
                 "current_goal": self._active_goal,
                 "last_tool_result": self._last_tool_result,
                 "connected": go2.is_connected, "interrupted": self.user_interrupt,
                 "pending_question": bool(self._pending_question_id)},
                 {"configurable": {"thread_id": thread_id}}, durability="sync")
+        if result.get("next_action") == "wait" and opportunity:
+            # The just-considered idle/fact opportunity cannot immediately
+            # start a separate social decision after this Graph chose to wait.
+            self._social_state.evaluated(opportunity)
         self._last_decision = {"event_id": event["event_id"],
                                "choice": result.get("event_decision", "defer"),
-                               "reason": result.get("decision_reason", "")}
+                               "reason": result.get("decision_reason", ""),
+                               "action": result.get("next_action", "none")}
         return self._last_decision
+
+    async def _handle_activity_event(self, event: dict, saver, thread_id: str) -> None:
+        """Adapt one existing Graph decision to an activity's next device step."""
+        activity_id, generation = self._activity_id(), self._generation
+
+        def current(*, fresh=True):
+            return bool(activity_id and activity_id == event.get("activity_id")
+                        and activity_id == self._activity_id() and generation == self._generation
+                        and not self.user_interrupt and not self._pending_question_id and go2.is_connected
+                        and (not fresh or event.get("deadline", 0) > time.time()))
+
+        if not current():
+            return
+        try:
+            async with asyncio.timeout(max(.01, event["deadline"] - time.time())):
+                decision = await self._decide_event(event, saver=saver, thread_id=thread_id)
+        except TimeoutError:
+            logger.info("[Drive] activity decision expired event=%s", event["event_id"])
+            return
+        if not current():
+            return
+        action = decision["action"]
+        if action in {"explore", "social"} and any(
+                item.get("kind") in {"peer_message", "training_event"} for item in self._events):
+            return
+        if action == "explore":
+            previous = self._last_tool_result
+            await self._do_explore(defer_social=True)
+            result = self._last_tool_result or {}
+            task_id = result.get("task_id")
+            event_id = "activity_result:" + str(task_id)
+            if (current(fresh=False) and result is not previous and task_id
+                    and event_id not in self._seen_events):
+                self._seen_events.add(event_id)
+                self._events.append({"event_id": event_id,
+                    "kind": "activity_progress", "source": "go2.execution",
+                    "activity_id": activity_id, "content": json.dumps(result, ensure_ascii=False, default=str),
+                    "ts": time.time(), "deadline": time.time() + 90})
+        elif action == "social":
+            await self._do_social()
+        elif action == "observe":
+            try:
+                async with asyncio.timeout(max(.01, event["deadline"] - time.time())):
+                    result = await execute_tool("go2_observe", {
+                        "question": "描述当前位置真实可见的场景及同伴设备，不移动或转身。"},
+                        context=self._context)
+            except TimeoutError:
+                return
+            if not current():
+                return
+            self._last_tool_result = result
+            text = str(result.get("message") or "").strip()
+            if result.get("result") != "ok" or not text:
+                return
+            observed = self._activity_event("observation", text[:800], source="go2.camera")
+            self._last_observation = text
+            if observed:
+                self._events.append({"event_id": observed["event_id"],
+                    "kind": "activity_observed", "source": "go2.camera", "content": text[:1600],
+                    "activity_id": activity_id, "ts": observed["ts"],
+                    "deadline": event["deadline"]})
 
     async def _interrupt_for_event(self) -> bool:
         event = self._events[0]
@@ -705,8 +810,9 @@ class Drive:
         from cloud.peers.games import activity_allows, game_is_playable, get_game
         activity_id = event.get("activity_id")
         is_game_invite = event.get("interaction_kind") == "game_invite"
+        from cloud.peers.inbound import message_activity_allows
         if ((activity_id or is_game_invite)
-                and (not activity_allows(activity_id, message["sender"], "go2")
+                and (not message_activity_allows(message)
                      or (is_game_invite and self._activity_id() != activity_id))):
             messenger.send_result(event["message_id"], "cancelled", reason="activity_ended")
             return
@@ -715,6 +821,11 @@ class Drive:
             reason = str(decision.get("reason") or "decision_unavailable")[:200]
             logger.info("[Drive] peer proposal %s choice=%s reason=%s",
                         event["message_id"], choice, reason)
+            if message.get("reply_to") and not is_game_invite:
+                # Consuming a reply without another conversational turn is a
+                # receipt acknowledgement, never a new physical success.
+                messenger.send_result(event["message_id"], "ok")
+                return
             if choice == "decline":
                 messenger.send_result(event["message_id"], "rejected", reason=reason)
             else:
@@ -803,16 +914,19 @@ class Drive:
             return
         from cloud.agents.go2.graph import run_go2_loop
         from cloud.peers.inbound import _peer_input
+        from cloud.peers.turns import peer_turn
         context = replace(self._context, expires_at=int(min(event["deadline"], time.time() + 90)))
-        task = asyncio.create_task(run_go2_loop(context.session_id, _peer_input(message, messenger),
-                context=context, run_id=event["message_id"], deadline=event["deadline"],
-                publish_reply=False))
+        with peer_turn(messenger, message) as turn:
+            # create_task copies the correlation context; the caller is reset
+            # immediately so unrelated autonomous/user work cannot inherit it.
+            task = asyncio.create_task(run_go2_loop("peer_" + message["conversation_id"],
+                    _peer_input(message, messenger), context=context,
+                    run_id=event["message_id"], deadline=event["deadline"], publish_reply=False))
         try:
             while not task.done():
                 if (self.user_interrupt or not go2.is_connected
                         or time.time() >= event["deadline"]
-                        or (activity_id and not activity_allows(
-                            activity_id, message["sender"], "go2"))):
+                        or (activity_id and not message_activity_allows(message))):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     from cloud.go2.navigation.navigator import navigator
@@ -844,11 +958,16 @@ class Drive:
             status = "unknown"
         messenger.send_result(event["message_id"], status, task_id=task_id,
                               reason=result.get("error"))
-        if result.get("response"):
+        if result.get("response") and not turn.sent and not message.get("reply_to"):
             messenger.send_message(message["target"], message["sender"],
-                str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply")
+                str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply",
+                expect_reply=False)
+        if turn.deferred_game and message_activity_allows(message):
+            self._social_state.peer_turn_completed(
+                activity_id, event["message_id"], turn.deferred_game)
 
-    async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的") -> None:
+    async def _do_explore(self, observe_question: str = "描述当前位置看到的场景，有什么值得记录的",
+                          *, defer_social: bool = False) -> None:
         runtime = runtime_for(go2)
         if runtime is not None and (runtime.active_reason() or not runtime.exploration_enabled
                                     or not runtime.life_task_available):
@@ -862,7 +981,8 @@ class Drive:
         # Consume the existing fresh observation only after this exploration
         # task has relinquished its life token, so idle-only invitations can
         # actually be considered. No timer or forced invitation is added.
-        if observation and not self.user_interrupt and go2.is_connected:
+        if (observation and not defer_social and not self._events
+                and not self.user_interrupt and go2.is_connected):
             try:
                 await self._evaluate_social(observation)
             except Exception:
@@ -976,7 +1096,8 @@ class Drive:
         self.start(paused[0], paused[1])
         return True
 
-    def start(self, owner_session_id: str = "system", context: ExecutionContext | None = None) -> None:
+    def start(self, owner_session_id: str = "system", context: ExecutionContext | None = None,
+              *, activity_request: dict | None = None) -> None:
         """启动内驱动循环，重置所有状态，创建后台任务。"""
         if self._task is not None:
             self._task.cancel()
@@ -987,7 +1108,7 @@ class Drive:
             runtime.set_exploration(True, owner_session_id)
         self._state            = MotivationalState.IDLE
         self._curiosity        = 0
-        self._initial_exploration = True
+        self._initial_exploration = not owner_session_id.startswith("act_")
         self._vision_retry_after = 0.0
         self._person_present   = False
         self._person_engaging  = False
@@ -1003,6 +1124,11 @@ class Drive:
         self._context = replace(context or SYSTEM_CONTEXT, origin_kind="agent_autonomous")
         self.user_interrupt = False
         self._pending_question_id = None
+        if activity_request and activity_request.get("activity_id") == owner_session_id:
+            self._events.append({"event_id": "activity:" + owner_session_id,
+                "kind": "activity_started", "source": "space.activity",
+                "activity_id": owner_session_id, "content": activity_request.get("content", ""),
+                "ts": time.time(), "deadline": time.time() + 90})
         logger.info("[Drive] 内驱动循环已启动")
 
     def stop(self, owner_session_id: str | None = None) -> bool:

@@ -5,7 +5,8 @@ import math
 import time
 import uuid
 
-from unitree_webrtc_connect import UnitreeWebRTCConnection, WebRTCConnectionMethod
+from unitree_webrtc_connect import WebRTCConnectionMethod
+from cloud.go2.connection.remote_signaling import RemoteConnection as UnitreeWebRTCConnection
 from unitree_webrtc_connect.constants import RTC_TOPIC, OBSTACLES_AVOID_API, DATA_CHANNEL_TYPE
 
 from cloud.go2.connection.fsm import Go2FSM, CommandBlocked
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 _STATUS_INTERVAL  = 10.0
 _STATE_STALE_S = 20.0
+_SPORT_RPC_TIMEOUT_S = 5.0
+_CONNECT_TIMEOUT_S = 45.0
+_SETUP_TIMEOUT_S = 5.0
+_CLOSING_TASKS: set[asyncio.Task] = set()
 
 
 class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
@@ -67,79 +72,123 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self._sport_state_observed_at = None
         self.reset_sensor_epoch()
         self.runtime.connection("connecting")
-        if self._conn:
-            await self._conn.disconnect()
-            self.reset_sensor_epoch()
-
-        self._conn = UnitreeWebRTCConnection(
-            WebRTCConnectionMethod.Remote,
-            serialNumber=serial,
-            username=email,
-            password=password,
-            region=region,
-            device_type="Go2",
-        )
-
-        connection = self._conn
+        previous, self._conn = self._conn, None
         session_id = self._odom_session_id
+        connection = None
         try:
-            await connection.connect()
-        except Exception as exc:
-            if self._conn is not connection or session_id != self._odom_session_id:
+            await self._stop_video()
+            if previous is not None:
+                await self._close_connection(previous)
+            if session_id != self._odom_session_id:
                 return
-            self.is_connected = False
-            self.runtime.connection("offline")
-            logger.error("[Go2/Conn] 连接失败: %s", exc)
+            connection = UnitreeWebRTCConnection(
+                WebRTCConnectionMethod.Remote, serialNumber=serial,
+                username=email, password=password, region=region, device_type="Go2")
+            self._conn = connection
+            await asyncio.wait_for(connection.connect(), timeout=_CONNECT_TIMEOUT_S)
+            if self._conn is not connection or session_id != self._odom_session_id:
+                await self._close_connection(connection)
+                return
+
+            # Native decoding returns metric N×3 points, not voxel indices.
+            connection.datachannel.set_decoder(decoder_type="native")
+            def current(callback):
+                def receive(message):
+                    if (self._conn is connection and self.is_connected
+                            and session_id == self._odom_session_id):
+                        callback(message)
+                return receive
+            for topic, callback in (("LF_SPORT_MOD_STATE", self._on_state),
+                                    ("ROBOTODOM", self._on_odom), ("LOW_STATE", self._on_low_state),
+                                    ("ULIDAR_ARRAY", self._on_voxel_map),
+                                    ("LIDAR_NAVIGATION_GLOBAL_PATH", self._on_global_path)):
+                connection.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], current(callback))
+            await asyncio.wait_for(connection.datachannel.disableTrafficSaving(True), timeout=_SETUP_TIMEOUT_S)
+            if self._conn is not connection or session_id != self._odom_session_id:
+                await self._close_connection(connection)
+                return
+            if self._sport_transport_closed(connection):
+                raise ConnectionError('Go2 transport closed during setup')
+
+            self.is_connected = True
+            self.body_state = None
+            self._motion_observation_enabled = False
+            self._connected_serial = serial
+            logger.info("[Go2/Conn] WebRTC 连接成功 serial=%s", serial)
+
+            async def transport_changed():
+                if (self._conn is connection and session_id == self._odom_session_id
+                        and self._sport_transport_closed(connection)):
+                    logger.warning("[Go2/Conn] WebRTC transport 已关闭")
+                    await self.disconnect()
+            for emitter, event in ((connection.pc, 'connectionstatechange'),
+                                   (getattr(connection.datachannel, 'channel', None), 'close')):
+                register = getattr(emitter, 'on', None)
+                if callable(register):
+                    register(event, transport_changed)
+
+            video_track = next((t.receiver.track for t in connection.pc.getTransceivers()
+                                if t.kind == 'video' and t.receiver and t.receiver.track), None)
+            connection.video.switchVideoChannel(True)
+            if video_track is not None:
+                self._video_task = asyncio.create_task(self._consume_video(video_track), name='go2-video')
+                logger.info("[Go2/Conn] 视频 track 已找到，开始采集")
+            else:
+                self._video_track_ended = True
+                self._video_error = 'video_track_missing'
+                logger.warning("[Go2/Conn] 未找到视频 track，画面不可用")
+            self._last_state_received_at = time.monotonic()
+            self._status_task = asyncio.create_task(self._status_loop())
+        except (Exception, asyncio.CancelledError) as exc:
+            if self._conn is connection and session_id == self._odom_session_id:
+                self._conn = None
+                self.is_connected = False
+                self._connected_serial = None
+                self.reset_sensor_epoch()
+                await self._stop_video()
+            if connection is not None:
+                await self._close_connection(connection)
+            elif previous is not None:
+                await self._close_connection(previous)
+            if not isinstance(exc, asyncio.CancelledError):
+                logger.error("[Go2/Conn] 连接失败: %s", exc)
             raise
 
-        if self._conn is not connection or session_id != self._odom_session_id:
-            await connection.disconnect()
-            return
-
-        # Native 解码器返回米制点云（ndarray N×3），比 LibVoxel 的格索引更易过滤地板
-        self._conn.datachannel.set_decoder(decoder_type="native")
-
-        connection = self._conn
-        def current(callback):
-            def receive(message):
-                if self._conn is connection and self.is_connected:
-                    callback(message)
-            return receive
-        for topic, callback in (("LF_SPORT_MOD_STATE", self._on_state),
-                                ("ROBOTODOM", self._on_odom), ("LOW_STATE", self._on_low_state),
-                                ("ULIDAR_ARRAY", self._on_voxel_map),
-                                ("LIDAR_NAVIGATION_GLOBAL_PATH", self._on_global_path)):
-            self._conn.datachannel.pub_sub.subscribe(RTC_TOPIC[topic], current(callback))
-        await connection.datachannel.disableTrafficSaving(True)
-        if self._conn is not connection or session_id != self._odom_session_id:
-            return
-
-        self.is_connected = True
-        self.body_state = None
-        self._motion_observation_enabled = False
-        logger.info("[Go2/Conn] WebRTC 连接成功 serial=%s", serial)
-        self._connected_serial = serial
-
-        video_track = None
-        for t in self._conn.pc.getTransceivers():
-            if t.kind == "video" and t.receiver and t.receiver.track:
-                video_track = t.receiver.track
-                break
-
-        self._conn.video.switchVideoChannel(True)
-
-        if video_track:
-            asyncio.create_task(self._consume_video(video_track))
-            logger.info("[Go2/Conn] 视频 track 已找到，开始采集")
-        else:
-            logger.warning("[Go2/Conn] 未找到视频 track，画面不可用")
-
-        self._last_state_received_at = time.monotonic()
-        self._status_task = asyncio.create_task(self._status_loop())
+    @staticmethod
+    async def _close_connection(connection):
+        # aiortc.close() cannot safely be cancelled halfway through: a later
+        # close then waits on its unfinished internal Future. Keep the first
+        # close alive and observe its result even if its caller is cancelled.
+        task = getattr(connection, '_ssm_close_task', None)
+        if not isinstance(task, asyncio.Task):
+            try:
+                task = asyncio.create_task(connection.disconnect(), name='go2-close-peer')
+            except Exception as exc:
+                logger.warning("[Go2/Conn] 清理 WebRTC 连接失败: %s", type(exc).__name__)
+                return
+            connection._ssm_close_task = task
+            _CLOSING_TASKS.add(task)
+            def finished(done):
+                _CLOSING_TASKS.discard(done)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(finished)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise
+        except Exception as exc:
+            logger.warning("[Go2/Conn] 清理 WebRTC 连接失败: %s", type(exc).__name__)
 
 
     async def disconnect(self) -> None:
         self._stop_manual_velocity()
+        connection, self._conn = self._conn, None
+        self._odom_session_id = uuid.uuid4().hex
         owner = self.runtime.data['life_owner']
         self._connected_serial = None
         self._latest_frame = None
@@ -169,26 +218,24 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             if self._status_task is not asyncio.current_task():
                 self._status_task.cancel()
             self._status_task = None
-        self._frame_ready = None
-        if self._conn:
-            try:
-                if hasattr(self._conn, "pc") and self._conn.pc:
-                    await self._conn.pc.close()
-            except Exception:
-                pass
-            try:
-                await self._conn.disconnect()
-            except Exception:
-                pass
-            self._conn = None
-        self.reset_sensor_epoch()
+        # Capture the connection before awaiting: a later connect owns its own
+        # peer and must never be closed by this retiring coroutine.
+        await self._stop_video()
+        if connection is not None:
+            await self._close_connection(connection)
         logger.info("[Go2/Conn] 已断开")
 
     # ── 定时状态快照 ──────────────────────────────────────────────────────
 
     async def _status_loop(self) -> None:
         from cloud.go2.navigation.navigator import navigator as _nav
-        while self.is_connected:
+        connection = self._conn
+        session = self._odom_session_id
+        while self.is_connected and self._conn is connection and self._odom_session_id == session:
+            if self._sport_transport_closed(connection):
+                logger.warning("[Go2/Conn] WebRTC transport 已关闭")
+                await self.disconnect()
+                return
             if (self._last_state_received_at is not None
                     and time.monotonic() - self._last_state_received_at > _STATE_STALE_S):
                 logger.warning("[Go2/Conn] 设备遥测中断，标记为离线")
@@ -256,16 +303,46 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             self._action_deadline = None
 
     def _expire_body_action(self, request_id):
+        pending = self.pending_action
+        if not pending or pending.get('request_id') != request_id:
+            return
         deadline = self._action_deadline
         self._action_deadline = None
         if deadline is not None:
             deadline.cancel()
-        pending = self.pending_action
-        if pending and pending.get('request_id') == request_id:
-            terminal = {**pending, 'phase': 'timeout', 'result': 'timeout',
-                        'error': 'completion_not_observed', 'finished_at': time.time(), 'ts': time.time()}
-            self.runtime.commit('body_action_timeout', pending_action={**pending, 'phase': 'timeout'},
-                                last_action=terminal)
+        terminal = {**pending, 'phase': 'timeout', 'result': 'timeout',
+                    'error': 'completion_not_observed', 'finished_at': time.time(), 'ts': time.time()}
+        self.runtime.commit('body_action_timeout', pending_action={**pending, 'phase': 'timeout'},
+                            last_action=terminal)
+        if self._completion is not None and not self._completion.done():
+            self._completion.set_result({
+                'result': 'timeout', 'error': 'completion_not_observed',
+                'request_id': request_id, 'pending_action': self.pending_action,
+                'confirmation_scope': 'request', 'body_state': self.body_state})
+
+    async def _publish_sport_request(self, connection, options):
+        """Retire the SDK's resolver when a bounded RPC wait is cancelled.
+
+        The SDK otherwise keeps the cancelled future and a late packet calls
+        set_result on it. Only this request's explicit wire identity is removed.
+        """
+        pub_sub = connection.datachannel.pub_sub
+        try:
+            return await pub_sub.publish_request_new(RTC_TOPIC['SPORT_MOD'], options)
+        finally:
+            resolver = getattr(pub_sub, 'future_resolver', None)
+            callbacks = getattr(resolver, 'pending_callbacks', None)
+            if isinstance(callbacks, dict):
+                generate = getattr(resolver, 'generate_message_key', None)
+                key = generate(DATA_CHANNEL_TYPE['REQUEST'], RTC_TOPIC['SPORT_MOD'], options['id']) if callable(generate) else options['id']
+                callbacks.pop(key, None)
+
+    @staticmethod
+    def _sport_transport_closed(connection):
+        channel = getattr(getattr(connection, 'datachannel', None), 'channel', None)
+        peer = getattr(connection, 'pc', None)
+        return (getattr(channel, 'readyState', None) in {'closed', 'closing'}
+                or getattr(peer, 'connectionState', None) in {'closed', 'failed', 'disconnected'})
 
     def _validate_motion(self, cmd: str, params: dict | None = None, *, dispatch_only=False) -> str | None:
         spec = ACTIONS.get(cmd)
@@ -343,7 +420,8 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
                 self._expire_body_action(self.pending_action['request_id'])
             return {"result": "timeout", "error": "completion_not_observed",
                     "body_state": self.body_state, "target_state": spec.expected_state,
-                    "confirmation_scope": "request", "request_status_code": code}
+                    "confirmation_scope": "request", "request_status_code": code,
+                    "pending_action": self.pending_action}
         except asyncio.CancelledError:
             if self._completion is waiter and self.pending_action is not None:
                 self.pending_action = {**self.pending_action, "phase": "cancelled_unconfirmed"}
@@ -389,18 +467,20 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         epoch = self._motion_epoch
         connection = self._conn
         request_id = uuid.uuid4().hex
+        wire_id = uuid.uuid4().int & 0x7fffffff or 1
         # Goals are stored separately. In particular, a sent Sit command is not
         # a sitting observation and its high body height is not standing proof.
         body_action = cmd not in {"StopMove", "Move", "BalanceStand"}
         waiter = None
         if body_action:
             self._motion_observation_enabled = False
-            self._action_observation = {'request_id': request_id,
+            self._action_observation = None if dispatch_only else {'request_id': request_id,
                                         'baseline': self._last_motor_positions,
                                         'motion_seen': False, 'acknowledged': False}
             self._posture_candidate_since = None
             self._posture_candidate_samples = 0
             self.pending_action = {"command": cmd, "request_id": request_id,
+                                   "rpc_request_id": wire_id,
                                    "label": spec.label,
                                    "target_state": spec.expected_state,
                                    "execution_state": spec.execution_state,
@@ -410,30 +490,64 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             self.body_confirmation = "unknown"
             self.body_state = None
             self._move_control_active = False
+            if not dispatch_only:
+                self._action_deadline = asyncio.get_running_loop().call_later(
+                    spec.timeout_s, self._expire_body_action, request_id)
+                if spec.completion == 'joint_posture' and self._joint_observation_available:
+                    waiter = asyncio.get_running_loop().create_future()
+                    self._completion = waiter
         previous_velocity_requested = self._velocity_command_active
         if cmd == 'Move':
             self._velocity_command_active = True
-        options = {"api_id": spec.api_id}
+        options = {"api_id": spec.api_id, "id": wire_id}
         if params:
             options["parameter"] = params
         try:
             response = await asyncio.wait_for(
-                connection.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], options),
-                timeout=min(spec.timeout_s, 5.0))
+                self._publish_sport_request(connection, options),
+                timeout=min(spec.timeout_s, _SPORT_RPC_TIMEOUT_S))
         except asyncio.CancelledError:
-            if epoch == self._motion_epoch and connection is self._conn and body_action:
+            if (epoch == self._motion_epoch and connection is self._conn and body_action
+                    and self.pending_action is not None):
                 self.pending_action = {**self.pending_action, "phase": "cancelled_unconfirmed"}
+            if self._completion is waiter:
+                self._completion = None
+            if waiter is not None and not waiter.done():
+                waiter.cancel()
             raise
         except Exception as exc:
             if epoch != self._motion_epoch or connection is not self._conn:
                 cancelled = asyncio.get_running_loop().create_future()
                 cancelled.set_result({"result": "cancelled", "error": "superseded_during_send"})
                 return cancelled, None
-            self._finish_pending("error", "disconnected")
-            self.is_connected = False
-            self.runtime.connection("offline")
-            self.body_confirmation = "unknown"
-            raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
+            if self._sport_transport_closed(connection):
+                self._finish_pending("error", "disconnected")
+                self.is_connected = False
+                self.body_confirmation = "unknown"
+                raise RuntimeError(f"发送失败，连接已断开: {exc}") from exc
+            # RPC receipt is separate from both connection liveness and physical
+            # completion. Keep observing the original action; never send again.
+            error = 'sport_rpc_timeout' if isinstance(exc, TimeoutError) else 'sport_rpc_failed'
+            logger.warning('[Go2/Conn] RPC未确认 cmd=%s request=%s rpc=%s error=%s; 保留遥测观察',
+                           cmd, request_id, wire_id, error)
+            if waiter is not None:
+                return waiter, None
+            observed = self.runtime.data.get('last_action') or {}
+            if observed.get('request_id') == request_id and observed.get('confirmation') == 'joint_posture':
+                completed = asyncio.get_running_loop().create_future()
+                completed.set_result({'result': observed['result'], 'request_id': request_id,
+                                      'confirmation': 'joint_posture', 'confirmation_scope': 'physical',
+                                      'body_state': self.body_state})
+                return completed, None
+            if dispatch_only:
+                self.runtime.finish_body_action(request_id, 'timeout', phase='dispatched_unconfirmed',
+                                                error=error)
+            unconfirmed = asyncio.get_running_loop().create_future()
+            unconfirmed.set_result({'result': 'timeout' if isinstance(exc, TimeoutError) else 'unknown',
+                                    'error': error, 'request_id': request_id,
+                                    'rpc_request_id': wire_id, 'confirmation_scope': 'request',
+                                    'pending_action': self.pending_action})
+            return unconfirmed, None
         if epoch != self._motion_epoch or connection is not self._conn or not self.is_connected:
             cancelled = asyncio.get_running_loop().create_future()
             cancelled.set_result({"result": "cancelled", "error": "superseded_during_send"})
@@ -442,10 +556,22 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         header = packet.get("header") if isinstance(packet, dict) else None
         status = header.get("status") if isinstance(header, dict) else None
         code = status.get("code") if isinstance(status, dict) else None
+        # Joint feedback can complete the action while its RPC is still pending.
+        # A late receipt must not recreate pending state or replace that result.
+        if waiter is not None and waiter.done():
+            return waiter, response
+        observed = self.runtime.data.get('last_action') or {}
+        if observed.get('request_id') == request_id and observed.get('confirmation') == 'joint_posture':
+            completed = asyncio.get_running_loop().create_future()
+            completed.set_result({'result': observed['result'], 'request_id': request_id,
+                                  'confirmation': 'joint_posture', 'confirmation_scope': 'physical',
+                                  'body_state': self.body_state})
+            return completed, response
         if type(code) is int and code != 0:
             if cmd == 'Move':
                 self._velocity_command_active = previous_velocity_requested
             if body_action:
+                self._finish_pending('error', 'sport_rpc_rejected')
                 self.runtime.finish_body_action(request_id, 'error', phase='rejected',
                                                 error='sport_rpc_rejected')
                 self._action_observation = None
@@ -467,11 +593,6 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             self.pending_action = {**self.pending_action,
                                    "phase": "executing" if observation['motion_seen'] else
                                    "accepted" if code == 0 else "sent"}
-            self._action_deadline = asyncio.get_running_loop().call_later(
-                spec.timeout_s, self._expire_body_action, request_id)
-            if spec.completion == "joint_posture" and self._joint_observation_available:
-                waiter = asyncio.get_running_loop().create_future()
-                self._completion = waiter
         elif cmd == "StopMove":
             self._velocity_command_active = False
             self._move_control_active = False

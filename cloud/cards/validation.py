@@ -103,6 +103,8 @@ def _validate_state_machine(sm: dict) -> None:
             raise ValueError("state_machine.diagram requires positive finite dimensions")
         if not isinstance(diagram.get("sections"), list):
             raise ValueError("diagram.sections must be an array")
+        if "media_position" in diagram and diagram["media_position"] != "left":
+            raise ValueError("diagram.media_position must be left when present")
         for section in diagram["sections"]:
             if (not isinstance(section, dict) or type(section.get("top")) not in (int, float)
                     or not math.isfinite(section["top"]) or not 0 <= section["top"] <= diagram["height"]):

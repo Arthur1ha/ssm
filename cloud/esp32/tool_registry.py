@@ -3,7 +3,7 @@
 from typing import Any
 
 from copy import deepcopy
-from edge.lamp_contract import ACTION_SCHEMAS, BLINK_DEFAULT, valid_params
+from edge.lamp_contract import ACTION_SCHEMAS, BLINK_DEFAULT, DEFAULT_ON_BRIGHTNESS, valid_params
 
 PHYSICAL_TIMEOUT = 20.0
 
@@ -13,7 +13,7 @@ LAMP_SKILLS = {
     "SET_STATE": {"tool": "set_led_state", "id": "set_light_state", "name": "开关灯",
                   "description": "切换灯环的照明状态"},
     "SET_COLOR": {"tool": "set_led_color", "id": "set_light_color", "name": "设置灯光颜色",
-                  "description": "一次设置 RGB 和亮度；省略亮度时保留当前值。相对调节以执行前状态选定目标，颜色和亮度合并一次设置，成功后结束本次调整"},
+                  "description": "一次设置 RGB 和亮度并亮起指定颜色；省略亮度时保留当前非零值，熄灭时使用默认开灯亮度。显式 brightness=0 仍为关灯。相对调节以执行前状态选定目标，颜色和亮度合并一次设置，成功后结束本次调整"},
     "BLINK": {"tool": "blink_led", "id": "blink_light", "name": "闪烁灯光",
               "description": "默认持续闪烁（count=0），直到开灯、关灯或调色；回执确认已启动。仅明确指定正整数次数时，闪完恢复先前灯光并确认完成"},
 }
@@ -110,7 +110,7 @@ def valid_lamp_params(action: str, params: Any, *, card: dict | None = None) -> 
 
 
 def normalize_brightness(action: str, params: dict, current: dict) -> dict:
-    """A missing brightness preserves the current setting for SET_COLOR."""
+    """Preserve lit brightness; setting a color while dark also lights it up."""
     if action != "SET_COLOR" or "brightness" in params:
         return params
     brightness = current.get("brightness")
@@ -118,7 +118,7 @@ def normalize_brightness(action: str, params: dict, current: dict) -> dict:
     if (type(brightness) is not int or
             not definition["minimum"] <= brightness <= definition["maximum"]):
         raise ValueError("current brightness is unavailable")
-    return {**params, "brightness": brightness}
+    return {**params, "brightness": brightness or DEFAULT_ON_BRIGHTNESS}
 
 
 def fsm_allows(card: dict, current_ism: str, action: str, params: dict) -> bool:

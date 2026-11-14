@@ -41,6 +41,7 @@ test_*.py
 !cloud/go2/tests/test_recording.py
 !cloud/go2/tests/test_access_control.py
 !cloud/go2/tests/test_task_recovery.py
+!cloud/go2/tests/test_media_pipeline.py
 !cloud/agents/go2/tests/
 !cloud/agents/go2/tests/test_search.py
 !cloud/agents/go2/tests/test_interrupted_run.py

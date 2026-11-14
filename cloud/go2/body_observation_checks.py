@@ -118,6 +118,47 @@ async def test_motion_and_stable_target_complete_action_and_deferred_life(observ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('complete_before_ack_timeout', [False, True])
+async def test_lost_rpc_ack_keeps_connection_and_completes_from_joints(observed, monkeypatch,
+                                                                    complete_before_ack_timeout):
+    import cloud.go2.connection.webrtc as webrtc
+    robot, feed, _ = observed
+    feed(count=7)
+    monkeypatch.setattr(webrtc, '_SPORT_RPC_TIMEOUT_S', .01)
+    callbacks = {}
+    pub_sub = robot._conn.datachannel.pub_sub
+    pub_sub.future_resolver = SimpleNamespace(pending_callbacks=callbacks)
+    sent = []
+
+    async def missing_ack(topic, options):
+        sent.append(options)
+        future = asyncio.get_running_loop().create_future()
+        callbacks[options['id']] = [future]
+        await future
+
+    pub_sub.publish_request_new = missing_ack
+    task = asyncio.create_task(robot.send_command('Dance1'))
+    for _ in range(6):
+        await asyncio.sleep(0)
+    request_id = robot.pending_action['request_id']
+    assert robot._completion is not None
+    if not complete_before_ack_timeout:
+        await asyncio.sleep(.03)
+        assert robot.is_connected
+        assert not task.done()
+    feed(WAVING, count=3, pitch=-.33)
+    feed(count=12)
+    result = await task
+    assert result['result'] == 'ok'
+    assert result['request_id'] == request_id
+    assert result['confirmation'] == 'joint_posture'
+    assert robot.is_connected
+    assert robot.pending_action is None
+    assert len(sent) == 1
+    assert callbacks == {}, 'Late RPC packets must not resolve a cancelled SDK future'
+
+
+@pytest.mark.asyncio
 async def test_sit_completion_requires_joint_pattern_not_target_assignment(observed):
     robot, feed, _ = observed
     feed(count=7)

@@ -171,7 +171,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                 f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex,
             **facts,
         )
-        if phase == "observed" and step is not None:
+        if phase == "observed" and step is not None and not run.parent_run_id:
             persona = render_identity(get_profile())
             status = result.get("result", "unknown")
 
@@ -226,6 +226,11 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                  unit_id=unit_id, session_id=context.session_id)
 
     async def finalize(current: GraphRun) -> GraphRun:
+        if current.parent_run_id and context.origin_kind == "user_delegated":
+            current.response = current.decision_draft
+            current.reply_source = "decision_model" if current.response else "runtime"
+            current.reply_ready = True
+            return current
         await finalize_reply(current, model=run_model,
                              instructions=lambda value: persona_reply_prompt(value, get_profile()),
                              validate=valid_reply_format)
@@ -298,7 +303,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     reply = run.response
     if context.session_id.startswith("peer_"):
         published = {}
-    elif run.status == "needs_clarification" and reply:
+    elif not run.parent_run_id and run.status == "needs_clarification" and reply:
         run.reply_event_id = stable_reply_event_id(run, status) or ""
         publish_agent_event(
             "agent_reply", agent_id=unit_id, session_id=event_session,
@@ -307,7 +312,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             parent_run_id=run.parent_run_id, source=event_source, text=reply,
             reply_kind="clarification", event_id=run.reply_event_id,
         )
-    if reply:
+    if reply and not run.parent_run_id:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                          run_id=run.run_id, agent_id=unit_id, session_id=run.session_id,
                          reply_kind="final", channel="http", reply=reply)

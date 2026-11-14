@@ -6,7 +6,7 @@ import time
 import neopixel
 from machine import ADC, Pin
 from probe import PRESENCE
-from lamp_contract import BLINK_DEFAULT
+from lamp_contract import BLINK_DEFAULT, DEFAULT_ON_BRIGHTNESS
 from config import UNIT_IR, UNIT_SOUND
 from config import (
     LIGHT_SENSOR_PIN, IR_SENSOR_PIN, SOUND_SENSOR_PIN,
@@ -199,7 +199,7 @@ class BSM:
         if state == "OFF":
             self.led_set_color(0, 0, 0, 0)
         elif state == "ON":
-            self.led_set_color(255, 255, 255, 200)
+            self.led_set_color(255, 255, 255, DEFAULT_ON_BRIGHTNESS)
         else:
             raise ValueError("unknown LED state")
 

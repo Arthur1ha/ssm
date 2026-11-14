@@ -173,7 +173,7 @@ async def go2_disconnect(context: ExecutionContext = Depends(require_intervening
 @router.get("/connection")
 async def go2_status(context=Depends(require_authenticated_read)):
     return {**go2.state_snapshot(), "state": go2._robot_state,
-            "error": getattr(go2, "_last_error", None)}
+            "video": go2.video_diagnostics(), "error": getattr(go2, "_last_error", None)}
 
 
 @router.get("/diagnostics/avoidance")
@@ -220,21 +220,25 @@ async def go2_video(context=Depends(require_authenticated_read)):
     return StreamingResponse(
         go2.mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "private, no-store", "X-Accel-Buffering": "no"},
     )
 
 
 @router.get("/video/snapshot")
-async def go2_video_snapshot(context=Depends(require_authenticated_read)):
-    """单帧 JPEG，供不支持 MJPEG 的浏览器（iOS Safari）轮询使用。"""
+async def go2_video_snapshot(preview: bool = False, context=Depends(require_authenticated_read)):
+    """Fresh JPEG fallback; preview uses the shared, smaller display image."""
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
-    frame = go2._latest_frame
-    if frame is None:
-        raise HTTPException(status_code=503, detail="暂无画面")
+    snapshot = go2.live_frame_snapshot(preview=preview)
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail="暂无新鲜画面")
+    frame, metadata = snapshot
     return Response(
-        content=frame,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "no-store"},
+        content=frame, media_type="image/jpeg",
+        headers={"Cache-Control": "private, no-store", "X-Accel-Buffering": "no",
+                 "X-Frame-Id": str(metadata['frame_id']),
+                 "X-Frame-Timestamp": str(metadata['captured_at']),
+                 "X-Frame-Age-Ms": str(max(0, int((time.monotonic() - metadata['received_at']) * 1000)))},
     )
 
 
@@ -260,7 +264,7 @@ async def go2_state(context=Depends(require_authenticated_read)):
                 except asyncio.TimeoutError:
                     state = {}
                 payload = {**go2.state_snapshot(), "state": go2._robot_state,
-                           "error": getattr(go2, "_last_error", None)}
+                           "video": go2.video_diagnostics(), "error": getattr(go2, "_last_error", None)}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             go2.remove_state_queue(q)
@@ -1105,94 +1109,58 @@ async def capture_rgb_lidar_target(target: str, context=Depends(require_admin_re
             "motion_command_sent": False}
 
 
+_map_image_task: asyncio.Task | None = None
+_MAP_MAX_AGE_S = 20.0
+
+
+def _map_is_current(robot, session, grid, observed_at):
+    return (robot.is_connected and getattr(robot, '_odom_session_id', None) == session
+            and robot.voxel_received_at is not None
+            and 0 <= time.monotonic() - robot.voxel_received_at <= _MAP_MAX_AGE_S
+            and (observed_at is None or 0 <= time.monotonic() - observed_at <= _MAP_MAX_AGE_S)
+            and getattr(grid, 'session_id', session) == session)
+
+
 @router.get("/map.png")
 async def go2_map_image(context=Depends(require_authenticated_read)):
-    import io, math as _math
-    import numpy as np
-    from PIL import Image, ImageDraw
     from cloud.agents.go2.memory import spatial as spatial_memory
     from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.navigation.map_image import render_map_png
 
-    if (not go2.is_connected or go2.voxel_received_at is None
-            or time.monotonic() - go2.voxel_received_at > 20.0):
+    global _map_image_task
+    robot = go2
+    session = getattr(robot, '_odom_session_id', None)
+    grid = robot.occupancy_grid
+    observed_at = getattr(grid, 'observed_at', None)
+    if grid is None or not _map_is_current(robot, session, grid, observed_at):
         raise HTTPException(status_code=503, detail="地图数据尚未就绪")
 
-    SCALE = 3
-
-    grid_obj = go2.occupancy_grid
-    odom     = go2.odom
-    if grid_obj is None:
-        raise HTTPException(status_code=503, detail="地图数据尚未就绪")
-
-    if (go2.odom_received_at is None or time.monotonic() - go2.odom_received_at > 1.0 or
-            go2.odom_frame_id != grid_obj.frame_id):
-        odom = {}
-
-    nx, ny = grid_obj.width[0], grid_obj.width[1]
-    W, H   = nx * SCALE, ny * SCALE
-
-    # 翻转行让 Y 轴朝上（北朝上）与世界坐标一致
-    from cloud.go2.navigation.occupancy_grid import FREE, OCCUPIED
-    arr = np.empty((ny, nx, 3), dtype=np.uint8)
-    arr[:] = (34, 65, 70)  # unobserved in-map cells are traversable too
-    arr[grid_obj.cells == FREE] = (34, 65, 70)
-    arr[grid_obj.cells == OCCUPIED] = (100, 100, 100)  # inflated clearance
-    arr[grid_obj.obstacles] = (210, 85, 75)  # raw obstacle returns
-    arr = arr[::-1]
-    img = Image.fromarray(arr, "RGB").resize((W, H), Image.NEAREST)
-    d   = ImageDraw.Draw(img)
-
-    def g2i(ix, iy):
-        """grid cell → image pixel，Y 翻转后北朝上"""
-        return ix * SCALE + SCALE // 2, (ny - 1 - iy) * SCALE + SCALE // 2
-
-    # 机器狗内置导航规划的全局路径（蓝线）
-    global_path = go2.global_path
-    if len(global_path) > 1:
-        pts = []
-        for wp in global_path:
-            try:
-                gx, gy = grid_obj.odom_to_grid(wp["x"], wp["y"])
-                pts.append(g2i(gx, gy))
-            except ValueError:
-                continue
-        if len(pts) > 1:
-            d.line(pts, fill=(30, 120, 255), width=2)
-
-    # 保存的地点
-    for loc in spatial_memory.list_locations():
-        if loc.get("session_id") != getattr(go2, "_odom_session_id", None):
-            continue
-        try:
-            lx, ly = grid_obj.odom_to_grid(loc["x"], loc["y"])
-        except ValueError:
-            continue
-        px, py = g2i(lx, ly)
-        r = 5
-        color  = (255, 200, 0) if navigator.target == loc["name"] else (160, 200, 80)
-        d.ellipse([px-r, py-r, px+r, py+r], fill=color)
-        d.text((px + r + 2, py - 5), loc["name"], fill=color)
-
-    # 机器人（绿圆 + 朝向箭头）
-    if odom:
-        try:
-            rix, riy = grid_obj.odom_to_grid(odom["x"], odom["y"])
-        except ValueError:
+    if _map_image_task is None or _map_image_task.done():
+        # SessionMap snapshots are immutable. Capture overlays before handing
+        # drawing, memory reads and PNG compression to the worker. Concurrent
+        # viewers share this one job instead of queuing multiple full renders.
+        odom = robot.odom.copy()
+        if (robot.odom_received_at is None
+                or time.monotonic() - robot.odom_received_at > 1.0
+                or robot.odom_frame_id != grid.frame_id):
             odom = {}
-        else:
-            px, py = g2i(rix, riy)
-            r = 7
-            d.ellipse([px-r, py-r, px+r, py+r], fill=(0, 220, 100), outline=(0, 255, 80), width=2)
-            heading = odom["heading"]
-            L = 14
-            ax = px + int(_math.cos(heading) * L)
-            ay = py - int(_math.sin(heading) * L)
-            d.line([px, py, ax, ay], fill=(0, 255, 80), width=3)
-            d.rectangle([4, 4, 126, 21], fill=(14, 18, 28))
-            d.text((7, 7), f"x={odom['x']:.2f} y={odom['y']:.2f}",
-                   fill=(190, 245, 205))
+        path = tuple(dict(point) for point in robot.global_path)
+        target = navigator.target
 
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return Response(content=buf.getvalue(), media_type="image/png",
-                    headers={"Cache-Control": "private, no-store"})
+        async def build():
+            def render():
+                return render_map_png(grid, odom, path, spatial_memory.list_locations(), target, session)
+            content = await asyncio.to_thread(render)
+            return content, robot, session, grid, observed_at
+
+        _map_image_task = asyncio.create_task(build(), name='go2-map-image')
+        _map_image_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+    try:
+        content, source, source_session, source_grid, stamp = await asyncio.wait_for(
+            asyncio.shield(_map_image_task), timeout=5.0)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=503, detail="地图生成超时") from exc
+    if source is not robot or not _map_is_current(robot, source_session, source_grid, stamp):
+        raise HTTPException(status_code=503, detail="地图数据已过期")
+    return Response(content=content, media_type="image/png",
+                    headers={"Cache-Control": "private, no-store", "X-Accel-Buffering": "no"})

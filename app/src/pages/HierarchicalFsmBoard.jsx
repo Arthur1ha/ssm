@@ -220,16 +220,20 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const executionLabel = execution?.label || topology.edges.find(edge => [edge.transition.trigger,edge.transition.action]
     .includes(execution?.command))?.transition.label || '设备动作';
   const graphSize = stateGraphDimensions(nodes.length, sm?.diagram);
-  return <div className="device-state-board device-whiteboard"
-    style={{'--board-accent':color, '--board-graph-ratio':graphSize.height / graphSize.width}} aria-busy={busy}
-    onKeyDown={event => { if (event.key === 'Escape' && anchor) { event.stopPropagation(); closePopover(); } }}>
-    {media.length > 0 && <div className="device-whiteboard__media" aria-label="实时画面与地图">
+  const insetMedia = media.length > 0 && sm?.diagram?.media_position === 'left';
+  const mediaPanel = media.length > 0 && <div className="device-whiteboard__media" aria-label="实时画面与地图">
       {media.map(widget => <div key={`${widget.type}:${widget._index}`} className="device-whiteboard__media-slot"><div
         className="device-whiteboard__media-tile">
         {connected ? renderWidget(widget) : <span className="device-whiteboard__media-empty">{widget.type === 'video' ? '视频 · 等待连接' : '地图 · 等待连接'}</span>}
       </div></div>)}
-    </div>}
+    </div>;
+  return <div className={`device-state-board device-whiteboard${insetMedia ? ' device-whiteboard--inset-media' : ''}`}
+    style={{'--board-accent':color, '--board-graph-ratio':graphSize.height / graphSize.width}} aria-busy={busy}
+    onKeyDown={event => { if (event.key === 'Escape' && anchor) { event.stopPropagation(); closePopover(); } }}>
+    {!insetMedia && mediaPanel}
+    <div className="device-whiteboard__frame">
     <div ref={canvasRef} className="device-whiteboard__canvas">
+      {insetMedia && mediaPanel}
       {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
         selectedLink={selectedLinkId} selectedDirection={selectedDirection?.id} onSelectState={select} onInspectTransition={inspectEdge}
         onDismiss={clearSelection}
@@ -268,6 +272,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
           })}
         </div>
       </StateBoardPopover>}
+    </div>
     </div>
     {(feedback || offline || stale || execution || awaitingFeedback) && <div className="device-whiteboard__feedback" role="status" aria-live="polite">
       {feedback && <div>{feedback}</div>}

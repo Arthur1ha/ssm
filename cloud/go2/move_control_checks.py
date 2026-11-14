@@ -46,8 +46,10 @@ async def test_entry_prepares_sport_channel_without_entering_balance_stand():
     result = await robot.send_command('EnterMoveControl')
     assert result['result'] == 'accepted'
     assert robot.runtime.data['control_mode'] == 'remote'
-    assert [call.args[1] for call in publish.await_args_list] == [
-        {'api_id':1003}]
+    assert publish.await_count == 1
+    prepare = publish.await_args.args[1]
+    assert prepare['api_id'] == 1003
+    assert type(prepare['id']) is int and prepare['id'] > 0
     assert all(call.args[0] == RTC_TOPIC['SPORT_MOD'] for call in publish.await_args_list)
     sticks.assert_not_called()  # selecting movement never starts driving
     robot.move_velocity(.2, -.1, .3)

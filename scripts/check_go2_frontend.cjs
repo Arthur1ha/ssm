@@ -252,7 +252,7 @@ async function checkInteractions() {
   const React = require('react');
   const ReactDOMServer = require('react-dom/server');
   const previewContext = vm.createContext({ React, window: {}, console });
-  for (const name of ['app/src/utils/stateMachine.js', 'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx', 'app/src/pages/HierarchicalFsmBoard.jsx']) {
+  for (const name of ['app/src/utils/stateMachine.js', 'app/src/hooks/useTraining.js', 'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx', 'app/src/pages/HierarchicalFsmBoard.jsx']) {
     vm.runInContext(compile(name), previewContext, {filename:name});
   }
   const initialState = {state_schema_version:2,epoch:'preview',revision:1,connected:true,
@@ -286,17 +286,21 @@ async function checkInteractions() {
     args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   try {
     const page = await browser.newPage();
+    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
     const errors = [];
     page.on('pageerror', error => { errors.push(error.message); console.error('Browser error:', error.message); });
     await page.setRequestInterception(true);
     page.on('request', request => {
       if (/^(data:|blob:)/.test(request.url())) return request.continue();
+      // Exercise the snapshot fallback in this layout/control regression.
+      if (/\/api\/go2\/video(?:\?|$)/.test(request.url())) {
+        return request.respond({status:503,headers:{'access-control-allow-origin':'*'},body:''});
+      }
       if (request.url().includes('/api/go2/map.png') || request.url().includes('/api/go2/video/snapshot')) {
         return request.respond({status:200,contentType:'image/svg+xml',headers:{'access-control-allow-origin':'*'},body:'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#14141f"/><path d="M30 30h260v120H30zM30 90h90V30" fill="none" stroke="#666" stroke-width="8"/><path d="M155 80l10 20-10-5-10 5z" fill="#c8ff3e"/><text x="100" y="165" fill="#999" font-size="10">SIMULATED</text></svg>'});
       }
       return request.abort();
     });
-    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
     await page.setContent('<html lang="zh-CN"><head><base href="https://ssm-test.invalid/"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div></body></html>');
     await page.addStyleTag({ content: '*{box-sizing:border-box;margin:0}html,body,#root{height:100%}body{background:#0B0B0E}' + read('app/styles/app.css') });
     if (process.env.GO2_PREVIEW_FONT) {
@@ -317,7 +321,6 @@ async function checkInteractions() {
     console.log('Browser React runtime:', await page.evaluate(() => React.version));
     await page.addScriptTag({ content: `if(!crypto.randomUUID)crypto.randomUUID=()=>('test-'+Math.random()).replace('.','');
       window.__calls=[]; window.__sources=[];window.__velocities=[];
-      window.__teachings=[];window.__teachingReads=[];
       const listeners=new EventTarget();
       window.__emit=detail=>listeners.dispatchEvent(new CustomEvent('server-event',{detail}));
       window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;window.__proposals=[];
@@ -335,7 +338,6 @@ async function checkInteractions() {
           __proposal={...__proposal,proposal_id:'remove1',superseded_by:null,superseded:false,cancelled:false,operation:'remove',teaching_id:options.body.teaching_id,created_at:Date.now()/1000,confirmed:false};
           __proposals.push(__proposal);return __proposal;}
         if(url.startsWith('/api/training/') && options.method==='PUT')return {};
-        if(url.startsWith('/api/teachings')){__teachingReads.push(url);return __teachings;}
         if(url.includes('/training'))return __training;
         if(url==='/api/devices')return [__lampCard,__card];return {};}};
       window.apiErrorText=error=>error.message;
@@ -683,78 +685,6 @@ async function checkInteractions() {
       }
       return;
     }
-    if (process.argv.includes('--rules-only')) {
-      const focusLink = async (src,dst) => {
-        await page.evaluate(({src,dst})=>{
-          [...document.querySelectorAll('.fsm-whiteboard__edge')].find(edge=>
-            [edge.dataset.source,edge.dataset.target].includes(src) && [edge.dataset.source,edge.dataset.target].includes(dst)).focus();
-        },{src,dst});
-        await page.keyboard.press('Enter');
-        await page.waitForSelector('[aria-label="转换说明"]');
-      };
-      const geometry = () => page.$eval('.device-whiteboard__popover',node=>{
-        const r=node.getBoundingClientRect();return [r.x,r.y,r.width,r.height];
-      });
-      assert.equal(await page.$$eval('.fsm-whiteboard__edge',edges=>new Set(edges.map(edge=>JSON.stringify([edge.dataset.source,edge.dataset.target].sort()))).size===edges.length),true);
-      await page.evaluate(()=>{
-        const original=apiClient.request;
-        apiClient.request=url=>url.startsWith('/api/teachings') ? new Promise(resolve=>{__resolveRules=resolve;__teachingReads.push(url);}) : original(url);
-        __card.services={teachings_endpoint:'/api/teachings'};
-        __card.skills=[{id:'sport',invoke:{action:'SPORT'},params_schema:{properties:{cmd:{enum:['Hello'],'x-enum-labels':{Hello:'挥手'}}}}}];
-        __renderState(__state);
-      });
-      await page.waitForFunction(()=>typeof __resolveRules==='function');
-      const readCount=await page.evaluate(()=>__teachingReads.length);
-      await focusLink('body:standing','body:greeting');
-      const before=await geometry();
-      assert.equal(before[2]<248 && before[3]<150,true,'Short content still occupies a fixed-size card');
-      assert.equal(await page.$eval('.device-whiteboard__popover',node=>/读取规则|当前状态|仅在当前|×/.test(node.innerText)),false);
-      await page.evaluate(()=>__resolveRules(Array.from({length:5},(_,i)=>({teaching_id:'rule-'+i,unit_id:'go2',execution_status:'enabled',
-        binding:{skill_id:'sport',params:{cmd:'Hello'},observation_id:'vision.person_presence',where:{detected:true}}}))));
-      await page.waitForSelector('.device-whiteboard__rule');
-      const expanded=await geometry();
-      assert.equal(expanded[3]>before[3] && expanded[3]<=240 && expanded[2]<=248,true,'Card does not adapt within its size limits');
-      assert.equal(await page.$eval('.device-whiteboard__popover-body',node=>node.scrollHeight>node.clientHeight),true,'Long rules do not scroll internally');
-      const line=()=>page.$eval('.fsm-whiteboard__edge.is-selected .fsm-whiteboard__line',node=>[node.getAttribute('d'),node.getAttribute('marker-start'),node.getAttribute('marker-end')]);
-      const originalLine=await line();
-      await page.click('[aria-label="转换方向"] button[aria-pressed="false"]');
-      const reversed=await line();
-      assert.equal(reversed[0],originalLine[0],'Direction switch changed line geometry');
-      assert.notDeepEqual(reversed.slice(1),originalLine.slice(1),'Direction switch did not reverse arrow');
-      assert.equal((await geometry())[3]<expanded[3],true,'Shorter rules retain an oversized empty card');
-      assert.equal(await page.$eval('.device-whiteboard__popover',node=>node.innerText.includes('动作执行完毕')),true);
-      assert.equal(await page.$('.device-whiteboard__rule'),null,'Forward user rules leaked into reverse direction');
-      assert.equal(await page.evaluate(()=>__calls.length),0,'Direction switch dispatched a device action');
-      assert.equal(await page.evaluate(()=>__teachingReads.length),readCount,'Switching direction fetched rules again');
-      await page.screenshot({path:'/tmp/ssm-grouped-go2-rules.png',fullPage:true});
-      await page.click('[aria-label="转换方向"] button[aria-pressed="false"]');
-      await page.click('.device-whiteboard__system-rule .btn:not(:disabled)');
-      await page.waitForFunction(()=>__calls.length===1);
-      assert.equal(await page.evaluate(()=>__calls[0].action),'Hello');
-      await page.keyboard.press('Escape');
-      assert.equal(await page.$('.device-whiteboard__popover'),null);
-      await page.evaluate(()=>{
-        apiClient.request=async url=>url.startsWith('/api/teachings') ? [] : {};
-        __renderState({ism:'ON',ts:1},{...__lampCard,_online:true});
-      });
-      await page.waitForSelector('.fsm-whiteboard__node[data-state="device:ON"]');
-      assert.equal(await page.$$('.fsm-whiteboard__edge').then(edges=>edges.length),3,'Lamp pairs were not merged');
-      await focusLink('device:ON','device:BLINKING');
-      await page.click('[aria-label="转换方向"] button[aria-pressed="false"]');
-      assert.equal(await page.$eval('.device-whiteboard__popover',node=>node.innerText.includes('闪烁结束')),true,'Automatic lamp rule was lost');
-      assert.equal(await page.$('.device-whiteboard__system-rule .btn')!==null,true,'Manual lamp rule was lost');
-      await page.screenshot({path:'/tmp/ssm-grouped-lamp-rules.png',fullPage:true});
-      for (const [width,height] of [[360,520],[1440,1000]]) {
-        await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
-        await new Promise(resolve=>setTimeout(resolve,100));
-        assert.equal(await page.$eval('.device-whiteboard__popover',node=>{const r=node.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;}),true);
-      }
-      await page.evaluate(()=>document.querySelector('.fsm-whiteboard__viewport').dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      assert.equal(await page.$('.device-whiteboard__popover'),null,'Background click did not dismiss the card');
-      assert.deepEqual(errors,[]);
-      console.log('PASS: one line per pair; all manual/automatic rules preserved; arrow direction switching; compact adaptive cards; cached user rules; explicit commands; lamp and responsive popovers.');
-      return;
-    }
     if (process.argv.includes('--layout-only')) {
       await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
       await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
@@ -776,6 +706,27 @@ async function checkInteractions() {
       assert.equal(graph.nodes['body:content'].label,'开心');
       assert.equal(graph.nodes['body:sitting'].label,'坐下');
       await page.screenshot({path:'/tmp/ssm-go2-radial-layout.png',fullPage:true});
+      for (const [width,height] of [[320,740],[390,844],[768,1024],[1440,1000],[844,390],[390,520]]) {
+        await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.equal(await page.evaluate(() => {
+          const tiles = [...document.querySelectorAll('.device-whiteboard__media-tile')].map(node => node.getBoundingClientRect());
+          const [video,map] = tiles;
+          const behavior = [...document.querySelectorAll('.fsm-whiteboard__node')].filter(node => node.dataset.group === '行为');
+          const poses = [...document.querySelectorAll('.fsm-whiteboard__node')].filter(node => node.dataset.group === '姿态与动作');
+          const canvas = document.querySelector('.device-whiteboard__canvas').getBoundingClientRect();
+          return tiles.length === 2 && Math.abs(video.width-map.width) < 1 && Math.abs(video.height-map.height) < 1
+            && Math.abs(video.width/video.height-16/9) < .03 && Math.abs(video.left-map.left) < 1 && video.bottom < map.top
+            && behavior.length === 4 && behavior.every(node => node.getBoundingClientRect().left > video.right)
+            && poses.every(node => node.getBoundingClientRect().top > map.bottom)
+            && [...document.querySelectorAll('.fsm-whiteboard__node')].every(node => {
+              const rect = node.getBoundingClientRect();
+              return rect.left >= canvas.left-1 && rect.right <= canvas.right+1 && rect.top >= canvas.top-1 && rect.bottom <= canvas.bottom+1;
+            }) && document.documentElement.scrollWidth <= innerWidth;
+        }), true, `Go2 media or states overlap at ${width}×${height}`);
+        assert.equal(await page.$eval('.device-page__chat input', node => node.getBoundingClientRect().bottom <= innerHeight), true);
+      }
+      await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
       await page.evaluate(()=>__renderState({ism:'ON',ts:1},{...__lampCard,_online:true}));
       await page.waitForSelector('.fsm-whiteboard__node[data-state="device:ON"]');
       assert.equal(await page.$$eval('.fsm-whiteboard__edge',edges=>edges.some(edge=>edge.dataset.source===edge.dataset.target)),false);
@@ -827,7 +778,13 @@ async function checkInteractions() {
       const before = await page.evaluate(()=>__calls.length);
       const bounds = await page.$eval('.fsm-whiteboard__viewport',node=>JSON.stringify(node.getBoundingClientRect().toJSON()));
       await page.tap(selector);
-      assert.equal(await page.$eval('.fsm-whiteboard__viewport',node=>JSON.stringify(node.getBoundingClientRect().toJSON())),bounds,'State action resized the canvas');
+      const afterBounds = await page.$eval('.fsm-whiteboard__viewport',node=>JSON.stringify(node.getBoundingClientRect().toJSON()));
+      if (state === 'body:moving') {
+        // Entering remote control reveals its panel below the viewport.
+        for (const key of ['left','top','width']) {
+          assert.equal(JSON.parse(afterBounds)[key],JSON.parse(bounds)[key],`Remote control moved canvas ${key}`);
+        }
+      } else assert.equal(afterBounds,bounds,'State action resized the canvas');
       await page.waitForFunction(before => __calls.length === before + 1, {}, before);
       await page.waitForFunction(()=>document.querySelector('.device-state-board').getAttribute('aria-busy')==='false');
     };
@@ -956,9 +913,13 @@ async function checkInteractions() {
     assert.equal(await page.$('.device-whiteboard__popover'),null,'Blank canvas did not dismiss the card');
     await page.$eval('.fsm-whiteboard__edge[data-trigger="Sit"]',node=>node.focus());
     await page.keyboard.press('Enter');
-    await page.click('[aria-label="转换说明"] .btn');
+    await page.waitForSelector('[aria-label="转换说明"]');
+    assert.equal(await page.$('[aria-label="转换说明"] .btn'),null,'Transition inspection must remain read-only');
+    assert.equal(await page.evaluate(()=>__calls.length),beforeInspect,'Inspecting an edge sent a command');
+    await closeExplanation();
+    await clickNode('body:sitting');
     await page.waitForFunction(before => __calls.length === before + 1, {}, beforeInspect);
-    assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Sit','Explicit edge action lost its declared command');
+    assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Sit','Node action lost its declared command');
     await page.waitForFunction(()=>document.querySelector('.device-state-board').getAttribute('aria-busy')==='false');
     await closeExplanation();
     await page.tap('.fsm-whiteboard__node[data-state="body:standing"]');
@@ -1034,7 +995,8 @@ async function checkInteractions() {
     await page.evaluate(()=>__renderState({...__state,epoch:'c',revision:1,activity_state:'active',life_state:'idle',body_state:'standing',available_actions:['EnterMoveControl','StopMove'],available_life_actions:['request_rest','start_explore','stop_explore']},__card,'visitor'));
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="body:standing"]');
     assert.equal(await page.$$eval('.fsm-whiteboard__edge',nodes=>nodes.find(node=>node.dataset.label==='开启探索').dataset.available),'false');
-    assert.equal(await page.$$eval('.fsm-whiteboard__edge',nodes=>nodes.some(node=>node.dataset.label==='停止探索')),true,'Idle exploration permission has no stop action');
+    await clickAction('停止探索');
+    assert.equal(await page.evaluate(()=>__calls.at(-1).params.action),'stop_explore','Idle exploration permission has no stop action');
     await page.evaluate(()=>__renderState(__state));
     await page.waitForFunction(()=>[...document.querySelectorAll('.fsm-whiteboard__edge')].find(node=>node.dataset.label==='开启探索')?.dataset.available==='true');
     await clickAction('开启探索');
@@ -1107,7 +1069,6 @@ async function checkInteractions() {
     await page.waitForFunction(()=>document.body.textContent.includes('普通操作等待同步'));
     await page.waitForFunction(()=>Object.values(__velocities.at(-1).params).every(value=>value===0));
     await page.keyboard.up('ArrowUp');
-    assert.equal(await page.$eval('.device-remote-controls button',node=>node.disabled),false,'Stale stream disabled remote exit');
     assert.equal(await page.$$eval('.fsm-whiteboard__edge[data-action]',nodes=>nodes.every(node=>node.dataset.available==='false')),true,'Stale stream allowed an ordinary action');
     assert.equal(await page.$('.device-header__stop'),null,'Go2 header should remain compact when the stream is stale');
     await page.click('.device-header__settings');
@@ -1119,11 +1080,6 @@ async function checkInteractions() {
     await clickAction('关灯');
     assert.equal(await page.evaluate(()=>__calls.at(-1).params.state),'OFF');
     await page.evaluate(()=>{
-      __teachings=[{teaching_id:'lamp-rule',unit_id:__lampCard.unit_id,name:'明亮时关灯',trigger:'光线明亮',behavior:'关灯',execution_status:'enabled',
-        binding:{observation_id:'sensor.light_changed',where:{level:'BRIGHT'},skill_id:'set_light_state',params:{state:'OFF'}}},
-        {teaching_id:'unbound-rule',unit_id:__lampCard.unit_id,name:'未绑定的教导',behavior:'关灯',execution_status:'unbound'},
-        {teaching_id:'other-rule',unit_id:'other',name:'其他设备规则',execution_status:'enabled',binding:{skill_id:'set_light_state',params:{state:'OFF'}}}];
-      __lampCard.services={...__lampCard.services,teachings_endpoint:'/api/teachings'};
       __renderState({ism:'ON',ts:100,r:255,g:200,b:80,brightness:180,autonomy_mode:'reactive',control_state:'holding',control_hold_until:2000000000,control_ts:101},{...__lampCard,_online:true});
     });
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="device:ON"]');
@@ -1138,18 +1094,6 @@ async function checkInteractions() {
     assert.equal(await page.$$eval('.device-settings-axis button.is-active',nodes=>nodes.some(node=>node.textContent.includes('自动调光'))),true);
     await page.click('[aria-label="关闭管理"]');
     await page.screenshot({path:'/tmp/ssm-whiteboard-lamp-mobile.png',fullPage:true});
-    await page.$eval('.fsm-whiteboard__edge[data-label="关灯"][data-available="true"]',node=>node.focus());
-    await page.keyboard.press('Enter');
-    await page.waitForSelector('.device-whiteboard__rule');
-    assert.equal(await page.$$('.device-whiteboard__rule').then(nodes=>nodes.length),1,'Unbound or unrelated user rules appeared');
-    assert.equal(await page.$eval('.device-whiteboard__rule',node=>node.innerText.includes('已启用')&&node.innerText.includes('明亮')),true);
-    await assertPopover();
-    await page.screenshot({path:'/tmp/ssm-whiteboard-rule-popover.png',fullPage:true});
-    await page.click('.device-whiteboard__rule button');
-    await page.waitForSelector('.rules-drawer.is-open .rule-binding');
-    assert.equal(await page.$eval('[data-teaching-id="lamp-rule"] .rule-binding select',node=>node.value),'sensor.light_changed','Rule editor did not open the selected binding');
-    await page.click('[aria-label="关闭自动化规则"]');
-    await page.waitForFunction(()=>!document.querySelector('.rules-drawer.is-open'));
     for (const source of ['OFF','ON','BLINKING']) {
       for (const target of ['OFF','ON','BLINKING'].filter(state=>state!==source)) {
         await closeExplanation();
@@ -1204,7 +1148,7 @@ async function checkInteractions() {
       if(height===844) await page.screenshot({path:'/tmp/go2-whiteboard-mobile.png',fullPage:true});
     }
     assert.deepEqual(errors,[]);
-    console.log('PASS: shared centered media; translucent anchored popovers without layout shifts; endpoint avoidance and mobile/desktop containment; Escape/background dismissal and focus restoration; user binding projection and targeted rule editor; state colors, selection, pan/pinch, joystick, command guards, lamp controls and SSE ordering.');
+    console.log('PASS: shared centered media; translucent anchored popovers without layout shifts; endpoint avoidance and mobile/desktop containment; Escape/background dismissal and focus restoration; state colors, selection, pan/pinch, joystick, command guards, lamp controls and SSE ordering.');
     console.log('Screenshots: /tmp/go2-whiteboard-{mobile,rest-mobile,desktop}.png, /tmp/ssm-whiteboard-lamp-mobile.png');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

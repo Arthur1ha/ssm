@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
+from copy import deepcopy
 from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -110,29 +110,6 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
         emit_agent_event("device.result", task_id=step_id, target_unit_id=unit_id,
                          status=result.get("result"), result=result,
                          completion_basis="edge_result" if result.get("result") != "timeout" else "unconfirmed")
-        if (unit_id == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
-                and context.get("origin_kind", "user_delegated") == "user_delegated"
-                and result.get("result") in {"ok", "accepted", "executing", "timeout", "unknown",
-                                             "rejected", "blocked", "cancelled", "error"}):
-            correlation = current_event_context()
-            try:
-                voice = transport.do_http_dispatch(
-                    f"/api/internal/esp32/{unit_id}/agent/replies",
-                    {"session_id": context["session_id"], "actor": context.get("actor"),
-                     "persist": context.get("persist"), "space_id": context.get("space_id"),
-                     "origin_kind": "user_delegated", "expires_at": context.get("expires_at"),
-                     "task_id": step_id, "goal": arguments.get("message") or
-                     f"{skill_id}: {json.dumps(params, ensure_ascii=False)}",
-                     "action": (skill.get("invoke") or {}).get("action", ""),
-                     "params": params, "trace_id": correlation.get("trace_id") or "",
-                     "parent_run_id": correlation.get("run_id") or ""},
-                    min(12, max(2, deadline - time.time())))
-                if voice.get("response"):
-                    result["agent_reply"] = voice["response"]
-                    result["agent_reply_event_id"] = voice.get("event_id")
-            except Exception as exc:
-                logger.warning("lamp delegated reply unavailable step=%s error=%s",
-                               step_id, type(exc).__name__)
     elif kind == "http":
         from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
         correlation = current_event_context()
@@ -163,6 +140,12 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
             result = {"result": "timeout", "error": "http_result_unknown", "task_id": step_id}
     else:
         result = {"result": "rejected", "error": "unsupported_transport"}
+    # The snapshot is evidence with its original device/receipt timestamps,
+    # not another success receipt. Never refresh it when an action returns.
+    if kind == "mqtt" and transport._state is not None:
+        snapshot = transport._state.actuator_snapshot().get(unit_id, {})
+        if isinstance(snapshot.get("state"), dict):
+            result = {**result, "physical_state": deepcopy(snapshot["state"])}
     return {**result, "task_id": result.get("task_id") or step_id,
             "query_endpoint": selected.get("endpoint") if kind == "http" else None,
             "unit_id": unit_id, "skill_id": skill_id}
@@ -317,7 +300,11 @@ def make_executor(run, context: dict, resume: bool = False):
                 if (context.get("origin_kind") != "user_delegated"
                         or target not in (activity.get("devices") or {})
                         or (activity["devices"][target]).get("status") != "joined"
-                        or any(step.get("tool") == "send_message" for step in run.steps)):
+                        or any(step.get("tool") == "send_message"
+                               and step.get("step_id") != step_id
+                               and (step.get("result") or {}).get("result") not in {
+                                   "blocked", "rejected", "error", "cancelled"}
+                               for step in run.steps)):
                     return {"result": "rejected", "error": "activity_message_denied"}
             messenger = getattr(transport, "_messenger", None)
             if messenger is None:

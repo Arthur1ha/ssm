@@ -74,9 +74,20 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     activity_id = event.get("activity_id")
     invitation_id = event.get("original_invitation_id") or event["message_id"]
     deadline = event["deadline"]
+
+    def blocked(reason, text):
+        # Drive has already announced task_id before entering the game.
+        # Omitting it makes AgentMessenger reject even a preflight failure.
+        logger.info("RPS game blocked invitation=%s task=%s reason=%s",
+                    invitation_id, task_id, reason)
+        get_activity_store().record_event(activity_id, "action_result", unit_id="go2",
+            text=text, game_id=GAME_ID, trigger_message_id=invitation_id,
+            task_id=task_id, status="blocked")
+        messenger.send_result(event["message_id"], "blocked", task_id=task_id, reason=reason)
+
     agent = get_agent()
     if agent is None:
-        messenger.send_result(event["message_id"], "blocked", reason="lamp_agent_unavailable")
+        blocked("lamp_agent_unavailable", "猜拳暂时无法开局：灯的智能体服务不可用。")
         return
     context = replace(drive._context, expires_at=int(deadline), persist=False)
     lamp_epoch = agent._autonomy_epoch, agent._command_epoch
@@ -275,10 +286,10 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     graph.add_edge("defended", END)
 
     if snapshot_error or not snapshot or not odom_session:
-        messenger.send_result(event["message_id"], "blocked", reason=snapshot_error or "map_unavailable")
+        blocked(snapshot_error or "map_unavailable", "猜拳暂时无法开局：尚未取得可用的实时地图与定位。")
         return
     if not agent.begin_peer_game(owner):
-        messenger.send_result(event["message_id"], "blocked", reason="lamp_busy")
+        blocked("lamp_busy", "猜拳暂时无法开局：灯正在处理其他任务或等待动作确认。")
         return
     lamp_epoch = agent._autonomy_epoch, agent._command_epoch
     status, reason = "unknown", "game_unconfirmed"

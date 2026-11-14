@@ -142,6 +142,7 @@ def test_go2_whiteboard_groups_do_not_invent_pose_states():
     {'width': 0, 'height': 720, 'sections': []},
     {'width': 600, 'height': float('nan'), 'sections': []},
     {'width': 600, 'height': 720, 'sections': [{'label': '行为', 'top': 900}]},
+    {'width': 600, 'height': 670, 'sections': [], 'media_position': 'unsupported'},
 ])
 def test_reject_malformed_whiteboard_dimensions(diagram):
     from cloud.go2.card import _build_go2_card
