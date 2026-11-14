@@ -135,10 +135,10 @@ ssm/
 
 | 硬件 | GPIO | 状态 |
 |------|------|------|
-| WS2812 灯环 | GPIO4 | 已接 |
+| WS2812 灯环 | GPIO25 | 已接 |
 | 光线传感器 | GPIO34 | 已接（ADC 模拟） |
 | 红外传感器 | GPIO19 | 未接（`UNIT_CONFIGS` 有条目，探测缺席不发 state/event） |
-| 声音传感器 | GPIO15 | 已接，开漏输出，使用 `flag` 显式启用 |
+| 声音传感器 | GPIO32 | 已接，开漏输出，使用 `flag` 显式启用 |
 
 > 接线状态为项目记录，实际存在性看启动 `PRESENCE`。蜂鸣器在 `config.py` 中无条目。光线和红外使用 ADC/数字探测，声音与灯使用 `flag`，不能把所有单元描述成自动电气探测。
 
@@ -290,7 +290,7 @@ git diff --check
 make tunnel-url
 ```
 
-**启动与配置**：API / PWA 默认监听 `127.0.0.1:8082/8081`，经自行配置的同源代理访问。`make api` 与 `make api-bg` 均不带 reload，代码或 `.env` 修改后需手动重启；启动命令修改不影响已运行的旧进程。`*-bg` 会先停止匹配进程，重复执行会重启。tunnel 目标依赖预先建立的 `ssm` 隧道，`make tunnel-url` 只打印配置地址。Broker 密码文件需本机创建，ACL 从 `infra/broker/acl.example` 配置并在模板显式启用。API 与编排器共用内部服务令牌；`SSM_SESSION_SECRET` 至少 32 字符才使用持久会话签名，HTTPS 保持安全 Cookie，仅本机 HTTP 调试关闭。
+**启动与配置**：API / PWA 默认监听 `127.0.0.1:8082/8081`，经自行配置的同源代理访问。`make api` 为开发模式，监视 `cloud/` Python 文件和 `cloud/.env` 热重载，请求排空等待为 2 秒；运行数据 JSON 和日志不触发热重载。`make api-bg` 无热重载，请求排空等待为 10 秒，代码或 `.env` 修改后需手动重启；等待上限不含应用清理和已运行的线程任务。编排器配置需单独重启加载；启动命令修改不影响已运行的旧进程。`*-bg` 会先停止匹配进程，重复执行会重启。tunnel 目标依赖预先建立的 `ssm` 隧道，`make tunnel-url` 只打印配置地址。Broker 密码文件需本机创建，ACL 从 `infra/broker/acl.example` 配置并在模板显式启用。API 与编排器共用内部服务令牌；`SSM_SESSION_SECRET` 至少 32 字符才使用持久会话签名，HTTPS 保持安全 Cookie，仅本机 HTTP 调试关闭。
 
 **前端回归**：`scripts/check_*.cjs` 使用模拟 API/设备反馈；按各脚本头部提供 Node 依赖、Chrome 与 React UMD 路径后运行，例如 `node scripts/check_activity_frontend.cjs`。这些不是 PWA 构建步骤。
 

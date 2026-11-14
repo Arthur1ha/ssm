@@ -198,21 +198,64 @@ class CommandRequest(BaseModel):
     deadline: float | None = None
 
 
+class _EventChannel(queue.Queue):
+    """A thread-safe producer queue with a cancellable async SSE reader."""
+
+    def __init__(self) -> None:
+        super().__init__(maxsize=100)
+        self._wake_lock = threading.Lock()
+        self._waiter = None
+
+    @staticmethod
+    def _wake(waiter) -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    def put(self, item, block=True, timeout=None) -> None:
+        super().put(item, block=block, timeout=timeout)
+        with self._wake_lock:
+            pending = self._waiter
+        if pending is not None:
+            loop, waiter = pending
+            # An in-flight MQTT callback can outlive its disconnected reader.
+            try:
+                loop.call_soon_threadsafe(self._wake, waiter)
+            except RuntimeError:
+                if not loop.is_closed():
+                    raise
+
+    async def get_async(self):
+        loop = asyncio.get_running_loop()
+        while True:
+            with self._wake_lock:
+                try:
+                    return self.get_nowait()
+                except queue.Empty:
+                    waiter = loop.create_future()
+                    self._waiter = (loop, waiter)
+            try:
+                await waiter
+            finally:
+                with self._wake_lock:
+                    if self._waiter == (loop, waiter):
+                        self._waiter = None
+
+
 class _EventBroker:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._queues: dict[str, set[queue.Queue]] = defaultdict(set)
+        self._queues: dict[str, set[_EventChannel]] = defaultdict(set)
         self._buffers: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=100))
         self._seen: dict[str, set[str]] = defaultdict(set)
         self._sessions: dict[str, dict[str, Any]] = {}
 
-    def subscribe(self, session: dict[str, Any] | str, last_event_id: str = "") -> queue.Queue:
+    def subscribe(self, session: dict[str, Any] | str, last_event_id: str = "") -> _EventChannel:
         legacy = isinstance(session, str)
         if isinstance(session, str):
             session = {"session_id": session, "space_id": DEFAULT_SPACE_ID,
                        "actor": "admin", "expires_at": time.time() + 60}
         session_id = session["session_id"]
-        channel: queue.Queue = queue.Queue(maxsize=100)
+        channel = _EventChannel()
         with self._lock:
             self._sessions[session_id] = dict(session)
             buffered = [] if legacy else list(self._buffers[session_id])
@@ -225,7 +268,7 @@ class _EventBroker:
             self._queues[session_id].add(channel)
         return channel
 
-    def unsubscribe(self, session_id: str, channel: queue.Queue) -> None:
+    def unsubscribe(self, session_id: str, channel: _EventChannel) -> None:
         with self._lock:
             channels = self._queues.get(session_id)
             if channels:
@@ -958,8 +1001,8 @@ async def session_events(request: Request, session: dict[str, Any] = Depends(req
             yield "event: ready\ndata: {}\n\n"
             while session_is_active(session):
                 try:
-                    event = await asyncio.to_thread(channel.get, True, 15)
-                except queue.Empty:
+                    event = await asyncio.wait_for(channel.get_async(), timeout=15)
+                except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
                     continue
                 event_id = str(event.get("event_id") or "evt_" + uuid.uuid4().hex)

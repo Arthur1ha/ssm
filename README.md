@@ -32,9 +32,9 @@ flowchart LR
 
 | 硬件 | GPIO | 模式 |
 |------|------|------|
-| WS2812 灯环（数据线） | GPIO4 | 单总线 |
+| WS2812 灯环（数据线） | GPIO25 | 单总线 |
 | 光线传感器 | GPIO34 | 模拟（ADC1） |
-| 声音传感器 | GPIO15 | 数字，上升沿触发 |
+| 声音传感器 | GPIO32 | 数字，上升沿触发 |
 | 红外传感器 | GPIO19 | 已配置，当前接线记录为未接；以启动探测结果为准 |
 
 `edge/probe.py` 按 `UNIT_CONFIGS` 执行探测：光线使用 ADC，红外使用数字输入；声音传感器为开漏输出，当前与灯一样使用 `flag` 显式启用。缺席传感器不发 `state/event`；只有灯发布智能体 manifest，传感器不生成设备卡。灯环为 16 颗 WS2812，物理输出单通道上限见 `WS2812_MAX_VAL`。
@@ -250,7 +250,7 @@ cp -n cloud/.env.example cloud/.env   # 首次配置，保留已有文件
 
 ```bash
 make broker        # 前台启动 MQTT Broker（TCP 1883）
-make api           # 前台启动 FastAPI（端口 8082，无热重载）
+make api           # 前台启动 FastAPI（端口 8082，代码与 cloud/.env 热重载）
 make orchestrator  # 前台启动编排器（崩溃自动重启）
 make pwa-bg        # 后台启动 PWA 文件服务（端口 8081）
 make tunnel-bg     # 后台启动 Cloudflare Tunnel HTTPS 隧道
@@ -259,7 +259,7 @@ make ps            # 查看进程
 make logs          # 查看最近会话和错误
 ```
 
-前台服务分别在独立终端或 tmux 窗口运行。带 `-bg` 的目标会先停止匹配的旧进程再后台启动；重复调用会重启服务。`make api` 和 `make api-bg` 均不启用热重载，代码或 `.env` 修改后需手动重启 API；前台日志同时写入 `logs/api.log`。已运行的旧进程不会因启动命令修改而更新，在 tmux 的 `api` 窗口停止旧进程后重新执行 `make api` 即可切换。`make stop` 停止 Makefile 管理的服务。
+前台服务分别在独立终端或 tmux 窗口运行。带 `-bg` 的目标会先停止匹配的旧进程再后台启动；重复调用会重启服务。`make api` 用于开发：监视 `cloud/` 下的 Python 代码与 `cloud/.env`，保存后自动重启 API；运行数据 JSON 和日志不会触发热重载。前台请求排空等待为 2 秒，日志同时写入 `logs/api.log`，Ctrl+C 后继续显示关闭过程。`make api-bg` 不启用热重载，请求排空等待为 10 秒，代码或 `.env` 修改后需手动重启。这些等待上限不包括应用清理和已运行的线程任务。编排器是独立进程，相关配置修改后仍需单独重启。已运行的旧进程不会因启动命令修改而更新，在 tmux 的 `api` 窗口停止旧进程后重新执行 `make api` 即可切换。`make stop` 停止 Makefile 管理的服务。
 
 API 和 PWA 分别只监听 `127.0.0.1:8082`、`127.0.0.1:8081`，需经同源代理访问。`make tunnel-bg` 使用预先建立的名为 `ssm` 的 tunnel；`make tunnel-url` 只打印 Makefile 配置的地址，不会自动创建隧道或检查公网可达性。
 

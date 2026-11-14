@@ -171,7 +171,7 @@ class BSM:
     def ir_presence(self): return self._ir_presence
 
     # ─────────────────────────────────────────────────────────
-    #  SOUND SENSOR  (D15, rising edge = sound detected)
+    #  SOUND SENSOR  (rising edge = sound detected)
     # ─────────────────────────────────────────────────────────
     def _tick_sound(self, now):
         raw = self._sound_pin.value()
