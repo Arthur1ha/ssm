@@ -73,7 +73,12 @@ def get_text_model(role: str, model_class=None):
         return chain[0].with_fallbacks(chain[1:]) if len(chain) > 1 else chain[0]
     if role not in ("lamp", "go2"):
         raise ValueError(f"Unknown cloud agent role: {role}")
-    common.update(timeout=35 if role == "lamp" else 30, max_retries=0)
+    # Compatible device providers accept native tools but may reject a forced
+    # function name. LangChain's structured-output wrapper otherwise adds that
+    # tool_choice automatically. Keep its parser and schema validation while
+    # allowing the provider's default automatic tool selection.
+    common.update(timeout=35 if role == "lamp" else 30, max_retries=0,
+                  disabled_params={"tool_choice": None})
     return model_class(model=os.getenv("DEVICE_TEXT_MODEL", "deepseek-v4-flash-0731"), **common)
 
 

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.go2.personality.behavior import exploration_interval
+from cloud.observability import emit_agent_event
 
 SOCIAL_CHECK_INTERVAL = 5
 
@@ -126,8 +127,12 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                         ])
                         decision = ActivityDecision.model_validate(raw)
                         action, reason = decision.action, decision.reason
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        reason = "activity_arbitration_" + type(exc).__name__
+                        emit_agent_event("model.error", agent_id="go2",
+                            run_id=event.get("event_id"), stage="activity_arbitration",
+                            activity_id=event.get("activity_id"), error=type(exc).__name__,
+                            status_code=getattr(exc, "status_code", None), detail=str(exc)[:1000])
                 return {"should_explore": False, "should_social": False,
                         "event_decision": "accept" if action != "wait" else "defer",
                         "decision_reason": reason, "next_action": action,
@@ -207,6 +212,10 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                 except Exception as exc:
                     choice = "defer"
                     decision_error = "arbitration_" + type(exc).__name__
+                    emit_agent_event("model.error", agent_id={"Go2": "go2", "灯": "esp32_desk_led"}.get(role_name, role_name),
+                        run_id=event.get("event_id"), stage="peer_arbitration",
+                        activity_id=event.get("activity_id"), error=type(exc).__name__,
+                        status_code=getattr(exc, "status_code", None), detail=str(exc)[:1000])
                 if choice not in {"accept", "defer", "decline"}:
                     choice = "defer"
                     decision_error = "invalid_arbitration_choice"

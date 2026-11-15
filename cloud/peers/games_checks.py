@@ -468,6 +468,7 @@ async def check_game_waits_for_lamp_setup() -> None:
 
     receipts = []
     drive = SimpleNamespace(_active_goal={"event_id": "game_wait"},
+        _context=ExecutionContext("act_test", "visitor", False, "main", "agent_autonomous"),
         _activity_id=lambda: "act_test", user_interrupt=False,
         _advance_task=AsyncMock())
     messenger = SimpleNamespace(

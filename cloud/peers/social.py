@@ -76,6 +76,19 @@ class SocialState:
         idle_id = f"idle:{activity_id}:{self._idle_episode}"
         if idle_ready and self.has_completed_turn(activity_id):
             return {**self._completed_turn, "event_ids": [*self._completed_turn["event_ids"], idle_id]}
+        request_id = f"activity_request:{activity_id}"
+        started_at = activity.get("started_at")
+        request = activity.get("context") or activity.get("text")
+        if (isinstance(request, str) and request.strip()
+                and isinstance(started_at, (int, float))
+                and self._born_at <= started_at <= instant
+                and request_id not in self.seen_discoveries):
+            # A new user's activity goal deserves a decision even while a
+            # physical game cannot start. This grants no execution permission;
+            # old activities observed after restart must not replay that goal.
+            return {"kind": "activity_request", "activity_id": activity_id, "event_ids": [request_id]
+                    + ([idle_id] if idle_ready else []),
+                    "summary": "用户刚为本次活动提出了目标，结合当前事实决定如何回应或协作；无需强制邀请。"}
         relevant = [row for row in discoveries if row.get("event_type") in
                     {"observation", "person_identified", "action_result"}
                     and not row.get("message_id") and row.get("event_id") not in self.seen_discoveries

@@ -7,7 +7,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from cloud.observability import configure_logging
+from cloud.observability import configure_logging, emit_agent_event
 
 logging.getLogger("cloud").setLevel(logging.INFO)
 
@@ -171,6 +171,15 @@ def _on_esp32_message(client, userdata, msg):
                 and parts[2] == os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led")
                 and intents_module.record_lamp_task_result(task_id, payload)):
             _esp32_state.store_task_result(task_id, payload)
+            emit_agent_event("device.result", task_id=task_id, target_unit_id=parts[2],
+                             session_id=payload.get("session_id"), transport="mqtt",
+                             status=payload.get("result"), result=payload,
+                             completion_basis=("edge_result" if payload.get("result") == "ok"
+                                               else "unconfirmed"))
+        else:
+            emit_agent_event("device.receipt_rejected", task_id=task_id,
+                             target_unit_id=parts[2], transport="mqtt",
+                             reason="receipt_identity_or_reservation_mismatch")
 
     elif len(parts) == 4 and parts[1] == "task":
         # Orchestrator dispatches can arrive directly over MQTT. Track them

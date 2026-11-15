@@ -184,6 +184,8 @@ def test_result_identity_and_session_are_checked(boundary):
 def test_api_ingress_rejects_foreign_results_before_terminal_cache(boundary, monkeypatch):
     from cloud.api import intents, main
     boundary.run()
+    events = []
+    monkeypatch.setattr(main, "emit_agent_event", lambda event, **fields: events.append((event, fields)))
     noop = SimpleNamespace(handle_message=lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main, "_esp32_state", boundary.state)
     monkeypatch.setattr(main, "get_registry", lambda: noop)
@@ -201,9 +203,13 @@ def test_api_ingress_rejects_foreign_results_before_terminal_cache(boundary, mon
         receive({"result": "ok", **override})
     receive({"result": "ok"}, unit="other")
     assert boundary.state.get_task_result("request_one") is None
+    assert all(event == "device.receipt_rejected" for event, _fields in events)
     assert boundary.run()["result"] == "unknown"
     receive({"result": "ok", "session_id": "session_one"})
     assert boundary.state.get_task_result("request_one")["result"] == "ok"
+    assert events[-1][0] == "device.result"
+    assert events[-1][1]["completion_basis"] == "edge_result"
+    assert events[-1][1]["status"] == "ok"
     receive({"result": "error", "session_id": "session_one"})
     assert boundary.state.get_task_result("request_one")["result"] == "ok"
     receive({"result": "ok"}, task="unregistered")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 import uuid
 from dataclasses import replace
@@ -38,6 +39,7 @@ def round_winner(lamp: str, dog: str) -> str:
 
 
 class SiegeState(TypedDict, total=False):
+    identification: dict
     observation: dict
     proposals: dict
     terms: dict
@@ -46,7 +48,6 @@ class SiegeState(TypedDict, total=False):
     choices: dict
     winner: str
     arrived: bool
-    target_anchor: dict
     result: str
     reason: str
 
@@ -91,9 +92,12 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         return
     context = replace(drive._context, expires_at=int(deadline), persist=False)
     lamp_epoch = agent._autonomy_epoch, agent._command_epoch
-    snapshot, snapshot_error = navigator.snapshot()
-    odom_session = snapshot[0].get("session_id") if snapshot else None
+    # Guessing and performing do not require a navigation map. The full
+    # approach tool checks fresh mapping/localization if the dog wins.
+    odom_session = getattr(go2, "_odom_session_id", None)
     owner = "rps:" + invitation_id
+    adjudicated_winner = None
+    lamp_off_confirmed = False
 
     def check():
         if time.time() >= deadline:
@@ -106,9 +110,9 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 or getattr(agent, "_peer_game_id", None) != owner
                 or lamp_epoch != (agent._autonomy_epoch, agent._command_epoch)):
             raise GameStopped("autonomy_interrupted_or_offline")
-        # Fresh maps are required by the movement tool at each earned move.
+        # Fresh maps are required again by the settlement movement tool.
         # A temporarily stale map while thinking/dancing is not a new epoch.
-        if getattr(go2, "_odom_session_id", odom_session) != odom_session:
+        if odom_session is not None and getattr(go2, "_odom_session_id", None) != odom_session:
             raise GameStopped("odom_session_changed")
 
     def record(kind: str, text: str, *, role="go2", **facts):
@@ -123,7 +127,9 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 "invitation": event["message"].get("content", ""),
                 "canonical_terms": state.get("terms"), "proposals": state.get("proposals"),
                 "setup_observation": state.get("observation"),
-                "round": state.get("round", 1), "history": state.get("history", [])}
+                "lamp_identification": state.get("identification"),
+                "round": state.get("round", 1), "history": state.get("history", []),
+                "winner": state.get("winner")}
 
     async def decision(role, phase, state=None):
         check()
@@ -132,6 +138,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             deadline=deadline)
 
     async def physical(action, params, step):
+        nonlocal lamp_off_confirmed
         check()
         physical_id = "task_" + uuid.uuid5(uuid.NAMESPACE_URL, owner + ":" + step).hex
 
@@ -153,28 +160,49 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                task_id=result.get("task_id", physical_id))
         if result.get("result") != "ok":
             raise GameStopped("lamp_action_unconfirmed:" + str(result.get("error") or result.get("result")))
+        if step == "prize:off":
+            # Keep this receipt even if a user intervenes immediately after it.
+            lamp_off_confirmed = True
         check()
         return result
 
+    async def identify(state):
+        answer = await decision("lamp", "identify", state)
+        await physical("SET_STATE", {"state": "ON"}, "identify:power")
+        await physical("SET_COLOR", answer["color"], "identify:color")
+        # The cue is only handed to the dog after both physical receipts.
+        confirmed_at = time.monotonic()
+        record("message", answer["speech"], role="lamp", stage="identification")
+        return {"identification": {"shape": "圆球灯", "color": answer["color"],
+                "speech": answer["speech"], "confirmed_at": confirmed_at}}
+
     async def setup(state):
         check()
+        cue = state["identification"]
         observation = await execute_tool("go2_observe", {
-            "question": "描述当前可见的桌面智能灯及其位置、外观，或明确位于灯旁的固定标记；"
-                        "找不到就如实说明，不把其他同色物品当成灯。"}, context=context)
+            "question": "参与游戏的灯是一盏圆球灯，已经确认亮出识别色。它告诉你："
+                        + cue["speech"] + "。已确认的RGB颜色为" + str(cue["color"]) + "。"
+                        "请根据当前画面找出形状和颜色相符的圆球灯，描述位置、外观或灯旁固定标记；"
+                        "找不到、颜色不符或有多个无法区分的候选就明确说明。"
+                        "同伴自述不是观察事实，不能把其他同色物品当成灯。"
+                        "后续灯会为出拳变色，请同时描述不依赖当前颜色的固定特征。"},
+            context=context, observation_after=cue["confirmed_at"])
         if observation.get("result") != "ok":
             raise GameStopped("game_observation_unavailable")
         text = str(observation.get("message") or "").strip()
         if not text:
             raise GameStopped("game_observation_unavailable")
         observed = record("observation", text[:800], source="go2.camera")
-        observed_state = {"observation": {"text": text[:1600], "source": "go2.camera",
+        observed_state = {"identification": cue,
+                         "observation": {"text": text[:1600], "source": "go2.camera",
                          "as_of": time.time(), "ref": (observed or {}).get("event_id")}}
         lamp, dog = await asyncio.gather(decision("lamp", "setup", observed_state),
                                          decision("go2", "setup", observed_state))
         # Parameters are proposals until BOTH models accept this exact contract.
-        terms = {"max_rounds": min(lamp["max_rounds"], dog["max_rounds"]),
-                 "advance_m": min(lamp["advance_m"], dog["advance_m"]),
-                 "target": dog["target"], "lamp_mapping": lamp["mapping"],
+        if not dog["target_visible"] or not dog.get("target"):
+            record("message", dog["speech"])
+            return {**observed_state, "result": "rejected", "reason": "game_target_not_visible"}
+        terms = {"target": dog["target"], "lamp_mapping": lamp["mapping"],
                  "go2_mapping": dog["mapping"]}
         return {**observed_state, "proposals": {"lamp": lamp, "go2": dog}, "terms": terms,
                 "round": 1, "history": [], "arrived": False}
@@ -187,8 +215,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "game_terms_not_agreed"}
         terms = state["terms"]
-        record("message", f"猜拳攻灯约定：最多 {terms['max_rounds']} 回合，狗每赢一轮沿安全路径推进最多"
-               f" {terms['advance_m']:g} 米；目标为「{terms['target']}」。平局也计回合，灯赢则守住。")
+        record("message", f"猜拳攻灯约定：一把定胜负，平局重来。狗赢就沿安全路径到「{terms['target']}」附近关灯；"
+               "灯赢就由狗表演一次。")
         for role in ("lamp", "go2"):
             # Setup speech explains the mapping in the role's own words;
             # private choices and raw wire parameters never enter chat.
@@ -204,6 +232,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         return {"choices": {"lamp": lamp, "go2": dog}}
 
     async def reveal(state):
+        nonlocal adjudicated_winner
         check()
         choices, terms, number = state["choices"], state["terms"], state["round"]
         record("message", f"第 {number} 回合：双方已锁定选择，开始展示。")
@@ -223,35 +252,35 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             raise GameStopped("go2_gesture_unconfirmed:" + str(dog_result.get("error") or dog_result.get("result")))
         check()
         winner = round_winner(choices["lamp"]["choice"], choices["go2"]["choice"])
-        label = {"go2": "狗赢，获得一次推进机会", "lamp": "灯赢，守住本轮", "draw": "平局，本轮不推进"}[winner]
+        if winner != "draw":
+            adjudicated_winner = winner
+        label = {"go2": "狗赢，接下来靠近灯并关灯", "lamp": "灯赢，接下来由狗表演", "draw": "平局，重新出拳"}[winner]
         record("message", f"第 {number} 回合：灯出{CHOICES[choices['lamp']['choice']]}，"
-               f"狗出{CHOICES[choices['go2']['choice']]}；{label}。")
+               f"狗出{CHOICES[choices['go2']['choice']]}；{label}。",
+               stage="rps_result", reason=winner + "_won" if winner != "draw" else "draw")
         for role in ("lamp", "go2"):
             record("message", choices[role]["speech"], role=role)
         history = [*state["history"], {"round": number, "lamp": choices["lamp"]["choice"],
                    "go2": choices["go2"]["choice"], "winner": winner}]
         return {"winner": winner, "history": history}
 
-    async def advance(state):
-        from cloud.go2.navigation.target_approach import expect_visual_target
-
+    async def approach(state):
         check()
         terms = state["terms"]
-        record("action", "这轮我赢了，沿已确认的安全路径向约定目标推进。",
+        record("action", "我赢了，准备沿安全路径到约定的灯附近，停稳复核后关灯。",
                action="go2_navigate_to_visible_target")
-        with expect_visual_target(state.get("target_anchor")):
-            result = await execute_tool("go2_navigate_to_visible_target",
-                {"target": terms["target"], "max_advance_m": terms["advance_m"]}, context=context)
+        result = await execute_tool("go2_navigate_to_visible_target",
+            {"target": terms["target"]}, context=context)
         record("action_result", str(result.get("message") or result.get("reason") or result.get("result")),
                action="go2_navigate_to_visible_target", status=result.get("result", "unknown"),
                task_id=(result.get("navigation") or {}).get("task_id") or task_id)
-        if (result.get("result") != "ok" or result.get("confirmation") not in {
-                "odom_stopped_and_visual_recheck", "odom_stopped_and_visual_progress"}):
-            raise GameStopped("game_advance_unconfirmed:" + str(result.get("reason") or result.get("error") or result.get("result")))
+        if (result.get("result") != "ok"
+                or result.get("confirmation") != "odom_stopped_and_visual_recheck"):
+            raise GameStopped("game_approach_unconfirmed:" + str(result.get("reason") or result.get("error") or result.get("result")))
         check()
-        return {"target_anchor": state.get("target_anchor") or result.get("target_location"),
-                "arrived": result.get("arrived") is True
-                and result.get("confirmation") == "odom_stopped_and_visual_recheck"}
+        # Full approach reports arrival through its confirmation, without an
+        # `arrived` field (that field belongs to bounded game advances).
+        return {"arrived": True}
 
     async def switch_off(state):
         check()
@@ -261,33 +290,40 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         await physical("SET_STATE", {"state": "OFF"}, "prize:off")
         return {"result": "ok", "reason": "go2_won_lamp_off_confirmed"}
 
+    async def perform(state):
+        answer = await decision("go2", "performance", state)
+        check()
+        record("message", answer["speech"])
+        record("action", "狗准备兑现本局约定，表演一个动作。", action="go2_sport")
+        result = await execute_tool("go2_sport", {"cmd": answer["command"]}, context=context,
+            request_id=f"rps_{invitation_id}_performance")
+        record("action_result", "狗的表演" + ("已确认完成。" if result.get("result") == "ok" else "尚未确认完成。"),
+               action="go2_sport", status=result.get("result", "unknown"),
+               task_id=result.get("command_request_id") or task_id)
+        if result.get("result") != "ok":
+            raise GameStopped("game_performance_unconfirmed:" + str(result.get("error") or result.get("result")))
+        check()
+        return {"result": "ok", "reason": "lamp_won_performance_confirmed"}
+
     def next_round(state):
         return {"round": state["round"] + 1, "choices": {}}
 
-    def after_round(state):
-        if state.get("arrived"):
-            return "switch_off"
-        return "defended" if state["round"] >= state["terms"]["max_rounds"] else "next_round"
-
     graph = StateGraph(SiegeState)
-    for name, node in (("setup", setup), ("agree", agree), ("choose", choose),
-                       ("reveal", reveal), ("advance", advance), ("switch_off", switch_off),
+    for name, node in (("identify", identify), ("setup", setup), ("agree", agree), ("choose", choose),
+                       ("reveal", reveal), ("approach", approach), ("switch_off", switch_off), ("perform", perform),
                        ("next_round", next_round)):
         graph.add_node(name, node)
-    graph.add_node("defended", lambda _s: {"result": "ok", "reason": "lamp_defended"})
-    graph.add_edge(START, "setup")
-    graph.add_edge("setup", "agree")
+    graph.add_edge(START, "identify")
+    graph.add_edge("identify", "setup")
+    graph.add_conditional_edges("setup", lambda s: END if s.get("result") else "agree")
     graph.add_conditional_edges("agree", lambda s: END if s.get("result") else "choose")
     graph.add_edge("choose", "reveal")
-    graph.add_conditional_edges("reveal", lambda s: "advance" if s["winner"] == "go2" else after_round(s))
-    graph.add_conditional_edges("advance", after_round)
+    graph.add_conditional_edges("reveal", lambda s: {"go2": "approach", "lamp": "perform", "draw": "next_round"}[s["winner"]])
+    graph.add_edge("approach", "switch_off")
     graph.add_edge("next_round", "choose")
     graph.add_edge("switch_off", END)
-    graph.add_edge("defended", END)
+    graph.add_edge("perform", END)
 
-    if snapshot_error or not snapshot or not odom_session:
-        blocked(snapshot_error or "map_unavailable", "猜拳暂时无法开局：尚未取得可用的实时地图与定位。")
-        return
     if not agent.begin_peer_game(owner):
         blocked("lamp_busy", "猜拳暂时无法开局：灯正在处理其他任务或等待动作确认。")
         return
@@ -318,7 +354,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         thread_id = "rps:game:" + invitation_id
         async with saver.async_run_lock(thread_id):
             graph_task = asyncio.create_task(graph.compile(checkpointer=saver).ainvoke({},
-                {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}, durability="sync"))
+                {"configurable": {"thread_id": thread_id}, "recursion_limit": sys.maxsize}, durability="sync"))
             while not graph_task.done():
                 check()
                 await asyncio.wait({graph_task}, timeout=.2)
@@ -345,31 +381,42 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 if stopped.get("result") != "ok":
                     status, reason = "unknown", "stop_unconfirmed:" + reason
         finally:
-            agent.end_peer_game(owner)
-        await drive._advance_task(goal, stage="finish", result={"result": status, "reason": reason})
-    text = {"go2_won_lamp_off_confirmed": "猜拳攻灯结束：狗抵达约定目标，灯已确认关闭，狗获胜。",
-            "lamp_defended": "猜拳攻灯结束：约定回合已用完，狗未抵达终点，灯守擂成功。"}.get(
-                reason, "猜拳攻灯已中断或未达成开局约定，本局不判胜负：" + reason)
-    record("message", text)
+            agent.end_peer_game(owner, preserve_output=lamp_off_confirmed)
+        if adjudicated_winner and status != "ok":
+            reason = adjudicated_winner + "_won:" + reason
+        await drive._advance_task(goal, stage="finish", result={"result": status, "reason": reason,
+                                                              "game_winner": adjudicated_winner})
+    text = {"go2_won_lamp_off_confirmed": "猜拳攻灯结束：狗猜拳获胜，已抵达目标并确认关灯。",
+            "lamp_won_performance_confirmed": "猜拳攻灯结束：灯猜拳获胜，狗已完成约定的表演。"}.get(reason)
+    if text is None:
+        text = ("猜拳结果已确定：" + ("狗获胜" if adjudicated_winner == "go2" else "灯获胜")
+                + "；后续约定动作未确认完成或已中断：" + reason if adjudicated_winner else
+                "猜拳攻灯已中断或未达成开局约定，本局未决出胜负：" + reason)
+    record("message", text, stage="settlement", reason=reason, status=status)
     messenger.send_result(event["message_id"], status, task_id=task_id, reason=reason)
 
 
 GAME = Game(
     game_id=GAME_ID, name="猜拳攻灯",
-    description="灯与狗自选颜色和动作映射猜拳；狗赢可分段靠近，限回合抵达并确认关灯则获胜，否则灯守擂成功。",
+    description="灯与狗自选颜色和动作映射，一把定胜负，平局重来；狗赢过去关灯，灯赢狗表演。",
     participants=(LAMP, "go2"), bidirectional=True, requires_idle=True,
     available=_available, execute=_execute, on_invitation=on_invitation,
     on_acceptance=on_acceptance, acceptance="", invitation_ttl_s=900,
     rules=("灯或狗均可自主邀请，双方同处活动且空闲，对方自主接受或拒绝。"
            "开局各自选择石头、剪刀、布的三种表达：灯自选三个可区分的亮灯颜色，狗自选三个当前可执行动作；"
-           "不规定固定映射，双方公布、确认后本局冻结。双方协商并确认回合数、单次推进米数及灯本身或灯旁固定标记作为终点；"
-           "不能追逐任意同色物体。每轮双方私下锁定选择再展示，不能根据对方本轮选择改拳。"
-           "石头胜剪刀、剪刀胜布、布胜石头；狗赢沿真实安全路径推进一次，灯赢或平局留在原地，平局也计入回合。"
-           "展示须灯的物理回执与狗的真实动作反馈均确认，技术失败或结果未知中断且不判胜负。"
-           "狗只有停稳并以新鲜画面复核同一约定终点后才获得关灯权，关灯真实回执确认才算狗获胜；"
-           "约定回合耗尽且仍未抵达，灯守擂成功。每次移动受本局约定距离约束，不盲走、不累计口头步数。"
+           "灯的实体是圆球灯，先自主选择识别色并真实亮灯，再告诉狗圆球外形及颜色；狗用亮灯后的新画面辨认。"
+           "观察须支持形状、颜色及唯一候选，不足则不能开局，不能追逐任意同色物体；"
+           "约定目标保留圆球灯的位置与固定特征，猜拳变色不更换目标。"
+           "不规定固定映射，双方确认目标与映射后本局冻结，不协商回合数或推进距离。"
+           "双方私下锁定选择再展示，不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
+           "一把定胜负，平局原地重来，直到分出胜负或本局期限到达。展示须灯物理回执与狗真实动作反馈均确认才能判拳。"
+           "狗赢后一次调用完整安全导航到约定目标附近，停稳并以新鲜画面复核同一目标后关灯，须真实关灯回执；"
+           "灯赢后由狗结合当前条件选择一个支持的表演动作，可以跳舞或其他动作，须真实完成回执。"
+           "猜拳胜负与后续动作完成分开记录，导航、关灯或表演失败不能改判输赢，未确认不能声称兑现成功。"
            "游戏期间灯暂停普通自主调光；用户介入、活动结束、断连、定位会话改变或期限到达则中断，"
-           "动作未知按原任务核对，重启不重放旧游戏。"),
+           "动作未知按原任务核对，重启不重放旧游戏。本局履约完成后释放游戏占用，保留原自主许可，"
+           "由既有自主Graph继续自由探索；用户接管或活动结束不恢复。"
+           "关灯确认后保持该结果直到新的有效传感器机会，不因收尾立即自行开灯。"),
     strategy=("结合人格、当前活动、用户要求和新鲜观察决定邀请或接受，不能因可玩列表存在就强制开局。"
               "自行选择易辨认的表达并解释本局约定；可结合已公开的历史出拳调整策略，但不得获取对方本轮私下选择。"
               "目标须能在当前画面辨认，场地和站姿允许动作、导航时才玩；参数可在开局协商，游戏中不临时改映射或规则。"

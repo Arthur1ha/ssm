@@ -107,14 +107,40 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
     message, messenger = event["message"], event["messenger"]
     source = str(event.get("source") or "")
     activity_id = event.get("activity_id")
+    generation = getattr(drive, "_generation", 0)
+    owner = getattr(drive, "owner_session_id", None)
+    context = replace(drive._context, expires_at=int(event["deadline"]))
+    task_goal = dict(drive._active_goal or {
+        "kind": "peer_message", "event_id": event.get("event_id") or event["message_id"],
+        "task_id": task_id})
+    task_goal.setdefault("generation", generation)
+    task_goal.setdefault("owner_session_id", owner)
+    task_goal.setdefault("activity_id", activity_id)
+
+    def current():
+        return (generation == getattr(drive, "_generation", 0)
+                and owner == getattr(drive, "owner_session_id", None)
+                and drive._activity_id() == activity_id
+                and activity_allows(activity_id, message["sender"], "go2"))
+
+    async def finish(status, reason, **facts):
+        # Keep the original task even if a newer activity has replaced the
+        # Drive's shared goal while we waited for the lamp/model/device.
+        await drive._advance_task(task_goal, stage="finish",
+                                  result={"result": status, "reason": reason, **facts})
+
     if not activity_allows(activity_id, message["sender"], "go2"):
         messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
                               reason="activity_ended")
         return
     color, color_error = await _wait_for_lamp_color(event, drive)
+    if not current():
+        await finish("cancelled", "activity_ended")
+        messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
+                              reason="activity_ended")
+        return
     if color is None:
-        await drive._advance_task(drive._active_goal, stage="finish",
-            result={"result": "rejected", "reason": color_error})
+        await finish("rejected", color_error)
         messenger.send_result(event["message_id"], "rejected", task_id=task_id,
                               reason=color_error)
         messenger.send_message("go2", message["sender"],
@@ -127,23 +153,30 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         snapshot, snapshot_error = None, "map_unavailable"
     if not go2.is_connected or snapshot is None:
         reason = "go2_disconnected" if not go2.is_connected else snapshot_error or "map_unavailable"
-        await drive._advance_task(drive._active_goal, stage="finish",
-                                  result={"result": "blocked", "reason": reason})
+        await finish("blocked", reason)
         messenger.send_result(event["message_id"], "blocked", task_id=task_id,
                               reason=reason)
         return
     color_name = _color_name(color["rgb"])
     if color_name is None:
         reason = "lamp_color_not_nameable"
-        await drive._advance_task(drive._active_goal, stage="finish",
-                                  result={"result": "blocked", "reason": reason})
+        await finish("blocked", reason)
         messenger.send_result(event["message_id"], "blocked", task_id=task_id,
                               reason=reason)
         return
-    drive._active_goal = {**drive._active_goal, "kind": "game", "game_id": "color_hunt",
-                          "target_color": color, "deadline": event["deadline"],
-                          "stage": "search"}
-    await drive._advance_task(drive._active_goal, stage="start")
+    task_goal.update(kind="game", game_id="color_hunt", target_color=color,
+                     deadline=event["deadline"], stage="search")
+    drive._active_goal = task_goal
+    started = await drive._advance_task(task_goal, stage="start")
+    if not current():
+        await finish("cancelled", "activity_ended")
+        messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
+                              reason="activity_ended")
+        return
+    if (started.get("result") or {}).get("result") == "blocked":
+        messenger.send_result(event["message_id"], "blocked", task_id=task_id,
+                              reason=(started["result"].get("error") or "game_unavailable"))
+        return
     observed_rgb = None
     pending_observe_rgb = None
     announced_target = None
@@ -160,7 +193,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
 
     def tool_guard(name: str, _params: dict) -> dict | None:
         nonlocal pending_observe_rgb, announced_target, candidate_basis
-        if not activity_allows(activity_id, message["sender"], "go2"):
+        if not current():
             return {"result": "cancelled", "error": "activity_ended"}
         if drive.user_interrupt or not go2.is_connected:
             return {"result": "cancelled", "error": "autonomy_interrupted_or_offline"}
@@ -188,6 +221,8 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
 
     def on_step(step: dict) -> None:
         nonlocal observed_rgb, observed_evidence
+        if not current():
+            return
         tool = step.get("tool")
         receipt = step.get("result") or {}
         if tool == "go2_observe":
@@ -225,8 +260,6 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         "不要使用盲走或坐标导航代替视觉目标导航。"
         "本局须导航确认停稳并重新观察同一目标，才算完成；缺少标定时如实报告发现但未到达。"
     )
-    context = replace(drive._context,
-                      expires_at=int(event["deadline"]))
     graph_task = asyncio.create_task(run_go2_loop(
         "peer_" + event["message_id"], goal, context=context,
         run_id=event["message_id"], deadline=event["deadline"],
@@ -238,8 +271,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
     stop_reason = None
     try:
         while not graph_task.done():
-            if (not activity_allows(activity_id, message["sender"], "go2")
-                    or drive._activity_id() != activity_id):
+            if not current():
                 stop_reason = "activity_ended"
             elif drive.user_interrupt or not go2.is_connected:
                 stop_reason = "autonomy_interrupted_or_offline"
@@ -250,7 +282,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
                 await asyncio.gather(graph_task, return_exceptions=True)
                 navigator.stop(owner_session_id=context.session_id)
                 stopped = False
-                if go2.is_connected:
+                if current() and go2.is_connected:
                     try:
                         stopped = (await go2.send_command(
                             "StopMove", completion_timeout=5.0)).get("result") == "ok"
@@ -262,8 +294,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
             await asyncio.sleep(0.2)
         if not stop_reason:
             graph_result = await graph_task
-            if (not activity_allows(activity_id, message["sender"], "go2")
-                    or drive._activity_id() != activity_id):
+            if not current():
                 stop_reason = "activity_ended"
             elif drive.user_interrupt or not go2.is_connected:
                 stop_reason = "autonomy_interrupted_or_offline"
@@ -277,7 +308,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         logger.exception("color_hunt graph failed message=%s", event["message_id"])
         navigator.stop(owner_session_id=context.session_id)
         stopped = False
-        if go2.is_connected:
+        if current() and go2.is_connected:
             try:
                 stopped = (await go2.send_command(
                     "StopMove", completion_timeout=5.0)).get("result") == "ok"
@@ -314,11 +345,8 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         reply = (str(last_receipt.get("message"))[:160] + "；还不能确认找到与灯同色的物品。"
                  if status == "blocked" and last_receipt.get("message") else
                  "我检查了当前画面，但还不能确认找到与灯同色的物品。")
-    await drive._advance_task(drive._active_goal, stage="finish", result={
-        "result": status, "reason": reason,
-        "target_color": color,
-        "graph_run_id": (graph_result or {}).get("run_id"),
-        "tool_results": steps})
+    await finish(status, reason, target_color=color,
+                 graph_run_id=(graph_result or {}).get("run_id"), tool_results=steps)
     messenger.send_result(event["message_id"], status, task_id=task_id,
                           reason=reason)
     messenger.send_message("go2", message["sender"], reply,

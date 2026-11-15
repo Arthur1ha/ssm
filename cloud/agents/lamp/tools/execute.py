@@ -16,6 +16,10 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
     declaration = TOOL_DECLARATIONS.get(name)
     if declaration is None or (lighting_only and not declaration.get("action")):
         return {"result": "rejected", "error": "tool_not_allowed"}
+    if declaration.get("action") or name in {"send_message", "request_peer_skill"}:
+        from cloud.peers.turns import peer_turn_available
+        if not peer_turn_available():
+            return {"result": "cancelled", "error": "peer_context_superseded"}
     if name == "request_peer_skill":
         params = {**params, "request_id": step_id}
     if name == "send_message" and context.origin_kind == "agent_autonomous":

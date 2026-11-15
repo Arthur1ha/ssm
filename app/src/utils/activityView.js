@@ -163,8 +163,21 @@ function activityDecisionBasis(event) {
     ? basis.evidence.filter(item => item && typeof item.summary === 'string' && item.summary.trim()) : []};
 }
 
+function activityEventKind(event = {}) {
+  const type = String(event.event_type || '').toLowerCase();
+  if (type === 'search_progress') return ['search_observe', 'search_candidate', 'search_confirmed']
+    .includes(event.stage) ? 'observation' : 'status';
+  if (type.includes('question')) return 'question';
+  if (type.includes('observation') || type.includes('observed') || type === 'person_identified') return 'observation';
+  if (type.includes('message') || type.includes('proposal') || type.includes('reply')) return 'message';
+  return 'status';
+}
+
 function activityDecisionText(event, text) {
   const original = String(text || '').trim();
+  // Conversation bubbles show what was actually said. Decision evidence stays
+  // available in the progress drawer without adding another speech paragraph.
+  if (['message', 'question'].includes(activityEventKind(event))) return original;
   const reason = activityDecisionBasis(event)?.reason;
   return reason && original !== reason ? [reason, original].filter(Boolean).join('\n') : original || reason || '';
 }
@@ -193,7 +206,7 @@ function activityDecisionEvidence(item, event, events, now = Date.now() / 1000) 
 
 Object.assign(window, {activityStateAge, activityLightColor, activityPhysicalLabel, activityMemberView,
   activityTaskKey, activityTaskRows, activityRelatedEvents, activityMessageReceipt, activityReasonText,
-  activityDecisionBasis, activityDecisionText, activityDecisionEvidence, isActivityLightingAction});
+  activityDecisionBasis, activityEventKind, activityDecisionText, activityDecisionEvidence, isActivityLightingAction});
 window.activityFeedbackChange = activityFeedbackChange;
 
 function activityMediaUrl(event) {

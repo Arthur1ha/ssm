@@ -47,6 +47,7 @@ class ReactiveState(TypedDict, total=False):
     call: dict | None
     status: str
     reply: str
+    decision_text: str
     autonomy_epoch: int
 
 
@@ -87,6 +88,8 @@ def _prompt(agent, state: ReactiveState):
         "你负责桌面灯的自主判断。一次最多调用一个工具；看到真实结果后才决定下一步。"
         "只有 lighting_eligible 为 true 才能调用物理灯光工具；入场本身不是调光理由。"
         "同一轮完成一次灯光动作后不要再改灯。无需动作时直接回答。"
+        "新活动用户原话的直接最终回答面向用户；真正向同伴交流或邀请须调用 send_message，"
+        "不能仅在回答正文说已邀请、已发消息或对方已答应。"
         "accepted、executing、timeout 不表示完成。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
         "社交机会只是重新判断的时机，不要求发消息或邀请游戏。"
@@ -96,13 +99,17 @@ def _prompt(agent, state: ReactiveState):
         "不要把空闲或休息推断成愿意玩；状态未知时可以询问，同伴可以拒绝。"
         "只有能说明为什么此时适合互动、游戏与当前情境有什么关联时才邀请。"
         "邀请须附 decision_reason 和 evidence_refs，引用 space.decision_evidence 中真实存在的 ref；"
-        "decision_reason 会合并到现有对话内容中展示给用户，"
-        "用自己的性格、第一人称说清我为什么现在作这个决定，不写‘选择理由’或执行报告。"
+        "decision_reason 只作为选择依据保存，供用户按需查看，不写入消息正文。"
+        "用第一人称简短记录为什么现在作这个决定，不写执行报告。"
         "事实归属于观察来源，不声称自己看到了同伴的画面，不编造同伴完整任务情况。"
-        "game_id 只填工具参数，不写入消息正文；玩法只从当前可玩列表读取，邀请时用自己的口吻说清规则。"
+        "game_id 只填工具参数，不写入消息正文；玩法只从当前可玩列表读取。"
+        "邀请正文用自己的口吻简短邀请，只补充对方参与所需的玩法与输赢约定，通常两三句即可；"
+        "不逐条复述完整规则、策略、权限、安全校验或回执流程，也不解释邀请原因。"
         "未邀请或未获接受时，不把玩法说成双方已经谈过或正在进行的事情。"
         "lighting_eligible 为 false 只表示本轮没有常规调光依据，不表示失去开灯能力；"
         "获接受后的游戏出题由独立任务校验。"
+        "observations.game_readiness 是当前真实开局门禁；受阻时可普通交流，"
+        "但不能承诺已开局、猜测阻塞原因或绕过未确认的物理回执。"
         "当前可玩列表只描述能力，不是发起游戏的理由。可以普通交流或不发消息。邀请不等于游戏完成。"
         "游戏的规则、策略及完成条件从当前可玩列表读取。"
         "观测中的 training_intent 是本次唯一允许启动的已确认教导；若不执行，应说明原因。"
@@ -209,7 +216,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if response.invalid_tool_calls or len(calls) > 1:
             return {"status": "blocked", "call": None}
         if not calls:
-            return {"status": "ok", "call": None}
+            return {"status": "ok", "call": None,
+                    "decision_text": response.content if isinstance(response.content, str) else ""}
         call = calls[0]
         if call.get("name") not in VISIBLE or not isinstance(call.get("args"), dict):
             return {"status": "rejected", "call": None}
@@ -313,6 +321,26 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         return "plan" if state["status"] == "executing" else "reply"
 
     def reply(state):
+        opportunity = state['sense'].get('social_opportunity') or {}
+        answer = state.get('decision_text', '')
+        if (opportunity.get('kind') == 'activity_request'
+                and not state.get('steps') and state.get('status') == 'ok'
+                and valid_reply_format(answer)):
+            from cloud.space.activity import get_activity_store
+            activity = get_activity_store().current()
+            activity_id = opportunity.get('activity_id')
+            unit_id = agent._find_led_unit()
+            member = ((activity or {}).get('devices') or {}).get(unit_id) or {}
+            if (activity_id and activity and activity.get('activity_id') == activity_id
+                    and activity.get('status') in {'starting', 'active', 'partial'}
+                    and member.get('status') == 'joined' and member.get('owner') == activity_id
+                    and state['autonomy_epoch'] == agent._autonomy_epoch
+                    and agent._should_act() and agent._device_online()):
+                answer = answer.strip()
+                publish('agent_reply', agent_id=unit_id, scope='space', space_id='main',
+                        source='autonomous', status='ok', run_id=state['run_id'], text=answer)
+                event(state, 'reply.emitted', reply=answer, channel='space_sse', reply_kind='final')
+                return {'reply': answer}
         physical = [s for s in state.get("steps", []) if s["tool"] in PHYSICAL]
         if (not physical or state["autonomy_epoch"] != agent._autonomy_epoch
                 or not agent._should_act() or not agent._device_online()):
@@ -405,7 +433,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
 
 
 def run_reactive_event(agent, sense: dict, *, model=None, publish=None,
-                       checkpointer=None, run_id: str | None = None) -> ReactiveState:
+                       checkpointer=None, run_id: str | None = None,
+                       autonomy_epoch: int | None = None) -> ReactiveState:
     """Invoke one isolated workflow with an event-specific thread ID."""
     run_id = run_id or "auto_" + uuid.uuid4().hex
     if checkpointer is None:
@@ -415,7 +444,8 @@ def run_reactive_event(agent, sense: dict, *, model=None, publish=None,
                                  checkpointer=checkpointer)
     return graph.invoke({"sense": sense, "run_id": run_id,
                          "trace_id": "tr_" + uuid.uuid4().hex,
-                         "autonomy_epoch": agent._autonomy_epoch,
+                         "autonomy_epoch": (agent._autonomy_epoch if autonomy_epoch is None
+                                            else autonomy_epoch),
                          "steps": [], "turns": 0},
                         {"configurable": {"thread_id": f"lamp-reactive:{run_id}"}})
 
@@ -453,6 +483,24 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     elif unit.endswith("_light") and "level" in payload:
         observation = {"id": "sensor.light_changed", "values": {"level": payload["level"]},
                        "source": unit, "ts": payload.get("ts", 0)}
+    preserved_since = getattr(agent, '_game_output_preserved_since', None)
+    if preserved_since is not None and observation:
+        from cloud.space.freshness import state_observed_at
+        observed_at = state_observed_at({'ts': observation['ts']}, now)
+        freshness_s = 5 if observation['id'] == 'sensor.sound_detected' else 90
+        fresh_after_game = (observed_at is not None and observed_at > preserved_since
+                            and 0 <= now - observed_at <= freshness_s)
+    else:
+        fresh_after_game = False
+    if (preserved_since is not None and observation
+            and fresh_after_game
+            and event.get('enqueue_ts', 0) > preserved_since
+            and (observation['id'] == 'sensor.sound_detected'
+                 or sense.get('light_available'))):
+        agent._game_output_preserved_since = None
+        preserved_since = None
+    if preserved_since is not None:
+        observation = None
     intent = None
     candidates = []
     if observation and observation['id'] == 'sensor.sound_detected':
@@ -508,16 +556,28 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
     # needs a subsequent material trigger and a fresh light reading.
     sense["lighting_eligible"] = bool(candidates or
                                       sense.get("light_available") and sense["proactive_hints"])
+    if preserved_since is not None:
+        # Timers, peer presence and our own LED state can still drive social
+        # decisions, but cannot turn a game's confirmed OFF result back on.
+        sense['lighting_eligible'] = False
     space = get_space_context(agent._find_led_unit(), state=agent._state)
     activity, eligible = activity_peers(agent._find_led_unit(), space["peers"])
-    from cloud.peers.games.base import game_invitation_ready
-    idle_ready = bool(activity and any(game_invitation_ready(
-        activity["activity_id"], agent._find_led_unit(), peer["unit_id"])
-        for peer in eligible))
+    activity_wakeup = event.get('kind') == 'activity_started'
+    if activity_wakeup and (not activity or event.get('activity_id') != activity['activity_id']):
+        return None
+    from cloud.peers.games.base import game_invitation_block_reason
+    readiness = {}
+    if activity:
+        for peer in eligible:
+            reason = game_invitation_block_reason(
+                activity['activity_id'], agent._find_led_unit(), peer['unit_id'])
+            readiness[peer['unit_id']] = {'ready': reason is None, 'reason': reason}
+    sense['game_readiness'] = readiness
+    idle_ready = any(item['ready'] for item in readiness.values())
     opportunity = agent._social_state.opportunity(
         activity, eligible, space["recent_discoveries"],
         profile["traits"]["social_initiative"], unit_id=agent._find_led_unit(),
-        idle_ready=idle_ready)
+        idle_ready=idle_ready, now=now)
     if opportunity:
         sense["social_opportunity"] = opportunity
     rule_sig = candidates[0]['event_id'] if candidates else None
@@ -534,7 +594,10 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
         (opportunity["kind"], tuple(opportunity["event_ids"]), int(now // 300))
         if opportunity else None,
     )
-    if not candidates and (signature == agent._last_reason_sig or now - agent._last_reason_ts < 10):
+    new_activity_request = (activity_wakeup and opportunity
+                            and opportunity.get('kind') == 'activity_request')
+    if not candidates and (signature == agent._last_reason_sig
+                           or now - agent._last_reason_ts < 10 and not new_activity_request):
         return None
     return sense, signature
 
@@ -542,12 +605,15 @@ def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tup
 def run_reactive_sensor_event(agent, event: dict, *, now: float | None = None,
                               **kwargs) -> ReactiveState | None:
     """Process one listener observation through the lamp's sensor Graph."""
+    autonomy_epoch = agent._autonomy_epoch
     prepared = prepare_sensor_event(agent, event, now=now)
     if prepared is None:
         return None
     sense, signature = prepared
     agent._last_reason_ts = time.time() if now is None else now
-    result = run_reactive_event(agent, sense, **kwargs)
+    result = run_reactive_event(agent, sense, autonomy_epoch=autonomy_epoch, **kwargs)
+    if autonomy_epoch != agent._autonomy_epoch:
+        return result
     intent = result.get('sense', sense).get('training_intent')
     if intent and not result.get('steps'):
         from cloud.agents.common.training.service import _emit
@@ -561,7 +627,9 @@ def run_reactive_sensor_event(agent, event: dict, *, now: float | None = None,
         sent = any(step.get("tool") == "send_message" and
                    (step.get("result") or {}).get("result") == "accepted"
                    for step in result.get("steps") or [])
-        if opportunity and sent:
+        if opportunity and (sent or (opportunity.get('kind') == 'activity_request'
+                                     and result.get('status') == 'ok'
+                                     and not result.get('steps'))):
             agent._social_state.evaluated(opportunity)
         # A physical action can finish this short Graph run before its social
         # choice. Keep the opportunity pending for the next sensor event.

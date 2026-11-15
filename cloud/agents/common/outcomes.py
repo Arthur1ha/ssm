@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from cloud.agents.common.tool_results import SUCCESS
+
 
 _LAMP_ACTIONS = {"set_led_state", "set_led_color", "blink_led"}
 _EXPLANATION_FIELDS = {"decision_reason", "evidence_refs"}
@@ -40,7 +42,7 @@ def recovered_attempts(steps: list[dict]) -> dict[int, int]:
         result = step.get("result") or {}
         if current is None or step.get("dispatch_status") != "observed":
             pending = []
-        elif result.get("result") == "ok":
+        elif result.get("result") in SUCCESS:
             recovered.update((failed, index) for failed in pending)
             pending = []
         elif (result.get("result") in {"blocked", "rejected"}
@@ -68,11 +70,11 @@ def outcome_summary(steps: list[dict]) -> dict:
                                  "result": (step.get("result") or {}).get("result", "unknown")}
                                 for index, step in enumerate(steps)
                                 if index not in recovered
-                                and (step.get("result") or {}).get("result") != "ok"],
+                                and (step.get("result") or {}).get("result") not in SUCCESS],
     }
 
 
 def completed_status(steps: Iterable[dict]) -> str:
     """A model final does not make unresolved tool outcomes successful."""
-    return ("partial" if any((step.get("result") or {}).get("result") != "ok"
+    return ("partial" if any((step.get("result") or {}).get("result") not in SUCCESS
                              for step in effective_steps(steps)) else "ok")

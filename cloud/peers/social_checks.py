@@ -37,3 +37,36 @@ def test_messages_stale_or_other_activity_observations_do_not_create_opportuniti
         assert social.opportunity(activity, [{"unit_id": "go2"}],
                                   [{**row, **override}], now=now) is None
     assert social.opportunity(activity, [], [row], now=now) is None
+
+
+def test_new_activity_goal_is_one_decision_opportunity_even_when_game_is_not_ready():
+    social = SocialState()
+    now = social._born_at + 1
+    activity = {"activity_id": "act_request", "started_at": now,
+                "context": "你们两个玩石头剪刀布"}
+    peers = [{"unit_id": "go2"}]
+    chance = social.opportunity(activity, peers, [], idle_ready=False, now=now)
+    assert chance['kind'] == 'activity_request'
+    assert chance['event_ids'] == ['activity_request:act_request']
+    # Neither a physical task gate nor the lack of sensor changes can swallow
+    # the new goal; it stays pending until a role Graph actually evaluates it.
+    assert social.opportunity(activity, peers, [], idle_ready=False, now=now + 1) == chance
+    social.evaluated(chance, now=now + 1)
+    assert social.opportunity(activity, peers, [], idle_ready=False, now=now + 900) is None
+    next_chance = social.opportunity({**activity, 'activity_id': 'act_new', 'started_at': now + 901},
+                                    peers, [], idle_ready=False, now=now + 901)
+    assert next_chance['kind'] == 'activity_request'
+
+
+def test_activity_goal_opportunity_does_not_replay_after_restart_or_without_peers():
+    social = SocialState()
+    now = social._born_at + 1
+    activity = {"activity_id": "act_request", "started_at": now,
+                "text": "一起玩吧"}
+    assert social.opportunity(activity, [], [], now=now) is None
+    assert social.opportunity(activity, [{'unit_id': 'go2'}], [], now=now)['kind'] == 'activity_request'
+    restarted = SocialState()
+    restarted._born_at = now + 1
+    assert restarted.opportunity(activity, [{'unit_id': 'go2'}], [], now=now + 2) is None
+    assert social.opportunity({**activity, 'activity_id': 'act_future', 'started_at': now + 5},
+                              [{'unit_id': 'go2'}], [], now=now) is None

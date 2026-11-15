@@ -66,6 +66,7 @@ class ESP32Agent(ReactiveMind):
         self._conversation_lock = threading.Lock()
         self._conversations = 0
         self._peer_game_id: str | None = None
+        self._game_output_preserved_since: float | None = None
         self._reactive_dispatches = 0
 
     def begin_peer_game(self, game_id: str) -> bool:
@@ -82,12 +83,26 @@ class ESP32Agent(ReactiveMind):
             self._autonomy_epoch += 1
         return True
 
-    def end_peer_game(self, game_id: str) -> None:
+    def end_peer_game(self, game_id: str, *, preserve_output: bool = False) -> None:
         """Release only the caller's claim; never reclaim a user's mode."""
         with self._conversation_lock:
             if getattr(self, '_peer_game_id', None) == game_id:
                 self._peer_game_id = None
                 self._autonomy_epoch += 1
+                if preserve_output and self._should_act():
+                    # The prize is a confirmed physical setting, not a new
+                    # autonomous lighting request. Resume social decisions,
+                    # but wait for a later sensor event before changing it.
+                    self._game_output_preserved_since = time.time()
+                    baseline = self._sense() or {}
+                    self._stable_light_level = baseline.get('light_level', 'UNKNOWN')
+                    self._last_light_level = self._stable_light_level
+                    self._pending_light_level = ''
+                    self._pending_light_since = 0.0
+                    self._autonomy_light_missing = not baseline.get('light_available', False)
+                    self._last_act_ts = 0.0
+                    self._work_start_ts = 0.0
+                    self._last_proactive_ts = 0.0
 
     def is_busy_for_game(self) -> bool:
         """Read actual work ownership; reactive social deliberation is free.
@@ -128,6 +143,7 @@ class ESP32Agent(ReactiveMind):
         self._autonomy_epoch += 1
         self._autonomy_since = time.time()
         self._autonomy_mode = mode
+        self._game_output_preserved_since = None
         if mode == "manual":
             from cloud.peers.gateway import cancel_pending
             cancel_pending(initiator_unit_id=self._find_led_unit(),
@@ -150,6 +166,7 @@ class ESP32Agent(ReactiveMind):
         """Invalidate older behaviors; reactive mode also yields temporarily."""
         with self._control_view_lock:
             self._command_epoch += 1
+        self._game_output_preserved_since = None
         if self._autonomy_mode != "reactive":
             return
         self._autonomy_epoch += 1

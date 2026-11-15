@@ -352,7 +352,8 @@ def normalize_result(name: str, raw: object) -> dict:
 
 
 async def execute_tool(name: str, params: dict | None = None, *, context: ExecutionContext | None = None,
-                       request_id: str | None = None) -> dict:
+                       request_id: str | None = None,
+                       observation_after: float | None = None) -> dict:
     context = context or current_context()
     spec = get_tool_spec(name)
     if spec is None:
@@ -400,6 +401,10 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
                 raw = await asyncio.wait_for(execute_command_request(
                     params['cmd'], {}, context=context, request_id=request_id),
                     timeout=spec.timeout_s)
+            elif name == 'go2_observe' and observation_after is not None:
+                # Server-owned receipt boundary; never a model/browser parameter.
+                raw = await asyncio.wait_for(fn(**params, after_received_at=observation_after),
+                                             timeout=spec.timeout_s)
             elif inspect.iscoroutinefunction(fn):
                 raw = await asyncio.wait_for(fn(**params), timeout=spec.timeout_s)
             elif spec.motion:

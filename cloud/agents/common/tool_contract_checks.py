@@ -44,6 +44,9 @@ async def test_native_tools_carry_usage_and_parameters(role, tmp_path, monkeypat
         effect_ledger=FileEffectLedger(tmp_path / "effects"))
     tools = {item["function"]["name"]: item["function"] for item in received}
     assert tools.keys() == declarations.keys()
+    for tool in tools.values():
+        assert tool["parameters"]["properties"]["final"]["type"] == "boolean"
+        assert "final" not in tool["parameters"].get("required", [])
     proposal = tools["propose_training"]
     assert "list_training" in proposal["description"]
     assert "situation" in proposal["description"]

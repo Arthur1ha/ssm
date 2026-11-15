@@ -31,6 +31,7 @@ class SocialState(TypedDict, total=False):
     opportunity: dict[str, Any]
     peers: list[dict[str, Any]]
     playable_games: list[dict[str, Any]]
+    game_readiness: dict[str, Any]
     space_summary: str
     interaction_history: dict[str, Any]
     decision_evidence: list[dict[str, Any]]
@@ -86,11 +87,17 @@ def build_social_graph(
             "只有当前可玩列表中的目标和 game_id 可以用于 game_invite。\n"
             "游戏邀请必须填写 reason 和 evidence_refs：用自己的口吻简短说明为何现在邀请，"
             "引用当前 decision_evidence 中确实存在的 ref，不能自填观察事实。"
+            "reason 只作为选择依据保存，供用户按需查看，不写入 content。"
+            "content 用自己的口吻简短邀请，只补充对方参与所需的玩法与输赢约定，通常两三句即可；"
+            "不逐条复述完整规则、策略、权限、安全校验或回执流程，也不解释邀请原因。"
             "idle 等机会 ID 只是调度信号，不是证据引用；普通交流不强制引用。\n"
             f"活动：{json.dumps(state.get('activity'), ensure_ascii=False)}\n"
             f"机会：{json.dumps(state['opportunity'], ensure_ascii=False)}\n"
             f"在线同伴：{json.dumps(targets, ensure_ascii=False)}\n"
             f"当前可玩玩法：{json.dumps(state.get('playable_games', []), ensure_ascii=False)}\n"
+            "game_readiness 是执行适配的当前门禁事实；未确认的灯命令须等待原回执，不能当作完成。"
+            "游戏暂不可开局仍可普通交流；结合用户活动原话简短说明眼前阻碍或询问同伴，不编造游戏进展。\n"
+            f"game_readiness：{json.dumps(state.get('game_readiness', {}), ensure_ascii=False)}\n"
             f"近期互动历史：{json.dumps(state.get('interaction_history', {}), ensure_ascii=False)}\n"
             f"decision_evidence：{json.dumps(state.get('decision_evidence', []), ensure_ascii=False)}\n"
             f"空间：{state.get('space_summary', '')}"

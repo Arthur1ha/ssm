@@ -146,7 +146,7 @@ async def test_reply_format_error_cannot_erase_successful_lamp_receipt(tmp_path,
     monkeypatch.setattr("cloud.agents.common.replies.emit_agent_event", lambda *a, **k: None)
     responses = iter([
         AIMessage(content="", tool_calls=[{"name": "set_led_color", "id": "purple",
-            "args": {"r": 140, "g": 60, "b": 200, "brightness": 120}}]),
+            "args": {"r": 140, "g": 60, "b": 200, "brightness": 120, "final": False}}]),
         AIMessage(content='{"kind":"final"}'),
         AIMessage(content="调好了，紫色，亮度也压下来了。"),
     ])

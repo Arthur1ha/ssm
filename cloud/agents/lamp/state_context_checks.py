@@ -55,7 +55,7 @@ async def test_off_baseline_survives_successful_color_change_and_checkpoint(fact
             if len(seen) == 1:
                 return AIMessage(content="", tool_calls=[{
                     "name": "set_led_color", "id": "warm-white",
-                    "args": {"r": 255, "g": 190, "b": 125, "brightness": 180}}])
+                    "args": {"r": 255, "g": 190, "b": 125, "brightness": 180, "final": False}}])
             return AIMessage(content="暖白亮起来了。")
 
     async def execute(_name, params, _step):
@@ -175,7 +175,8 @@ def test_delegated_lamp_entry_dispatches_once_and_reuses_completed_run(facts, mo
     trusted = ExecutionContext("session", "admin", False, "main", "user_delegated", time.time() + 60)
     arguments = dict(lighting_only=True, run_id="warm-entry", parent_run_id="steward")
     result = graph.run_lamp_loop(agent, "调成暖白色", UNIT, trusted, lambda *_a, **_k: None, **arguments)
-    assert result["result"] == "ok" and len(dispatched) == 1 and model.calls == 2
+    assert result["result"] == "ok" and len(dispatched) == 1 and model.calls == 1
+    assert result["steps"][0]["result"]["final"] is True
     replay = graph.run_lamp_loop(agent, "调成暖白色", UNIT, trusted, lambda *_a, **_k: None, **arguments)
     assert replay["result"] == "ok" and replay["reply"] == result["reply"]
-    assert len(dispatched) == 1 and model.calls == 2
+    assert len(dispatched) == 1 and model.calls == 1

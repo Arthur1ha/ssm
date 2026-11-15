@@ -183,6 +183,13 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
             await _end_locked("superseded_user_request")
             raise HTTPException(status_code=409, detail="activity request was superseded")
         active = store.activate(activity_id) or store.get(activity_id) or record
+        if (active.get("status") in {"active", "partial"}
+                and (active.get("devices") or {}).get(
+                    os.getenv("ESP32_LED_UNIT_ID", "esp32_desk_led"), {}).get("status") == "joined"):
+            from cloud.esp32.service import get_agent
+            agent = get_agent()
+            if agent is not None:
+                agent.on_activity_started(activity_id)
         return active
 
 

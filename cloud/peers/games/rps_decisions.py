@@ -93,13 +93,9 @@ class Go2Mapping(DecisionModel):
 
 
 class SetupDecision(DecisionModel):
-    max_rounds: int = Field(ge=1, le=12)
-    advance_m: float = Field(ge=0.15, le=1.0, allow_inf_nan=False)
-    target: str = Field(min_length=1, max_length=100,
-                        description="真实灯本体或其旁固定标记的具体视觉描述，不能按本轮灯色找任意同色物品")
     speech: str = Field(min_length=1, max_length=300)
 
-    @field_validator("target", "speech")
+    @field_validator("speech")
     @classmethod
     def nonblank(cls, value: str):
         if not value.strip():
@@ -111,8 +107,44 @@ class LampSetup(SetupDecision):
     mapping: LampMapping
 
 
+class LampIdentification(SetupDecision):
+    color: LampColor
+
+
 class Go2Setup(SetupDecision):
     mapping: Go2Mapping
+    target_visible: bool = Field(description="提供的当前相机观察是否足以辨认灯或灯旁固定标记")
+    target: str | None = Field(max_length=100,
+        description="观察支持的灯本体或灯旁固定标记描述；看不到或无法辨认时填null，不猜测")
+
+    @model_validator(mode="after")
+    def observed_target(self):
+        if self.target_visible:
+            if not self.target or not self.target.strip():
+                raise ValueError("visible_game_target_required")
+            self.target = self.target.strip()
+        elif self.target is not None:
+            raise ValueError("unobserved_game_target")
+        return self
+
+
+class PerformanceDecision(DecisionModel):
+    command: str
+    speech: str = Field(min_length=1, max_length=300)
+
+    @field_validator("command")
+    @classmethod
+    def supported(cls, value: str):
+        if value not in gesture_options():
+            raise ValueError("game_performance_not_supported")
+        return value
+
+    @field_validator("speech")
+    @classmethod
+    def nonblank(cls, value: str):
+        if not value.strip():
+            raise ValueError("nonblank_speech_required")
+        return value.strip()
 
 
 class Agreement(DecisionModel):
@@ -140,12 +172,16 @@ class DecisionState(TypedDict, total=False):
 
 
 def _schema(role: str, phase: str):
+    if phase == "identify" and role == "lamp":
+        return LampIdentification
     if phase == "setup":
         return LampSetup if role == "lamp" else Go2Setup
     if phase in {"agree", "invite"}:
         return Agreement
     if phase == "throw":
         return ThrowDecision
+    if phase == "performance" and role == "go2":
+        return PerformanceDecision
     raise ValueError("unknown_game_decision_phase")
 
 
@@ -172,6 +208,13 @@ def _instructions(role: str, phase: str) -> str:
         "规则与上下文从提供的数据读取，历史记录只用于策略，不当作新鲜观察。"
         "用自己的性格自然表达，不复述内部字段，不声称未获回执的动作已经完成。"
     )
+    if phase == "identify":
+        return common + (
+            "你的实体是一盏圆球灯。开局先选一个清楚可见的亮灯颜色，帮助狗辨认你。"
+            "准备一句亮灯确认后转告狗的提示：用自然语言说你是圆球灯、亮出的颜色，请它在画面中找你；"
+            "颜色名称必须与color的RGB一致，不编造自己在房间中的位置。"
+            "这只是开局识别色，不是出拳，也不固定后续猜拳映射。执行器确认亮灯后才会转告狗。"
+        )
     if phase == "setup":
         specific = (
             "自行选择本局石头、剪刀、布的三个映射，不沿用固定模板。"
@@ -179,17 +222,22 @@ def _instructions(role: str, phase: str) -> str:
             if role == "lamp" else
             "自行从给出的可用动作中选三个不同动作表示石头、剪刀、布，不沿用固定模板。"
             "优先考虑当前场地和动作耗时，动作之后仍需真实回执确认站立。"
+            "同时判断当前相机观察是否足以辨认灯，并提供灯本体或灯旁固定标记的具体目标描述；"
+            "观察不足就返回target_visible=false、target=null并如实说明，不能把用户承诺放好灯当成已看到。"
+            "画面中的形状或颜色不符、有多个无法区分的候选时也返回不可辨认。"
+            "目标必须有提供的当前真实观察支持，不根据灯的出拳颜色挑任意同色物品。"
+            "识别提示中的圆球形状和已确认亮出的颜色用于本次认灯，不能把同伴的自述当成相机观察。"
+            "后续猜拳会变色，target须保留观察到的形状、位置或固定标记，不把当前识别色当作永久特征。"
         )
         return common + specific + (
-            "同时提议本局总回合数、狗每次赢可推进的米数、灯本体或灯旁固定标记的具体目标描述。"
-            "目标必须有提供的真实观察或用户要求支持，不根据灯的出拳颜色挑任意同色物品。"
+            "本局一把定胜负，平局重来，不协商回合数或推进距离。"
             "这些只是提议，还需要双方确认；不编造空间距离、物品或可达性。"
             "发言向同伴说清自己的三个映射和本局提议。"
         )
     if phase == "agree":
         return common + (
             "阅读双方映射与canonical_terms，独立决定是否同意这一整份本局约定。"
-            "同意表示接受同一回合上限、推进距离、目标与双方映射，不能私自替换参数。"
+            "同意表示接受一把定胜负、平局重来、同一目标与双方映射；狗赢一次导航过去关灯，灯赢狗表演一次。"
             "有歧义、观察不足或条件不合适就拒绝并说明；拒绝不表示对方能力失效。"
         )
     if phase == "invite":
@@ -197,6 +245,12 @@ def _instructions(role: str, phase: str) -> str:
             "结合当前任务、人格、真实空间事实和邀请内容，自主决定接受、拒绝或暂缓。"
             "只有愿意现在参与才返回accepted=true；暂缓和拒绝都返回false并自然说明。"
             "空闲、游戏可玩或同伴邀请本身不意味着必须接受。"
+        )
+    if phase == "performance":
+        return common + (
+            "本局灯已赢，轮到你兑现一次表演。结合当前场地、人格和剩余期限，"
+            "从available_gestures选择一个支持的动作，可以跳舞或其他合适表演，不发明动作或固定序列。"
+            "用简短发言说明打算表演什么，不能说已经完成；执行器会等待真实完成回执。"
         )
     return common + (
         "独立秘密决定本轮出石头、剪刀还是布。只依据已结束回合历史和公开约定作策略判断，"
@@ -233,7 +287,7 @@ async def decide(role: str, phase: str, facts: dict, *, thread_id: str,
 
         async def choose(state: DecisionState) -> DecisionState:
             context = state["facts"]
-            if role == "go2" and phase == "setup":
+            if role == "go2" and phase in {"setup", "performance"}:
                 context = {**context, "available_gestures": gesture_options()}
             messages = role_messages(
                 render_identity(profile) + "\n" + _instructions(role, phase),

@@ -144,14 +144,17 @@ def test_no_local_sensor_does_not_hide_shared_social_context(monkeypatch, space)
         "traits": {"social_initiative": 50, "adjustment_sensitivity": 50}, "revision": 1})
     event = prepare_sensor_event(agent, {})
     assert event is not None
-    assert "social_opportunity" not in event[0]
+    assert event[0]['social_opportunity']['kind'] == 'activity_request'
     assert event[0]["lighting_eligible"] is False
+    social.evaluated(event[0]['social_opportunity'])
     # A genuine discovery arriving after entry wakes social reasoning even
-    # without a local light reading; joining alone does not.
+    # without a local light reading. The new user goal itself also deserves a
+    # decision; neither opportunity authorizes a physical lighting action.
     space["recent_discoveries"].append({**space["recent_discoveries"][0],
                                       "event_id": "evt_new_view", "ts": time.time()})
     event = prepare_sensor_event(agent, {})
     assert event[0]["social_opportunity"]["kind"] == "discovery"
+    assert event[0]["lighting_eligible"] is False
     agent._should_act = lambda: False
     assert prepare_sensor_event(agent, {}) is None
 

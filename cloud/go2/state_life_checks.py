@@ -333,10 +333,17 @@ async def test_other_session_cannot_handoff_exploration(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_exploration_requires_navigation_before_lease_or_mode_change(monkeypatch):
+async def test_start_exploration_requires_navigation_before_lease_or_mode_change(monkeypatch, tmp_path):
     import importlib
     router = importlib.import_module('cloud.go2.service')
     nav_module = importlib.import_module('cloud.go2.navigation.navigator')
+    executor = importlib.import_module('cloud.go2.tools.executor')
+    monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
+    # This check owns navigation preconditions; training has separate contract
+    # coverage and must not load configured records or another fixture's robot.
+    monkeypatch.setattr(executor, '_training_preflight', AsyncMock(return_value={
+        'allowed': True, 'params': {'action': 'start_explore'},
+        'training_refs': [], 'reasons': [], 'transition_id': None}))
     robot = robot_at()
     lease = ControlLease()
     configure = MagicMock()

@@ -114,6 +114,17 @@ class ReactiveMind:
                                "autonomy_epoch": self._autonomy_epoch,
                                "eligible_at_arrival": self._should_act()})
 
+    def on_activity_started(self, activity_id: str) -> None:
+        """Wake the existing worker after activity membership is committed.
+
+        This carries a scheduling signal, not a sensor observation or a
+        command. The worker rereads the current activity before deciding.
+        """
+        self._event_queue.put({"kind": "activity_started", "activity_id": activity_id,
+                               "enqueue_ts": time.time(),
+                               "autonomy_epoch": self._autonomy_epoch,
+                               "eligible_at_arrival": self._should_act()})
+
     def _sense(self) -> dict | None:
         observed = sense_sensors(self._state, self._last_sound_ts)
         # Social opportunities depend on shared activity evidence even when

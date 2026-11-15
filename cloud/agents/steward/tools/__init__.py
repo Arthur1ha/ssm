@@ -50,7 +50,7 @@ def _wait_mqtt_result(task_id: str, session_id: str, deadline: float,
         result = get_physical_result(task_id, unit_id=unit_id, session_id=session_id)
         if isinstance(result, dict):
             status = result.get("result")
-            if status in {"ok", "blocked", "rejected", "error", "cancelled", "timeout"}:
+            if status in {"ok", "accepted", "blocked", "rejected", "error", "cancelled", "timeout"}:
                 return result
         time.sleep(0.1)
     return {"result": "timeout", "task_id": task_id, "error": "edge_result_unconfirmed"}
@@ -100,7 +100,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
             action=(skill.get("invoke") or {}).get("action", ""), params=params,
             context=execution, dispatch=dispatch, task_id=step_id,
             card=card, source="orchestrator", wait=False)
-        if result.get("result") in {"accepted", "executing", "unknown"}:
+        if result.get("result") in {"executing", "unknown"}:
             action = (skill.get("invoke") or {}).get("action", "")
             result = _wait_mqtt_result(step_id, context["session_id"],
                                        min(deadline, time.time() + PHYSICAL_ACTIONS[action]["timeout"]),

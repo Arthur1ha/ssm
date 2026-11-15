@@ -49,7 +49,12 @@ const decisionBasis = {reason:'呆呆狗现在也没任务，我也有空；刚�
   evidence:[{ref:'observation-one',kind:'observation',source:'go2',as_of:now-30,summary:'地上有一个白色猫头鹰玩偶。'}]};
 const groundedInvite={...invite,decision_basis:decisionBasis};
 assert.equal(activityDecisionBasis(groundedInvite).reason,decisionBasis.reason);
-assert.equal(activityDecisionText(groundedInvite,invite.text),decisionBasis.reason+'\n'+invite.text);
+assert.equal(activityDecisionText(groundedInvite,invite.text),invite.text);
+for (const type of ['question', 'user_question', 'peer_message', 'proposal', 'reply', 'PEER_REPLY']) {
+  assert.equal(activityDecisionText({...groundedInvite,event_type:type},invite.text),invite.text,
+    'A conversation bubble acquired decision reasoning: '+type);
+}
+assert.equal(activityDecisionText(groundedInvite,''),'','A missing message was replaced by private decision reasoning');
 assert.equal(activityDecisionText(groundedInvite,decisionBasis.reason),decisionBasis.reason);
 assert.equal(activityDecisionText(invite,invite.text),invite.text);
 assert.equal(activityDecisionBasis(invite),null,'Old history acquired a fabricated explanation');
@@ -241,7 +246,8 @@ async function browserChecks() {
     await page.evaluate(({invite,basis})=>__render({events:[{...invite,decision_basis:basis}]}),
       {invite:groundedInvite,basis:decisionBasis});
     await page.waitForSelector('[data-decision-reason]');
-    assert.equal(await page.$eval('[data-decision-reason]',el=>el.textContent),decisionBasis.reason+'\n'+invite.text);
+    assert.equal(await page.$eval('[data-decision-reason]',el=>el.textContent),invite.text,
+      'Decision reasoning was appended to the invitation bubble');
     assert(await page.$eval('[data-decision-reason]',el=>el.classList.contains('space-activity__bubble')),
       'The main decision was reduced to a caption instead of agent dialogue');
     assert.equal(await page.$eval('[data-decision-reason]',el=>
@@ -253,6 +259,8 @@ async function browserChecks() {
     assert.equal(await page.$$eval('[data-decision-reason]',els=>els.length),1);
     await page.click('.space-activity__message-meta .space-activity__evidence-link');
     await page.waitForSelector('[data-decision-evidence]');
+    assert(await page.$eval('.activity-evidence',el=>el.textContent.includes('刚才它看到了白色玩偶')),
+      'The progress drawer lost the stored invitation reason');
     assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('白色猫头鹰')));
     assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('来源原记录未保留')));
     assert(await page.$eval('.activity-evidence',el=>el.textContent.includes('不能据此确认设备已经行动')));

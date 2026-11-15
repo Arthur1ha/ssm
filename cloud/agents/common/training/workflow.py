@@ -18,6 +18,7 @@ from langgraph.graph import END, START, StateGraph
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.effects import FileEffectLedger, use_effect
 from cloud.agents.common.runner import invoke_blocking
+from cloud.agents.common.tool_results import task_result
 from cloud.space.execution import ExecutionContext
 
 
@@ -110,6 +111,7 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
                     if not isinstance(result, dict) or not result.get('result'):
                         result = {'result': 'unknown', 'error': 'invalid_device_result'}
                     await invoke_blocking(ledger.mark_result, *identity, result)
+            result = task_result(result, final=index + 1 >= len(definition['steps']))
             if after_step is not None:
                 await _call(after_step, resolved, trusted, result)
             receipt = {'step_index': index, 'action': resolved['action'],

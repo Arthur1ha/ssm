@@ -45,7 +45,7 @@ async def test_first_handoff_passes_after_graph_appends_current_pending_step(han
             self.inputs.append(messages)
             if len(self.inputs) == 1:
                 return AIMessage(content="", tool_calls=[{
-                    "name": "start_activity", "args": {}, "id": "start"}])
+                    "name": "start_activity", "args": {"final": False}, "id": "start"}])
             if len(self.inputs) == 2:
                 return AIMessage(content="", tool_calls=[{
                     "name": "send_message", "args": {
@@ -62,8 +62,9 @@ async def test_first_handoff_passes_after_graph_appends_current_pending_step(han
             current, model=model, instructions="简短报告已确认阶段，不把邀请送达当成开局。"))
     h.messenger.send_message.assert_called_once_with(
         "cloud_orchestrator", "esp32_desk_led", h.run.goal, None, activity_id="act_handoff")
-    assert h.run.steps[-1]["result"]["result"] == "accepted"
-    assert h.run.status == "accepted"
+    assert h.run.steps[-1]["result"] == {
+        "result": "ok", "device_result": "accepted", "message_id": "handoff_message", "final": True}
+    assert h.run.status == "ok"
     assert "还未确认" in h.run.response
 
 

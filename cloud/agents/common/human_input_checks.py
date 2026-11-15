@@ -59,7 +59,7 @@ async def test_question_interrupt_reopens_without_repeating_completed_action(
 
     model = Model([
         AIMessage(content="", tool_calls=[{
-            "name": "adjust_device", "args": {}, "id": "physical-1"}]),
+            "name": "adjust_device", "args": {"final": False}, "id": "physical-1"}]),
         response("question", "接下来去哪里？"),
     ])
     common = dict(tool_schemas={"adjust_device": adjust_device}, execute=execute,

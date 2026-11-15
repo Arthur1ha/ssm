@@ -184,7 +184,9 @@ class AgentMessenger:
             return {"result": "blocked", "error": "invalid_deadline"}
         if type(expect_reply) is not bool:
             return {"result": "blocked", "error": "invalid_reply_expectation"}
-        from cloud.peers.turns import current_peer_turn
+        from cloud.peers.turns import current_peer_turn, peer_turn_available
+        if not peer_turn_available():
+            return {"result": "blocked", "error": "peer_context_superseded"}
         turn = current_peer_turn(self, sender, target)
         if turn is not None:
             if turn.sent:
@@ -222,6 +224,13 @@ class AgentMessenger:
             if reply_to and (parent is None or parent["sender"] != target
                              or parent["target"] != sender or parent["deadline"] <= now):
                 return {"result": "blocked", "error": "invalid_reply_to"}
+            if parent is not None:
+                from cloud.peers.inbound import message_activity_allows
+                if not message_activity_allows(parent):
+                    return {"result": "blocked", "error": "activity_ended"}
+                if activity_id is not None and activity_id != parent.get("activity_id"):
+                    return {"result": "blocked", "error": "activity_reply_mismatch"}
+                expires = min(expires, parent["deadline"])
             if (not reply_to and interaction_kind == "message"
                     and self.has_pending_conversation(sender, target)):
                 return {"result": "blocked", "error": "peer_conversation_pending"}
@@ -246,7 +255,12 @@ class AgentMessenger:
             from cloud.space.activity import get_activity_store
             activity = get_activity_store().current()
             current_activity_id = activity.get("activity_id") if activity else None
-            if activity_id is not None:
+            if parent is not None:
+                # A reply belongs to its original conversation, even when a
+                # different activity has since begun (or none was attached).
+                if parent.get("activity_id"):
+                    payload["activity_id"] = parent["activity_id"]
+            elif activity_id is not None:
                 if (sender != "cloud_orchestrator" or not isinstance(activity_id, str)
                         or not _ID.fullmatch(activity_id)):
                     return {"result": "blocked", "error": "activity_not_current"}
@@ -279,6 +293,8 @@ class AgentMessenger:
                     payload["decision_basis"] = self._resolve_decision(sender, decision_reason, evidence_refs)
                 except ValueError as exc:
                     return {"result": "rejected", "error": str(exc)}
+            if not peer_turn_available():
+                return {"result": "blocked", "error": "peer_context_superseded"}
             if not self._publish(payload):
                 return {"result": "error", "error": "mqtt_publish_failed"}
             self._outgoing[message_id] = {**payload, "state": "waiting_reply" if expect_reply else "answered", "received": False,
@@ -456,6 +472,7 @@ class AgentMessenger:
                     prior = self._outgoing.get(reply_to)
                     if (prior is None or prior["target"] != sender
                             or prior["conversation_id"] != conversation_id
+                            or prior.get("activity_id") != payload.get("activity_id")
                             or round_number != prior["round"] + 1):
                         return True
                     if prior["state"] not in _TERMINAL:

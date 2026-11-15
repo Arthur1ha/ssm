@@ -39,7 +39,7 @@ def test_same_lamp_request_can_recover_preflight_refusals_without_erasing_receip
     assert steps == before
 
 
-@pytest.mark.parametrize("result", ["unknown", "timeout", "accepted", "executing", "cancelled", "error"])
+@pytest.mark.parametrize("result", ["unknown", "timeout", "executing", "cancelled", "error"])
 def test_uncertainty_and_physical_failures_are_never_hidden_by_later_success(result):
     assert completed_status([lamp_step("one", result, preflight=True),
                              lamp_step("two", "ok")]) == "partial"
@@ -122,7 +122,7 @@ async def test_child_partial_result_is_preserved_and_not_treated_as_completion(t
         build_messages=lambda current: role_messages("按真实结果回复", current.goal),
         execute=lambda *_a: receipt, checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
         effect_ledger=FileEffectLedger(tmp_path / "effects"))
-    assert run.status == "partial" and run.steps[0]["result"] == receipt
+    assert run.status == "partial" and run.steps[0]["result"] == {**receipt, "final": False}
 
 
 @pytest.mark.asyncio
@@ -159,9 +159,9 @@ async def test_graph_uses_recovery_with_original_steps_and_checkpointed_context(
         execute=execute, checkpointer=saver, effect_ledger=FileEffectLedger(tmp_path / "effects"))
     assert run.status == "ok" and executions == ["one", "two"]
     assert [step["result"]["result"] for step in run.steps] == ["rejected", "ok"]
-    summaries = [json.loads(message.content.split("\n", 1)[1])["outcomes"]
-                 for message in inputs[-1] if message.name == "context" and "recovered_attempts" in message.content]
-    assert summaries[0]["recovered_attempts"] == [{"step_id": "one", "completed_by": "two"}]
+    assert len(inputs) == 2 and run.steps[-1]["result"]["final"] is True
+    assert outcome_summary(run.steps)["recovered_attempts"] == [
+        {"step_id": "one", "completed_by": "two"}]
     from cloud.agents.common.context import thread_id_for
     saved = saver.get_tuple({"configurable": {"thread_id": thread_id_for(run.agent_id, run.session_id)}})
     assert saved.checkpoint["channel_values"]["run"]["initial_context"] == run.initial_context

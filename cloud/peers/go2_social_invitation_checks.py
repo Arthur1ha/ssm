@@ -98,6 +98,40 @@ def test_social_model_cannot_invent_observation_reference(social_bus):
     assert records[0]["result"] == {"result": "rejected", "error": "decision_evidence_unavailable"}
 
 
+def test_new_activity_can_discuss_pending_lamp_receipt_without_starting_game(social_bus, monkeypatch):
+    h = social_bus
+    h.space["activity"]["started_at"] = time.time()
+    h.space["activity"]["context"] = "你两玩石头剪刀布"
+    h.space["recent_discoveries"] = []
+    monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready", lambda *_: False)
+    monkeypatch.setattr("cloud.peers.games.registry.game_invitation_ready", lambda *_: False)
+    monkeypatch.setattr("cloud.peers.games.base.game_invitation_block_reason",
+                        lambda *_: "lamp_result_unconfirmed")
+
+    class Model:
+        def with_structured_output(self, *_args, **_kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            h.prompts.extend(messages)
+            assert "当前可玩玩法：[]" in messages[-1].content
+            assert '"ready": false' in messages[-1].content
+            assert "lamp_result_unconfirmed" in messages[-1].content
+            return {"decision": "send_message", "target": LAMP,
+                    "content": "我等你上一条灯光命令确认，咱们再开局。",
+                    "reason": "灯的真实结果还没确认。"}
+
+    monkeypatch.setattr(free_explore, "get_text_llm", Model)
+    asyncio.run(h.drive._evaluate_social())
+    assert len(h.sent) == 1
+    payload = verify_message(h.sent[0][0], json.loads(h.sent[0][1]))
+    assert payload.get("interaction_kind", "message") == "message" and "game_id" not in payload
+    assert h.drive._social_state.last_sent > 0
+    # A single user's activity goal is consumed once, without a timer retry.
+    asyncio.run(h.drive._evaluate_social())
+    assert len(h.sent) == 1
+
+
 def test_ordinary_go2_message_does_not_require_game_grounding(social_bus):
     from cloud.go2.tools.tools import send_message
     assert send_message(LAMP, "你好")["result"] == "accepted"

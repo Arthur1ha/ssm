@@ -34,7 +34,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| [`runner.py`](../../cloud/agents/common/runner.py) | 共用 LangGraph 任务循环。`GraphRun` 记录目标、步骤、状态和回复；每轮选择一个工具、观察结果后继续。 |
+| [`runner.py`](../../cloud/agents/common/runner.py) | 共用 LangGraph 任务循环。`GraphRun` 记录目标、步骤、状态和回复；同轮多个工具按返回顺序执行，逐步校验、等待真实回执并保存检查点，失败或未确认时不继续这批调用。 |
 | [`checkpoint.py`](../../cloud/agents/common/checkpoint.py) | 将 Graph 状态持久化到文件，支持跨进程读取与中断恢复。 |
 | [`run_index.py`](../../cloud/agents/common/run_index.py) | 将公开 `run_id` 映射到会话 Graph。 |
 | [`views.py`](../../cloud/agents/common/views.py) | 按 `run_id` 从检查点读取结果，并固定已完成任务的查询位置。 |

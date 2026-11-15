@@ -72,7 +72,8 @@ def _finish(messenger, message: dict, result: dict, *, reply_key: str = "reply",
         # Keep the original task ID available for reconciliation. A dispatch or
         # a promise cannot become a completion result here.
         reply = "我已经发起处理，但当前没有可靠的完成结果；需要按原任务 ID 等待或查询。"
-        if not already_sent and not message.get("reply_to"):
+        if (not already_sent and not message.get("reply_to")
+                and message_activity_allows(message)):
             messenger.send_message(message["target"], message["sender"], reply,
                                    reply_to=original_id, reply_kind="reply", expect_reply=False)
         return
@@ -84,7 +85,8 @@ def _finish(messenger, message: dict, result: dict, *, reply_key: str = "reply",
     else:
         messenger.send_result(original_id, "unknown", task_id=task_id,
                               reason="unrecognized_agent_result")
-    if not already_sent and not message.get("reply_to"):
+    if (not already_sent and not message.get("reply_to")
+            and message_activity_allows(message)):
         messenger.send_message(message["target"], message["sender"], reply,
                                reply_to=original_id, reply_kind="reply", expect_reply=False)
 
@@ -157,17 +159,34 @@ def handle_api_peer_message(messenger, message: dict, state) -> None:
             return
         session = {"session_id": context.session_id, "actor": "visitor",
                    "persist": False, "expires_at": context.expires_at}
+        command_epoch = getattr(agent, "_command_epoch", 0)
+        autonomy_epoch = getattr(agent, "_autonomy_epoch", 0)
+
+        def available():
+            return (message["deadline"] > time.time()
+                    and message_activity_allows(message)
+                    and getattr(agent, "_command_epoch", 0) == command_epoch
+                    and getattr(agent, "_autonomy_epoch", 0) == autonomy_epoch)
 
         def dispatch(unit_id, action, params, _context, _source, *, task_id=None):
+            nonlocal command_epoch, autonomy_epoch
+            if not available():
+                raise PermissionError("peer_context_superseded")
             if agent.get_autonomy_mode() != "reactive":
                 raise PermissionError("lamp_autonomy_manual")
             task_id = _dispatch_mqtt_task(unit_id, action, params, session,
                                           source="peer_autonomous", task_id=task_id)
             agent.mark_peer_command(unit_id)
+            # Advance only this command's versions. Adopting current values
+            # could swallow a user takeover during the blocking publish.
+            if hasattr(agent, "_command_epoch"):
+                command_epoch += 1
+            if hasattr(agent, "_autonomy_epoch"):
+                autonomy_epoch += 1
             messenger.send_progress(message["message_id"], task_id)
             return task_id
 
-        with peer_turn(messenger, message) as turn:
+        with peer_turn(messenger, message, availability=available) as turn:
             result = agent.run_user_loop(text, target, context, dispatch,
                                          run_id=message["message_id"])
         _finish(messenger, message, result, already_sent=turn.sent)

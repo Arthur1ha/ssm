@@ -48,6 +48,10 @@ def activity_allows(activity_id: str | None, sender: str, target: str) -> bool:
 
 
 def game_invitation_ready(activity_id: str | None, sender: str, target: str) -> bool:
+    return game_invitation_block_reason(activity_id, sender, target) is None
+
+
+def game_invitation_block_reason(activity_id: str | None, sender: str, target: str) -> str | None:
     """Check actual owners' task facts before inviting/accepting, not in-play.
 
     Both device services live in the API process. Missing live services fail
@@ -55,18 +59,26 @@ def game_invitation_ready(activity_id: str | None, sender: str, target: str) -> 
     evidence of an idle device. This creates no second device state store.
     """
     if not activity_allows(activity_id, sender, target):
-        return False
+        return "activity_not_joined"
     from cloud.esp32.service import get_agent
     from cloud.go2.connection import go2
     from cloud.go2.control import control_lease
     from cloud.go2.mode.free_explore import drive
 
     lamp = get_agent()
-    if (lamp is None or not lamp._should_act() or not lamp._device_online()
-            or lamp.is_busy_for_game()):
-        return False
+    if lamp is None:
+        return "lamp_agent_unavailable"
+    if not lamp._should_act():
+        return "lamp_autonomy_inactive"
+    if not lamp._device_online():
+        return "lamp_offline"
+    if (getattr(lamp, "_state", None) is not None
+            and lamp._state.has_pending_tasks()):
+        return "lamp_result_unconfirmed"
+    if lamp.is_busy_for_game():
+        return "lamp_busy"
     if not go2.is_connected or getattr(go2, "runtime", None) is None:
-        return False
+        return "go2_disconnected"
     state = go2.runtime.snapshot()
     if (state.get("connected") is not True or state.get("connection_state") != "online"
             or state.get("activity_state") != "active"
@@ -78,10 +90,12 @@ def game_invitation_ready(activity_id: str | None, sender: str, target: str) -> 
             or state.get("control_mode") != "normal"
             or state.get("body_state") == "moving"
             or drive.user_interrupt or drive._pending_question_id or drive._active_goal):
-        return False
+        return "go2_busy"
     lease = control_lease.snapshot()
     # A completed autonomous exploration segment may retain its own lease.
     # An outstanding user/other session's lease still reserves control.
-    return lease is None or lease.owner_session_id == state.get("exploration_owner")
+    if lease is not None and lease.owner_session_id != state.get("exploration_owner"):
+        return "go2_motion_owned_elsewhere"
+    return None
 
 

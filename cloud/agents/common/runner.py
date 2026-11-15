@@ -1,7 +1,7 @@
 """One sequential LangGraph tool cycle shared by steward, lamp, and Go2.
 
-The graph gates every model response before dispatch. A response with multiple
-tool calls executes none, so physical tools cannot run concurrently.
+The graph validates and executes tool calls in response order, checkpointing
+each receipt before continuing. Physical tools never run concurrently.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import inspect
 import threading
 import time
 import uuid
+from copy import deepcopy
 from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
 from typing import Annotated, Any, Callable, Literal, TypedDict
@@ -31,11 +32,8 @@ from cloud.agents.common.effects import FileEffectLedger, use_effect
 from cloud.agents.common.conversation import dialogue_turn, legacy_dialogue, trim_dialogue
 from cloud.agents.common.messages import context_message, observed_tool_messages
 from cloud.agents.common.outcomes import completed_status, outcome_summary
+from cloud.agents.common.tool_results import UNCERTAIN, task_result
 from cloud.observability import emit_agent_event
-
-UNCERTAIN = {"accepted", "executing", "timeout", "unknown"}
-FAILURE = {"blocked", "rejected", "cancelled", "error", "partial", "needs_clarification"}
-
 
 @dataclass
 class GraphRun:
@@ -66,6 +64,7 @@ class _State(TypedDict):
     decision: dict
     turns: int
     effects: int
+    pending_calls: list[dict]
     messages: Annotated[list[AnyMessage], add_messages]
 
 
@@ -78,8 +77,13 @@ class DialogueResponse(BaseModel):
 
 
 def _schema(name: str, declaration: Any) -> dict:
-    schema = convert_to_openai_tool(declaration)
+    schema = deepcopy(convert_to_openai_tool(declaration))
     schema["function"]["name"] = name
+    schema["function"]["parameters"].setdefault("properties", {})["final"] = {
+        "type": "boolean",
+        "description": "成功后是否结束本次任务。单个动作或整批最后一步默认 true；"
+                       "明确还需观察结果并继续其他步骤时填写 false。此字段不传给设备。",
+    }
     return schema
 
 
@@ -151,8 +155,14 @@ async def run_role_graph(
     response_parser = PydanticOutputParser(pydantic_object=DialogueResponse)
     text_parser = StrOutputParser()
     response_policy = SystemMessage(content=(
-        "通过原生 tool calling 每轮最多调用一个业务工具；调用时不输出面向用户的文字。"
-        "观察真实结果后再决定下一步，不重复成功的动作。"
+        "通过原生 tool calling 调用业务工具；调用时不输出面向用户的文字。"
+        "同轮返回的多个调用会严格按返回顺序串行执行，每步确认成功后才执行下一步。"
+        "仅在各步参数都已明确时一次返回多个调用；若后续参数或是否执行取决于前一步结果，"
+        "先只调用前一步，观察真实结果后再决定下一步。不重复成功的动作。"
+        "工具参数 final 声明成功后是否结束本次任务；单个动作或整批最后一个动作默认结束。"
+        "还需根据结果继续原目标时，当前调用必须明确 final=false；查询默认继续。"
+        "工具结果 final=true 后运行直接结束，不再规划或执行后续调用。"
+        "accepted 与 ok 都按动作成功处理，不为等待另一种成功回执重复执行。"
         "缺少必要信息时返回 JSON：{\"kind\":\"question\",\"text\":\"一个具体问题\"}，"
         "运行图将暂停等待回答。已有信息足够时不要反复确认。"
         "无需工具或目标完成时返回 JSON：{\"kind\":\"final\",\"text\":\"以当前人格直接回应\"}。"
@@ -226,7 +236,8 @@ async def run_role_graph(
             emit("model.empty_retry", turn=turns)
             try:
                 response = await asyncio.wait_for(bound_model.ainvoke(messages + [SystemMessage(
-                    content="上一轮没有返回内容或工具调用。请根据原请求调用一个合适的工具，或明确回答。"
+                    content="上一轮没有返回内容或工具调用。请依据已有结果回答；"
+                            "目标尚未完成时才调用必要工具，不重复已成功的动作。"
                 )]), timeout=max(0.1, current.deadline - time.time()))
             except Exception as exc:
                 emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc))
@@ -238,9 +249,6 @@ async def run_role_graph(
                      duration_ms=round((time.monotonic() - started) * 1000))
         if getattr(response, "invalid_tool_calls", None):
             current.status, current.response = "error", "工具调用格式无效，未执行新动作。"
-            return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        if len(calls) > 1:
-            current.status, current.response = "blocked", "模型一次请求了多个动作，未执行新动作。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         if not calls:
             if not isinstance(content, str) or not content.strip():
@@ -265,39 +273,55 @@ async def run_role_graph(
                 current.reply_source = "decision_model"
                 emit("reply.draft", turn=turns, reply=current.decision_draft)
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        call = calls[0]
-        if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
-            current.status, current.response = "error", "工具调用格式无效，未执行新动作。"
-            return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        name = call["name"]
-        if name not in tool_schemas:
-            current.status, current.response = "rejected", "模型请求了未授权工具，未执行动作。"
-            return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        declaration = tool_schemas[name]
-        args = call["args"]
-        if inspect.isclass(declaration) and issubclass(declaration, BaseModel):
-            try:
-                args = declaration.model_validate(args).model_dump(exclude_none=True)
-            except ValidationError:
-                current.status, current.response = "rejected", "工具参数未通过校验，未执行动作。"
-                return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        if effectful(name) and state["effects"] >= max_effects:
-            current.status, current.response = "blocked", "任务动作次数已达上限；其余步骤未执行。"
-            return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        return {"run": asdict(current), "decision": {"kind": "tool", "name": name,
-                "params": args, "step_id": call.get("id") or uuid.uuid4().hex}, "turns": turns}
+        # Persist native call IDs before dispatch, including IDs omitted by a
+        # compatible provider. Each tool node consumes exactly one queued call.
+        pending = [{**call, "id": call.get("id") or uuid.uuid4().hex}
+                   if isinstance(call, dict) else call for call in calls]
+        return {"run": asdict(current), "decision": {"kind": "tool"},
+                "pending_calls": pending, "turns": turns}
 
     async def model_route(state: _State) -> str:
         return state["decision"]["kind"]
 
     async def tool_node(state: _State) -> dict:
         current = GraphRun(**state["run"])
-        decision = state["decision"]
-        name, params, step_id = decision["name"], decision["params"], decision["step_id"]
+        pending = state.get("pending_calls") or []
+        # Existing checkpoints may still contain a single prepared decision.
+        if not pending:
+            decision = state["decision"]
+            pending = [{"name": decision["name"], "args": decision["params"],
+                        "id": decision["step_id"]}]
+        call, remaining = pending[0], pending[1:]
+
+        def stop(status: str, text: str) -> dict:
+            current.status, current.response = status, text
+            return {"run": asdict(current), "decision": {"kind": "finish"},
+                    "pending_calls": []}
+
+        if time.time() >= current.deadline:
+            return stop("timeout", "任务已到期；其余步骤未执行，未确认的动作不会自动重发。")
+        if not isinstance(call, dict) or not isinstance(call.get("name"), str) or not isinstance(call.get("args"), dict):
+            return stop("error", "工具调用格式无效，未执行新动作。")
+        name = call["name"]
+        if name not in tool_schemas:
+            return stop("rejected", "模型请求了未授权工具，未执行新动作。")
+        declaration = tool_schemas[name]
+        args = dict(call["args"])
+        final = args.pop("final", not remaining and effectful(name))
+        if type(final) is not bool:
+            return stop("rejected", "任务终结标记必须为布尔值，未执行新动作。")
+        if inspect.isclass(declaration) and issubclass(declaration, BaseModel):
+            try:
+                args = declaration.model_validate(args).model_dump(exclude_none=True)
+            except ValidationError:
+                return stop("rejected", "工具参数未通过校验，未执行新动作。")
+        if effectful(name) and state["effects"] >= max_effects:
+            return stop("blocked", "任务动作次数已达上限；其余步骤未执行。")
+        params, step_id = args, call["id"]
         emit("graph.node", node="tool", phase="entered", step_id=step_id, tool=name)
         is_effect = effectful(name)
         step = {"step_id": step_id, "tool_call_id": step_id, "tool": name,
-                "params": params, "effectful": is_effect,
+                "params": params, "effectful": is_effect, "final": final,
                 "dispatch_status": "pending", "result": None}
         current.steps.append(step)
         sync_outer(current)
@@ -326,7 +350,7 @@ async def run_role_graph(
                         result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
                                                         timeout=max(0.1, current.deadline - time.time()))
                 if isinstance(result, dict) and result.get("result") not in {
-                    "unknown", "timeout", "executing", "accepted"
+                    "unknown", "timeout", "executing"
                 }:
                     ledger.mark_result(current.agent_id, thread_id,
                                        current.run_id, step_id, result)
@@ -343,8 +367,9 @@ async def run_role_graph(
         except Exception as exc:
             result = {"result": "unknown" if is_effect else "error",
                       "error": type(exc).__name__}
-        if not isinstance(result, dict) or result.get("result") not in {"ok", *UNCERTAIN, *FAILURE}:
-            result = {"result": "error", "error": "invalid_tool_result"}
+        result = task_result(result, final=final)
+        if name in terminal_tools:
+            result["final"] = True
         step.update(dispatch_status="observed", result=result)
         sync_outer(current)
         if record:
@@ -359,15 +384,24 @@ async def run_role_graph(
             current.status, current.response = result["result"], "请求已发送，但实际完成情况尚未确认；后续步骤已暂停。"
         elif result["result"] == "cancelled":
             current.status, current.response = "cancelled", "任务已取消；后续步骤未执行。"
-        elif name in terminal_tools:
-            current.status = result["result"]
+        elif result["final"]:
+            current.status = (completed_status(current.steps) if result["result"] == "ok"
+                              else result["result"])
             current.response = result.get("message") or result.get("reason") or result.get("error") or result["result"]
-        return {"run": asdict(current), "effects": state["effects"] + int(is_effect)}
+        if result["final"] or result["result"] in UNCERTAIN:
+            route = "finish"
+        elif result["result"] == "ok" and remaining:
+            route = "tool"
+        else:
+            # Failed calls invalidate the rest of this model response. Let the
+            # existing model node observe the receipt and decide how to proceed.
+            route = "model"
+        return {"run": asdict(current), "effects": state["effects"] + int(is_effect),
+                "decision": {"kind": route},
+                "pending_calls": remaining if route == "tool" else []}
 
     async def tool_route(state: _State) -> str:
-        result = (state["run"]["steps"][-1].get("result") or {}).get("result")
-        tool_name = state["run"]["steps"][-1].get("tool")
-        return "finish" if tool_name in terminal_tools or result in UNCERTAIN | {"cancelled"} else "model"
+        return state["decision"]["kind"]
 
     async def start_route(state: _State) -> str:
         return "tool" if state.get("decision", {}).get("kind") == "tool" else "model"
@@ -400,7 +434,7 @@ async def run_role_graph(
     graph.add_node("finalize", finalize_node)
     graph.add_conditional_edges(START, start_route, {"tool": "tool", "model": "model"})
     graph.add_conditional_edges("model", model_route, {"tool": "tool", "ask": "ask", "finish": "finalize"})
-    graph.add_conditional_edges("tool", tool_route, {"model": "model", "finish": "finalize"})
+    graph.add_conditional_edges("tool", tool_route, {"tool": "tool", "model": "model", "finish": "finalize"})
     graph.add_edge("ask", "model")
     graph.add_edge("finalize", END)
     compiled = graph.compile(checkpointer=saver)
@@ -423,6 +457,7 @@ async def run_role_graph(
             seed = (legacy_dialogue(saver, config, run.run_id)
                     if "messages" not in values else [])
             output = await compiled.ainvoke({"run": asdict(run), "decision": first,
+                                             "pending_calls": [],
                                              "messages": seed,
                                              "turns": len(run.steps),
                                              "effects": sum(bool(s.get("effectful")) for s in run.steps)},

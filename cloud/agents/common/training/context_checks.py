@@ -208,7 +208,8 @@ async def test_new_session_selects_saved_reference_without_reconstructing_parame
     result = await run_role_graph(run, model=model, tool_schemas={"apply_training": ApplyTraining},
         build_messages=lambda current: teachings.messages(role, current=current)[0],
         execute=execute)
-    assert result.status == "accepted" and model.calls == 1
+    assert result.status == "ok" and model.calls == 1
+    assert result.steps[-1]["result"]["final"] is True
     prepared, step_id = prepared_calls[0]
     assert step_id == "saved-behavior" and prepared["training_ref"] == saved["teaching_id"]
     assert prepared["training_revision"] == 1 and prepared["training_overrides"] == {}

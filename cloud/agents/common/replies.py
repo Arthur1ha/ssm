@@ -10,6 +10,7 @@ from collections.abc import Callable
 from cloud.agents.common.runner import GraphRun as Run
 from cloud.agents.common.messages import reply_messages
 from cloud.agents.common.outcomes import effective_steps, outcome_summary
+from cloud.agents.common.tool_results import SUCCESS, UNCERTAIN
 from cloud.observability import emit_agent_event
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,9 @@ def valid_reply_format(value: object, run: Run | None = None) -> bool:
 def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
     """Report observed results when a role's reply model is unavailable."""
     role = "go2" if agent_id == "go2" else ("lamp" if agent_id.startswith("esp32") else "orchestrator")
-    if status in {"accepted", "executing", "timeout", "unknown"}:
+    if status == "accepted":
+        status = "ok"
+    if status in UNCERTAIN:
         return {"go2": "我还没收到动作完成的确认。", "lamp": "我还没收到调灯完成的确认。",
                 "orchestrator": "这项安排尚无完成确认。"}[role]
     if status == "error" and run is not None and not run.steps:
@@ -91,7 +94,7 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
     if run is not None and run.steps:
         results = [(step, step.get("result") or {}) for step in effective_steps(run.steps)]
         completed = [step for step, result in results
-                     if step_kind(step) == "action" and result.get("result") == "ok"]
+                     if step_kind(step) == "action" and result.get("result") in SUCCESS]
         proposals = [step for step, result in results
                      if step_kind(step) == "training_proposal" and result.get("result") == "ok"]
         failed = [result for _, result in results if result.get("result") in
@@ -127,7 +130,7 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
         if proposals and not completed:
             return "这项要求已整理好，请核对对话中的修改卡片。"
         if not completed and status == "ok":
-            kinds = {step_kind(step) for step, result in results if result.get("result") == "ok"}
+            kinds = {step_kind(step) for step, result in results if result.get("result") in SUCCESS}
             if "message" in kinds:
                 return "消息已发出，等待对方回应。"
             if "configuration" in kinds:
@@ -141,7 +144,7 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
                 "orchestrator": "设备当前离线，这次安排无法完成。"}[role]
     if status == "ok":
         if run is not None and not any(
-            step_kind(step) == "action" and (step.get("result") or {}).get("result") == "ok"
+            step_kind(step) == "action" and (step.get("result") or {}).get("result") in SUCCESS
             for step in run.steps
         ):
             return {"go2": "唔，我这会儿没法好好回答。等一下再问我，好吗？",

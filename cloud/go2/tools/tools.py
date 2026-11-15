@@ -63,13 +63,18 @@ _OBSERVE_SYSTEM_PROMPT = (
 )
 
 
-async def go2_observe(question: str = "描述你看到的场景") -> str:
+async def go2_observe(question: str = "描述你看到的场景", *,
+                      after_received_at: float | None = None) -> str:
     from langchain_core.messages import SystemMessage
     from cloud.go2.perception.vision import frame_is_fresh
-    captured = go2.latest_frame_snapshot()
-    if captured is None:
-        return "无可用视频帧，请确认 Go2 已连接且视频流正常"
-    jpeg, meta = captured
+    if after_received_at is not None:
+        from cloud.go2.perception.visual_target import _capture_view
+        jpeg, meta, _quality = await _capture_view(after_received_at=after_received_at)
+    else:
+        captured = go2.latest_frame_snapshot()
+        if captured is None:
+            return "无可用视频帧，请确认 Go2 已连接且视频流正常"
+        jpeg, meta = captured
     if not frame_is_fresh({"ts": meta.get("captured_at")}):
         return "视频帧已过期，请等待新画面后重试"
     frame_b64 = base64.b64encode(jpeg).decode("ascii")

@@ -9,6 +9,7 @@ from copy import deepcopy
 
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.common.replies import finalize_reply
+from cloud.agents.common.tool_results import SUCCESS
 from cloud.observability import emit_agent_event
 
 
@@ -59,8 +60,9 @@ def device_outcomes(run: GraphRun) -> dict[str, dict]:
         group["has_action"] = bool(actions)
         results = [(step.get("result") or {}).get("result", "unknown")
                    for step in actions or group["steps"]]
-        failures = [value for value in results if value != "ok"]
-        group["status"] = ("ok" if not failures else "partial" if "ok" in results else failures[-1])
+        failures = [value for value in results if value not in SUCCESS]
+        group["status"] = ("ok" if not failures else "partial" if any(value in SUCCESS for value in results)
+                           else failures[-1])
     return groups
 
 

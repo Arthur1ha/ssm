@@ -10,7 +10,7 @@ import pytest
 from cloud.go2.control import ControlLease
 from cloud.go2.state import Go2State
 from cloud.peers.games import get_game, playable_games
-from cloud.peers.games.base import game_invitation_ready
+from cloud.peers.games.base import game_invitation_ready, game_invitation_block_reason
 from cloud.peers.messaging import AgentMessenger
 from cloud.peers.social import SocialState
 
@@ -88,6 +88,21 @@ def test_missing_or_busy_lamp_cannot_be_treated_as_idle(idle, monkeypatch):
     assert not game_invitation_ready("act_idle", LAMP, DOG)
     monkeypatch.setattr("cloud.esp32.service.get_agent", lambda: None)
     assert not game_invitation_ready("act_idle", DOG, LAMP)
+
+
+def test_readiness_reason_reports_real_unconfirmed_lamp_tasks_without_unblocking(idle):
+    from cloud.esp32.state import ESP32State
+    idle.lamp._state = ESP32State()
+    idle.lamp._state.mark_task_pending("task_unconfirmed")
+    assert game_invitation_block_reason("act_idle", DOG, LAMP) == "lamp_result_unconfirmed"
+    assert not game_invitation_ready("act_idle", DOG, LAMP)
+    assert playable_games("act_idle", DOG, LAMP) == []
+    # Request timeout is not a receipt, so the exact same block remains.
+    idle.lamp._state.store_task_result("task_unconfirmed", {"result": "timeout"})
+    assert game_invitation_block_reason("act_idle", DOG, LAMP) == "lamp_result_unconfirmed"
+    idle.lamp._state.store_task_result("task_unconfirmed", {"result": "ok"})
+    assert game_invitation_block_reason("act_idle", DOG, LAMP) is None
+    assert game_invitation_ready("act_idle", DOG, LAMP)
 
 
 @pytest.mark.parametrize("sender,target", [(LAMP, DOG), (DOG, LAMP)])

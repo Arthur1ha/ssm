@@ -10,7 +10,7 @@
 
 1. ESP32 启动时探测引脚 → 为已接智能体发布 retained manifest；传感器仅发布独立的 state/event，不产生设备卡
 2. 云端 CardRegistry 统一处理 retained manifest/card/status，API 汇集 state/event；管理员把发现的设备加入固定空间 `main` 后，PWA 经 `/api/devices` 与 `/api/events`（SSE）自动展示和同步，无手动订阅步骤
-3. 用户语音/文字 → 已认证 PWA 请求 `/api/intents` → API 生成可信上下文并发布签名 MQTT `ssm/intent/{session_id}` → 管家 Graph 逐轮选择一个工具、等待真实结果、继续规划，最后生成人格回复；设备聊天/按钮走 `/api/commands/{unit_id}`
+3. 用户语音/文字 → 已认证 PWA 请求 `/api/intents` → API 生成可信上下文并发布签名 MQTT `ssm/intent/{session_id}` → 管家 Graph 按序执行模型返回的工具调用、逐步等待真实结果、继续规划，最后生成人格回复；设备聊天/按钮走 `/api/commands/{unit_id}`
 4. `reactive` 模式下，传感器事件也可触发云端 ESP32 智能体自主决策；默认 `manual` 不自发控灯
 5. ESP32 独立执行硬件 tick、任务去重与结果回报；当前固件没有离线自动控灯规则，云端离线不触发新的自主决策
 6. 智能体通过 MQTT retained manifest/card 发布能力，`/api/devices/{unit_id}/agent` 返回空间内已发现设备的静态 A2A Agent Card；HTTP 是读取投影，发现真相仍在 MQTT
@@ -206,7 +206,7 @@ ssm/
 
 ### 4. 逐步任务循环（意图编排）
 
-**决策**：三个云端智能体共用 `cloud/agents/common/` 的 LangGraph 运行、文件检查点、动作账本和回复契约；每轮由模型选择一个工具或最终回答，观察工具真实结果后再决定下一轮。各角色在 `cloud/agents/{steward,lamp,go2}/graph.py` 组装提示词和设备专属工具。
+**决策**：三个云端智能体共用 `cloud/agents/common/` 的 LangGraph 运行、文件检查点、动作账本和回复契约。动作结果与任务终结使用统一的 `result/final` 契约：`accepted` 与 `ok` 均按成功处理，Graph 将接受结果投影为 `result=ok`；工具结果 `final=true` 直接清空后续调用并进入收尾，不再规划。单个动作或整批最后一个动作成功后默认终结；需要观察结果再继续原目标时，调用明确声明 `final=false`，批次中间动作和查询默认继续。`final` 是 Graph 控制字段，剥离后才校验和派发业务参数。多个工具调用按返回顺序串行执行，每步校验并保存回执；失败使本批剩余调用失效，执行中、超时或未知结果暂停后续动作。收尾只允许无工具回复，不重新进入动作循环。各角色在 `cloud/agents/{steward,lamp,go2}/graph.py` 组装提示词和设备专属工具。
 
 **后续开发约束**：智能体框架统一使用 LangChain / LangGraph。新增智能体或调整决策流程时，优先使用框架提供的模型、工具、状态图、检查点和恢复能力；不新增自研 Agent 循环、工具调用解析、记忆编排或第二套运行时。MQTT/HTTP 传输、设备安全校验与真实回执判定仍作为业务适配代码保留。
 
@@ -234,7 +234,7 @@ ssm/
 
 **决策**：`state_machine.regions` 是唯一静态状态与转换声明。Go2 的 connection / activity / life / body 分层结构和灯照明区域共用 Card 契约；实时动作门禁从已有执行适配投影，PWA 不另建状态或动作目录。
 
-Go2 `status` 只表示云端服务在线；WebRTC 看 `state.connected/connection_state`，身体姿态看真实遥测和 `body_confirmation`。`autonomy_mode=manual|free_explore` 是配置，不等于当前 `life_state`。`accepted/executing` 不是完成，未确认姿态为 `null`，不能因连接、重启或超时凭空设为站立。休息不自动趴下，唤醒不自动起立或恢复探索。
+Go2 `status` 只表示云端服务在线；WebRTC 看 `state.connected/connection_state`，身体姿态看真实遥测和 `body_confirmation`。`autonomy_mode=manual|free_explore` 是配置，不等于当前 `life_state`。`accepted` 按动作成功处理，`executing` 仍表示执行中；姿态字段仍由遥测更新，未观测姿态为 `null`，不能因连接、重启或超时凭空设为站立。休息不自动趴下，唤醒不自动起立或恢复探索。
 
 自由探索实际启动后，`life_state=explore` 持续覆盖观察、规划和轮次间等待；具体进展沿用对话消息，不新增状态图节点或调整页面布局。互动任务接管时为 `play`，结束且探索许可仍有效时恢复 `explore`；停止、休息或断连后不得因旧任务结束重新进入探索。持续探索在轮次间没有具体 `life_task_id`，不能把该空值当作可完成的任务令牌。
 
@@ -317,6 +317,6 @@ make tunnel-url
 - 在 `probe.py` / `agent_manifest.py` 里硬编码 unit 名称
 - 在 PWA 里重新引入 subscribed/toggleSub 状态
 - 新增第二套 Agent 循环、状态图真相、教导存储或绕过可信身份/真实回执的执行入口
-- 用 `accepted`、消息送达、模型描述或 retained 历史快照确认物理成功
+- 用消息送达、模型描述或 retained 历史快照伪造设备观测；`accepted` 的动作成功语义不改写姿态和传感器事实
 - 用测试、文档验证覆盖已有教导、人员、人格、记忆或任务账本
 - 为"将来可能有用"的功能写代码（MVP 原则）
