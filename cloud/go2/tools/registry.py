@@ -7,6 +7,8 @@ from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, sport_description, sport_
 from cloud.go2.state import life_tool_schema
 from cloud.agents.go2.workflows.search import SEARCH_TOOL_TIMEOUT_S
 
+VISUAL_NAVIGATION_TIMEOUT_S = 135.0
+
 
 def _schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
     return {"type": "object", "properties": properties, "required": list(required),
@@ -43,7 +45,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
-        ToolSpec("go2_navigate_to_visible_target", "朝当前画面中的目标接近，target 传自然语言描述。视觉识别后与雷达点云配对，规划停靠点，停稳后复核；仅 ok 且复核通过表示安全接近，不代表触碰或精确到达。可选 max_advance_m 限制本次沿已知可通行路径推进的米数；此时 arrived=false 只表示已推进，arrived=true 才确认抵达。decision_reason可用第一人称简短说明依据刚才观察为何选择这个候选，不声称已经到达；游戏中必须提供。失败直接报告原因，不用相对移动或坐标导航盲走替代", _schema({"target": _string(minLength=1, maxLength=100), "decision_reason": _string(minLength=1, maxLength=300), "max_advance_m": _number(minimum=.15, maximum=1.0)}, ("target",)), motion=True, timeout_s=135, result_rule="device"),
+        ToolSpec("go2_navigate_to_visible_target", "朝当前画面中的目标接近，target 传自然语言描述。视觉识别后与雷达点云配对，规划停靠点，停稳后复核；仅 ok 且复核通过表示安全接近，不代表触碰或精确到达。可选 max_advance_m 限制本次沿已知可通行路径推进的米数；此时 arrived=false 只表示已推进，arrived=true 才确认抵达。decision_reason可用第一人称简短说明依据刚才观察为何选择这个候选，不声称已经到达；游戏中必须提供。未限定max_advance_m时，地图不可用、自身定位不可用或目标雷达定位失败，确认停稳后自动调用go2_find_object分段观察接近；保留原始失败与找物回执，outcome=nearby、found=true且stop.result=ok才确认已在附近，不代表精确测距。目标未识别、视觉格式错误、动作失败、权限异常、取消、超时或运动结果未知不转找物；控制权、定位会话和原任务期限必须仍有效。显式max_advance_m保留距离限制、不转完整找物。不用相对移动或坐标导航盲走替代", _schema({"target": _string(minLength=1, maxLength=100), "decision_reason": _string(minLength=1, maxLength=300), "max_advance_m": _number(minimum=.15, maximum=1.0)}, ("target",)), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
         ToolSpec("go2_find_object", "在室内寻找地面物品并走到附近；用户任务默认搜索当前定位会话地图的可达区域，已有矩形边界则遵守边界，无需用户提供房间名称或坐标。未发现时换观察点；发现后按可通行路径朝目标方向分段移动，停稳后再看。连续画面粗略判断已在附近并停稳即完成，不要求精确目标坐标或测距。结果不代表可直接触碰目标；未检查区域不代表目标不存在。仅用户明确指定且无法确定房间时澄清。outcome 区分未启动 not_started、暂未识别 not_seen、见过但未接近 seen_not_reached、已接近 nearby；按 message 保留受阻原因。内部范围配置或定位会话问题不要求用户补填房间；终态后不承诺自动继续搜索", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
         ToolSpec("go2_push_cargo", "对已找到的同一地面货物执行一次有界靠近或普通步态推送尝试。cargo须描述该货物，destination须是本单已确认的唯一有色地面配送区，distance_m为本步最大前进米数。保留机身避障、教导和控制租约；对齐、接触或观测不足会受阻，不绕开障碍强推。只有ok、delivered=true且cargo_contained_in_verified_zone_and_stopped才确认货物送达；approached仅证明靠近，pushed须真实LiDAR货物位移，机器人到站和画面框变化都不是货物送达。未知结果按原request_id核对，不换ID盲目重发", _schema({"cargo": _string(minLength=1, maxLength=150), "destination": _string(minLength=1, maxLength=150), "distance_m": _number(minimum=.1, maximum=.25, default=.15)}, ("cargo", "destination")), motion=True, timeout_s=240, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
@@ -72,6 +74,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         }, ("target_unit_id", "skill_id", "params")), timeout_s=155),
     )
 }
+
+
+def target_navigation_complete(result: dict, target: str) -> bool:
+    """Accept metric arrival or stopped visual proximity, never mere progress."""
+    if result.get('result') != 'ok' or result.get('target') != target:
+        return False
+    if result.get('confirmation') == 'odom_stopped_and_visual_recheck':
+        return True
+    fallback = result.get('fallback') or {}
+    return bool(result.get('outcome') == 'nearby' and result.get('found') is True
+                and (result.get('stop') or {}).get('result') == 'ok'
+                and result.get('task_id')
+                and fallback.get('tool') == 'go2_find_object'
+                and fallback.get('task_id') == result['task_id'])
 
 
 def get_tool_spec(name: str) -> ToolSpec | None:

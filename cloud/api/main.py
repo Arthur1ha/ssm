@@ -71,7 +71,7 @@ def _on_esp32_connect(client, userdata, flags, rc):
         client.subscribe([
             ("ssm/agents/+/state",  0),
             ("ssm/agents/+/event",  0),
-            ("ssm/result/+/+",      0),
+            ("ssm/result/+/+",      1),
             ("ssm/task/+/+",        0),
             ("ssm/feedback/+",      0),
             ("ssm/peer/result/+",   0),
@@ -195,7 +195,10 @@ def _on_esp32_message(client, userdata, msg):
             except (OSError, ValueError, TypeError):
                 recorded = None
                 logger.warning("Lamp task receipt unavailable for %s", parts[3])
-            if recorded and recorded.get("result") in {"ok", "blocked", "rejected", "error", "cancelled"}:
+            if recorded and (recorded.get("result") in {"ok", "blocked", "rejected", "error", "cancelled"}
+                             or (recorded.get("result") == "unknown"
+                                 and recorded.get("error") == "receipt_unavailable"
+                                 and recorded.get("execution_active") is False)):
                 # A delayed QoS duplicate can outlive the bounded in-memory
                 # result cache. Reuse its durable receipt before marking busy.
                 _esp32_state.store_task_result(parts[3], recorded)
@@ -292,6 +295,20 @@ async def lifespan(app):
         while True:
             await asyncio.sleep(1)
             last_control = publish_control_change(last_control)
+            from cloud.esp32.physical_tasks import observed_result, receipt_query
+            for task_id in _esp32_state.receipt_queries_due():
+                try:
+                    recorded = observed_result(task_id)
+                    if recorded:
+                        _esp32_state.store_task_result(task_id, recorded)
+                    if not _esp32_state.has_pending_tasks(task_id):
+                        continue
+                    query = receipt_query(task_id)
+                    if query:
+                        intents_module._mqtt_publish(
+                            f"ssm/task_query/{query['unit_id']}/{task_id}", query)
+                except Exception:
+                    logger.warning("Lamp receipt query failed for %s", task_id)
             if time.monotonic() - last_go2_heartbeat >= 30:
                 go2_router_module._publish_go2_state()
                 last_go2_heartbeat = time.monotonic()

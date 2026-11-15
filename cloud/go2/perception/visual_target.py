@@ -30,7 +30,6 @@ CAPTURE_DIR = LOG_DIR / "vision"
 MAX_CAPTURE_BYTES = 2_000_000
 
 CALIBRATION_PATH = Path(__file__).with_name('camera_calibration.json')
-MAX_SAMPLE_SKEW = 0.25
 MAX_FRAME_AGE = 0.8
 MAX_POSITION_ERROR_M = 0.20
 from cloud.go2.navigation.occupancy_grid import ROBOT_HALF_LENGTH_M, SAFETY_MARGIN_M
@@ -91,10 +90,11 @@ def validate_samples(frame: dict, pose: dict, pose_at: float | None,
     sampled = frame.get('received_at')
     if type(sampled) not in (int, float) or not math.isfinite(sampled) or now - sampled > MAX_FRAME_AGE or sampled > now:
         raise TargetUnlocalized('frame_stale')
-    if (any(type(value) not in (int, float) or not math.isfinite(value) for value in (pose_at, voxel_at))
-            or abs(sampled - pose_at) > MAX_SAMPLE_SKEW
-            or abs(sampled - voxel_at) > MAX_SAMPLE_SKEW):
-        raise TargetUnlocalized('sensor_frame_skew')
+    # Camera, odometry and LiDAR arrive independently. Receipt-time skew alone
+    # does not reject a sample; session, fresh imagery and pose stability still apply.
+    if any(type(value) not in (int, float) or not math.isfinite(value)
+           for value in (pose_at, voxel_at)):
+        raise TargetUnlocalized('sensor_sample_unavailable')
     if pose_frame != 'odom' or voxel_frame != 'odom' or not session_id or pose.get('session_id') != session_id:
         raise TargetUnlocalized('odom_session_mismatch')
     if frame.get('odom_session_id') != session_id:
@@ -519,7 +519,7 @@ async def observe_target(target: str, *, after_frame_id=None,
                              frame.get('pose_received_at'), frame['received_at'],
                              go2.odom_frame_id, 'odom', frame['odom_session_id'])
         except TargetUnlocalized as exc:
-            if exc.reason not in {'sensor_frame_skew', 'pose_invalid', 'odom_session_mismatch'}:
+            if exc.reason not in {'sensor_sample_unavailable', 'pose_invalid', 'odom_session_mismatch'}:
                 raise
             pose_reason = exc.reason
     # Preserve exactly the submitted frame even if model latency or a later
@@ -549,7 +549,7 @@ async def observe_target(target: str, *, after_frame_id=None,
     except TargetUnlocalized as exc:
         if (require_pose or getattr(go2, '_odom_session_id', None) != frame['odom_session_id']
                 or exc.reason not in {'localization_unavailable', 'pose_invalid',
-                                      'sensor_frame_skew', 'odom_session_mismatch'}):
+                                      'sensor_sample_unavailable', 'odom_session_mismatch'}):
             raise
         # A sighting remains useful, but it has no geometric coverage or bearing.
         pose, pose_reason = None, exc.reason

@@ -28,13 +28,17 @@ class TriggerMap:
         self._recent_results = []  # bounded QoS-1 duplicate suppression
         self._task_correlation = {}  # only active task IDs; terminal payload caches IDs
 
+        self._led_query_pfx = "ssm/task_query/{}/".format(UNIT_LED)
         self._led_task_pfx = "ssm/task/{}/".format(UNIT_LED)
 
     # ─────────────────────────────────────────────────────────
     #  Called by MqttClient for every incoming message
     # ─────────────────────────────────────────────────────────
     def on_mqtt(self, topic, payload):
-        if topic.startswith(self._led_task_pfx):
+        if topic.startswith(self._led_query_pfx):
+            task_id = topic[len(self._led_query_pfx):]
+            self._query_result(task_id, payload)
+        elif topic.startswith(self._led_task_pfx):
             task_id = topic[len(self._led_task_pfx):]
             self._handle_led_task(payload, task_id)
 
@@ -158,10 +162,25 @@ class TriggerMap:
     #  Orchestrator task handler
     #  Topic: ssm/task/{unit_id}/{task_id}
     # ─────────────────────────────────────────────────────────
+    def _query_result(self, task_id, payload):
+        if not isinstance(payload, dict) or payload.get("task_id") != task_id:
+            return
+        for result in self._recent_results:
+            if result["task_id"] == task_id:
+                self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), result, qos=1)
+                return
+        if self._pending_blink and self._pending_blink[0] == task_id:
+            self._publish_result(task_id, self._pending_blink[1], "executing")
+            return
+        # No execution is owned by this ID. Preserve uncertainty, and cache a
+        # tombstone so a delayed duplicate cannot execute it after the query.
+        self._publish_result(task_id, payload.get("session_id", ""), "unknown",
+                             "receipt_unavailable")
+
     def _handle_led_task(self, p, task_id):
         for result in self._recent_results:
             if result["task_id"] == task_id:
-                self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), result)
+                self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), result, qos=1)
                 return
         if self._pending_blink and self._pending_blink[0] == task_id:
             self._publish_result(task_id, self._pending_blink[1], "executing")
@@ -199,19 +218,21 @@ class TriggerMap:
             "result": result, "error": error,
             "ism_state": self._ism_led.state, "ts": unix_time(),
         }
+        if result == "unknown" and error == "receipt_unavailable":
+            payload["execution_active"] = False
         payload.update(self._task_correlation.get(task_id, {}))
         if result != "executing":
             self._task_correlation.pop(task_id, None)
             self._recent_results.append(payload)
             if len(self._recent_results) > 16:
                 self._recent_results.pop(0)
-        self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), payload)
+        self._mqtt.publish("ssm/result/{}/{}".format(UNIT_LED, task_id), payload, qos=1)
 
     def republish_recent_results(self):
         """Restore terminal acknowledgements lost during a broker outage."""
         for payload in self._recent_results:
             if not self._mqtt.publish(
-                    "ssm/result/{}/{}".format(UNIT_LED, payload["task_id"]), payload):
+                    "ssm/result/{}/{}".format(UNIT_LED, payload["task_id"]), payload, qos=1):
                 break
 
     def _publish_led_state(self, force=False):

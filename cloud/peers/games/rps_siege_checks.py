@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,7 +13,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from cloud.peers.games import rps_siege
-from cloud.peers.games.rps_decisions import Go2Setup, PerformanceDecision
+from cloud.peers.games.rps_decisions import Go2Identification, LampSetup, PerformanceDecision
 from cloud.peers.messaging import AgentMessenger
 from cloud.space.execution import ExecutionContext
 
@@ -22,6 +22,41 @@ class _MemorySaver(InMemorySaver):
     @asynccontextmanager
     async def async_run_lock(self, _thread_id):
         yield
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_dog_invitation_asks_lamp_willingness_before_any_identification(monkeypatch, tmp_path, accepted):
+    from cloud.peers.games import rps_decisions, rps_lifecycle
+
+    monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
+    monkeypatch.setattr(rps_lifecycle, "game_invitation_ready", lambda *_: True)
+    agent = SimpleNamespace(begin_peer_game=Mock())
+    for name, attributes in {
+        "cloud.esp32.service": {"get_agent": lambda: agent},
+        "cloud.space.context": {"get_space_context": lambda *_args, **_kwargs: {
+            "lamp_state": "OFF", "target_identified": False}},
+    }.items():
+        module = ModuleType(name)
+        module.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, module)
+    agent._state = None
+    decide = AsyncMock(return_value={"accepted": accepted, "speech": "我来参与准备。" if accepted else "这次先不玩。"})
+    monkeypatch.setattr(rps_decisions, "decide", decide)
+    messenger = Mock()
+    messenger.send_message.return_value = {"result": "accepted", "message_id": "lamp_reply"}
+    invitation = {"kind": "message", "interaction_kind": "game_invite", "game_id": "rps_siege",
+                  "activity_id": "act_test", "message_id": "dog_invite", "sender": "go2",
+                  "target": rps_siege.LAMP, "content": "来玩猜拳？", "deadline": time.time() + 60}
+    rps_lifecycle.on_invitation(messenger, invitation, None)
+    assert decide.await_args.args[:2] == ("lamp", "invite")
+    assert "接受参与→认灯→公开双方映射→确认规则→秘密出拳" in decide.await_args.args[2]["game"]["rules"]
+    assert messenger.send_message.call_args.kwargs["reply_kind"] == ("accepted" if accepted else "declined")
+    assert messenger.send_message.call_args.kwargs["reply_to"] == "dog_invite"
+    agent.begin_peer_game.assert_not_called()
+    if accepted:
+        messenger.send_result.assert_not_called()
+    else:
+        messenger.send_result.assert_called_once_with("dog_invite", "rejected", reason="invitation_declined")
 
 
 @pytest.fixture
@@ -41,16 +76,16 @@ async def game_harness(monkeypatch):
 
     monkeypatch.setattr(loop, "run_in_executor", inline_executor)
     calls, timeline, decisions, observations = [], [], [], []
-    target_location = {"x": 1.5, "y": 0.2, "odom_session_id": "test-odom"}
     fixture = SimpleNamespace(
         lamp_choices=["scissors"], dog_choices=["rock"],
         gesture_result="ok", performance_result="ok", physical_result="ok", off_result="ok",
         observation={"result": "ok", "message": "桌上的智能灯清楚可见。"}, target_visible=True,
         agreement=True, interrupt_after=None, interrupt_after_off=False,
-        physical_results=[],
-        navigation_results=[
-            {"result": "ok", "confirmation": "odom_stopped_and_visual_recheck",
-             "target_location": target_location},
+        physical_results=[], interrupt_decision=None,
+        search_results=[
+            {"result": "ok", "outcome": "nearby", "found": True,
+             "target": "桌上的智能灯", "task_id": "rps_msg_test_rps_lamp",
+             "stop": {"result": "ok"}},
         ],
     )
     messenger = Mock()
@@ -86,14 +121,19 @@ async def game_harness(monkeypatch):
 
     async def decide(role, phase, facts, **_kwargs):
         decisions.append((role, phase, deepcopy(facts)))
+        if fixture.interrupt_decision == (role, phase):
+            drive.user_interrupt = True
         if phase == "identify":
-            assert role == "lamp"
+            if role == "go2":
+                return {"target": "桌上的智能灯" if fixture.target_visible else None,
+                        "target_visible": fixture.target_visible,
+                        "speech": "认出了桌上的圆球灯。" if fixture.target_visible else "没能认出灯。"}
             return {"color": {"r": 0, "g": 100, "b": 255, "brightness": 160},
                     "speech": "我是亮蓝色的圆球灯，请看看我在哪里。"}
         if phase == "setup":
             return {"speech": "我选好这局的表达了。",
-                    **({"target": "桌上的智能灯" if fixture.target_visible else None,
-                        "target_visible": fixture.target_visible} if role == "go2" else {}),
+                    **({"color_names": {"rock": "红色", "scissors": "绿色", "paper": "蓝色"}}
+                       if role == "lamp" else {}),
                     "mapping": ({
                         "rock": {"r": 255, "g": 0, "b": 0, "brightness": 160},
                         "scissors": {"r": 0, "g": 255, "b": 0, "brightness": 160},
@@ -101,6 +141,9 @@ async def game_harness(monkeypatch):
                     } if role == "lamp" else {
                         "rock": "Hello", "scissors": "Stretch", "paper": "Content"})}
         if phase == "agree":
+            # The model must see exactly the contract already shown to the user.
+            assert len([row for row in timeline if row.get("stage") == "mapping_proposal"]) == 2
+            assert any(row.get("stage") == "terms_proposal" for row in timeline)
             return {"accepted": fixture.agreement, "speech": "同意这局约定。"}
         if phase == "performance":
             return {"command": "Dance2", "speech": "这把你赢了，我来跳个舞。"}
@@ -108,6 +151,19 @@ async def game_harness(monkeypatch):
         assert "choices" not in facts  # Never send a current private choice to either model.
         choices = fixture.lamp_choices if role == "lamp" else fixture.dog_choices
         return {"choice": choices[facts["round"]-1], "speech": "我选好了。"}
+
+    searches = []
+    active_search = None
+
+    @contextmanager
+    def search_request(request_id, deadline):
+        nonlocal active_search
+        active_search = (request_id, deadline)
+        searches.append(active_search)
+        try:
+            yield
+        finally:
+            active_search = None
 
     async def execute_tool(name, params, **kwargs):
         calls.append((name, deepcopy(params)))
@@ -119,8 +175,11 @@ async def game_harness(monkeypatch):
         if name == "go2_sport":
             return {"result": fixture.performance_result if kwargs.get("request_id", "").endswith("_performance")
                     else fixture.gesture_result}
-        assert name == "go2_navigate_to_visible_target"
-        return fixture.navigation_results.pop(0)
+        assert name == "go2_find_object"
+        assert active_search is not None
+        assert active_search[0] == "rps_msg_test_rps_lamp"
+        assert int(active_search[1]) == kwargs["context"].expires_at
+        return fixture.search_results.pop(0)
 
     def execute_physical(**kwargs):
         calls.append((kwargs["action"], deepcopy(kwargs["params"])))
@@ -144,6 +203,7 @@ async def game_harness(monkeypatch):
         "cloud.go2.navigation.navigator": {"navigator": navigator},
         "cloud.go2.control": {"control_lease": SimpleNamespace(snapshot=lambda: None)},
         "cloud.go2.tools.executor": {"execute_tool": execute_tool},
+        "cloud.agents.go2.workflows.search": {"search_request": search_request},
         "cloud.space.activity": {"get_activity_store": lambda: store},
         "cloud.space.context": {"get_space_context": lambda *_args, **_kwargs: {}},
         "cloud.api.intents": {"_dispatch_mqtt_task": Mock()},
@@ -164,14 +224,18 @@ async def game_harness(monkeypatch):
                            messenger=messenger, navigator=navigator, calls=calls,
                            timeline=timeline, decisions=decisions,
                            observations=observations,
-                           target_location=target_location)
+                           searches=searches)
 
 
-async def test_dog_wins_once_then_full_approach_and_confirmed_switch_off(game_harness):
+async def test_dog_wins_then_searches_nearby_without_metric_location_and_switches_off(game_harness):
     h = game_harness
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    advances = [params for name, params in h.calls if name == "go2_navigate_to_visible_target"]
+    advances = [params for name, params in h.calls if name == "go2_find_object"]
     assert advances == [{"target": "桌上的智能灯"}]
+    assert h.searches == [("rps_msg_test_rps_lamp", h.event["deadline"])]
+    search_events = [row for row in h.timeline if row.get("action") == "go2_find_object"]
+    assert [row["event_type"] for row in search_events] == ["action", "action_result"]
+    assert all(row["task_id"] == "rps_msg_test_rps_lamp" for row in search_events)
     off_indices = [index for index, call in enumerate(h.calls)
                    if call == ("SET_STATE", {"state": "OFF"})]
     assert len(off_indices) == 1 and off_indices[0] == len(h.calls)-1
@@ -219,7 +283,7 @@ async def test_lamp_wins_then_model_selected_performance_without_navigation(game
     h = game_harness
     h.config.lamp_choices = ["paper"]
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    assert not any(name == "go2_navigate_to_visible_target" for name, _params in h.calls)
+    assert not any(name == "go2_find_object" for name, _params in h.calls)
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
     h.messenger.send_result.assert_called_once_with(
         "msg_test_rps", "ok", task_id="task_test_rps", reason="lamp_won_performance_confirmed")
@@ -236,7 +300,7 @@ async def test_draw_repeats_without_moving_until_first_decisive_throw(game_harne
     h.config.dog_choices = ["rock"] * 36
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert len([1 for name, _ in h.calls if name == "go2_sport"]) == 36
-    assert [params for name, params in h.calls if name == "go2_navigate_to_visible_target"] == [{"target": "桌上的智能灯"}]
+    assert [params for name, params in h.calls if name == "go2_find_object"] == [{"target": "桌上的智能灯"}]
     last_throw = [facts for _role, phase, facts in h.decisions if phase == "throw"][-1]
     assert last_throw["round"] == 36 and all(row["winner"] == "draw" for row in last_throw["history"])
     h.messenger.send_result.assert_called_once_with(
@@ -280,7 +344,7 @@ async def test_unconfirmed_gesture_cannot_score_advance_or_win(game_harness):
     h = game_harness
     h.config.gesture_result = "unknown"
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    assert not any(name == "go2_navigate_to_visible_target" for name, _params in h.calls)
+    assert not any(name == "go2_find_object" for name, _params in h.calls)
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
     assert not any(event.get("stage") == "rps_result" for event in h.timeline)
     h.messenger.send_result.assert_called_once_with(
@@ -305,7 +369,8 @@ async def test_unidentifiable_lamp_rejects_before_agreement_or_throw(game_harnes
     h.config.target_visible = False
     h.config.observation = {"result": "ok", "message": "画面中没有可辨认的灯或固定标记。"}
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    assert {phase for _role, phase, _facts in h.decisions} == {"identify", "setup"}
+    assert [(role, phase) for role, phase, _facts in h.decisions] == [("lamp", "identify"), ("go2", "identify")]
+    assert not any(row.get("stage") == "mapping_proposal" for row in h.timeline)
     assert [name for name, _ in h.calls] == ["SET_STATE", "SET_COLOR", "go2_observe"]
     h.messenger.send_result.assert_called_once_with("msg_test_rps", "rejected", task_id="task_test_rps",
                                                    reason="game_target_not_visible")
@@ -317,15 +382,69 @@ async def test_disagreement_stops_before_throw(game_harness):
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert not any(phase == "throw" for _role, phase, _facts in h.decisions)
     assert h.messenger.send_result.call_args.kwargs["reason"] == "game_terms_not_agreed"
+    assert len([row for row in h.timeline if row.get("stage") == "mapping_proposal"]) == 2
+    assert not any(row.get("stage") == "terms_confirmed" for row in h.timeline)
 
 
-@pytest.mark.parametrize("confirmation", [None, "odom_stopped_and_visual_progress"])
-async def test_unconfirmed_arrival_keeps_dog_win_but_never_switches_off(game_harness, confirmation):
+async def test_public_mapping_is_complete_before_agreement_even_with_vague_model_speech(game_harness):
     h = game_harness
-    h.config.navigation_results = [{"result": "ok", "confirmation": confirmation}]
+    await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
+    stages = [row.get("stage") for row in h.timeline]
+    assert stages.index("recognition") < stages.index("mapping_proposal") < stages.index("agreement")
+    assert stages.index("terms_confirmed") < stages.index("rps_result")
+    proposals = [row for row in h.timeline if row.get("stage") == "mapping_proposal"]
+    assert proposals[0]["unit_id"] == rps_siege.LAMP
+    assert "石头＝红色；剪刀＝绿色；布＝蓝色" in proposals[0]["text"]
+    assert proposals[1]["unit_id"] == "go2"
+    assert "石头＝挥手；剪刀＝伸展；布＝开心" in proposals[1]["text"]
+    agreements = [facts for _, phase, facts in h.decisions if phase == "agree"]
+    throws = [facts for _, phase, facts in h.decisions if phase == "throw"]
+    assert all(facts["canonical_terms"] == agreements[0]["canonical_terms"] for facts in agreements + throws)
+    assert all("choices" not in facts for facts in agreements + throws)
+    assert all(facts["target_identification"]["target_visible"] for _, phase, facts in h.decisions if phase == "setup")
+    assert all(set(params) == {"r", "g", "b", "brightness"}
+               for name, params in h.calls if name == "SET_COLOR")
+
+
+def test_mapping_requires_all_three_readable_color_names():
+    proposal = {"speech": "我选好了。", "mapping": {
+        "rock": {"r": 255, "g": 0, "b": 0, "brightness": 160},
+        "scissors": {"r": 0, "g": 255, "b": 0, "brightness": 160},
+        "paper": {"r": 0, "g": 0, "b": 255, "brightness": 160}},
+        "color_names": {"rock": "红色", "scissors": "绿色", "paper": "蓝色"}}
+    assert LampSetup.model_validate(proposal).color_names.paper == "蓝色"
+    for names in ({"rock": "红色"}, {**proposal["color_names"], "paper": "  "}):
+        with pytest.raises(ValueError):
+            LampSetup.model_validate({**proposal, "color_names": names})
+
+
+@pytest.mark.parametrize("phase", ["setup", "agree"])
+async def test_intervention_during_decision_cannot_publish_stale_rules_or_throw(game_harness, phase):
+    h = game_harness
+    h.config.interrupt_decision = ("lamp", phase)
+    await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
+    assert not any(p == "throw" for _, p, _ in h.decisions)
+    forbidden = "mapping_proposal" if phase == "setup" else "terms_confirmed"
+    assert not any(row.get("stage") == forbidden for row in h.timeline)
+    assert h.messenger.send_result.call_args.kwargs["reason"] == "autonomy_interrupted_or_offline"
+
+
+@pytest.mark.parametrize("patch", [
+    {"result": "accepted"},
+    {"outcome": "seen_not_reached"},
+    {"outcome": None},
+    {"found": False},
+    {"stop": {"result": "accepted"}},
+    {"stop": None},
+    {"target": "另一个小球"},
+    {"task_id": "other_search"},
+])
+async def test_unconfirmed_search_keeps_dog_win_but_never_switches_off(game_harness, patch):
+    h = game_harness
+    h.config.search_results[0].update(patch)
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
-    assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:game_approach_unconfirmed:ok"
+    assert h.messenger.send_result.call_args.kwargs["reason"].startswith("go2_won:game_approach_unconfirmed:")
     assert any(row.get("stage") == "rps_result" and row.get("reason") == "go2_won" for row in h.timeline)
     assert "狗获胜" in h.timeline[-1]["text"] and "未确认完成" in h.timeline[-1]["text"]
 
@@ -333,7 +452,7 @@ async def test_unconfirmed_arrival_keeps_dog_win_but_never_switches_off(game_har
 async def test_navigation_failure_does_not_change_winner(game_harness):
     h = game_harness
     h.navigator.snapshot = lambda: (None, "map_unavailable")
-    h.config.navigation_results = [{"result": "blocked", "reason": "map_unavailable"}]
+    h.config.search_results = [{"result": "blocked", "reason": "map_unavailable"}]
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:game_approach_unconfirmed:map_unavailable"
     assert h.drive._advance_task.await_args.kwargs["result"]["game_winner"] == "go2"
@@ -369,7 +488,7 @@ async def test_unconfirmed_performance_preserves_lamp_win(game_harness):
 
 async def test_user_interruption_after_arrival_prevents_switch_off(game_harness):
     h = game_harness
-    h.config.interrupt_after = "go2_navigate_to_visible_target"
+    h.config.interrupt_after = "go2_find_object"
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
     assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:autonomy_interrupted_or_offline"
@@ -402,14 +521,13 @@ async def test_unconfirmed_lamp_display_cannot_score(game_harness):
 
 
 def test_target_decision_requires_visible_description_and_rejects_invented_hidden_target():
-    setup = {"mapping": {"rock": "Hello", "scissors": "Stretch", "paper": "Content"},
-             "speech": "看不到灯，先不开局。", "target_visible": False, "target": None}
-    assert Go2Setup.model_validate(setup).target is None
+    setup = {"speech": "看不到灯，先不开局。", "target_visible": False, "target": None}
+    assert Go2Identification.model_validate(setup).target is None
     with pytest.raises(ValueError, match="unobserved_game_target"):
-        Go2Setup.model_validate({**setup, "target": "猜测的灯"})
+        Go2Identification.model_validate({**setup, "target": "猜测的灯"})
     with pytest.raises(ValueError, match="visible_game_target_required"):
-        Go2Setup.model_validate({**setup, "target_visible": True})
-    assert Go2Setup.model_validate({**setup, "target_visible": True, "target": " 桌上的灯 "}).target == "桌上的灯"
+        Go2Identification.model_validate({**setup, "target_visible": True})
+    assert Go2Identification.model_validate({**setup, "target_visible": True, "target": " 桌上的灯 "}).target == "桌上的灯"
 
 
 def test_performance_requires_supported_action_with_confirmable_standing_completion():

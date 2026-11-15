@@ -17,6 +17,7 @@ SOCKET_TIMEOUT_S = 3
 class MqttClient:
     def __init__(self):
         self._subs = []
+        self._outbox = []
         self._callback = None
         self._client = None
         self._last_ping = 0
@@ -43,25 +44,34 @@ class MqttClient:
     def set_reconnect_callback(self, cb):
         self._on_reconnect = cb
 
-    def subscribe(self, topic):
-        if topic not in self._subs:
-            self._subs.append(topic)
+    def subscribe(self, topic, qos=0):
+        if (topic, qos) not in self._subs:
+            self._subs.append((topic, qos))
         if self._client:
             try:
                 self._client.sock.settimeout(SOCKET_TIMEOUT_S)
-                self._client.subscribe(topic)
+                self._client.subscribe(topic, qos=qos)
             except Exception as exc:
                 self._drop(exc)
 
     def publish(self, topic, payload, retain=False, qos=0):
-        if self._client is None:
-            return False
         if isinstance(payload, dict):
             data = json.dumps(payload).encode()
         elif isinstance(payload, str):
             data = payload.encode()
         else:
             data = payload
+        if qos == 1:
+            # umqtt.publish waits for PUBACK and may invoke the receive callback.
+            # Queue receipts to avoid a nested publish/PUBACK wait in that callback.
+            item = (topic, data, retain)
+            if item not in self._outbox:
+                if len(self._outbox) >= 32:
+                    return False  # TriggerMap retains receipts for later queries.
+                self._outbox.append(item)
+            return True
+        if self._client is None:
+            return False
         try:
             self._client.sock.settimeout(SOCKET_TIMEOUT_S)
             self._client.publish(topic, data, retain=retain, qos=qos)
@@ -85,6 +95,11 @@ class MqttClient:
                 self._client.sock.settimeout(SOCKET_TIMEOUT_S)
                 self._client.ping()
                 self._last_ping = now
+            if self._outbox:
+                item = self._outbox[0]
+                self._client.sock.settimeout(SOCKET_TIMEOUT_S)
+                self._client.publish(item[0], item[1], retain=item[2], qos=1)
+                self._outbox.pop(0)
             self._client.check_msg()
         except Exception as exc:
             self._drop(exc)
@@ -134,9 +149,9 @@ class MqttClient:
                 finally:
                     probe.close()
                 client.connect()
-            for topic in self._subs:
+            for topic, qos in self._subs:
                 client.sock.settimeout(SOCKET_TIMEOUT_S)
-                client.subscribe(topic)
+                client.subscribe(topic, qos=qos)
         except Exception as exc:
             self._close(client)
             print("[MQTT] Connect failed: {}".format(exc))

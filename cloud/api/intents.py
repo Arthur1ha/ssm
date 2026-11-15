@@ -796,7 +796,8 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
             "skill_id": "go2_find_object" if canonical == "FIND_OBJECT" else "go2_visual_navigate",
             "params": {"target": target.strip()},
             "task_id": task_id,
-            "deadline": min(float(session["expires_at"]), time.time() + (SEARCH_SERVER_TIMEOUT_S if canonical == "FIND_OBJECT" else 180)),
+            "deadline": min(float(session["expires_at"]), deadline or time.time() + SEARCH_SERVER_TIMEOUT_S,
+                            time.time() + SEARCH_SERVER_TIMEOUT_S),
         })
     if canonical == "RECOGNIZE_PERSON":
         return await _internal_request("/api/go2/identity/recognize", "POST", session, {})

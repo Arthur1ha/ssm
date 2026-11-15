@@ -1,3 +1,4 @@
+import asyncio
 import math
 import json
 import time
@@ -185,7 +186,7 @@ async def test_missing_calibration_uses_lidar_without_claiming_a_target(monkeypa
     locate = AsyncMock(side_effect=TargetUnlocalized('object_returns_unavailable'))
     monkeypatch.setattr(visual_target, 'locate_lidar_target', locate)
     monkeypatch.setattr(target_approach, 'REOBSERVE_MAX_STEPS', 0)
-    result = await tools.go2_navigate_to_visible_target('白色猫头鹰')
+    result = await target_approach.navigate_to_visible_target('白色猫头鹰')
     assert result['result'] == 'blocked'
     assert result['reason'] == 'object_returns_unavailable'
     locate.assert_awaited_once()
@@ -418,10 +419,20 @@ async def test_lidar_localization_preserves_pre_model_pair_and_source(lidar_loca
 
 
 @pytest.mark.asyncio
-async def test_lidar_rejects_skew_before_model(lidar_localizer):
+async def test_lidar_accepts_receipt_skew_before_model(lidar_localizer):
     module, robot, pose, frame, calls = lidar_localizer
-    robot.voxel_received_at -= 1.
-    with pytest.raises(TargetUnlocalized, match='sensor_frame_skew'):
+    robot.voxel_received_at -= .6
+    frame['pose_received_at'] -= .4
+    location, _, _ = await module.locate_lidar_target('owl')
+    assert location['source'] == 'lidar_foreground_cluster'
+    assert calls == ['image', 'pair', 'model', 'cluster']
+
+
+@pytest.mark.asyncio
+async def test_lidar_rejects_missing_sample_before_model(lidar_localizer):
+    module, robot, pose, frame, calls = lidar_localizer
+    robot.voxel_received_at = None
+    with pytest.raises(TargetUnlocalized, match='sensor_sample_unavailable'):
         await module.locate_lidar_target('owl')
     assert calls == []
 
@@ -473,3 +484,311 @@ def test_real_lidar_target_has_floor_evidence_inside_inflated_keepout():
     grid.measured_floor[:] = False
     with pytest.raises(TargetUnlocalized, match='target_ground_unverified'):
         select_standoff(grid, pose, location)
+
+
+@pytest.fixture
+def visual_search_fallback(monkeypatch):
+    """Exercise the real tool composition without devices, models or file stores."""
+    from unittest.mock import AsyncMock
+    from cloud.go2.tools import tools, executor
+    from cloud.go2.navigation import navigator, target_approach
+    from cloud.agents.go2.workflows.search import current_search_request
+    from cloud.space.execution import ExecutionContext, use_context
+    from cloud.observability import events as event_module
+
+    robot = SimpleNamespace(_odom_session_id='fallback-odom')
+    primary = AsyncMock(return_value={'result': 'blocked', 'reason': 'object_returns_unavailable',
+                                      'target': '小球', 'navigation': None, 'observation_moves': []})
+    stop = AsyncMock(return_value={'result': 'ok'})
+    owner = SimpleNamespace(owner_session_id='fallback-session')
+    calls, events = [], []
+    context = ExecutionContext('fallback-session', 'visitor', False,
+                               expires_at=int(time.time() + 300))
+
+    async def search(name, params, *, context):
+        request = current_search_request()
+        calls.append((name, params, context, request))
+        assert stop.await_count > 0
+        return {'result': 'ok', 'outcome': 'nearby', 'found': True, 'stop': {'result': 'ok'},
+                'target': params['target'], 'task_id': request[0], 'target_location': None}
+
+    monkeypatch.setattr(tools, 'go2', robot)
+    monkeypatch.setattr(tools.control_lease, 'snapshot', lambda: owner)
+    real_navigation = target_approach.navigate_to_visible_target
+    real_execute = executor.execute_tool
+    monkeypatch.setattr(target_approach, 'navigate_to_visible_target', primary)
+    monkeypatch.setattr(navigator.navigator, 'stop_and_confirm', stop)
+    monkeypatch.setattr(executor, 'execute_tool', AsyncMock(side_effect=search))
+    # Keep the real event contract and redaction; replace only disk output.
+    # Mocking emit_agent_event hid an unregistered navigation.fallback event.
+    monkeypatch.setattr(event_module, 'write_agent_event',
+                        lambda row: events.append((row['event'], row)))
+    with use_context(context):
+        yield SimpleNamespace(primary=primary, stop=stop, calls=calls, events=events,
+                              context=context, robot=robot, owner=owner, tools=tools,
+                              real_navigation=real_navigation, real_execute=real_execute,
+                              search=executor.execute_tool)
+
+
+@pytest.mark.parametrize('reason', [
+    'localization_unavailable', 'map_unavailable',
+    'object_returns_unavailable', 'target_lidar_disagreement', 'position_uncertainty_excessive',
+    'sensor_sample_unavailable', 'pose_invalid', 'pose_3d_unavailable',
+    'ground_ray_unreliable', 'ground_intersection_unreliable',
+    'target_ground_unverified', 'measured_floor_unavailable', 'target_outside_local_map',
+])
+async def test_visual_target_falls_back_to_existing_search_with_same_goal_and_deadline(visual_search_fallback, reason):
+    h = visual_search_fallback
+    from cloud.agents.go2.workflows.search import search_request, current_search_request
+    from cloud.agents.common.effects import use_effect
+    from cloud.go2.tools.registry import target_navigation_complete
+    h.primary.return_value['reason'] = reason
+    deadline = time.time() + 40
+    with search_request('parent-run', deadline), use_effect(None, ('go2', 'thread', 'run', 'step')):
+        result = await h.tools.go2_navigate_to_visible_target('小球')
+        assert current_search_request() == ('parent-run', deadline)
+    name, params, context, request = h.calls[0]
+    assert name == 'go2_find_object' and params == {'target': '小球'} and context is h.context
+    assert request[1] == deadline
+    assert result['initial_navigation'] == h.primary.return_value
+    assert result['fallback']['reason'] == reason
+    assert result['fallback']['task_id'] == result['task_id'] == request[0]
+    assert result['outcome'] == 'nearby' and result['target_location'] is None
+    assert 'confirmation' not in result  # Do not fabricate metric arrival.
+    assert target_navigation_complete(result, '小球')
+    assert h.events[0][0] == 'navigation.fallback'
+    h.primary.assert_awaited_once_with('小球', allow_reobservation=False)
+
+
+@pytest.mark.parametrize('receipt', [
+    {'result': 'ok', 'confirmation': 'odom_stopped_and_visual_recheck'},
+    {'result': 'blocked', 'reason': 'target_not_visible'},
+    {'result': 'blocked', 'reason': 'target_confirmation_mismatch'},
+    {'result': 'blocked', 'reason': 'vision_result_invalid'},
+    {'result': 'error', 'reason': 'motion_not_observed'},
+    {'result': 'cancelled', 'reason': 'localization_unavailable'},
+    {'result': 'timeout', 'reason': 'localization_unavailable'},
+    {'result': 'blocked', 'reason': 'body_telemetry_unavailable'},
+    {'result': 'blocked', 'reason': 'control_lease_changed'},
+    {'result': 'blocked', 'reason': 'disconnected'},
+    {'result': 'blocked', 'reason': 'no_known_free_path'},
+    {'result': 'blocked', 'reason': 'stop_unconfirmed'},
+    {'result': 'timeout', 'reason': 'object_returns_unavailable'},
+    {'result': 'accepted', 'reason': 'object_returns_unavailable'},
+    {'result': 'unknown', 'reason': 'object_returns_unavailable'},
+    {'result': 'blocked', 'reason': 'object_returns_unavailable', 'navigation': {'status': 'executing'}},
+    {'result': 'blocked', 'reason': 'object_returns_unavailable', 'observation_moves': [{'status': 'unknown'}]},
+])
+async def test_visual_target_does_not_retry_success_safety_failures_or_unknown_motion(visual_search_fallback, receipt):
+    h = visual_search_fallback
+    h.primary.return_value = receipt
+    assert await h.tools.go2_navigate_to_visible_target('小球') == receipt
+    h.search.assert_not_awaited()
+    h.stop.assert_not_awaited()
+
+
+async def test_visual_target_keeps_explicit_distance_limit(visual_search_fallback):
+    h = visual_search_fallback
+    result = await h.tools.go2_navigate_to_visible_target('小球', max_advance_m=.5)
+    h.primary.assert_awaited_once_with('小球', max_advance_m=.5)
+    assert result == h.primary.return_value
+    h.search.assert_not_awaited()
+    h.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize('change', ['stop_unknown', 'control_changed', 'session_changed'])
+async def test_visual_fallback_rechecks_stop_session_and_owner(visual_search_fallback, change):
+    h = visual_search_fallback
+    async def stop(**_kwargs):
+        if change == 'control_changed':
+            h.owner.owner_session_id = 'new-user'
+        if change == 'session_changed':
+            h.robot._odom_session_id = 'new-odom'
+        return {'result': 'accepted' if change == 'stop_unknown' else 'ok'}
+    h.stop.side_effect = stop
+    result = await h.tools.go2_navigate_to_visible_target('小球')
+    assert result['reason'] == {'stop_unknown': 'stop_unconfirmed',
+        'control_changed': 'control_lease_changed', 'session_changed': 'odom_session_mismatch'}[change]
+    h.search.assert_not_awaited()
+
+
+async def test_visual_fallback_cannot_extend_parent_deadline(visual_search_fallback):
+    from cloud.agents.go2.workflows.search import search_request
+    h = visual_search_fallback
+    with search_request('expired-parent', time.time() - 1):
+        result = await h.tools.go2_navigate_to_visible_target('小球')
+    assert result == h.primary.return_value
+    h.search.assert_not_awaited()
+    h.stop.assert_not_awaited()
+
+
+async def test_visual_fallback_preserves_search_failure_and_completed_motion(visual_search_fallback):
+    h = visual_search_fallback
+    h.primary.return_value['observation_moves'] = [{'status': 'succeeded', 'task_id': 'observed-move'}]
+    h.search.side_effect = None
+    h.search.return_value = {'result': 'blocked', 'outcome': 'seen_not_reached',
+                            'reason': 'no_known_free_observation_path', 'stop': {'result': 'ok'}}
+    result = await h.tools.go2_navigate_to_visible_target('小球')
+    assert result['result'] == 'blocked' and result['reason'] == 'no_known_free_observation_path'
+    assert result['initial_navigation']['observation_moves'][0]['task_id'] == 'observed-move'
+    h.search.assert_awaited_once()
+
+
+async def test_visual_fallback_identity_is_stable_per_original_effect(visual_search_fallback):
+    from cloud.agents.common.effects import use_effect
+    h = visual_search_fallback
+    for step in ('step-a', 'step-a', 'step-b'):
+        with use_effect(None, ('go2', 'thread', 'run', step)):
+            await h.tools.go2_navigate_to_visible_target('小球')
+    ids = [call[3][0] for call in h.calls]
+    assert ids[0] == ids[1] and ids[0] != ids[2]
+
+
+@pytest.mark.parametrize('reason', ['localization_unavailable', 'map_unavailable'])
+async def test_completed_navigation_failure_can_enter_search_after_stopping(visual_search_fallback, reason):
+    h = visual_search_fallback
+    h.primary.return_value = {
+        'result': 'error', 'reason': reason,
+        'navigation': {'status': 'failed', 'task_id': 'previous-move',
+                       'last_trusted_pose': {'x': .4, 'y': 0., 'session_id': 'fallback-odom'}},
+    }
+    result = await h.tools.go2_navigate_to_visible_target('小球')
+    h.stop.assert_awaited_once()
+    h.search.assert_awaited_once()
+    assert result['result'] == 'ok'
+    assert result['initial_navigation']['navigation']['task_id'] == 'previous-move'
+
+
+async def test_previous_unconfirmed_stop_requires_new_stop_receipt(visual_search_fallback):
+    h = visual_search_fallback
+    h.primary.return_value.update(reason='map_unavailable', stop={'result': 'accepted'})
+    result = await h.tools.go2_navigate_to_visible_target('小球')
+    h.stop.assert_awaited_once()
+    h.search.assert_awaited_once()
+    assert result['initial_navigation']['stop']['result'] == 'accepted'
+
+
+async def test_lidar_failure_reaches_search_without_inner_reobservation(visual_search_fallback, monkeypatch):
+    """Replay the first failure in the real 14:29 trace, before it was overwritten."""
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation import target_approach
+    from cloud.go2.perception import visual_target
+    h = visual_search_fallback
+    # The function is captured by the wrapper at invocation, so retrieve its
+    # original implementation from the fixture instead of reloading globals.
+    monkeypatch.setattr(target_approach, 'navigate_to_visible_target', h.real_navigation)
+    monkeypatch.setattr(target_approach, 'go2', SimpleNamespace(is_connected=True, body_state='standing'))
+    monkeypatch.setattr(target_approach, '_authorize', lambda *a, **k: None)
+    monkeypatch.setattr(visual_target, 'load_calibration', lambda **k: {})
+    locate = AsyncMock(side_effect=TargetUnlocalized('object_returns_unavailable'))
+    observe = AsyncMock(side_effect=TargetUnlocalized('localization_unavailable'))
+    monkeypatch.setattr(visual_target, 'locate_ground_target', locate)
+    monkeypatch.setattr(visual_target, 'observe_target', observe)
+    result = await h.tools.go2_navigate_to_visible_target('小球')
+    locate.assert_awaited_once()
+    observe.assert_not_awaited()
+    h.search.assert_awaited_once()
+    assert result['fallback']['reason'] == 'object_returns_unavailable'
+    assert result['initial_navigation']['reason'] == 'object_returns_unavailable'
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('vision failure'), asyncio.CancelledError()])
+async def test_unrelated_exception_or_cancellation_never_starts_search(visual_search_fallback, failure):
+    h = visual_search_fallback
+    h.primary.side_effect = failure
+    with pytest.raises(type(failure)):
+        await h.tools.go2_navigate_to_visible_target('小球')
+    h.search.assert_not_awaited()
+
+
+async def test_fallback_uses_parent_budget_beyond_old_visual_timeout(visual_search_fallback):
+    from cloud.agents.go2.workflows.search import search_request, SEARCH_TOOL_TIMEOUT_S
+    from cloud.go2.tools.registry import get_tool_spec
+    h = visual_search_fallback
+    deadline = time.time() + 200
+    with search_request('long-search', deadline):
+        await h.tools.go2_navigate_to_visible_target('小球')
+    assert h.calls[0][3][1] == deadline
+    assert get_tool_spec('go2_navigate_to_visible_target').timeout_s == SEARCH_TOOL_TIMEOUT_S
+
+
+async def test_role_executor_and_search_graph_return_one_final_receipt(
+        visual_search_fallback, monkeypatch, tmp_path):
+    """Run both production graphs and tool boundaries with only device I/O replaced."""
+    from cloud.agents.common.runner import GraphRun, run_role_graph
+    from cloud.agents.common.checkpoint import FileCheckpointSaver
+    from cloud.agents.common.effects import FileEffectLedger
+    from cloud.agents.go2.workflows import search
+    from cloud.go2 import connection, control, service
+    from cloud.go2.tools import executor
+    from unittest.mock import AsyncMock
+    h = visual_search_fallback
+    h.primary.return_value.update(reason='localization_unavailable')
+    h.robot.is_connected = True
+    monkeypatch.setenv('SSM_CHECKPOINT_DIR', str(tmp_path / 'search'))
+    monkeypatch.setattr(connection, 'go2', h.robot)
+    monkeypatch.setattr(executor, 'go2', h.robot)
+    monkeypatch.setattr(executor, 'execute_tool', h.real_execute)
+    monkeypatch.setattr(executor, '_check_motion_owner', lambda *a: None)
+    monkeypatch.setattr(executor, 'check_motion_preconditions', lambda *a: None)
+    monkeypatch.setattr(executor, '_audit', lambda name, context, result, *a: result)
+    monkeypatch.setattr(service, 'prepare_user_interaction', AsyncMock())
+    monkeypatch.setattr(control, 'control_lease', SimpleNamespace(
+        acquire=lambda context: None, release=lambda session: None))
+    monkeypatch.setattr(control.session_tasks, 'track', lambda *a: None)
+    observations = []
+
+    class Device:
+        def __init__(self, context, task_id, bounds, session):
+            assert context is h.context and session == 'fallback-odom'
+            self.travelled_m, self.coverage = 0., {}
+
+        async def guard(self, state):
+            return None
+
+        async def progress(self, *a, **k):
+            pass
+
+        async def observe(self, state):
+            observations.append(state['target'])
+            return {'found': True, 'frame_id': len(observations),
+                    'observation': {'proximity': 'nearby'}}
+
+        async def record(self, observation):
+            return {'observations': len(observations)}
+
+        async def approach(self, state):
+            assert state['observation']['nearby_confirmed']
+            return {'result': 'ok', 'reason': 'arrival_verified', 'found': True}
+
+    monkeypatch.setattr(search, 'DeviceSearch', Device)
+
+    class Model:
+        def bind_tools(self, schemas, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            raise AssertionError('the same goal must not be dispatched again after fallback')
+
+    run = GraphRun('fallback-chain', h.context.session_id, '去前面的灯那里', time.time() + 40)
+    run.agent_id = 'go2'
+    async def execute(name, params, step_id):
+        with search.search_request(run.run_id, run.deadline):
+            return await h.real_execute(name, params, context=h.context)
+
+    await run_role_graph(
+        run, model=Model(), tool_schemas={'go2_navigate_to_visible_target': {
+            'name': 'go2_navigate_to_visible_target', 'description': 'visual navigation',
+            'parameters': {'type': 'object', 'properties': {'target': {'type': 'string'}}}}},
+        build_messages=lambda current: [],
+        execute=execute, initial_tool=('go2_navigate_to_visible_target', {'target': '小球'}),
+        terminal_tools=frozenset({'go2_navigate_to_visible_target'}),
+        checkpointer=FileCheckpointSaver(tmp_path / 'role'),
+        effect_ledger=FileEffectLedger(tmp_path / 'effects'))
+    assert run.status == 'ok' and len(run.steps) == 1
+    receipt = run.steps[0]['result']
+    assert receipt['outcome'] == 'nearby' and receipt['stop']['result'] == 'ok'
+    assert receipt['fallback']['reason'] == 'localization_unavailable'
+    assert receipt['initial_navigation']['reason'] == 'localization_unavailable'
+    assert observations == ['小球', '小球']
+    h.primary.assert_awaited_once()

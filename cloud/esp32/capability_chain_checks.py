@@ -384,6 +384,59 @@ def edge_lamp(monkeypatch):
                            events=events, tick=tick, command=command)
 
 
+@pytest.fixture
+def edge_pixels(edge_lamp, monkeypatch):
+    """Include the real output limiter; edge_lamp normally intercepts _set_raw."""
+    lamp = edge_lamp
+
+    class Pixels(list):
+        def write(self):
+            lamp.pixels.append(tuple(self))
+
+    lamp.driver._num_pixels = 2
+    lamp.driver._np = Pixels([(0, 0, 0)] * 2)
+    lamp.driver._set_raw = type(lamp.driver)._set_raw.__get__(lamp.driver)
+    monkeypatch.setitem(lamp.driver._set_raw.__func__.__globals__, "WS2812_MAX_VAL", 30)
+    return lamp
+
+
+@pytest.mark.parametrize("rgb,brightness,expected", [
+    ((255, 128, 32), 255, (30, 15, 4)),
+    ((32, 128, 255), 255, (4, 15, 30)),
+    ((255, 128, 32), 128, (30, 15, 4)),
+    ((255, 128, 32), 30, (30, 15, 3)),
+    ((255, 128, 32), 8, (8, 4, 1)),
+    ((255, 128, 32), 4, (4, 2, 0)),
+    ((255, 255, 255), 255, (30, 30, 30)),
+])
+def test_color_output_limit_keeps_mixed_colors_distinct(edge_pixels, rgb, brightness, expected):
+    lamp = edge_pixels
+    params = dict(zip(("r", "g", "b"), rgb), brightness=brightness)
+    lamp.command("color", "SET_COLOR", params)
+    assert lamp.pixels[-1] == (expected, expected)
+    assert lamp.bridge._last_led_snapshot == ("ON", *rgb, brightness)
+    assert lamp.events[-1][1]["result"] == "ok"
+    lamp.command("off", "SET_STATE", {"state": "OFF"})
+    assert lamp.pixels[-1] == ((0, 0, 0),) * 2
+    lamp.command("on", "SET_STATE", {"state": "ON"})
+    assert lamp.pixels[-1] == (expected, expected)
+
+
+def test_blink_output_limit_keeps_color_on_every_tick_and_restores(edge_pixels):
+    lamp = edge_pixels
+    lamp.command("color", "SET_COLOR", {"r": 32, "g": 128, "b": 255, "brightness": 255})
+    lamp.command("blink", "BLINK", {"r": 255, "g": 128, "b": 32, "count": 2})
+    assert lamp.pixels[-1] == ((30, 15, 4),) * 2
+    lamp.tick()
+    assert lamp.pixels[-1] == ((0, 0, 0),) * 2
+    lamp.tick()
+    assert lamp.pixels[-1] == ((30, 15, 4),) * 2
+    lamp.tick()
+    assert lamp.pixels[-1] == ((4, 15, 30),) * 2
+    assert lamp.bridge._last_led_snapshot == ("ON", 32, 128, 255, 255)
+    assert lamp.events[-1][1]["result"] == "ok"
+
+
 def test_color_from_dark_lights_requested_rgb_and_retains_it_when_reopened(edge_lamp):
     lamp = edge_lamp
     requested = {"r": 160, "g": 40, "b": 220}

@@ -258,7 +258,8 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         "视觉观察只能确认候选物可见，不能证明地图可达；"
         "无候选就如实结束；不要凭邀请、文字观察或模型回答宣称找到，"
         "不要使用盲走或坐标导航代替视觉目标导航。"
-        "本局须导航确认停稳并重新观察同一目标，才算完成；缺少标定时如实报告发现但未到达。"
+        "本局须确认已在同一目标附近并停稳才算完成；目标定位失败时工具可自动转为分段找物，"
+        "以真实找物和停稳回执判断完成，不能把仅看见或推进一段当成完成。"
     )
     graph_task = asyncio.create_task(run_go2_loop(
         "peer_" + event["message_id"], goal, context=context,
@@ -320,9 +321,9 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
     steps = (graph_result or {}).get("tool_results") or []
     visual = next((step.get("result") or {} for step in reversed(steps)
                    if step.get("tool") == "go2_navigate_to_visible_target"), None)
-    reached_candidate = bool(announced_target and visual and visual.get("result") == "ok" and
-                             visual.get("confirmation") ==
-                             "odom_stopped_and_visual_recheck")
+    from cloud.go2.tools.registry import target_navigation_complete
+    reached_candidate = bool(announced_target and visual and
+                             target_navigation_complete(visual, announced_target))
     if reached_candidate and not stop_reason:
         status, reason = "ok", "candidate_reached"
         reply = (str((graph_result or {}).get("response") or "").strip()[:1000]
@@ -662,7 +663,7 @@ GAME = Game(
     execute=_run_color_hunt,
     rules=("灯或狗都可邀请，双方均无未完成任务且空闲时才可发起；接收方依据人格、当前事实自主接受、拒绝或延后。"
            "双方确认接受后灯才重新选色并核对真实回执，邀请时的旧灯色不是接受前置条件。"
-           "狗行动前须确认新灯色和安全路径；须导航确认停稳并视觉复核同一目标才算找到。"
+           "狗行动前须确认新灯色和安全路径；须导航确认停稳并视觉复核同一目标，或自动降级找物确认同一目标已在附近且停稳，才算找到。"
            "判断输赢只看本局目标导航回执，之后自由探索到达别处不等于找到游戏目标。"),
     strategy=("结合自己的 traits、当前活动、同伴状态及新鲜环境观察决定是否邀请或接受。"
               "有清楚可辨认的同色静止物品可寻找时适合提议；有可玩项本身不是邀请理由。"

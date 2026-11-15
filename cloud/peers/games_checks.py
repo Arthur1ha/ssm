@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import time
+
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -82,6 +84,34 @@ def test_arbitration_receives_game_strategy_without_a_game_specific_prompt():
     assert "示例独立规则" in messages[1].content
     assert "示例独立策略" in messages[1].content
     assert "寻找同色物品" not in messages[0].content
+
+
+@pytest.mark.parametrize("choice", ["accept", "defer", "decline"])
+def test_rps_invitation_arbitration_receives_preparation_order_and_preserves_willingness(choice):
+    from cloud.agents.go2.workflows.free_explore import build_motivation_graph
+    from cloud.peers.games.rps_siege import GAME
+
+    prompts = []
+
+    class Model:
+        def with_structured_output(self, *_args, **_kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            prompts.extend(messages)
+            return {"choice": choice, "reason": "我先考虑是否参与准备。"}
+
+    graph = build_motivation_graph(profile_loader=lambda: {"revision": 1, "traits": {}}, model=Model())
+    result = asyncio.run(graph.ainvoke({"connected": True,
+        "space_summary": "灯在线，当前熄灭；双方无任务占用。",
+        "last_tool_result": {"reason": "game_target_not_visible"},
+        "pending_event": {"kind": "peer_message", "interaction_kind": "game_invite",
+                          "game": GAME.metadata(), "content": "来玩猜拳攻灯？"}}))
+    assert result["event_decision"] == choice
+    assert "接受参与→认灯→公开双方映射→确认规则→秘密出拳" in prompts[1].content
+    assert "不要把尚未进行的准备当作接受邀请的前提" in prompts[0].content
+    assert "game_target_not_visible" in prompts[1].content
+    assert result["next_action"] == ("run_peer_task" if choice == "accept" else "none")
 
 
 def test_existing_color_hunt_contracts():
@@ -366,7 +396,8 @@ def check_no_observation_no_game_color() -> None:
     assert receipts[-1] == (("accept_empty", "blocked"), {"reason": "game_observation_required"})
 
 
-async def check_graph_handoff(confirmation: str = "odom_stopped_and_visual_recheck") -> None:
+async def check_graph_handoff(confirmation: str = "odom_stopped_and_visual_recheck", *,
+                              visual_receipt: dict | None = None, expected_status: str | None = None) -> None:
     """The existing graph chooses its target; success never scripts additional motion or lamp changes."""
     receipts, activity_events, replies = [], [], []
     lamp_rgb = [(255, 255, 255)]
@@ -414,8 +445,9 @@ async def check_graph_handoff(confirmation: str = "odom_stopped_and_visual_reche
         assert activity_events[-1][1] == reason
         assert json.loads(kwargs["task_context"]())["latest_observation"]["summary"] == "看到白色盒子"
         return {"result": "ok", "run_id": "game_check", "tool_results": [
-            {"tool": "go2_navigate_to_visible_target", "params": {"target": "白色盒子"}, "result": {
-                "result": "ok", "confirmation": confirmation}}]}
+            {"tool": "go2_navigate_to_visible_target", "params": {"target": "白色盒子"}, "result":
+                visual_receipt if visual_receipt is not None else {
+                    "result": "ok", "target": "白色盒子", "confirmation": confirmation}}]}
 
     with (patch("cloud.peers.games.color_hunt.activity_allows", return_value=True),
           patch("cloud.peers.games.color_hunt.live_lamp_color", side_effect=lambda _source: {
@@ -432,7 +464,7 @@ async def check_graph_handoff(confirmation: str = "odom_stopped_and_visual_reche
     sport.assert_not_called()
     lamp.assert_not_called()
     off.assert_not_called()
-    expected = "ok" if confirmation == "odom_stopped_and_visual_recheck" else "unknown"
+    expected = expected_status or ("ok" if confirmation == "odom_stopped_and_visual_recheck" else "unknown")
     assert receipts[0][0][1] == expected
     assert receipts[0][1]["reason"] == ("candidate_reached" if expected == "ok" else "no_confirmed_color_match")
     assert "plot_steps" not in drive._advance_task.await_args.kwargs["result"]
@@ -460,7 +492,8 @@ async def check_navigation_reason_is_narration_only() -> None:
         await go2_navigate_to_visible_target(**args)
         await go2_navigate_to_visible_target("红球")
     assert navigate.await_count == 2
-    assert all(call.args == ("红球",) and not call.kwargs for call in navigate.await_args_list)
+    assert all(call.args == ("红球",) and call.kwargs == {'allow_reobservation': False}
+               for call in navigate.await_args_list)
 
 
 async def check_game_waits_for_lamp_setup() -> None:
@@ -500,3 +533,19 @@ if __name__ == "__main__":
     asyncio.run(check_game_waits_for_lamp_setup())
     asyncio.run(check_navigation_reason_is_narration_only())
     print("peer game protocol checks passed")
+
+
+@pytest.mark.parametrize("patch, expected", [
+    ({}, "ok"),
+    ({"outcome": "seen_not_reached"}, "unknown"),
+    ({"found": False}, "unknown"),
+    ({"stop": {"result": "accepted"}}, "unknown"),
+    ({"target": "另一个物品"}, "unknown"),
+    ({"task_id": "unrelated-search"}, "unknown"),
+    ({"fallback": None}, "unknown"),
+])
+async def test_color_hunt_accepts_only_matching_stopped_search_fallback(patch, expected):
+    receipt = {"result": "ok", "target": "白色盒子", "outcome": "nearby", "found": True,
+               "stop": {"result": "ok"}, "task_id": "search-game",
+               "fallback": {"tool": "go2_find_object", "task_id": "search-game"}, **patch}
+    await check_graph_handoff(visual_receipt=receipt, expected_status=expected)

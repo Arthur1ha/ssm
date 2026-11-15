@@ -15,7 +15,7 @@ class ESP32State:
         self._task_results        = {}
         # Request timeouts are uncertain outcomes, not permission to start a
         # game. Keep unresolved dispatches separate from the bounded cache.
-        self._pending_tasks       = set()
+        self._pending_tasks       = {}
 
     def mark_task_pending(self, task_id: str) -> None:
         """Record a dispatch before publish, or its MQTT loopback.
@@ -25,12 +25,24 @@ class ESP32State:
         """
         with self._lock:
             previous = self._task_results.get(task_id, {})
+            if (previous.get("result") == "unknown"
+                    and previous.get("execution_active") is False
+                    and previous.get("error") == "receipt_unavailable"):
+                return
             if previous.get("result") not in {"ok", "blocked", "rejected", "error", "cancelled"}:
-                self._pending_tasks.add(task_id)
+                self._pending_tasks.setdefault(task_id, time.monotonic())
 
-    def has_pending_tasks(self) -> bool:
+    def receipt_queries_due(self) -> list[str]:
         with self._lock:
-            return bool(self._pending_tasks)
+            now = time.monotonic()
+            due = [key for key, last in self._pending_tasks.items() if now - last >= 5][:8]
+            for key in due:
+                self._pending_tasks[key] = now
+            return due
+
+    def has_pending_tasks(self, task_id: str | None = None) -> bool:
+        with self._lock:
+            return task_id in self._pending_tasks if task_id is not None else bool(self._pending_tasks)
 
     def on_manifest(self, unit_id: str, payload: dict):
         with self._lock:
@@ -54,11 +66,17 @@ class ESP32State:
     def store_task_result(self, task_id: str, result: dict):
         with self._lock:
             previous = self._task_results.get(task_id, {})
+            if (previous.get("result") == "unknown" and previous.get("execution_active") is False
+                    and result.get("result") in {"accepted", "executing", "timeout"}):
+                return
             if previous.get("result") in ("ok", "blocked", "rejected", "error", "cancelled"):
                 return
             self._task_results[task_id] = dict(result)
-            if result.get("result") in {"ok", "blocked", "rejected", "error", "cancelled"}:
-                self._pending_tasks.discard(task_id)
+            if (result.get("result") in {"ok", "blocked", "rejected", "error", "cancelled"}
+                    or (result.get("result") == "unknown"
+                        and result.get("error") == "receipt_unavailable"
+                        and result.get("execution_active") is False)):
+                self._pending_tasks.pop(task_id, None)
             if len(self._task_results) > 256:
                 self._task_results.pop(next(iter(self._task_results)))
             self._result_ready.notify_all()
@@ -68,7 +86,7 @@ class ESP32State:
         with self._result_ready:
             while True:
                 result = self._task_results.get(task_id, {})
-                if result.get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout"):
+                if result.get("result") in ("ok", "blocked", "rejected", "error", "cancelled", "timeout", "unknown"):
                     return result
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

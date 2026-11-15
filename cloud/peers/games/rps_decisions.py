@@ -103,16 +103,29 @@ class SetupDecision(DecisionModel):
         return value.strip()
 
 
+class LampColorNames(DecisionModel):
+    rock: str = Field(min_length=1, max_length=30)
+    scissors: str = Field(min_length=1, max_length=30)
+    paper: str = Field(min_length=1, max_length=30)
+
+    @field_validator("rock", "scissors", "paper")
+    @classmethod
+    def nonblank(cls, value: str):
+        if not value.strip():
+            raise ValueError("nonblank_color_name_required")
+        return value.strip()
+
+
 class LampSetup(SetupDecision):
     mapping: LampMapping
+    color_names: LampColorNames
 
 
 class LampIdentification(SetupDecision):
     color: LampColor
 
 
-class Go2Setup(SetupDecision):
-    mapping: Go2Mapping
+class Go2Identification(SetupDecision):
     target_visible: bool = Field(description="提供的当前相机观察是否足以辨认灯或灯旁固定标记")
     target: str | None = Field(max_length=100,
         description="观察支持的灯本体或灯旁固定标记描述；看不到或无法辨认时填null，不猜测")
@@ -126,6 +139,10 @@ class Go2Setup(SetupDecision):
         elif self.target is not None:
             raise ValueError("unobserved_game_target")
         return self
+
+
+class Go2Setup(SetupDecision):
+    mapping: Go2Mapping
 
 
 class PerformanceDecision(DecisionModel):
@@ -172,8 +189,8 @@ class DecisionState(TypedDict, total=False):
 
 
 def _schema(role: str, phase: str):
-    if phase == "identify" and role == "lamp":
-        return LampIdentification
+    if phase == "identify":
+        return LampIdentification if role == "lamp" else Go2Identification
     if phase == "setup":
         return LampSetup if role == "lamp" else Go2Setup
     if phase in {"agree", "invite"}:
@@ -208,6 +225,14 @@ def _instructions(role: str, phase: str) -> str:
         "规则与上下文从提供的数据读取，历史记录只用于策略，不当作新鲜观察。"
         "用自己的性格自然表达，不复述内部字段，不声称未获回执的动作已经完成。"
     )
+    if phase == "identify" and role == "go2":
+        return common + (
+            "你已接受参与，现在只根据灯亮起后的当前相机观察辨认圆球灯，不选择出拳映射。"
+            "判断形状、颜色与识别提示是否相符、候选是否唯一；观察不足、颜色不符或候选不明确，"
+            "返回target_visible=false、target=null并如实说明，不能把同伴自述或历史失败当作当前观察。"
+            "确认辨认后返回target_visible=true，target保留当前观察支持的位置、圆球形状或固定标记；"
+            "后续出拳会变色，不能把识别色当作永久目标特征。发言说明认灯结果，不声称已出拳。"
+        )
     if phase == "identify":
         return common + (
             "你的实体是一盏圆球灯。开局先选一个清楚可见的亮灯颜色，帮助狗辨认你。"
@@ -219,30 +244,30 @@ def _instructions(role: str, phase: str) -> str:
         specific = (
             "自行选择本局石头、剪刀、布的三个映射，不沿用固定模板。"
             "灯选三个肉眼清楚可区分、非黑色的RGB颜色，亮度为1到255；不能只改变同一颜色的亮度。"
+            "color_names逐项填写与mapping中RGB相符的自然语言颜色名称，供双方和用户阅读。"
             if role == "lamp" else
             "自行从给出的可用动作中选三个不同动作表示石头、剪刀、布，不沿用固定模板。"
             "优先考虑当前场地和动作耗时，动作之后仍需真实回执确认站立。"
-            "同时判断当前相机观察是否足以辨认灯，并提供灯本体或灯旁固定标记的具体目标描述；"
-            "观察不足就返回target_visible=false、target=null并如实说明，不能把用户承诺放好灯当成已看到。"
-            "画面中的形状或颜色不符、有多个无法区分的候选时也返回不可辨认。"
-            "目标必须有提供的当前真实观察支持，不根据灯的出拳颜色挑任意同色物品。"
-            "识别提示中的圆球形状和已确认亮出的颜色用于本次认灯，不能把同伴的自述当成相机观察。"
-            "后续猜拳会变色，target须保留观察到的形状、位置或固定标记，不把当前识别色当作永久特征。"
+            "认灯已由此前阶段完成，沿用target_identification中的目标，不另选目标。"
         )
         return common + specific + (
             "本局一把定胜负，平局重来，不协商回合数或推进距离。"
             "这些只是提议，还需要双方确认；不编造空间距离、物品或可达性。"
-            "发言向同伴说清自己的三个映射和本局提议。"
+            "执行器会逐项公布你的结构化映射；speech简短表达本局提议与意愿，不另造或改写映射。"
+            "映射是公开规则，不是本轮出拳；此刻不选拳，不以保密为由隐瞒对应关系。"
         )
     if phase == "agree":
         return common + (
             "阅读双方映射与canonical_terms，独立决定是否同意这一整份本局约定。"
-            "同意表示接受一把定胜负、平局重来、同一目标与双方映射；狗赢一次导航过去关灯，灯赢狗表演一次。"
+            "核对公开颜色名称与RGB是否相符、动作是否可区分；不一致或含糊就拒绝并说明。"
+            "同意表示接受一把定胜负、平局重来、同一目标与双方映射；狗赢用找物流程分段观察接近，确认在附近停稳后关灯，灯赢狗表演一次。"
             "有歧义、观察不足或条件不合适就拒绝并说明；拒绝不表示对方能力失效。"
         )
     if phase == "invite":
         return common + (
             "结合当前任务、人格、真实空间事实和邀请内容，自主决定接受、拒绝或暂缓。"
+            "接受仅表示愿意参与准备；认灯、选映射与规则确认在接受后执行。"
+            "灯尚未亮起、尚未看到灯、尚未选映射或上一局认灯失败，本身不构成拒绝准备的条件。"
             "只有愿意现在参与才返回accepted=true；暂缓和拒绝都返回false并自然说明。"
             "空闲、游戏可玩或同伴邀请本身不意味着必须接受。"
         )

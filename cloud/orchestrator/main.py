@@ -207,7 +207,7 @@ def _subscribe_and_announce(client):
         ("ssm/agents/+/event",  0),
         ("ssm/decision/active", 0),
         ("ssm/intent/+",        0),
-        ("ssm/result/+/+",      0),
+        ("ssm/result/+/+",      1),
         ("ssm/session/+/ended", 0),
         ("ssm/peer/request/+", 0),
         ("ssm/peer/cancel/+", 0),

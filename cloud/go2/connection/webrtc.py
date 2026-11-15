@@ -403,11 +403,13 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
                 return {"result": "error", "error": "sport_rpc_rejected",
                         "request_status_code": code, "body_state": self.body_state,
                         "confirmation_scope": "request"}
+            last = self.pending_action or self.runtime.data.get('last_action') or {}
             return {"result": "accepted", "confirmation": "sport_rpc" if code == 0 else "transport",
                     "confirmation_scope": "request", "body_state": self.body_state,
+                    **({'request_id': last.get('request_id')} if dispatch_only else {}),
                     **({'dispatch_only': True} if dispatch_only else {}),
                     "target_state": spec.expected_state,
-                    "completion_supported": not dispatch_only and spec.completion == "joint_posture" and self._joint_observation_available,
+                    "completion_supported": spec.completion == "joint_posture" and self._joint_observation_available,
                     "pending_action": self.pending_action.copy() if self.pending_action else None,
                     "request_status_code": code}
         try:
@@ -474,8 +476,9 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         waiter = None
         if body_action:
             self._motion_observation_enabled = False
-            self._action_observation = None if dispatch_only else {'request_id': request_id,
+            self._action_observation = {'request_id': request_id,
                                         'baseline': self._last_motor_positions,
+                                        'after_motor_at': self._low_state_received_at,
                                         'motion_seen': False, 'acknowledged': False}
             self._posture_candidate_since = None
             self._posture_candidate_samples = 0
@@ -490,12 +493,12 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             self.body_confirmation = "unknown"
             self.body_state = None
             self._move_control_active = False
-            if not dispatch_only:
+            if not dispatch_only or self._joint_observation_available:
                 self._action_deadline = asyncio.get_running_loop().call_later(
                     spec.timeout_s, self._expire_body_action, request_id)
-                if spec.completion == 'joint_posture' and self._joint_observation_available:
-                    waiter = asyncio.get_running_loop().create_future()
-                    self._completion = waiter
+            if spec.completion == 'joint_posture' and self._joint_observation_available:
+                waiter = asyncio.get_running_loop().create_future()
+                self._completion = waiter
         previous_velocity_requested = self._velocity_command_active
         if cmd == 'Move':
             self._velocity_command_active = True
@@ -503,9 +506,25 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         if params:
             options["parameter"] = params
         try:
-            response = await asyncio.wait_for(
-                self._publish_sport_request(connection, options),
-                timeout=min(spec.timeout_s, _SPORT_RPC_TIMEOUT_S))
+            # Physical completion may arrive before (or without) the RPC ACK.
+            # Do not hold the caller/command lock until the ACK timeout then.
+            rpc_task = asyncio.create_task(self._publish_sport_request(connection, options))
+            try:
+                if waiter is None:
+                    response = await asyncio.wait_for(rpc_task, timeout=min(spec.timeout_s, _SPORT_RPC_TIMEOUT_S))
+                else:
+                    done, _ = await asyncio.wait({rpc_task, waiter},
+                        timeout=min(spec.timeout_s, _SPORT_RPC_TIMEOUT_S),
+                        return_when=asyncio.FIRST_COMPLETED)
+                    if waiter in done:
+                        return waiter, None
+                    if rpc_task not in done:
+                        raise TimeoutError
+                    response = rpc_task.result()
+            finally:
+                if not rpc_task.done():
+                    rpc_task.cancel()
+                await asyncio.gather(rpc_task, return_exceptions=True)
         except asyncio.CancelledError:
             if (epoch == self._motion_epoch and connection is self._conn and body_action
                     and self.pending_action is not None):
@@ -540,12 +559,15 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
                                       'body_state': self.body_state})
                 return completed, None
             if dispatch_only:
+                self._action_observation = None
                 self.runtime.finish_body_action(request_id, 'timeout', phase='dispatched_unconfirmed',
                                                 error=error)
             unconfirmed = asyncio.get_running_loop().create_future()
             unconfirmed.set_result({'result': 'timeout' if isinstance(exc, TimeoutError) else 'unknown',
                                     'error': error, 'request_id': request_id,
                                     'rpc_request_id': wire_id, 'confirmation_scope': 'request',
+                                    **({'dispatch_only': True, 'completion_supported': self._joint_observation_available}
+                                       if dispatch_only else {}),
                                     'pending_action': self.pending_action})
             return unconfirmed, None
         if epoch != self._motion_epoch or connection is not self._conn or not self.is_connected:
@@ -581,6 +603,12 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             return None, response
         if body_action:
             if dispatch_only:
+                if waiter is not None:
+                    # Manual admission does not require a known starting
+                    # posture, but available joints still confirm completion.
+                    self.pending_action = {**self.pending_action, 'phase': 'executing'
+                        if self._action_observation['motion_seen'] else 'accepted' if code == 0 else 'sent'}
+                    return waiter, response
                 # A manual button requests a device-native action. Receipt of
                 # the request ends this call; it does not prove a posture.
                 self._action_observation = None

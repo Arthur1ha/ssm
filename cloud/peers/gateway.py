@@ -366,8 +366,7 @@ def request_peer_skill(
             from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
             # This one task includes visual localization, navigation and
             # arrival verification. Never outwait the verified user session.
-            timeout = min(SEARCH_SERVER_TIMEOUT_S if skill_id == "go2_find_object" else 150.0,
-                          context.expires_at - time.time())
+            timeout = min(SEARCH_SERVER_TIMEOUT_S, context.expires_at - time.time())
         action = str((skill.get("invoke") or {}).get("action") or "")
         if target_unit_id not in {"go2", "cloud_orchestrator"} and skill_id not in {
             "set_light_state", "blink_light", "adjust_lighting",

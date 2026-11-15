@@ -25,6 +25,7 @@ class Go2FSM:
         self._motion_observation_enabled = False
         self._last_motor_positions = None
         self._last_motor_observed_at = None
+        self._last_posture_motor_at = None
         self._joint_observation_available = False
         self._posture_candidate = None
         self._posture_candidate_since = None
@@ -35,6 +36,7 @@ class Go2FSM:
     def _reset_body_observations(self):
         self._last_motor_positions = None
         self._last_motor_observed_at = None
+        self._last_posture_motor_at = None
         self._joint_observation_available = False
         self._posture_candidate = None
         self._posture_candidate_since = None
@@ -122,25 +124,16 @@ class Go2FSM:
     def pending_action(self, value):
         self.runtime.commit('body_execution', pending_action=value)
 
-    def _refresh_body_freshness(self):
-        observed = getattr(self, '_sport_state_observed_at', None)
-        now = time.monotonic()
-        motor_stale = self._joint_observation_available and (self._last_motor_observed_at is None
-                                                            or now - self._last_motor_observed_at > 2)
-        if observed is not None and (now - observed > 2 or motor_stale):
-            self.runtime.commit('telemetry_expired', body_telemetry_fresh=False)
-
-    def body_ready_reason(self, *, refresh=True):
-        if refresh:
-            self._refresh_body_freshness()
+    def body_ready_reason(self):
+        # Accepted body feedback does not expire with elapsed time. Connection
+        # resets and explicit motor faults still invalidate the observation.
         if not self.runtime.data['body_telemetry_fresh']:
-            return 'body_telemetry_stale'
+            return 'body_telemetry_unavailable'
         if self.body_confirmation not in {'observed', 'previous_observation'}:
             return '等待有效设备反馈'
         return None
 
     def state_snapshot(self):
-        self._refresh_body_freshness()
         with self.runtime._lock:
             result = self.runtime.snapshot()
             available = self._available_actions()
@@ -150,20 +143,19 @@ class Go2FSM:
             result['available_manual_actions'] = [] if manual_reason else manual_commands
             result['blocked_manual_actions'] = ({cmd: manual_reason for cmd in manual_commands}
                                                 if manual_reason else {})
-            reason = self.runtime.active_reason() or self.body_ready_reason(refresh=False)
+            reason = self.runtime.active_reason() or self.body_ready_reason()
             result['blocked_actions'] = {cmd: reason or
                                           ('身体动作待确认' if self.pending_action else '当前身体姿态不允许此动作')
                                           for cmd in ACTIONS if cmd not in available}
             reasons = self.runtime.life_reasons()
             for action in ('request_rest', 'start_explore'):
-                reasons[action] = reasons[action] or self.body_ready_reason(refresh=False)
+                reasons[action] = reasons[action] or self.body_ready_reason()
             result['available_life_actions'] = [key for key, reason in reasons.items() if reason is None]
             result['life_blocked_reasons'] = reasons
             return result
 
     @property
     def available_actions(self) -> list[str]:
-        self._refresh_body_freshness()
         return self._available_actions()
 
     def _available_actions(self) -> list[str]:
@@ -173,7 +165,7 @@ class Go2FSM:
         if self.pending_action is not None:
             action = ACTIONS[self.pending_action["command"]]
             return ["StopMove"] if action.interruptible and self.is_connected else []
-        if self.body_ready_reason(refresh=False):
+        if self.body_ready_reason():
             return ['StopMove'] if self.is_connected else []
         return _FSM_AVAILABLE.get(self.body_state, [])
 
@@ -250,11 +242,18 @@ class Go2FSM:
                 or not all(type(v) in (int, float) and math.isfinite(v) for v in q)):
             return
         sport_at = getattr(self, '_sport_state_observed_at', None)
-        if not self.is_connected or sport_at is None or now - sport_at > .5:
+        motor_at = self._low_state_received_at
+        if (not self.is_connected or sport_at is None or motor_at is None
+                or not 0 <= now - sport_at <= .5 or not 0 <= now - motor_at <= .5
+                or motor_at == self._last_posture_motor_at):
             return
+        if self._last_posture_motor_at is not None and motor_at - self._last_posture_motor_at > 2:
+            self._posture_candidate_since = None
+            self._posture_candidate_samples = 0
+        self._last_posture_motor_at = motor_at
         previous = self._last_motor_positions
         self._last_motor_positions = tuple(q)
-        self._last_motor_observed_at = now
+        self._last_motor_observed_at = motor_at
         self._joint_observation_available = True
         self.runtime.commit('body_telemetry_received', body_telemetry_fresh=True)
         step = max(abs(a - b) for a, b in zip(q, previous)) if previous else math.inf
@@ -273,7 +272,12 @@ class Go2FSM:
         pending = self.pending_action
         observation = self._action_observation
         if pending and observation and pending.get('request_id') == observation['request_id']:
+            after = observation.get('after_motor_at')
+            if after is not None and motor_at <= after:
+                return
             baseline = observation.get('baseline')
+            if baseline is None:
+                observation['baseline'] = tuple(q)
             changed = baseline and max(abs(a - b) for a, b in zip(q, baseline)) > .18
             if changed and not observation['motion_seen']:
                 observation['motion_seen'] = True
@@ -308,6 +312,9 @@ class Go2FSM:
         self.runtime.body(body, confirmation='observed', source='joint_posture')
         self.runtime.finish_body_action(pending['request_id'], result, phase=phase,
                                         confirmation='joint_posture')
+        logger.info('[Go2/Conn] 动作遥测确认 cmd=%s request=%s result=%s elapsed_s=%.3f',
+                    pending.get('command'), pending['request_id'], result,
+                    time.time() - pending.get('sent_at', time.time()))
         self._action_observation = None
         deadline = getattr(self, '_action_deadline', None)
         if deadline is not None:

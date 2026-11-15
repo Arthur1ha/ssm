@@ -124,12 +124,23 @@ def test_stale_or_old_session_frame_cannot_localize(field, value, reason):
         vision.validate_samples(frame, pose, now, now, 'odom', 'odom', 's')
 
 
-def test_bad_sample_timing_is_rejected():
+@pytest.mark.parametrize('pose_offset,voxel_offset', [(.4, 0), (0, .6), (.4, .6)])
+def test_receipt_time_skew_alone_does_not_reject_samples(pose_offset, voxel_offset):
     now = time.monotonic()
     frame = {'received_at': now, 'odom_session_id': 's'}
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
-    with pytest.raises(vision.TargetUnlocalized, match='sensor_frame_skew'):
-        vision.validate_samples(frame, pose, now, now-1, 'odom', 'odom', 's')
+    vision.validate_samples(frame, pose, now-pose_offset, now-voxel_offset, 'odom', 'odom', 's')
+
+
+@pytest.mark.parametrize('missing', [None, float('nan'), float('inf')])
+@pytest.mark.parametrize('sensor', ['pose', 'voxel'])
+def test_missing_sample_timing_still_blocks(missing, sensor):
+    now = time.monotonic()
+    frame = {'received_at': now, 'odom_session_id': 's'}
+    pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
+    with pytest.raises(vision.TargetUnlocalized, match='sensor_sample_unavailable'):
+        vision.validate_samples(frame, pose, missing if sensor == 'pose' else now,
+                                missing if sensor == 'voxel' else now, 'odom', 'odom', 's')
 
 
 @pytest.mark.asyncio

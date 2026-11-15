@@ -33,6 +33,7 @@ def _evidence(name, payload):
 
 @pytest.mark.parametrize('skill_id,params', [
     ('go2_find_object', {'target': '白色猫头鹰'}),
+    ('go2_visual_navigate', {'target': '白色猫头鹰'}),
 ])
 def test_steward_search_preserves_child_budget(monkeypatch, skill_id, params):
     from cloud.go2.card import _build_go2_card
@@ -50,6 +51,10 @@ def test_steward_search_preserves_child_budget(monkeypatch, skill_id, params):
         'params': params}, 'search-child', now + 300)
     assert result['result'] == 'blocked'
     assert now + SEARCH_SERVER_TIMEOUT_S <= captured[0]['deadline'] <= time.time() + SEARCH_SERVER_TIMEOUT_S
+    earlier = now + 30
+    steward._invoke_skill(context, {'unit_id': 'go2', 'skill_id': skill_id,
+        'params': params}, 'short-child', earlier)
+    assert captured[-1]['deadline'] == earlier
 
 
 @pytest.mark.asyncio
@@ -163,8 +168,8 @@ def test_peer_lamp_reuses_physical_boundary_and_durable_receipt(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lamp_result", ["ok", "timeout"])
-async def test_steward_waits_for_blink_receipt_before_go2(monkeypatch, tmp_path, lamp_result):
+@pytest.mark.parametrize("final", [True, False])
+async def test_steward_respects_final_after_accepted_blink(monkeypatch, tmp_path, final):
     from cloud.agents.common.effects import FileEffectLedger
     from cloud.agents.steward.tools import card as card_validation
     from cloud.go2.card import _build_go2_card
@@ -186,15 +191,14 @@ async def test_steward_waits_for_blink_receipt_before_go2(monkeypatch, tmp_path,
         sequence.append("blink_dispatched")
 
     def receipt(task_id, session_id, deadline, **_kwargs):
-        sequence.append("blink_" + lamp_result)
-        return {"task_id": task_id, "result": lamp_result, "ism": "ON"}
+        raise AssertionError('accepted already counts as success under the current result contract')
 
     def http(endpoint, body, timeout):
         if endpoint.endswith("/agent/replies"):
             return {}
         assert endpoint == "/api/go2/chat"
         assert body["skill_id"] == "go2_sport" and body["params"] == {"cmd": "Hello"}
-        assert sequence[-1] == "blink_ok"
+        assert sequence[-1] == "blink_dispatched"
         sequence.append("hello_completed")
         return {"result": "ok", "task_id": body["task_id"], "confirmation": "simulated_joint_posture"}
 
@@ -204,7 +208,7 @@ async def test_steward_waits_for_blink_receipt_before_go2(monkeypatch, tmp_path,
     context = {"session_id": "sequence-session", "actor": "visitor", "persist": False,
                "space_id": "main", "origin_kind": "user_delegated", "expires_at": time.time() + 60}
     choices = [
-        {"unit_id": "esp32_desk_led", "skill_id": "blink_light", "params": {"count": 2}},
+        {"unit_id": "esp32_desk_led", "skill_id": "blink_light", "params": {"count": 2}, "final": final},
         {"unit_id": "go2", "skill_id": "go2_sport", "params": {"cmd": "Hello"}},
     ]
 
@@ -233,10 +237,11 @@ async def test_steward_waits_for_blink_receipt_before_go2(monkeypatch, tmp_path,
         build_messages=lambda _run: [HumanMessage(content="先闪灯，再挥手")], execute=execute,
         checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
         effect_ledger=FileEffectLedger(tmp_path / "effects"))
-    assert sequence == (["blink_dispatched", "blink_ok", "hello_completed"] if lamp_result == "ok"
-                        else ["blink_dispatched", "blink_timeout"])
-    assert run.status == ("ok" if lamp_result == "ok" else "timeout")
-    _evidence("blink-then-hello-" + lamp_result, {
+    assert sequence == (["blink_dispatched"] if final else ["blink_dispatched", "hello_completed"])
+    assert run.status == "ok"
+    assert run.steps[0]['result']['device_result'] == 'accepted'
+    assert run.steps[0]['result']['final'] is final
+    _evidence("blink-then-hello-final-" + str(final), {
         "sequence": sequence, "result": run.status, "steps": run.steps})
 
 

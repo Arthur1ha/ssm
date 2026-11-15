@@ -98,6 +98,8 @@ const commandBus = {
           `/api/commands/${encodeURIComponent(unitId)}/tasks/${encodeURIComponent(taskId)}`,
           { signal: controller.signal },
         );
+        if (result?.result === 'unknown' && result.error === 'receipt_unavailable'
+            && result.execution_active === false) return result;
         if (!['executing', 'accepted', 'unknown'].includes(result?.result)) return result;
       } catch (error) {
         if ([401, 403, 404].includes(error.status)) {
@@ -128,6 +130,8 @@ const commandBus = {
     if (result?.result === 'accepted') return '指令已发送，尚未确认完成';
     if (result?.result === 'executing') return '正在执行';
     if (result?.result === 'timeout') return '等待完成反馈超时，结果尚未确认';
+    if (result?.result === 'unknown' && result.error === 'receipt_unavailable'
+        && result.execution_active === false) return '设备已不再执行这条任务，但历史结果无法确认；不会自动重发';
     if (result?.result === 'unknown') return '设备动作结果未知；不会自动重发';
     if (result?.result === 'partial') return result.reply || result.response || '部分步骤未完成';
     if (result?.error) {

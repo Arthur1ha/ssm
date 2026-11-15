@@ -5,6 +5,7 @@
 # Keep each ESP32 deployment on its own user and enumerate its unit topics.
 
 user ssm_api
+topic write ssm/task_query/#
 topic read ssm/agents/#
 topic read ssm/result/#
 topic read ssm/task/#
@@ -48,6 +49,7 @@ topic write ssm/agents/esp32_desk_led/message
 topic write ssm/agents/cloud_orchestrator/message
 
 user esp32_desk
+topic read ssm/task_query/esp32_desk_led/#
 topic read ssm/decision/active
 topic read ssm/rules/esp32_desk
 topic read ssm/task/esp32_desk_led/#

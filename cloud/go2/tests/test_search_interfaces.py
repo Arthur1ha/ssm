@@ -30,7 +30,8 @@ def test_search_requires_user_delegation_from_steward():
 
 
 @pytest.mark.asyncio
-async def test_find_object_command_keeps_user_deadline_and_uses_long_task(monkeypatch):
+@pytest.mark.parametrize('action,skill', [('FIND_OBJECT', 'go2_find_object'), ('VISUAL_NAVIGATE', 'go2_visual_navigate')])
+async def test_find_object_command_keeps_user_deadline_and_uses_long_task(monkeypatch, action, skill):
     from cloud.api import intents
     calls = []
     async def dispatch(path, method, session, body):
@@ -38,12 +39,17 @@ async def test_find_object_command_keeps_user_deadline_and_uses_long_task(monkey
         return {'result': 'executing', 'task_id': body['task_id']}
     monkeypatch.setattr(intents, '_internal_request', dispatch)
     expires = time.time() + 80
-    result = await intents._dispatch_go2('FIND_OBJECT', {'target': '猫头鹰'},
+    result = await intents._dispatch_go2(action, {'target': '猫头鹰'},
                                         {'session_id': 'visitor', 'actor': 'visitor', 'expires_at': expires})
     assert result['result'] == 'executing'
     assert calls[0][0] == '/api/go2/chat'
-    assert calls[0][2]['skill_id'] == 'go2_find_object'
+    assert calls[0][2]['skill_id'] == skill
     assert calls[0][2]['deadline'] == expires
+    earlier = time.time() + 20
+    await intents._dispatch_go2(action, {'target': '猫头鹰'},
+                               {'session_id': 'visitor', 'actor': 'visitor', 'expires_at': expires},
+                               deadline=earlier)
+    assert calls[-1][2]['deadline'] == earlier
 
 
 @pytest.mark.asyncio
@@ -64,7 +70,8 @@ async def test_natural_chat_has_search_budget_and_keeps_explicit_deadline(monkey
 
 
 @pytest.mark.asyncio
-async def test_router_natural_chat_admits_long_search_without_explicit_skill(monkeypatch):
+@pytest.mark.parametrize('skill', [None, 'go2_visual_navigate', 'go2_find_object'])
+async def test_router_natural_chat_admits_long_search_without_explicit_skill(monkeypatch, skill):
     from cloud.go2 import router, tasks
     from cloud.agents.go2 import graph
     from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
@@ -80,7 +87,8 @@ async def test_router_natural_chat_admits_long_search_without_explicit_skill(mon
     monkeypatch.setattr(tasks, 'chat_tasks', Registry())
     monkeypatch.setattr(router.session_tasks, 'track', lambda *args: None)
     now = time.time()
-    result = await router.go2_chat(router.ChatRequest(message='找白色猫头鹰', task_id='natural-search'),
+    result = await router.go2_chat(router.ChatRequest(message='找白色猫头鹰', task_id='natural-search',
+                                                   skill_id=skill, params={'target': '白色猫头鹰'}),
         ExecutionContext('operator', 'admin', False, expires_at=int(now + 600)))
     assert result.status_code == 202
     assert now + SEARCH_SERVER_TIMEOUT_S <= captured['deadline'] <= time.time() + SEARCH_SERVER_TIMEOUT_S

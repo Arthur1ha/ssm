@@ -130,7 +130,7 @@ async def start_body_action(command, params, *, context, request_id=None, trace_
     trace_id = trace_id or 'tr_' + uuid.uuid4().hex
     if not re.fullmatch(r'tr_[A-Fa-f0-9]{32}', trace_id):
         raise HTTPException(status_code=400, detail='invalid trace_id')
-    deadline = deadline if deadline is not None else time.time() + 45
+    deadline = deadline if deadline is not None else time.time() + ACTIONS[command].timeout_s + 25
     if not math.isfinite(deadline) or not time.time() < deadline <= time.time() + 300:
         raise HTTPException(status_code=400, detail='invalid deadline')
     if context.expires_at:

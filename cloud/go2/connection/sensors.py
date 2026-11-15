@@ -10,7 +10,6 @@ class Go2Sensors:
     def __init__(self) -> None:
         super().__init__()
         self._robot_state: dict = {}
-        self._body_fresh_timer = None
         self._last_state_received_at: float | None = None
         self._odom: dict = {}
         self._odom_received_at: float | None = None
@@ -44,9 +43,6 @@ class Go2Sensors:
         reset_body = getattr(self, '_reset_body_observations', None)
         if callable(reset_body):
             reset_body()
-        if self._body_fresh_timer is not None:
-            self._body_fresh_timer.cancel()
-            self._body_fresh_timer = None
         self.session_map.reset(getattr(self, "_odom_session_id", None))
         self._robot_state = {}
         self._last_state_received_at = None
@@ -92,15 +88,8 @@ class Go2Sensors:
                           and all(type(v) in (int, float) and math.isfinite(v) for v in velocity))
         if valid_height or valid_velocity:
             self._sport_state_observed_at = self._last_state_received_at
-            motor_fresh = not self._joint_observation_available or (self._last_motor_observed_at is not None
-                and self._last_state_received_at - self._last_motor_observed_at <= 2)
-            self.runtime.commit('telemetry_received', body_telemetry_fresh=motor_fresh)
-            if self._body_fresh_timer is not None:
-                self._body_fresh_timer.cancel()
-            try:
-                self._body_fresh_timer = asyncio.get_running_loop().call_later(2.01, self._refresh_body_freshness)
-            except RuntimeError:
-                self._body_fresh_timer = None
+            motor_valid = not self._joint_observation_available or self._last_motor_observed_at is not None
+            self.runtime.commit('telemetry_received', body_telemetry_fresh=motor_valid)
         raw_progress = inner.get("progress")
         progress = raw_progress if type(raw_progress) in (int, float) and math.isfinite(raw_progress) else None
         self._fsm_on_velocity(inner.get("velocity"), inner.get("yaw_speed"))
@@ -114,6 +103,9 @@ class Go2Sensors:
             "body_confirmation": self.body_confirmation,
             "pending_action": self.pending_action.copy() if self.pending_action else None,
         }
+        # Sport and LOW_STATE packets arrive independently. Pair in either
+        # order, counting each motor sample only once.
+        self._fsm_on_joint_observation(self._last_state_received_at)
         self._push_state_queues()
         resume = getattr(self, '_autonomy_resume_callback', None)
         if resume is not None:
@@ -230,7 +222,7 @@ class Go2Sensors:
         for index, motor in enumerate(motors[:12]):
             lost = motor.get('lost', 0)
             old = previous[index] if previous else None
-            if old is None or lost != old['lost'] or now - old['received_at'] > 1.:
+            if old is None or lost != old['lost'] or now - old['received_at'] >= 2.:
                 stable_since = now
             else:
                 stable_since = old['stable_since']
@@ -282,6 +274,9 @@ class Go2Sensors:
                         if isinstance(motors, list) else [],
             },
         }
+        if positions is not None:
+            self._last_motor_observed_at = now
+            self._joint_observation_available = True
         observe_body = getattr(self, '_fsm_on_joint_observation', None)
         if callable(observe_body):
             observe_body(now)
@@ -345,6 +340,10 @@ class Go2Sensors:
             "imu": {"age_s": None if self._low_state_received_at is None else now - self._low_state_received_at,
                     "samples": self._low_state_count, "latest_rate_hz": rate(self._low_state_interval_s)},
             "posture": {"leg_extensions": extensions, "imu_rpy": low.get('imu_rpy'),
+                        "sport_age_s": (None if getattr(self, '_sport_state_observed_at', None) is None
+                                        else now - self._sport_state_observed_at),
+                        "accepted_motor_age_s": (None if getattr(self, '_last_motor_observed_at', None) is None
+                                                 else now - self._last_motor_observed_at),
                         "motor_diagnostics": low.get('motor_diagnostics'),
                         "candidate": getattr(self, '_posture_candidate', None),
                         "candidate_samples": getattr(self, '_posture_candidate_samples', 0),

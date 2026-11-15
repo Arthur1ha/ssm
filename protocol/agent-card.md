@@ -29,7 +29,7 @@ SSM Card 是 MQTT retained 控制面的能力声明。`ssm/agents/{unit_id}/card
 - 区域可声明 `available_actions_field` 和 `blocked_actions_field`，分别绑定实时快照中的动作键列表和阻止原因字典。转移的 `availability_key` 默认取 `action`；例如 `action=LIFE` 的休息转移使用 `availability_key=request_rest`。
 - `required_actor=admin|visitor` 是界面权限提示，服务端仍必须校验身份。`available_only=true` 表示只有实时可用列表包含该键时才展示次要入口，例如生活待命时的停止探索自环。其他不可用操作可以禁用并说明原因。
 - `execution_field`、`last_execution_field` 指向实时快照中的当前请求和最近终态结果。请求包含 `command`、可选 `label`、`phase` 和关联 ID；终态还可包含 `result`、`confirmation` 和完成时间。它们不会将请求接受投影成物理姿态确认。
-- `freshness_field` 指向主区域的实时布尔新鲜度字段；为 `false` 时该区域普通动作受限，旧观测可继续显示。其他区域仍使用自己的动作门禁，不能因身体遥测过期禁用唤醒或停止探索。控制面 `online`、设备连接、新鲜度与动作完成是不同事实。
+- `freshness_field` 指向主区域的实时布尔新鲜度字段；为 `false` 时该区域普通动作受限，旧观测可继续显示。Go2 的兼容字段 `body_telemetry_fresh` 表示反馈有效性，不设身体遥测有效期；未取得有效反馈、断连或明确电机故障时为 `false`。其他区域仍使用自己的动作门禁，不能因身体反馈无效禁用唤醒或停止探索。控制面 `online`、设备连接、新鲜度与动作完成是不同事实。
 - 转移可用 `completion` 描述设备完成依据。`unavailable` 表示尚未具备可靠完成确认，图中有目标节点不代表该动作可以自动串联。`trigger_condition` 是唯一转换条件文案；卡片使用方向表示结果，多条触发用“或”，同条内的必要条件用“且”。
 - 可选 `state_machine.diagram={width,height,sections:[{label,top}]}` 定义白板尺寸、分隔线与小标题；区域的 `diagram_group`、`node_radius` 和归一化 `layout` 坐标决定可见节点的分组、大小和位置。这些展示字段不改变运行状态、动作参数或权限。Go2 通过 `diagram.media_position="left"` 在白板左上竖排小尺寸视频和地图缩略图，两者使用相同的 16:9 外框，内容等比容纳并可点击放大；休息、待命、互动、探索置于右上“行为”，姿态和动作置于下方；连接仍只在设备标题显示。未声明媒体位置的旧 Card 沿用顶部媒体行，避免新前端遮挡旧坐标中的节点。
 
@@ -77,7 +77,7 @@ Go2 点击“移动”直接完成运动准备并显示摇杆，不显示单独�
 
 Go2 的姿态和动作在初始白板视口内全部可见，站立连接趴卧、坐下及下方动作。节点坐标及边缘留白均在画布范围内，默认无需平移寻找动作；默认显示状态转移连线。视频和地图从缩略图放大为页面内的有界浮窗，保持标题和对话入口可见，不调用全屏或遮罩整个页面。
 
-区域可声明 `prepare_action:{via:"standing",action:"SPORT"}`。已确认坐姿或趴卧时，点击站立仅选择当前姿态对应的起身命令；点击以站立为起点的其他动作，通过 `SPORT` 的 `cmd` 与 `prepare_standing:true` 请求服务端准备。服务端 LangGraph 先执行起身，并等待同一连接、同一物理请求的站立完成回执，再发送目标动作。准备失败、姿态过期或急停均中止后续步骤。手动命令的 `dispatch_only` 只改变结果等待方式，不取消页面对已知起始姿态的选择。
+区域可声明 `prepare_action:{via:"standing",action:"SPORT"}`。已确认坐姿或趴卧时，点击站立仅选择当前姿态对应的起身命令；点击以站立为起点的其他动作，通过 `SPORT` 的 `cmd` 与 `prepare_standing:true` 请求服务端准备。服务端 LangGraph 先执行起身，并等待同一连接、同一物理请求的站立完成回执，再发送目标动作。准备失败、身体反馈无效或急停均中止后续步骤。手动命令的 `dispatch_only` 保留手动请求准入，不取消页面对已知起始姿态的选择；关节反馈可用时仍等待实际动作变化及稳定目标姿态，超过短 HTTP 窗口通过已有任务查询取得完成结果。
 
 未知 widget 会记录日志并跳过；已知 widget 缺必填字段或引用未知状态也跳过。控件可用 `state_field` 绑定指定区域字段，默认使用主区；`enabled_when` 为字段到 JSON 标量或标量数组的字典，逐项 AND 匹配，不支持表达式执行。`available_actions_field`、`blocked_actions_field`、`availability_key` 与区域的实时门禁语义相同。例如遥控摇杆声明 `enabled_when:{control_mode:"remote"}`，并绑定 `available_actions` 的 `Move` 键。
 

@@ -30,7 +30,7 @@ UNIT_LED   = DEVICE_ID + "_led"
 # ── Hardware Pins（实际接线）─────────────────────────────────
 WS2812_PIN       = 25   # GPIO25 — WS2812 灯环数据线
 WS2812_NUM       = 16   # 灯环像素数量
-WS2812_MAX_VAL   = 8    # 单通道最大值（0-255），电池供电低亮测试档
+WS2812_MAX_VAL   = 30   # 输出峰值上限（0-255），超限时 RGB 同比例缩小；电池供电低亮测试档
 SOUND_SENSOR_PIN = 32   # GPIO32 — 声音传感器 数字输入（高=检测到声音，启动后正常）
 LIGHT_SENSOR_PIN = 34   # GPIO34 — 光敏传感器 AO 模拟输入（ADC1，不受 WiFi 影响）
 IR_SENSOR_PIN    = 19   # D19 — 红外传感器 数字输入（低电平=检测到）

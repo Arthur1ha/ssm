@@ -59,6 +59,16 @@ async def start(robot, command, **kwargs):
     return chat_tasks.get(result['task_id'], USER.session_id)
 
 
+async def finish_target(robot, command):
+    for _ in range(100):
+        if robot.sent and robot.sent[-1] == ACTIONS[command].api_id:
+            break
+        await asyncio.sleep(.01)
+    if command != 'EnterMoveControl':
+        assert robot.pending_action['command'] == command
+        robot._complete_observed_action(ACTIONS[command].expected_state)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('source,stand', [('sitting', 'RiseSit'), ('lying', 'StandUp')])
 @pytest.mark.parametrize('command', TARGETS)
@@ -69,16 +79,17 @@ async def test_every_standing_action_waits_for_correct_rise_receipt(robot, sourc
     assert robot.sent == [ACTIONS[stand].api_id]
     assert record.result is None
     robot._complete_observed_action('standing')
+    await finish_target(robot, command)
     result = await chat_tasks.wait(record, 5)
-    assert result['result'] == 'accepted'
+    assert result['result'] == ('accepted' if command == 'EnterMoveControl' else 'ok')
     assert result['preparation']['result'] == 'ok'
     if command == 'EnterMoveControl':
         assert robot.sent == [ACTIONS[stand].api_id, ACTIONS['StopMove'].api_id]
         assert robot.runtime.data['control_mode'] == 'remote'
     else:
         assert robot.sent == [ACTIONS[stand].api_id, ACTIONS[command].api_id]
-        assert result['dispatch_only'] is True
-        assert robot.body_state is None  # target acceptance is not its completion
+        assert result['confirmation'] == 'joint_posture'
+        assert robot.body_state == ACTIONS[command].expected_state
 
 
 @pytest.mark.asyncio
@@ -98,7 +109,6 @@ async def test_failed_rise_never_sends_target(robot):
     from cloud.go2.tasks import chat_tasks
     record = await start(robot, 'Hello')
     robot._expire_body_action(robot.pending_action['request_id'])
-    robot._completion.set_result({'result':'timeout','error':'completion_not_observed'})
     result = await chat_tasks.wait(record, 1)
     assert result['result'] == 'timeout'
     assert robot.sent == [ACTIONS['RiseSit'].api_id]
@@ -130,6 +140,7 @@ async def test_retry_shares_task_and_never_repeats_physical_commands(robot):
     assert first is again
     assert len(robot.sent) == 1
     robot._complete_observed_action('standing')
+    await finish_target(robot, 'StandDown')
     await chat_tasks.wait(first, 1)
     assert await start(robot, 'StandDown', request_id=request_id) is first
     assert len(robot.sent) == 2
@@ -167,7 +178,8 @@ async def test_http_command_uses_preparation_workflow(robot):
     record = chat_tasks.get(result['task_id'], USER.session_id)
     assert robot.sent == [ACTIONS['RiseSit'].api_id]
     robot._complete_observed_action('standing')
-    assert (await chat_tasks.wait(record, 5))['result'] == 'accepted'
+    await finish_target(robot, 'Hello')
+    assert (await chat_tasks.wait(record, 5))['result'] == 'ok'
     assert robot.sent[-1] == ACTIONS['Hello'].api_id
 
 
@@ -185,7 +197,8 @@ async def test_moving_to_body_action_waits_for_observed_stop(robot):
     robot.move_velocity(0, 0, 0)  # disabling the UI also releases its stick
     for _ in range(3):
         robot._on_state({'data':{'velocity':[0,0,0]}})
+    await finish_target(robot, 'Sit')
     result = await chat_tasks.wait(record, 5)
-    assert result['result'] == 'accepted'
+    assert result['result'] == 'ok'
     assert robot.sent == [ACTIONS['StopMove'].api_id,ACTIONS['Sit'].api_id]
     assert robot._state_queues == []

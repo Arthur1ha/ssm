@@ -188,3 +188,33 @@ def test_direct_mqtt_loopback_tracks_only_the_lamp(agent, api_boundary, monkeypa
         assert agent._state.get_task_result(task_id) is None
     send('esp32_desk_led')
     assert not agent.is_busy_for_game()
+
+
+def test_device_query_release_requires_original_task_ownership(agent, api_boundary, monkeypatch):
+    main, intents = api_boundary
+    from cloud.esp32 import physical_tasks
+    ignore = SimpleNamespace(handle_message=lambda *_args, **_kw: False)
+    for name in ('get_registry', 'get_constraint_store', 'get_activity_store'):
+        monkeypatch.setattr(main, name, lambda: ignore)
+    monkeypatch.setattr(main, '_agent_messenger', None)
+    monkeypatch.setattr(main.peer_gateway, 'handle_peer_result', lambda *_args: False)
+    monkeypatch.setattr(intents, 'handle_mqtt_message', lambda *_args: False)
+    monkeypatch.setattr(main, 'emit_agent_event', lambda *_args, **_kw: None)
+    task_id = 'task_' + 'b' * 32
+    physical_tasks.reserve(task_id, unit_id='esp32_desk_led', session_id='owner',
+                           action='SET_STATE', params={'state': 'ON'})
+    agent._state.mark_task_pending(task_id)
+    result = {'task_id': task_id, 'unit_id': 'esp32_desk_led', 'session_id': 'wrong',
+              'result': 'unknown', 'error': 'receipt_unavailable', 'execution_active': False}
+
+    def deliver():
+        main._on_esp32_message(None, None, SimpleNamespace(
+            topic=f'ssm/result/esp32_desk_led/{task_id}',
+            payload=json.dumps(result).encode(), retain=False))
+
+    deliver()
+    assert agent.is_busy_for_game()
+    result['session_id'] = 'owner'
+    deliver()
+    assert not agent.is_busy_for_game()
+    assert physical_tasks.get(task_id, unit_id='esp32_desk_led', session_id='owner')['result'] == 'unknown'

@@ -84,17 +84,25 @@ def test_old_life_completion_cannot_end_new_task_or_new_epoch():
     assert state.snapshot()['life_state'] == 'idle'
 
 
-def test_stale_body_blocks_motion_and_rest_without_lying_about_posture():
+def test_elapsed_time_does_not_block_confirmed_body_motion_or_rest(monkeypatch):
+    from cloud.go2.tools import executor
     robot = robot_at('standing')
     before = robot.state_snapshot()
-    robot._sport_state_observed_at = time.monotonic() - 3
+    robot._sport_state_observed_at = time.monotonic() - 3600
+    robot._joint_observation_available = True
+    robot._last_motor_observed_at = time.monotonic() - 3600
     after = robot.state_snapshot()
-    assert after['revision'] > before['revision']
+    assert after == before
     assert after['body_state'] == 'standing'
-    assert after['available_actions'] == ['StopMove']
-    assert after['life_blocked_reasons']['request_rest'] == 'body_telemetry_stale'
-    with pytest.raises(CommandBlocked, match='stale'):
-        robot.move_velocity(.1, 0, 0)
+    assert 'Move' in after['available_actions']
+    assert after['life_blocked_reasons']['request_rest'] is None
+    monkeypatch.setattr(executor, 'go2', robot)
+    monkeypatch.setattr(executor, 'control_lease', ControlLease())
+    context = ExecutionContext('old-telemetry', 'admin', True)
+    for name in ('go2_move', 'go2_find_object', 'go2_navigate_to_visible_target'):
+        executor.check_motion_preconditions(name, {}, context)
+    robot.move_velocity(.1, 0, 0)
+    robot._conn.datachannel.pub_sub.publish_without_callback.assert_called()
 
 
 @pytest.mark.asyncio
@@ -157,24 +165,6 @@ async def test_rest_blocks_queued_autonomous_event_before_graph(monkeypatch):
                                'deadline': time.time() + 60}, None, None, 'test')
     decision.assert_not_awaited()
     messenger.send_result.assert_called_once()
-
-
-def test_snapshot_uses_one_committed_freshness_fact(monkeypatch):
-    import cloud.go2.connection.fsm as module
-    robot = robot_at()
-    # Crossing a clock boundary midway through projection cannot mix revision
-    # and gate fields. Refresh once before the projection and derive from facts.
-    calls = 0
-    original = robot._refresh_body_freshness
-    def refresh():
-        nonlocal calls
-        calls += 1
-        original()
-    monkeypatch.setattr(robot, '_refresh_body_freshness', refresh)
-    snapshot = robot.state_snapshot()
-    assert calls == 1
-    assert snapshot['body_telemetry_fresh'] is True
-    assert 'Hello' in snapshot['available_actions']
 
 
 def graph_runtime(tmp_path, monkeypatch, model):
@@ -363,9 +353,9 @@ async def test_start_exploration_requires_navigation_before_lease_or_mode_change
 
 @pytest.mark.parametrize('invalid', [{}, {'progress': 0}, {'body_height': float('nan')},
                                    {'velocity': [0, float('nan'), 0]}, {'velocity': [0, 0]}])
-def test_invalid_body_frame_does_not_refresh_stale_pose(invalid):
-    robot = robot_at()
-    robot._sport_state_observed_at = time.monotonic() - 3
+def test_invalid_initial_body_frame_does_not_establish_valid_feedback(invalid):
+    robot = Go2Connection()
+    robot.is_connected = True
     before = robot.state_snapshot()
     robot._on_state({'data': invalid})
     after = robot.state_snapshot()

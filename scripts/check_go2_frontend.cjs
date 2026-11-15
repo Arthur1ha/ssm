@@ -100,6 +100,10 @@ async function checkCommandResults() {
   const waitForLampTask = sandbox.bus.waitForLampTask.bind(sandbox.bus);
   assert.equal((await waitForLampTask('esp32_desk_led','missing-receipt',0)).result,'timeout',
     'Missing physical receipt must not be reported as still executing after the deadline');
+  payload = {result:'unknown',error:'receipt_unavailable',execution_active:false,task_id:'old'};
+  assert.equal((await waitForLampTask('esp32_desk_led','old',100)).result,'unknown',
+    'A device-confirmed inactive task must stop waiting without claiming success');
+  assert.match(sandbox.bus.describe(payload), /已不再执行/);
   sandbox.apiClient.request = (_path, {signal}) => new Promise((_resolve, reject) =>
     signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name:'AbortError'}))));
   assert.equal((await waitForLampTask('esp32_desk_led','stalled-query',20)).result,'timeout',

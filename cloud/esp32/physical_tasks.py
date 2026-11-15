@@ -80,7 +80,10 @@ def record_result(task_id: str, unit_id: str, result: dict) -> bool:
     if (result.get("task_id") not in (None, task_id)
             or result.get("unit_id") not in (None, unit_id)
             or result.get("result") not in {"accepted", "executing", "ok", "blocked",
-                                            "rejected", "cancelled", "error", "timeout"}):
+                                            "rejected", "cancelled", "error", "timeout", "unknown"}):
+        return False
+    if result.get("result") == "unknown" and not (
+            result.get("error") == "receipt_unavailable" and result.get("execution_active") is False):
         return False
     with locked_directory(PHYSICAL_TASKS_DIR):
         path = record_path(PHYSICAL_TASKS_DIR, task_id)
@@ -92,6 +95,9 @@ def record_result(task_id: str, unit_id: str, result: dict) -> bool:
         if result.get("session_id") not in (None, old.get("session_id")):
             return False
         previous = old.get("result") or {}
+        if (previous.get("result") == "unknown" and previous.get("execution_active") is False
+                and result.get("result") in {"accepted", "executing", "timeout"}):
+            return False
         if previous.get("result") in {"ok", "blocked", "rejected", "cancelled", "error"}:
             return previous["result"] == result.get("result")
         old["result"] = dict(result)
@@ -169,3 +175,12 @@ def completion_history(*, unit_id: str, transition_id: str, teaching_id: str,
     except (OSError, ValueError, TypeError):
         return False, None
     return True, latest
+
+
+def receipt_query(task_id: str) -> dict | None:
+    """Read the original owner; never construct a second physical command."""
+    with locked_directory(PHYSICAL_TASKS_DIR):
+        row = read_record(record_path(PHYSICAL_TASKS_DIR, task_id))
+    if not row:
+        return None
+    return {"task_id": task_id, "unit_id": row["unit_id"], "session_id": row["session_id"]}

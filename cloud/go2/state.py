@@ -54,7 +54,7 @@ LIFE_GUARDS = {
     "exploring": "当前未探索",
 }
 STATE_REASON_LABELS = {
-    "body_telemetry_stale": "设备反馈已过期，等待最新状态",
+    "body_telemetry_unavailable": "等待有效设备反馈或电机故障恢复",
     "body_action_unconfirmed": "上个动作的结果尚未确认",
     "body_action_pending_confirmation": "上个动作的结果尚未确认",
     "exploration_owned_by_another_session": "探索由另一位用户控制",

@@ -309,7 +309,7 @@ _velocity_sequences: dict[tuple[str, str], tuple[int, float]] = {}
 @router.post("/commands")
 async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(require_service_context)):
     from cloud.go2.tools.executor import execute_command_request
-    from cloud.go2.actions import SPORT_COMMANDS
+    from cloud.go2.actions import ACTIONS, SPORT_COMMANDS
     cmd = req.action or req.cmd
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
@@ -319,13 +319,42 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
         return await start_body_action(cmd, req.params, context=context, request_id=req.request_id,
                                        trace_id=req.trace_id, deadline=req.deadline)
     try:
-        result = await execute_command_request(cmd, req.params, context=context,
-                                              request_id=req.request_id, trace_id=req.trace_id,
-                                              deadline=req.deadline,
-                                              dispatch_only=(context.origin_kind == 'user_delegated'
-                                                             and cmd in SPORT_COMMANDS and cmd != 'StopMove'))
+        manual_body = context.origin_kind == 'user_delegated' and cmd in SPORT_COMMANDS and cmd != 'StopMove'
+        if manual_body:
+            # Reuse the task registry/polling path so a gesture can outlive the
+            # HTTP window without losing its physical completion receipt.
+            from cloud.go2.tasks import chat_tasks, command_identity
+            request_id = req.request_id or 'cmd_' + uuid.uuid4().hex
+            identity = command_identity(context, request_id)
+            task_id = 'command_' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:32]
+            trace_id = req.trace_id or 'tr_' + uuid.uuid4().hex
+            if not re.fullmatch(r'tr_[A-Fa-f0-9]{32}', trace_id):
+                raise ValueError('invalid_trace_id')
+            deadline = time.time() + ACTIONS[cmd].timeout_s + 5
+            if req.deadline is not None:
+                if not time.time() < req.deadline <= time.time() + 300:
+                    raise ValueError('invalid_request_deadline')
+                deadline = min(deadline, req.deadline)
+            if context.expires_at:
+                deadline = min(deadline, context.expires_at)
+            fingerprint = json.dumps([cmd, req.params], sort_keys=True, ensure_ascii=False)
+
+            async def run_command():
+                return await execute_command_request(cmd, req.params, context=context,
+                    request_id=request_id, trace_id=trace_id, deadline=deadline, dispatch_only=True)
+
+            replayed = chat_tasks.get(task_id, context.session_id) is not None
+            record = chat_tasks.start(task_id, context.session_id, fingerprint, deadline,
+                                      run_command, trace_id=trace_id)
+            session_tasks.track(context.session_id, record.task)
+            result = {**await chat_tasks.wait(record, .2), 'command_request_id': request_id}
+            if replayed:
+                result['replayed'] = True
+        else:
+            result = await execute_command_request(cmd, req.params, context=context,
+                request_id=req.request_id, trace_id=req.trace_id, deadline=req.deadline)
     except ValueError as exc:
-        raise HTTPException(status_code=409 if str(exc) == "effect_call_id_conflict" else 400,
+        raise HTTPException(status_code=409 if str(exc) in {"effect_call_id_conflict", "task_id_conflict"} else 400,
                             detail=str(exc)) from exc
     if result.get("result") == "blocked":
         status = (409 if result.get("error") == "control_lease_conflict" else
@@ -450,7 +479,8 @@ async def go2_chat(req: ChatRequest, context: ExecutionContext = Depends(require
             raise HTTPException(status_code=400, detail="invalid task_id")
         from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
         # Natural-language CHAT can choose the search skill after admission.
-        default_timeout = SEARCH_SERVER_TIMEOUT_S if req.skill_id in {None, "go2_chat", "go2_find_object"} else 180 if req.skill_id == "go2_visual_navigate" else 45
+        default_timeout = SEARCH_SERVER_TIMEOUT_S if req.skill_id in {
+            None, "go2_chat", "go2_find_object", "go2_visual_navigate"} else 45
         if req.skill_id == "go2_move":
             from cloud.go2.tools.registry import get_tool_spec
             default_timeout = get_tool_spec("go2_move").timeout_s + 10

@@ -55,7 +55,8 @@ def on_reconnect():
 mqtt.set_callback(trigger_map.on_mqtt)
 mqtt.set_reconnect_callback(on_reconnect)
 
-mqtt.subscribe("ssm/task/{}/+".format(UNIT_LED))
+mqtt.subscribe("ssm/task/{}/+".format(UNIT_LED), qos=1)
+mqtt.subscribe("ssm/task_query/{}/+".format(UNIT_LED), qos=1)
 
 mqtt.begin()
 

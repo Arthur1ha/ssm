@@ -24,6 +24,7 @@ from cloud.go2.perception.visual_target import (
 from cloud.observability import emit_agent_event
 
 _MESSAGES = {
+    'sensor_sample_unavailable': '定位或雷达采样数据缺失，暂不能可靠定位目标；尚未确认到达。',
     'object_returns_unavailable': '已看到目标，但当前雷达尚不能把它与背景可靠分开，暂未确认到位。',
     'target_lidar_disagreement': '地面接触点与雷达物体簇不一致，暂不能可靠定位目标。',
     'authorization_expired': '本次任务的控制授权已到期。',
@@ -220,7 +221,8 @@ async def _bounded_navigation(operation, context, start: dict,
 
 async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None,
                                      target_hint: dict | None = None,
-                                     max_advance_m: float | None = None) -> dict:
+                                     max_advance_m: float | None = None,
+                                     allow_reobservation: bool = True) -> dict:
     """Confirm on different stationary frames, approach, stop and recheck.
 
     Bounds, when provided by a search, are (min_x,min_y,max_x,max_y) in the
@@ -265,7 +267,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         _authorize(context)
         retry_reason = None
         while True:
-            if max_advance_m is None:
+            if max_advance_m is None and allow_reobservation:
                 location, pose, _ = await _localize_with_reobservation(
                     target, locate, context, bounds, observation_moves, hint_state, retry_reason)
             else:
@@ -280,6 +282,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
             except TargetUnlocalized as exc:
                 if (exc.reason not in {'object_returns_unavailable', 'target_not_visible'}
                         or len(observation_moves) >= REOBSERVE_MAX_STEPS
+                        or not allow_reobservation
                         or max_advance_m is not None):
                     raise
                 retry_reason = exc.reason

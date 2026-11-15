@@ -1,6 +1,9 @@
+import asyncio
 import base64
 import json
 import time
+import uuid
+from hashlib import sha256
 from dataclasses import asdict, is_dataclass
 
 from langchain_core.messages import HumanMessage
@@ -136,11 +139,77 @@ async def go2_navigate_to_coordinate(x: float, y: float) -> dict:
 
 async def go2_navigate_to_visible_target(target: str, decision_reason: str | None = None,
                                        max_advance_m: float | None = None) -> dict:
-    """Navigate a target; decision narration never changes physical parameters."""
+    """Use search when metric navigation cannot obtain a usable map/location."""
+    from cloud.agents.common.effects import current_effect
+    from cloud.agents.go2.workflows.search import current_search_request, search_request
     from cloud.go2.navigation.target_approach import navigate_to_visible_target
-    if max_advance_m is None:
-        return await navigate_to_visible_target(target)
-    return await navigate_to_visible_target(target, max_advance_m=max_advance_m)
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.tools.executor import execute_tool, validate_execution_context, normalize_result
+    from cloud.go2.tools.registry import get_tool_spec, VISUAL_NAVIGATION_TIMEOUT_S
+    from cloud.observability import emit_agent_event
+
+    started = time.time()
+    session = getattr(go2, '_odom_session_id', None)
+    if max_advance_m is not None:
+        # Full search may travel farther than the caller's explicit allowance.
+        return await navigate_to_visible_target(target, max_advance_m=max_advance_m)
+    async with asyncio.timeout(VISUAL_NAVIGATION_TIMEOUT_S):
+        result = await navigate_to_visible_target(target, allow_reobservation=False)
+    if not isinstance(result, dict):
+        return normalize_result('go2_navigate_to_visible_target', result)
+    recoverable = {
+        'localization_unavailable', 'map_unavailable',
+        'object_returns_unavailable', 'target_lidar_disagreement',
+        'position_uncertainty_excessive', 'ground_ray_unreliable',
+        'ground_intersection_unreliable', 'pose_invalid', 'pose_3d_unavailable',
+        'sensor_sample_unavailable', 'measured_floor_unavailable',
+        'target_ground_unverified', 'target_outside_local_map',
+    }
+    if result.get('result') not in {'blocked', 'error'} or result.get('reason') not in recoverable:
+        return result
+    # Terminal failed navigation may have moved; require a new stop receipt.
+    # An unfinished or unknown action must first be reconciled under its own ID.
+    receipts = [*(result.get('observation_moves') or [])]
+    if result.get('navigation'):
+        receipts.append(result['navigation'])
+    if any(receipt.get('status') not in {'succeeded', 'failed', 'blocked'} for receipt in receipts):
+        return result
+
+    context = current_context()
+    validate_execution_context(context)
+    owner = control_lease.snapshot()
+    if owner is not None and owner.owner_session_id != context.session_id:
+        return {**result, 'reason': 'control_lease_changed', 'initial_navigation': result}
+    if session is None or session != getattr(go2, '_odom_session_id', None):
+        return {**result, 'reason': 'odom_session_mismatch', 'initial_navigation': result}
+    parent = current_search_request()
+    deadline = min(started + get_tool_spec('go2_navigate_to_visible_target').timeout_s - 5,
+                   parent[1] if parent else float('inf'), context.expires_at or float('inf'))
+    if time.time() >= deadline:
+        return result
+    stop = await navigator.stop_and_confirm(owner_session_id=context.session_id)
+    if stop.get('result') != 'ok':
+        return {'result': 'accepted', 'reason': 'stop_unconfirmed', 'target': target,
+                'stop': stop, 'initial_navigation': result}
+    # Stopping awaits telemetry; the session/authority may change during it.
+    validate_execution_context(context)
+    if session != getattr(go2, '_odom_session_id', None):
+        return {**result, 'reason': 'odom_session_mismatch', 'initial_navigation': result}
+    owner = control_lease.snapshot()
+    if owner is not None and owner.owner_session_id != context.session_id:
+        return {**result, 'reason': 'control_lease_changed', 'initial_navigation': result}
+    if time.time() >= deadline:
+        return result
+    effect = current_effect()
+    identity = list(effect[1]) if effect else [context.session_id, parent[0] if parent else uuid.uuid4().hex]
+    search_id = 'visual_search_' + sha256('\0'.join([*identity, target]).encode()).hexdigest()[:32]
+    emit_agent_event('navigation.fallback', tool='go2_navigate_to_visible_target',
+                     fallback_tool='go2_find_object', reason=result['reason'],
+                     task_id=search_id, target=target, deadline=deadline)
+    with search_request(search_id, deadline):
+        searched = await execute_tool('go2_find_object', {'target': target}, context=context)
+    return {**searched, 'fallback': {'tool': 'go2_find_object', 'reason': result['reason'],
+                                    'task_id': search_id}, 'initial_navigation': result}
 
 
 async def go2_find_object(target: str) -> dict:

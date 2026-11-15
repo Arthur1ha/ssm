@@ -25,7 +25,7 @@ EVENTS = frozenset({
     "run.cancelled", "run.finished",
     "checkpoint.saved", "effect.reserved", "effect.reused", "graph.node",
     "vision.observe", "vision.model", "vision.gate", "vision.motion", "vision.lidar",
-    "navigation.progress",
+    "navigation.progress", "navigation.fallback",
 })
 CONTEXT_FIELDS = frozenset({
     "service", "agent_id", "trace_id", "run_id", "parent_run_id",

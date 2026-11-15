@@ -33,6 +33,11 @@ _request: ContextVar[tuple[str, float] | None] = ContextVar("go2_search_request"
 _exploration_coverage = None
 
 
+def current_search_request() -> tuple[str, float] | None:
+    """Read the trusted parent task and deadline when composing existing tools."""
+    return _request.get()
+
+
 @contextmanager
 def search_request(task_id: str, deadline: float):
     token = _request.set((task_id, deadline))

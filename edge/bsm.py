@@ -242,9 +242,13 @@ class BSM:
         )
 
     def _set_raw(self, r, g, b):
-        r = min(r, WS2812_MAX_VAL)
-        g = min(g, WS2812_MAX_VAL)
-        b = min(b, WS2812_MAX_VAL)
+        # Limit brightness together: clipping channels separately turns mixed
+        # colors into white, especially with a low battery-test output cap.
+        peak = max(r, g, b)
+        if peak > WS2812_MAX_VAL:
+            r = (r * WS2812_MAX_VAL + peak // 2) // peak
+            g = (g * WS2812_MAX_VAL + peak // 2) // peak
+            b = (b * WS2812_MAX_VAL + peak // 2) // peak
         for i in range(self._num_pixels):
             self._np[i] = (r, g, b)
         self._np.write()

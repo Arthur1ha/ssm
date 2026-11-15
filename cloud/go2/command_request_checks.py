@@ -490,3 +490,31 @@ async def test_http_velocity_packets_never_wait_for_global_activity_teardown(dev
     intervention.assert_not_awaited()
     assert move.call_args_list[0].args == (.1, 0, .2)
     assert move.call_args_list[1].args == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_manual_http_long_action_uses_existing_task_and_single_dispatch(device):
+    from cloud.go2.router import CommandRequest, go2_command
+    from cloud.go2.tasks import chat_tasks
+    robot, _ = device
+    finish = asyncio.Event()
+
+    async def slow(*args, **kwargs):
+        await finish.wait()
+        return {'result': 'ok', 'request_id': 'physical-long', 'confirmation': 'joint_posture'}
+
+    robot.send_command.side_effect = slow
+    request = CommandRequest(cmd='Dance1', request_id='long-gesture')
+    first = await go2_command(request, USER)
+    again = await go2_command(request, USER)
+    assert first['result'] == again['result'] == 'executing'
+    assert first['task_id'] == again['task_id']
+    assert robot.send_command.await_count == 1
+    record = chat_tasks.get(first['task_id'], USER.session_id)
+    assert record.deadline > time.time() + 50
+    finish.set()
+    final = await chat_tasks.wait(record, 1)
+    assert final['result'] == 'ok'
+    assert read_command_result(USER, 'long-gesture')['result'] == 'ok'
+    assert (await go2_command(request, USER))['replayed'] is True
+    assert robot.send_command.await_count == 1

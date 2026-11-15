@@ -43,8 +43,6 @@ def observed(monkeypatch):
             robot._on_low_state({'data': {'motor_state': [{'q': value, 'lost': 0} for value in q],
                                           'imu_state': {'rpy': [-.009, pitch, .1]}}})
     yield robot, feed, clock
-    if robot._body_fresh_timer:
-        robot._body_fresh_timer.cancel()
     if robot._action_deadline:
         robot._action_deadline.cancel()
 
@@ -56,6 +54,17 @@ def test_connected_robot_confirms_standing_from_joint_geometry_without_commands(
     assert robot.runtime.data['body_observation_source'] == 'joint_posture'
     assert 'Hello' in robot.available_actions
     robot._conn.datachannel.pub_sub.publish_request_new.assert_not_called()
+
+
+def test_sport_updates_do_not_expire_old_accepted_joint_feedback(observed):
+    robot, feed, clock = observed
+    feed(count=7)
+    body_observed_at = robot.state_snapshot()['body_observed_at']
+    clock[0] += 3600
+    robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, 0]}})
+    assert robot.body_ready_reason() is None
+    assert 'Move' in robot.available_actions
+    assert robot.state_snapshot()['body_observed_at'] == body_observed_at
 
 
 def test_real_sitting_geometry_is_not_standing_despite_overlapping_height(observed):
@@ -118,9 +127,10 @@ async def test_motion_and_stable_target_complete_action_and_deferred_life(observ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('manual', [False, True])
 @pytest.mark.parametrize('complete_before_ack_timeout', [False, True])
 async def test_lost_rpc_ack_keeps_connection_and_completes_from_joints(observed, monkeypatch,
-                                                                    complete_before_ack_timeout):
+                                                                    complete_before_ack_timeout, manual):
     import cloud.go2.connection.webrtc as webrtc
     robot, feed, _ = observed
     feed(count=7)
@@ -137,7 +147,7 @@ async def test_lost_rpc_ack_keeps_connection_and_completes_from_joints(observed,
         await future
 
     pub_sub.publish_request_new = missing_ack
-    task = asyncio.create_task(robot.send_command('Dance1'))
+    task = asyncio.create_task(robot.send_command('Hello', dispatch_only=manual))
     for _ in range(6):
         await asyncio.sleep(0)
     request_id = robot.pending_action['request_id']
@@ -186,15 +196,6 @@ async def test_timeout_can_restore_observed_control_without_claiming_action_succ
     assert robot.body_state == 'standing'
     assert robot.runtime.data['last_action']['phase'] == 'recovered'
     assert robot.runtime.data['last_action']['result'] == 'timeout'
-
-
-def test_low_state_dropout_blocks_body_actions_even_with_fresh_sport(observed):
-    robot, feed, clock = observed
-    feed(count=7)
-    clock[0] += 3
-    robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, -.07]}})
-    assert robot.available_actions == ['StopMove']
-    assert robot.body_state == 'standing'
 
 
 def test_fresh_low_state_cannot_use_stale_sport_to_confirm_posture(observed):
@@ -267,5 +268,57 @@ def test_active_motor_fault_blocks_despite_valid_angles_and_fresh_sport(observed
         robot._on_low_state({'data': {'motor_state': motors, 'bit_flag': 0x80 if timeout else 0,
                                     'imu_state': {'rpy': [0, 0, 0]}}})
     assert robot._low_state['motor_positions'] is None
-    assert robot.body_ready_reason() == 'body_telemetry_stale'
+    assert robot.body_ready_reason() == 'body_telemetry_unavailable'
     assert robot.available_actions == ['StopMove']
+
+
+@pytest.mark.asyncio
+async def test_physical_completion_does_not_wait_for_rpc_timeout(observed, monkeypatch):
+    import cloud.go2.connection.webrtc as webrtc
+    robot, feed, _ = observed
+    feed(count=7)
+    monkeypatch.setattr(webrtc, '_SPORT_RPC_TIMEOUT_S', 60)
+    cancelled = asyncio.Event()
+
+    async def no_ack(*args):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    robot._conn.datachannel.pub_sub.publish_request_new = no_ack
+    task = asyncio.create_task(robot.send_command('Hello', dispatch_only=True))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    feed(count=12)
+    assert not task.done(), 'Unchanged standing is not a completed greeting'
+    feed(WAVING, count=3, pitch=-.33)
+    feed(count=12)
+    assert (await asyncio.wait_for(task, .2))['result'] == 'ok'
+    assert cancelled.is_set()
+
+
+def test_low_state_before_sport_is_paired_once_without_losing_motor_freshness(observed):
+    robot, feed, clock = observed
+    feed(count=7)
+    clock[0] += .6
+    robot._on_low_state({'data': {'motor_state': [{'q': q} for q in STANDING],
+                                  'imu_state': {'rpy': [0, 0, 0]}}})
+    assert robot._last_motor_observed_at == clock[0]
+    before = robot._posture_candidate_samples
+    robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, 0]}})
+    assert robot._posture_candidate_samples == before + 1
+    robot._on_state({'data': {'body_height': .321, 'velocity': [0, 0, 0]}})
+    assert robot._posture_candidate_samples == before + 1
+
+
+def test_known_stable_motor_loss_survives_short_network_gap(observed):
+    robot, _, clock = observed
+    motors = [{'q': q, 'lost': 5} for q in STANDING]
+    for _ in range(8):
+        clock[0] += .1
+        robot._motor_positions_from_feedback(motors, clock[0])
+    clock[0] += 1.2
+    assert robot._motor_positions_from_feedback(motors, clock[0]) is not None
+    motors[0]['lost'] += 1
+    assert robot._motor_positions_from_feedback(motors, clock[0]) is None
