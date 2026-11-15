@@ -18,6 +18,7 @@ const {activityMemberView,activityTaskRows,activityRelatedEvents,activityMessage
   activityDecisionBasis,activityDecisionText,activityDecisionEvidence,projectActivityEvents} = context;
 const compactEvents=context.compactActiveActivityEvents;
 const replay=process.env.SSM_ACTIVITY_REPLAY ? JSON.parse(fs.readFileSync(process.env.SSM_ACTIVITY_REPLAY,'utf8')) : null;
+const sseReplay=process.env.SSM_ACTIVITY_SSE_REPLAY ? JSON.parse(fs.readFileSync(process.env.SSM_ACTIVITY_SSE_REPLAY,'utf8')) : null;
 const now = Date.now()/1000;
 const go2 = {unit_id:'go2',name:'呆呆狗',agent_type:'robot',_online:true,
   state_machine:{state_field:'body_state',regions:[
@@ -172,6 +173,83 @@ async function browserChecks() {
   const browser = await puppeteer.launch({headless:true,executablePath:process.env.PUPPETEER_EXECUTABLE_PATH,
     protocolTimeout:45000,args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
   try {
+    // Native EventSource -> real ApiClient -> hook -> activity bubbles. The
+    // history endpoint deliberately starts empty, so REST cannot mask dropped
+    // named SSE events (the previous mapping_proposal transport bug).
+    const streamPage = await browser.newPage();
+    const streamErrors = [];
+    streamPage.on('pageerror', error=>{streamErrors.push(error.message);console.error('SSE browser error:',error.message);});
+    const streamActivity = sseReplay?.activity || {...activity,activity_id:'act_sse'};
+    const mappingRows = sseReplay?.events.filter(row=>row.stage==='mapping_proposal') || [
+      {type:'activity',event_type:'message',stage:'mapping_proposal',game_id:'rps_siege',
+        event_id:'map-lamp',activity_id:streamActivity.activity_id,unit_id:'esp32_desk_led',
+        ts:now,text:'石头＝正红；剪刀＝亮绿；布＝明黄。'},
+      {type:'activity',event_type:'message',stage:'mapping_proposal',game_id:'rps_siege',
+        event_id:'map-dog',activity_id:streamActivity.activity_id,unit_id:'go2',
+        ts:now+.1,text:'石头＝开心；剪刀＝比心；布＝伸展。'},
+    ];
+    const streamRows = sseReplay?.events || [...mappingRows, ...Array.from({length:18},(_,index)=>({
+      type:'activity',event_type:'message',stage:'agreement',event_id:`later-${index}`,
+      activity_id:streamActivity.activity_id,unit_id:'go2',ts:now+index+1,text:`后续进展 ${index}`,
+    }))];
+    const wire = sseReplay?.wire || streamRows.map(row=>
+      `id: ${row.event_id}\nevent: activity\ndata: ${JSON.stringify(row)}\n\n`).join('');
+    let restoreHistory = false;
+    await streamPage.setRequestInterception(true);
+    streamPage.on('request', request=>{
+      const url = new URL(request.url());
+      if(url.pathname==='/') request.respond({status:200,contentType:'text/html',
+        body:'<html><body><div id="root"></div></body></html>'});
+      else if(url.pathname==='/api/events') request.respond({status:200,contentType:'text/event-stream',body:wire});
+      else if(url.pathname==='/api/activity/current') request.respond({status:200,contentType:'application/json',
+        body:JSON.stringify({activity:streamActivity,latest_activity_id:streamActivity.activity_id})});
+      else if(url.pathname===`/api/activity/${streamActivity.activity_id}/events`) request.respond({status:200,
+        contentType:'application/json',body:JSON.stringify({activity:streamActivity,events:restoreHistory ? streamRows : []})});
+      else if(url.pathname==='/favicon.ico') request.respond({status:204,body:''});
+      else {streamErrors.push('Unexpected stream request: '+request.url());request.abort();}
+    });
+    await streamPage.goto('http://ssm.test/');
+    for(const file of [process.env.SSM_CHECK_REACT,process.env.SSM_CHECK_REACT_DOM])
+      await streamPage.addScriptTag({path:file});
+    for(const file of ['ApiClient.js',...files,'hooks/useActivityTimeline.js'])
+      await streamPage.addScriptTag({content:compile('app/src/'+file)});
+    await streamPage.addStyleTag({path:'app/styles/app.css'});
+    await streamPage.evaluate(({go2,lamp,states,expected})=>{
+      window.__received=[];
+      apiClient.addEventListener('server-event',message=>{
+        if(!__received.some(row=>row.event_id===message.detail.event_id)) __received.push(message.detail);
+        if(__received.length>=expected) apiClient.closeEvents();
+      });
+      function Harness(){
+        const view=useActivityTimeline();window.__timeline=view;
+        return React.createElement(SpaceActivityFeed,{activity:view.displayActivity,events:view.events,
+          agents:[go2,lamp],unitData:states,connected:true});
+      }
+      window.__root=ReactDOM.createRoot(document.getElementById('root'));
+      window.__mount=()=>__root.render(React.createElement(Harness));__mount();
+    },{go2,lamp,states,expected:streamRows.length});
+    await streamPage.waitForFunction(()=>Boolean(window.__timeline?.displayActivity));
+    await streamPage.evaluate(()=>apiClient.openEvents());
+    try {
+      await streamPage.waitForFunction(count=>window.__received.length===count,{timeout:5000},streamRows.length);
+    } catch(error) {
+      console.error('Received SSE records:',await streamPage.evaluate(()=>({count:__received.length,
+        mappings:__received.filter(row=>row.stage==='mapping_proposal').length})));
+      throw error;
+    }
+    await streamPage.waitForFunction(()=>document.querySelector('.space-activity__toggle'));
+    await streamPage.click('.space-activity__toggle');
+    await streamPage.waitForFunction(texts=>texts.every(text=>[...document.querySelectorAll('.space-activity__bubble')]
+      .some(bubble=>bubble.textContent.trim()===text.trim())),{timeout:5000},mappingRows.map(row=>row.text));
+    // Reconnect/snapshot recovery must restore the same bubbles without
+    // inventing a different mapping or duplicating records.
+    restoreHistory = true;
+    await streamPage.evaluate(()=>apiClient.dispatchEvent(new Event('events-open')));
+    await streamPage.waitForFunction(count=>__timeline.events.length===count,{},streamRows.length);
+    assert.equal(await streamPage.evaluate(()=>__timeline.events.filter(row=>row.stage==='mapping_proposal').length),mappingRows.length);
+    assert.deepEqual(streamErrors,[]);
+    await streamPage.close();
+    console.log('PASS: native named SSE -> ApiClient -> activity hook -> both mapping bubbles; history recovery deduplicates.');
     const page = await browser.newPage();
     const errors=[];
     page.on('pageerror',error=>{errors.push(error.message);console.error('Browser error:',error.message);});

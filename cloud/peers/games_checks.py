@@ -108,7 +108,7 @@ def test_rps_invitation_arbitration_receives_preparation_order_and_preserves_wil
         "pending_event": {"kind": "peer_message", "interaction_kind": "game_invite",
                           "game": GAME.metadata(), "content": "来玩猜拳攻灯？"}}))
     assert result["event_decision"] == choice
-    assert "接受参与→认灯→公开双方映射→确认规则→秘密出拳" in prompts[1].content
+    assert "接受参与→公开双方映射→确认规则→认灯定位→秘密选拳并同时展示" in prompts[1].content
     assert "不要把尚未进行的准备当作接受邀请的前提" in prompts[0].content
     assert "game_target_not_visible" in prompts[1].content
     assert result["next_action"] == ("run_peer_task" if choice == "accept" else "none")

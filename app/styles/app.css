@@ -304,7 +304,6 @@ body {
 .device-whiteboard__actions { display: flex; flex-wrap: wrap; gap: 4px; }
 .device-whiteboard__actions .btn { min-height: 32px; margin-top: 0; padding: 3px 6px; color: var(--board-accent); border: 0; background: transparent; font-size: 11px; }
 .device-whiteboard__actions .btn:disabled { color: var(--color-text-dim); opacity: .6; cursor: default; }
-.device-whiteboard__feedback { padding: 5px 12px; flex: 0 0 auto; color: var(--color-text-muted); font-size: 10px; border-top: 1px solid var(--color-border); }
 .device-whiteboard__controls { flex: 0 1 auto; min-height: 0; max-height: 140px; overflow-y: auto; border-top: 1px solid var(--color-border); padding: 6px 12px; background: var(--color-surface-1); }
 .device-whiteboard__controls:has(.device-remote-controls) { flex: 0 0 150px; max-height: 150px; }
 .device-remote-controls { max-width: 440px; margin-inline: auto; }
@@ -976,4 +975,3 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 .training-selection { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--color-border); background: var(--color-surface-1); color: var(--color-text-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .training-selection button { flex-shrink: 0; cursor: pointer; }
 /* Feedback is an overlay so changing its text does not move the state graph. */
-.device-whiteboard__feedback { position: absolute; bottom: 0; left: 0; right: 0; z-index: 2; pointer-events: none; background: var(--color-surface-1); }

@@ -185,10 +185,13 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         cue = state["identification"]
         observation = await execute_tool("go2_observe", {
-            "question": "参与游戏的灯是一盏圆球灯，已经确认亮出识别色。它告诉你："
+            "question": "用户提供的外形线索：灯是蓝紫色球体，用户会放在狗的视野内；这不是已看见的证明。"
+                        "参与游戏的圆球灯已经确认亮出识别色。它告诉你："
                         + cue["speech"] + "。已确认的RGB颜色为" + str(cue["color"]) + "。"
-                        "请根据当前画面找出形状和颜色相符的圆球灯，描述位置、外观或灯旁固定标记；"
-                        "找不到、颜色不符或有多个无法区分的候选就明确说明。"
+                        "请综合球形外观、蓝紫色线索、实际发光和当前识别色找出候选，描述画面位置、外观或灯旁固定标记。"
+                        "蓝紫色是用户提供的外观线索，不要求发光后仍保持蓝紫色；相机呈色与指令RGB也可能不同，"
+                        "不要仅因色调不完全相同就排除，但不能仅凭颜色认定身份。"
+                        "找不到、外形证据不足或有多个无法区分的候选就明确说明。"
                         "同伴自述不是观察事实，不能把其他同色物品当成灯。"
                         "后续灯会为出拳变色，请同时描述不依赖当前颜色的固定特征。"},
             context=context, observation_after=cue["confirmed_at"])
@@ -198,7 +201,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         if not text:
             raise GameStopped("game_observation_unavailable")
         observed = record("observation", text[:800], source="go2.camera")
-        observed_state = {"identification": cue,
+        check()
+        observed_state = {**state, "identification": cue,
                          "observation": {"text": text[:1600], "source": "go2.camera",
                          "as_of": time.time(), "ref": (observed or {}).get("event_id")}}
         dog = await decision("go2", "identify", observed_state)
@@ -215,8 +219,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp = LampSetup.model_validate(lamp).model_dump()
         dog = Go2Setup.model_validate(dog).model_dump()
         check()
-        terms = {"target": state["target_identification"]["target"],
-                 "lamp_mapping": lamp["mapping"], "lamp_color_names": lamp["color_names"],
+        terms = {"lamp_mapping": lamp["mapping"], "lamp_color_names": lamp["color_names"],
                  "go2_mapping": dog["mapping"]}
         gestures = gesture_options()
         for role, answer in (("lamp", lamp), ("go2", dog)):
@@ -225,8 +228,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             mapping_text = "；".join(f"{label}＝{labels[choice]}" for choice, label in CHOICES.items())
             record("message", f"本局映射提议：{mapping_text}。这是公开规则，待双方确认。\n{answer['speech']}",
                    role=role, stage="mapping_proposal")
-        record("message", f"待确认的规则：一把定胜负，平局重来。狗赢就沿安全路径到「{terms['target']}」附近关灯；"
-               "灯赢就由狗表演一次。双方确认后固定映射，再各自秘密选拳。", stage="terms_proposal")
+        record("message", "待确认的规则：一把定胜负，平局重来。狗赢就沿安全路径到本局确认的灯附近关灯；"
+               "灯赢就由狗表演一次。双方确认映射后先认灯定位，再秘密选拳、同时展示。", stage="terms_proposal")
         return {"proposals": {"lamp": lamp, "go2": dog}, "terms": terms,
                 "round": 1, "history": [], "arrived": False}
 
@@ -238,7 +241,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                    status="accepted" if answer["accepted"] else "rejected")
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "game_terms_not_agreed"}
-        record("message", "双方已确认本局映射和规则，现在各自秘密选拳，锁定后再展示。", stage="terms_confirmed")
+        record("message", "双方已确认本局映射和规则，接下来亮识别色、确认灯的位置，然后秘密选拳、同时展示。", stage="terms_confirmed")
         return {}
 
     async def choose(state):
@@ -253,21 +256,30 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         nonlocal adjudicated_winner
         check()
         choices, terms, number = state["choices"], state["terms"], state["round"]
-        record("message", f"第 {number} 回合：双方已锁定选择，开始展示。")
         current = (agent._state.actuator_snapshot().get(LAMP, {}).get("state") or {})
         if current.get("ism") != "ON":
             await physical("SET_STATE", {"state": "ON"}, f"{number}:power")
         color = terms["lamp_mapping"][choices["lamp"]["choice"]]
         command = terms["go2_mapping"][choices["go2"]["choice"]]
-        await physical("SET_COLOR", color, f"{number}:color")
-        check()
-        dog_result = await execute_tool("go2_sport", {"cmd": command}, context=context,
+        async def dog_gesture():
+            check()
+            result = await execute_tool("go2_sport", {"cmd": command}, context=context,
                                        request_id=f"rps_{invitation_id}_{number}_gesture")
-        record("action_result", f"狗的出拳动作{('已确认' if dog_result.get('result') == 'ok' else '未确认')}。",
-               action="go2_sport", status=dog_result.get("result", "unknown"),
-               task_id=dog_result.get("command_request_id") or task_id)
-        if dog_result.get("result") != "ok":
-            raise GameStopped("go2_gesture_unconfirmed:" + str(dog_result.get("error") or dog_result.get("result")))
+            record("action_result", f"狗的出拳动作{('已确认' if result.get('result') == 'ok' else '未确认')}。",
+                   action="go2_sport", status=result.get("result", "unknown"),
+                   task_id=result.get("command_request_id") or task_id)
+            if result.get("result") != "ok":
+                raise GameStopped("go2_gesture_unconfirmed:" + str(result.get("error") or result.get("result")))
+            check()
+
+        record("message", f"第 {number} 回合：双方已锁定选择，同时开始展示。", stage="reveal")
+        # Dispatch both without waiting for either receipt. Collect both
+        # outcomes before scoring; never leave a sibling task unobserved.
+        results = await asyncio.gather(
+            physical("SET_COLOR", color, f"{number}:color"), dog_gesture(), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         check()
         winner = round_winner(choices["lamp"]["choice"], choices["go2"]["choice"])
         if winner != "draw":
@@ -284,19 +296,19 @@ async def _execute(drive, event: dict, task_id: str) -> None:
 
     async def approach(state):
         check()
-        terms = state["terms"]
+        target = state["target_identification"]["target"]
         search_id = "rps_" + invitation_id + "_lamp"
         record("action", "我赢了，准备边走边观察约定的灯，确认已在附近并停稳后关灯。",
                action="go2_find_object", task_id=search_id)
         with search_request(search_id, deadline):
             result = await execute_tool("go2_find_object",
-                {"target": terms["target"]}, context=context)
+                {"target": target}, context=context)
         record("action_result", str(result.get("message") or result.get("reason") or result.get("result")),
                action="go2_find_object", status=result.get("result", "unknown"),
                task_id=result.get("task_id") or search_id)
         if (result.get("result") != "ok" or result.get("outcome") != "nearby"
                 or result.get("found") is not True or (result.get("stop") or {}).get("result") != "ok"
-                or result.get("target") != terms["target"] or result.get("task_id") != search_id):
+                or result.get("target") != target or result.get("task_id") != search_id):
             raise GameStopped("game_approach_unconfirmed:" + str(result.get("reason") or result.get("error") or result.get("result")))
         check()
         # Search proves visual proximity and stopping, not a metric lamp position.
@@ -333,11 +345,11 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                        ("reveal", reveal), ("approach", approach), ("switch_off", switch_off), ("perform", perform),
                        ("next_round", next_round)):
         graph.add_node(name, node)
-    graph.add_edge(START, "identify")
+    graph.add_edge(START, "setup")
     graph.add_edge("identify", "recognize")
-    graph.add_conditional_edges("recognize", lambda s: END if s.get("result") else "setup")
+    graph.add_conditional_edges("recognize", lambda s: END if s.get("result") else "choose")
     graph.add_edge("setup", "agree")
-    graph.add_conditional_edges("agree", lambda s: END if s.get("result") else "choose")
+    graph.add_conditional_edges("agree", lambda s: END if s.get("result") else "identify")
     graph.add_edge("choose", "reveal")
     graph.add_conditional_edges("reveal", lambda s: {"go2": "approach", "lamp": "perform", "draw": "next_round"}[s["winner"]])
     graph.add_edge("approach", "switch_off")
@@ -424,16 +436,16 @@ GAME = Game(
     available=_available, execute=_execute, on_invitation=on_invitation,
     on_acceptance=on_acceptance, acceptance="", invitation_ttl_s=900,
     rules=("灯或狗均可自主邀请，双方同处活动且空闲，对方自主接受或拒绝。"
-           "流程为接受参与→认灯→公开双方映射→确认规则→秘密出拳。接受邀请只同意进入准备，"
+           "流程为接受参与→公开双方映射→确认规则→认灯定位→秘密选拳并同时展示。接受邀请只同意进入准备，"
            "不要求此时灯已亮起或已经认出灯；上一局认灯失败不能代替本局准备后的新观察。"
            "开局各自选择石头、剪刀、布的三种表达：灯自选三个可区分的亮灯颜色，狗自选三个当前可执行动作；"
-           "灯的实体是圆球灯，先自主选择识别色并真实亮灯，再告诉狗圆球外形及颜色；狗用亮灯后的新画面辨认。"
-           "观察须支持形状、颜色及唯一候选，不足则不能开局，不能追逐任意同色物体；"
+           "用户提供灯是蓝紫色球体、会放在狗视野内的线索。规则确认后灯自主选择识别色并真实亮灯，再告诉狗外形及颜色；狗用亮灯后的新画面辨认和定位。"
+           "用户线索不能代替观察；综合球形、蓝紫色外观线索、发光与识别色辨认，色调差异不能单独否定候选，也不能只凭同色认定身份；观察不足或候选不唯一则不出拳。"
            "约定目标保留圆球灯的位置与固定特征，猜拳变色不更换目标。"
-           "认灯成功后才各自选映射，逐项公开石头、剪刀、布对应的颜色或动作，再分别确认目标、映射与规则。"
+           "先各自选映射，逐项公开石头、剪刀、布对应的颜色或动作，再分别确认映射与规则；随后认灯定位，确认成功才秘密选拳。"
            "映射是双方和用户都能读到的公开规则，不能用保密出拳为由隐瞒。"
            "不规定固定映射，双方确认后本局冻结，不协商回合数或推进距离。"
-           "双方私下锁定选择再展示，不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
+           "双方私下锁定选择后并发派发变色和动作，不等待一方完成才派发另一方；设备与网络存在时延，不承诺物理上精确同步。不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
            "一把定胜负，平局原地重来，直到分出胜负或本局期限到达。展示须灯物理回执与狗真实动作反馈均确认才能判拳。"
            "狗赢后用找物流程接近约定的圆球灯，沿可通行路径分段移动、停稳再看；"
            "连续新鲜画面确认已在附近且真实停稳后才关灯，不要求雷达分离出灯的点簇或精确目标距离，须真实关灯回执；"
@@ -445,7 +457,7 @@ GAME = Game(
            "关灯确认后保持该结果直到新的有效传感器机会，不因收尾立即自行开灯。"),
     strategy=("结合人格、当前活动、用户要求和新鲜观察决定邀请或接受，不能因可玩列表存在就强制开局。"
               "自行选择易辨认的表达并解释本局约定；可结合已公开的历史出拳调整策略，但不得获取对方本轮私下选择。"
-              "邀请阶段判断参与意愿与当前占用；接受后由准备流程亮灯并辨认目标，不能要求先完成准备才愿意参与。"
+              "邀请阶段判断参与意愿与当前占用；接受后先公开映射并确认规则，再亮灯辨认目标，不能要求先认灯才制定规则。"
               "认灯阶段须有本局新画面支持，动作与导航分别遵守实时执行门禁；游戏中不临时改映射或规则。"
               "交流沿用自身人格，不预排对白、固定出拳序列或庆祝动作。"),
 )

@@ -55,7 +55,7 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
 
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
 function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, connected,
-  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, feedback, card, training, locateTransition }) {
+  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, card, training, locateTransition }) {
   const { useState, useEffect, useRef, useCallback } = React;
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLinkId, setSelectedLinkId] = useState(null);
@@ -78,8 +78,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     .flatMap(trainingTransitionIds));
   const topology = stateBoardTopology(sm, liveState, taughtTransitionIds);
   const pendingExecution = liveState[sm?.execution_field];
-  const execution = pendingExecution || liveState[sm?.last_execution_field];
-  const awaitingFeedback = connected && primary?.state_field && liveState[primary.state_field] == null;
   const remoteActive = widget => Object.keys(widget.enabled_when || {}).length > 0
     && Object.entries(widget.enabled_when).every(([key,value]) =>
       Array.isArray(value) ? value.includes(liveState[key]) : liveState[key] === value);
@@ -214,11 +212,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       _disabled:offline || stale || (widget.type === 'joystick' && (busy
         || sm?.freshness_field && liveState[sm.freshness_field] === false))}],report,actor,liveState,
     widget.state_field || primary?.state_field,sm?.connection_field || '',connected);
-  const phase = ({sending:'正在发送',dispatched:'已发送',sent:'等待设备确认',accepted:'已接收，完成待确认',executing:'正在执行',
-    timeout:'完成反馈超时',cancelled_unconfirmed:'已请求取消，结果待确认',stop_requested_unconfirmed:'已请求停止，结果待确认',
-    recovered:'姿态已恢复',completed:'已完成',ok:'已完成',rejected:'设备拒绝请求',failed:'执行失败',error:'执行失败',cancelled:'已取消'})[execution?.phase || execution?.result] || '等待设备反馈';
-  const executionLabel = execution?.label || topology.edges.find(edge => [edge.transition.trigger,edge.transition.action]
-    .includes(execution?.command))?.transition.label || '设备动作';
   const graphSize = stateGraphDimensions(nodes.length, sm?.diagram);
   const insetMedia = media.length > 0 && sm?.diagram?.media_position === 'left';
   const mediaPanel = media.length > 0 && <div className="device-whiteboard__media" aria-label="实时画面与地图">
@@ -274,17 +267,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       </StateBoardPopover>}
     </div>
     </div>
-    {(feedback || offline || stale || execution || awaitingFeedback) && <div className="device-whiteboard__feedback" role="status" aria-live="polite">
-      {feedback && <div>{feedback}</div>}
-      {offline ? <div>设备未连接，暂不能执行动作</div>
-        : stale ? <div>状态同步中，普通操作等待同步</div>
-        : <>
-          {execution && <div>{executionLabel} · {phase}</div>}
-          {awaitingFeedback && <div>{primary?.manual_available_actions_field
-            ? '姿态暂未确认，手动动作仍可发送'
-            : '设备已连接，等待有效设备反馈；当前状态尚未确认，暂不能切换'}</div>}
-        </>}
-    </div>}
     {(controls.length > 0 || remoteControls.length > 0) && <div className="device-whiteboard__controls">
       {remoteControls.map(widget => {
         const engaged = remoteActive(widget);

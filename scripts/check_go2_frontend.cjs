@@ -423,10 +423,9 @@ async function checkInteractions() {
       await page.waitForFunction(() => document.querySelector('[data-state="body:lying"]').dataset.executable==='false');
       const count = await page.evaluate(() => __calls.length);
       await page.$eval('[data-state="body:lying"]',node => node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      await page.waitForFunction(() => document.querySelector('.device-whiteboard__feedback')?.textContent.includes('设备反馈已过期'));
       assert.equal(await page.evaluate(() => __calls.length),count,'Stale posture started an automatic sequence');
       assert.deepEqual(errors,[]);
-      console.log('PASS: sitting/lying select the correct rise, every standing-based action requests server preparation, duplicate taps/current poses do not replay, stale preparation reports its reason.');
+      console.log('PASS: sitting/lying select the correct rise, every standing-based action requests server preparation, duplicate taps/current poses do not replay, stale preparation is blocked.');
       return;
     }
     if (process.argv.includes('--training-only')) {
@@ -978,7 +977,7 @@ async function checkInteractions() {
       node.dispatchEvent(new MouseEvent('click',{bubbles:true}));
     });
     assert.equal(await page.evaluate(()=>__calls.length),1,'Duplicate request escaped guard');
-    await page.waitForFunction(()=>document.body.textContent.includes('尚未确认完成'));
+    await page.waitForFunction(()=>document.querySelector('.device-state-board')?.getAttribute('aria-busy')==='false');
     await clickAction('休息');
     assert.equal(await page.evaluate(()=>__calls.at(-1).params.action),'request_rest');
     await page.evaluate(()=>__renderState({...__state,revision:2,activity_state:'rest',life_state:null,body_state:'lying',available_actions:[],available_life_actions:['wake']}));
@@ -1057,8 +1056,7 @@ async function checkInteractions() {
     await page.keyboard.press('Escape');
     await page.waitForFunction(()=>!document.querySelector('.device-media-viewer'));
     assert.equal(await page.$('.device-whiteboard__expand'),null);
-    assert.equal(await page.$eval('.device-whiteboard__feedback',
-      node=>node.textContent.includes('指令已发送')),true,'Command feedback was hidden');
+    assert.equal(await page.$('.device-whiteboard__feedback'),null,'Removed status strip returned');
     for(const [width,height] of [[1440,1000],[768,1024],[360,740]]){
       await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
       await assertAllStatesVisible();
@@ -1070,7 +1068,6 @@ async function checkInteractions() {
     await page.keyboard.down('ArrowUp');
     await page.waitForFunction(()=>__velocities.at(-1).params.vx>0);
     await page.evaluate(()=>__sources[0].onerror());
-    await page.waitForFunction(()=>document.body.textContent.includes('普通操作等待同步'));
     await page.waitForFunction(()=>Object.values(__velocities.at(-1).params).every(value=>value===0));
     await page.keyboard.up('ArrowUp');
     assert.equal(await page.$$eval('.fsm-whiteboard__edge[data-action]',nodes=>nodes.every(node=>node.dataset.available==='false')),true,'Stale stream allowed an ordinary action');
@@ -1115,7 +1112,7 @@ async function checkInteractions() {
       connection_state:'online',activity_state:'active',life_state:'idle',body_state:null,
       body_telemetry_fresh:false,available_manual_actions:__manualCommands,
       pending_action:null,last_action:null,available_actions:['StopMove']}));
-    await page.waitForFunction(()=>document.querySelector('.device-whiteboard__feedback')?.textContent.includes('手动动作仍可发送'));
+    await page.waitForFunction(()=>document.querySelectorAll('.fsm-whiteboard__node.is-current[data-state^="body:"]').length===0);
     await clickNode('body:sitting');
     assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Sit','Missing posture blocked manual dispatch');
     await clickNode('body:greeting');
@@ -1123,7 +1120,7 @@ async function checkInteractions() {
     await closeExplanation();
     await page.evaluate(()=>__renderState({...__state,revision:2,body_state:'standing',pending_action:null,
       last_action:{command:'Hello',phase:'completed',result:'ok'}}));
-    await page.waitForFunction(()=>document.querySelector('.device-whiteboard__feedback')?.textContent.includes('挥手 · 已完成'));
+    await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="body:standing"]');
     assert.equal(await page.$$('.fsm-whiteboard__edge.is-running').then(nodes=>nodes.length),0,
       'A completed receipt must not animate as a running command');
     await page.evaluate(()=>{

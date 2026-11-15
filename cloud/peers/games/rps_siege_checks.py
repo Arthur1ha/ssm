@@ -49,7 +49,7 @@ def test_dog_invitation_asks_lamp_willingness_before_any_identification(monkeypa
                   "target": rps_siege.LAMP, "content": "来玩猜拳？", "deadline": time.time() + 60}
     rps_lifecycle.on_invitation(messenger, invitation, None)
     assert decide.await_args.args[:2] == ("lamp", "invite")
-    assert "接受参与→认灯→公开双方映射→确认规则→秘密出拳" in decide.await_args.args[2]["game"]["rules"]
+    assert "接受参与→公开双方映射→确认规则→认灯定位→秘密选拳并同时展示" in decide.await_args.args[2]["game"]["rules"]
     assert messenger.send_message.call_args.kwargs["reply_kind"] == ("accepted" if accepted else "declined")
     assert messenger.send_message.call_args.kwargs["reply_to"] == "dog_invite"
     agent.begin_peer_game.assert_not_called()
@@ -81,7 +81,7 @@ async def game_harness(monkeypatch):
         gesture_result="ok", performance_result="ok", physical_result="ok", off_result="ok",
         observation={"result": "ok", "message": "桌上的智能灯清楚可见。"}, target_visible=True,
         agreement=True, interrupt_after=None, interrupt_after_off=False,
-        physical_results=[], interrupt_decision=None,
+        physical_results=[], interrupt_decision=None, concurrent_reveal=False,
         search_results=[
             {"result": "ok", "outcome": "nearby", "found": True,
              "target": "桌上的智能灯", "task_id": "rps_msg_test_rps_lamp",
@@ -154,6 +154,10 @@ async def game_harness(monkeypatch):
 
     searches = []
     active_search = None
+    reveal_started = {role: asyncio.Event() for role in ("lamp", "go2")}
+    reveal_release = {role: asyncio.Event() for role in ("lamp", "go2")}
+    for release in reveal_release.values():
+        release.set()
 
     @contextmanager
     def search_request(request_id, deadline):
@@ -173,6 +177,10 @@ async def game_harness(monkeypatch):
             observations.append(deepcopy(kwargs))
             return fixture.observation
         if name == "go2_sport":
+            if fixture.concurrent_reveal and kwargs.get("request_id", "").endswith("_gesture"):
+                reveal_started["go2"].set()
+                await asyncio.wait_for(reveal_started["lamp"].wait(), timeout=1)
+                await reveal_release["go2"].wait()
             return {"result": fixture.performance_result if kwargs.get("request_id", "").endswith("_performance")
                     else fixture.gesture_result}
         assert name == "go2_find_object"
@@ -191,7 +199,13 @@ async def game_harness(monkeypatch):
         return {"result": result, "task_id": kwargs["task_id"]}
 
     async def invoke_blocking(callback, *args, **kwargs):
-        return callback(*args, **kwargs)
+        result = callback(*args, **kwargs)
+        if (fixture.concurrent_reveal and kwargs.get("action") == "SET_COLOR"
+                and kwargs["params"] != {"r": 0, "g": 100, "b": 255, "brightness": 160}):
+            reveal_started["lamp"].set()
+            await asyncio.wait_for(reveal_started["go2"].wait(), timeout=1)
+            await reveal_release["lamp"].wait()
+        return result
 
     store = SimpleNamespace(record_event=lambda _activity, kind, **kwargs:
                             timeline.append({"event_type": kind, **kwargs}))
@@ -224,7 +238,7 @@ async def game_harness(monkeypatch):
                            messenger=messenger, navigator=navigator, calls=calls,
                            timeline=timeline, decisions=decisions,
                            observations=observations,
-                           searches=searches)
+                           searches=searches, reveal_started=reveal_started, reveal_release=reveal_release)
 
 
 async def test_dog_wins_then_searches_nearby_without_metric_location_and_switches_off(game_harness):
@@ -258,13 +272,16 @@ async def test_spherical_lamp_announces_confirmed_color_before_fresh_observation
     question = h.calls[2][1]["question"]
     assert "圆球灯" in question and "亮蓝色" in question and str(color) in question
     assert "多个无法区分" in question and "不依赖当前颜色" in question
+    assert "蓝紫色球体" in question and "不是已看见的证明" in question
+    assert "不要仅因色调不完全相同就排除" in question
     cue = next(facts["lamp_identification"] for role, phase, facts in h.decisions
-               if role == "go2" and phase == "setup")
+               if role == "go2" and phase == "identify")
     assert cue["color"] == color
     assert h.observations[0]["observation_after"] == cue["confirmed_at"]
     announcement = next(i for i, row in enumerate(h.timeline) if row.get("stage") == "identification")
     assert all(row["event_type"] == "action_result" and row["status"] == "ok"
-               for row in h.timeline[:announcement])
+               for row in h.timeline[announcement - 2:announcement])
+    assert any(row.get("stage") == "terms_confirmed" for row in h.timeline[:announcement - 2])
     assert h.timeline[announcement + 1]["event_type"] == "observation"
 
 
@@ -275,7 +292,7 @@ async def test_unconfirmed_identification_cannot_announce_or_observe(game_harnes
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert not any(name == "go2_observe" for name, _params in h.calls)
     assert not any(row.get("stage") == "identification" for row in h.timeline)
-    assert [phase for _role, phase, _facts in h.decisions] == ["identify"]
+    assert [phase for _role, phase, _facts in h.decisions] == ["setup", "setup", "agree", "agree", "identify"]
     assert h.drive._advance_task.await_args.kwargs["result"]["game_winner"] is None
 
 
@@ -355,22 +372,22 @@ async def test_unconfirmed_gesture_cannot_score_advance_or_win(game_harness):
 
 @pytest.mark.parametrize("observation", [{"result": "error", "message": "无法观察"},
                                          {"result": "ok", "message": "  "}])
-async def test_failed_or_empty_observation_stops_before_setup(game_harness, observation):
+async def test_failed_or_empty_observation_keeps_public_rules_but_stops_before_throw(game_harness, observation):
     h = game_harness
     h.config.observation = observation
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    assert [phase for _role, phase, _facts in h.decisions] == ["identify"]
+    assert [phase for _role, phase, _facts in h.decisions] == ["setup", "setup", "agree", "agree", "identify"]
     assert [name for name, _ in h.calls] == ["SET_STATE", "SET_COLOR", "go2_observe"]
     assert h.messenger.send_result.call_args.kwargs["reason"] == "game_observation_unavailable"
 
 
-async def test_unidentifiable_lamp_rejects_before_agreement_or_throw(game_harness):
+async def test_unidentifiable_lamp_keeps_agreed_rules_but_never_throws(game_harness):
     h = game_harness
     h.config.target_visible = False
     h.config.observation = {"result": "ok", "message": "画面中没有可辨认的灯或固定标记。"}
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    assert [(role, phase) for role, phase, _facts in h.decisions] == [("lamp", "identify"), ("go2", "identify")]
-    assert not any(row.get("stage") == "mapping_proposal" for row in h.timeline)
+    assert [phase for _, phase, _ in h.decisions] == ["setup", "setup", "agree", "agree", "identify", "identify"]
+    assert len([row for row in h.timeline if row.get("stage") == "mapping_proposal"]) == 2
     assert [name for name, _ in h.calls] == ["SET_STATE", "SET_COLOR", "go2_observe"]
     h.messenger.send_result.assert_called_once_with("msg_test_rps", "rejected", task_id="task_test_rps",
                                                    reason="game_target_not_visible")
@@ -384,14 +401,16 @@ async def test_disagreement_stops_before_throw(game_harness):
     assert h.messenger.send_result.call_args.kwargs["reason"] == "game_terms_not_agreed"
     assert len([row for row in h.timeline if row.get("stage") == "mapping_proposal"]) == 2
     assert not any(row.get("stage") == "terms_confirmed" for row in h.timeline)
+    assert not h.calls  # No identification lighting, camera or gestures before agreement.
 
 
 async def test_public_mapping_is_complete_before_agreement_even_with_vague_model_speech(game_harness):
     h = game_harness
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     stages = [row.get("stage") for row in h.timeline]
-    assert stages.index("recognition") < stages.index("mapping_proposal") < stages.index("agreement")
-    assert stages.index("terms_confirmed") < stages.index("rps_result")
+    assert stages.index("mapping_proposal") < stages.index("agreement") < stages.index("terms_confirmed")
+    assert stages.index("terms_confirmed") < stages.index("identification") < stages.index("recognition")
+    assert stages.index("recognition") < stages.index("reveal") < stages.index("rps_result")
     proposals = [row for row in h.timeline if row.get("stage") == "mapping_proposal"]
     assert proposals[0]["unit_id"] == rps_siege.LAMP
     assert "石头＝红色；剪刀＝绿色；布＝蓝色" in proposals[0]["text"]
@@ -401,7 +420,8 @@ async def test_public_mapping_is_complete_before_agreement_even_with_vague_model
     throws = [facts for _, phase, facts in h.decisions if phase == "throw"]
     assert all(facts["canonical_terms"] == agreements[0]["canonical_terms"] for facts in agreements + throws)
     assert all("choices" not in facts for facts in agreements + throws)
-    assert all(facts["target_identification"]["target_visible"] for _, phase, facts in h.decisions if phase == "setup")
+    assert all(facts["target_identification"] is None for _, phase, facts in h.decisions if phase in {"setup", "agree"})
+    assert all(facts["target_identification"]["target_visible"] for facts in throws)
     assert all(set(params) == {"r", "g", "b", "brightness"}
                for name, params in h.calls if name == "SET_COLOR")
 
@@ -416,6 +436,59 @@ def test_mapping_requires_all_three_readable_color_names():
     for names in ({"rock": "红色"}, {**proposal["color_names"], "paper": "  "}):
         with pytest.raises(ValueError):
             LampSetup.model_validate({**proposal, "color_names": names})
+
+
+@pytest.mark.parametrize("slow_role", ["lamp", "go2"])
+async def test_both_throws_dispatch_before_either_receipt_and_score_waits_for_both(game_harness, slow_role):
+    h = game_harness
+    h.config.concurrent_reveal = True
+    h.reveal_release[slow_role].clear()
+    task = asyncio.create_task(rps_siege.GAME.execute(h.drive, h.event, "task_test_rps"))
+    try:
+        for started in h.reveal_started.values():
+            await asyncio.wait_for(started.wait(), timeout=2)
+        assert not task.done()
+        assert not any(row.get("stage") == "rps_result" for row in h.timeline)
+        assert not any(name == "go2_find_object" for name, _ in h.calls)
+        assert len([phase for _, phase, _ in h.decisions if phase == "throw"]) == 2
+    finally:
+        h.reveal_release[slow_role].set()
+        await asyncio.wait_for(task, timeout=2)
+    assert any(row.get("stage") == "rps_result" for row in h.timeline)
+
+
+async def test_failed_concurrent_lamp_throw_never_scores_or_rewards(game_harness):
+    h = game_harness
+    h.config.concurrent_reveal = True
+    h.config.physical_results = ["ok", "ok", "unknown"]
+    await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
+    assert all(started.is_set() for started in h.reveal_started.values())
+    assert not any(row.get("stage") == "rps_result" for row in h.timeline)
+    assert not any(name == "go2_find_object" for name, _ in h.calls)
+    assert h.messenger.send_result.call_args.kwargs["reason"] == "lamp_action_unconfirmed:unknown"
+    h.navigator.stop_and_confirm.assert_awaited_once()
+
+
+async def test_user_interruption_cancels_both_pending_reveal_waiters(game_harness):
+    h = game_harness
+    h.config.concurrent_reveal = True
+    for release in h.reveal_release.values():
+        release.clear()
+    task = asyncio.create_task(rps_siege.GAME.execute(h.drive, h.event, "task_test_rps"))
+    try:
+        for started in h.reveal_started.values():
+            await asyncio.wait_for(started.wait(), timeout=2)
+        h.drive.user_interrupt = True
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        for release in h.reveal_release.values():
+            release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert not any(row.get("stage") == "rps_result" for row in h.timeline)
+    assert h.messenger.send_result.call_args.kwargs["reason"] == "autonomy_interrupted_or_offline"
+    h.navigator.stop_and_confirm.assert_awaited_once()
 
 
 @pytest.mark.parametrize("phase", ["setup", "agree"])

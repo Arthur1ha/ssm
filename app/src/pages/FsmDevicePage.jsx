@@ -402,7 +402,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         <div className="device-state-workspace device-state-workspace--shared">
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
-            actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth} feedback={execution}
+            actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth}
             onTransition={dispatchTransition} report={reportExecution} training={training} />
         </div>
       )}

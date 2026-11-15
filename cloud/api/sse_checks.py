@@ -1,6 +1,7 @@
 """SSE stays responsive to MQTT threads and disconnects without worker waits."""
 
 import asyncio
+import json
 import threading
 import time
 
@@ -8,6 +9,40 @@ import pytest
 from starlette.requests import Request
 
 from cloud.api import intents
+
+
+@pytest.mark.parametrize('stage', [
+    'mapping_proposal', 'terms_proposal', 'agreement', 'terms_confirmed',
+    'identification', 'recognition', 'reveal', 'rps_result', 'settlement',
+    'search_observe',
+])
+async def test_activity_stage_keeps_activity_sse_name_and_matches_history(monkeypatch, tmp_path, stage):
+    from cloud.api import activity as activity_api
+    from cloud.space.activity import ActivityStore
+
+    store = ActivityStore(tmp_path / 'activity.json')
+    revision = store.note_user_intervention('request-game')
+    record = store.begin('玩石头剪刀布', 'request-game', revision)
+    monkeypatch.setattr(activity_api, 'get_activity_store', lambda: store)
+    broker, stream = await open_stream(monkeypatch)
+    store.configure(emit=lambda event: broker.emit_space(event['space_id'], event))
+    try:
+        event = store.record_event(record['activity_id'], 'message', unit_id='go2',
+            game_id='rps_siege', stage=stage, text='石头＝开心；剪刀＝比心；布＝伸展。')
+        wire = await asyncio.wait_for(anext(stream), timeout=1)
+        assert '\nevent: activity\n' in wire
+        payload = json.loads(next(line[6:] for line in wire.splitlines() if line.startswith('data: ')))
+        assert payload == event
+        history = await activity_api.get_activity_events(record['activity_id'], {'space_id': 'main'})
+        assert history['events'][-1] == payload
+        assert payload['stage'] == stage
+    finally:
+        await stream.aclose()
+
+
+def test_legacy_feedback_still_routes_by_stage():
+    assert intents._sse_event_name({'stage': 'planning'}) == 'planning'
+    assert intents._sse_event_name({'type': 'agent_progress', 'stage': 'search_observe'}) == 'agent_progress'
 
 
 async def open_stream(monkeypatch):

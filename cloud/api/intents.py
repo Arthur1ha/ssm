@@ -328,7 +328,7 @@ class _EventBroker:
 _events = _EventBroker()
 _cleanup_tasks: dict[str, asyncio.Task] = {}
 _ended_sessions: dict[str, float] = {}
-_TYPED_UI_EVENTS = frozenset({"agent_progress", "agent_reply", "reply_error", "run_stage"})
+_TYPED_UI_EVENTS = frozenset({"agent_progress", "agent_reply", "reply_error", "run_stage", "activity"})
 
 
 def _sse_event_name(event: dict[str, Any]) -> str:
