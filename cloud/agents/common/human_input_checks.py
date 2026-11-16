@@ -78,7 +78,7 @@ async def test_repeated_clarifications_survive_reopen_and_next_turn(agent_id, tm
 
     assert [m.content for m in saved_dialogue()] == [goal, "偏暖还是偏冷？"]
     second = Model([response("question", "还要再亮一点吗？")])
-    await run_role_graph(new_run(), model=second, checkpointer=saver(),
+    paused_again = await run_role_graph(new_run(), model=second, checkpointer=saver(),
                          effect_ledger=ledger, resume=True, resume_value="暖一点吧", **common)
     assert [m.content for m in saved_dialogue()] == [
         goal, "偏暖还是偏冷？", "暖一点吧", "还要再亮一点吗？"]
@@ -86,6 +86,21 @@ async def test_repeated_clarifications_survive_reopen_and_next_turn(agent_id, tm
     final = await run_role_graph(new_run(), model=third, checkpointer=saver(),
         effect_ledger=ledger, resume=True, resume_value="不用再亮了", **common)
     assert final.status == "ok"
+    assert (paused.model_turn, paused_again.model_turn, final.model_turn) == (2, 3, 4)
+    if agent_id == "cloud_orchestrator":
+        from cloud.agents.steward.graph import stable_reply_event_id
+        identity = lambda value: stable_reply_event_id(value)
+    elif agent_id == "esp32_desk_led":
+        from cloud.agents.lamp.graph import stable_reply_event_id
+        identity = lambda value: stable_reply_event_id(value, value.status)
+    else:
+        from cloud.agents.go2.run_view import stable_reply_event_id
+        identity = lambda value: stable_reply_event_id(value.run_id,
+            session_id=value.session_id, model_turn=value.model_turn,
+            reply_kind="clarification" if value.status == "needs_clarification" else "final")
+    ids = [identity(value) for value in (paused, paused_again, final)]
+    assert len(set(ids)) == 3 and identity(paused) == ids[0]
+    assert len(first.inputs) == 2 and len(second.inputs) == len(third.inputs) == 1
     expected = [goal, "偏暖还是偏冷？", "暖一点吧", "还要再亮一点吗？", "不用再亮了"]
     dialogue = [m for m in third.inputs[0] if isinstance(m, (HumanMessage, AIMessage))
                 and m.name is None and not getattr(m, "tool_calls", None)]

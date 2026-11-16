@@ -378,14 +378,19 @@ class ActivityStore:
         event = {"type": "activity", "event_type": event_type,
                  "event_id": "evt_" + uuid.uuid4().hex, "activity_id": activity_id,
                  "space_id": DEFAULT_SPACE_ID, "ts": time.time(),
-                 "unit_id": unit_id, "text": str(text)[:1000]}
+                 "agent_id": unit_id, "unit_id": unit_id, "text": str(text)[:1000]}
         event.update({key: value for key, value in facts.items()
                       if key in {"target_unit_id", "message_id", "conversation_id", "task_id",
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
                                  "interaction_kind", "game_id",
                                  "question_id", "action", "physical_stop", "reason",
                                  "source", "confidence", "source_event_id", "display", "stage"}})
-        event.update(public_process_facts({**facts, "unit_id": unit_id}))
+        projected = public_process_facts({**facts, "unit_id": unit_id})
+        # Journal rows have their own identity. Keep the source identity for
+        # SSE/history reconciliation without replacing the journal event id.
+        projected.pop("event_id", None)
+        event.update(projected)
+        event.setdefault("source_event_id", event["event_id"])
         if event_type in {"message", "question"}:
             from cloud.agents.common.emotions import normalize_emotion
             event["emotion"] = normalize_emotion(facts.get("emotion"))

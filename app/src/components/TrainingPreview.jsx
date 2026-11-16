@@ -18,11 +18,9 @@ function TrainingPreview({proposal,onConfirm,onCancel,onRevise,error}) {
     {proposal.operation === 'remove' ? <p>{before || summary}</p>
       : effect && effect !== summary && <p>{effect}</p>}
     {proposal.operation !== 'remove' && <TrainingRuleSteps record={proposal}/>}
-    {proposal.confirmed && <p>{proposal.operation === 'remove' ? '这条规则已删除。' : '规则已保存。'}</p>}
     {proposal.cancelled && <p>这次没有修改规则。</p>}
     {(proposal.superseded || proposal.superseded_by) && <p>后续对话已调整这项要求。</p>}
-    {proposal.expired && !proposal.confirmed && !proposal.cancelled && !proposal.superseded_by && <p>继续告诉我你的要求，我会重新核对这次修改。</p>}
-    {editable && proposal.confirmation_allowed === false && <p>{proposal.reasonText || '这项要求暂时无法应用，可以继续在对话中调整。'}</p>}
+    {editable && proposal.confirmation_allowed === false && <p>{proposal.reasonText || '暂时无法应用。'}</p>}
     {error && <p className="training-error" role="alert">{error}</p>}
     {editable && <div className="training-actions">
       <button type="button" className="btn btn--accent" disabled={busy || proposal.confirmation_allowed === false} onClick={() => run(onConfirm)}>{busy ? '正在保存…' : '就这样'}</button>

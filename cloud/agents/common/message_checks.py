@@ -1,7 +1,6 @@
 """Model-free checks of role boundaries, real receipts and final call counts."""
 
 import json
-import threading
 import time
 from types import SimpleNamespace
 
@@ -12,7 +11,6 @@ from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.effects import FileEffectLedger
 from cloud.agents.common.messages import reply_messages, role_messages
-from cloud.agents.common.progress import progress_messages
 from cloud.agents.common.replies import factual_fallback, finalize_reply, valid_reply_format
 from cloud.agents.common.runner import GraphRun, run_role_graph
 
@@ -56,7 +54,6 @@ def test_role_decisions_separate_instructions_request_and_live_facts(role, monke
     assert "人格用于表达" in messages[0].content
     assert "真实观测和回执" in messages[0].content
     assert "propose_training" not in messages[0].content
-    assert "go2_move" not in messages[0].content
     assert "set_led_color" not in messages[0].content
     assert [message.content for message in messages if isinstance(message, HumanMessage)
             and message.name is None] == [current.goal, "就用上次那档"]
@@ -70,8 +67,7 @@ def test_reply_and_progress_keep_actual_tool_call_and_receipt_roles():
     current = run(steps=[{"step_id": "set-1", "tool": "set_led_color",
                          "params": {"r": 255, "g": 236, "b": 210},
                          "result": {"result": "ok", "task_id": "device-1"}}])
-    for messages in (reply_messages("用自己的口吻回复", current),
-                     progress_messages("当前人格", current.goal, current.steps[0])):
+    for messages in (reply_messages("用自己的口吻回复", current),):
         assert isinstance(messages[0], SystemMessage)
         call, receipt = messages[-2:]
         assert isinstance(call, AIMessage) and isinstance(receipt, ToolMessage)
@@ -188,7 +184,7 @@ def test_go2_conversation_failure_without_tools_does_not_claim_action_unsupporte
                        agent_id='go2', status='error')
     answer = factual_fallback('go2', 'error', current)
     assert '做不到' not in answer and '动作' not in answer
-    assert '你的话' in answer
+    assert '回复暂时不可用' in answer
 
 
 def test_query_and_proposal_success_never_imply_physical_completion():
@@ -226,53 +222,6 @@ async def test_empty_response_retry_is_runtime_instruction_not_user_wording(tmp_
         effect_ledger=FileEffectLedger(tmp_path / "effects"))
     assert len(inputs) == 2 and isinstance(inputs[1][-1], SystemMessage)
     assert [message.content for message in inputs[1] if isinstance(message, HumanMessage)] == [current.goal]
-
-
-@pytest.mark.asyncio
-async def test_physical_reply_keeps_receipt_wait_and_publish_idempotency(tmp_path, monkeypatch):
-    from cloud.agents.lamp.workflows import physical_reply
-
-    monkeypatch.setattr("cloud.agents.common.replies.emit_agent_event", lambda *a, **k: None)
-    monkeypatch.setattr(physical_reply, "get_profile", lambda: {
-        "prompt": "灯的人格", "name": "测试灯", "traits": {}})
-    inputs, published = [], []
-
-    async def invoke(messages):
-        inputs.append(messages)
-        return AIMessage(content="这档暖白调好了。")
-
-    def publish(kind, **fields):
-        published.append((kind, fields))
-        return {"event_id": "physical-final"}
-
-    kwargs = dict(task_id="physical-task", goal="用这档暖白", action="SET_COLOR",
-        params={"r": 255, "g": 236, "b": 210}, trace_id="trace", parent_run_id="parent",
-        unit_id="esp32_desk_led", session_id="session",
-        agent=SimpleNamespace(_llm=SimpleNamespace(ainvoke=invoke)),
-        device_state=SimpleNamespace(get_task_result=lambda _id: {"result": "ok"}),
-        registry=SimpleNamespace(get_card=lambda _id: {"online": True}), publish=publish,
-        checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"))
-    first = await physical_reply.run_physical_reply(**kwargs)
-    second = await physical_reply.run_physical_reply(**kwargs)
-    assert first == second and first["response"] == "这档暖白调好了。"
-    assert len(inputs) == 1 and len(published) == 1
-    assert isinstance(inputs[0][0], SystemMessage) and isinstance(inputs[0][-1], ToolMessage)
-
-
-@pytest.mark.parametrize("step,answer", [
-    ({"tool": "propose_training", "effectful": True, "result": {"result": "ok"}}, "核对草案后再确认，还不能说‘已经保存好了’。"),
-    ({"tool": "SET_COLOR", "effectful": True, "result": {"result": "accepted"}}, "等回执确认以后才能说‘灯调好了’。"),
-])
-def test_progress_narration_keeps_negation_and_quoted_words(step, answer, monkeypatch):
-    from cloud.agents.common import progress
-
-    slots = threading.BoundedSemaphore(1)
-    monkeypatch.setattr(progress, "_slots", slots)
-    published = []
-    progress.submit_progress("当前人格", "调整阅读配置", step, lambda _messages: answer,
-                             published.append, threading.Event(), time.time() + 5)
-    assert slots.acquire(timeout=2), "narration worker did not release its slot"
-    assert published == [answer]
 
 
 @pytest.mark.parametrize("value", [None, {}, "", "   ", '{"text":"回复"}', "```回复```", "字" * 4001])

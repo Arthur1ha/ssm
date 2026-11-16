@@ -10,22 +10,45 @@ from cloud.observability import bind_context
 from cloud.space.execution import ExecutionContext
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('captured_at', [1794820000.25, None])
+async def test_search_observation_keeps_original_camera_time_not_monotonic_time(monkeypatch, captured_at):
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import visual_target
+    from cloud.go2.connection import go2
+
+    search = object.__new__(DeviceSearch)
+    search.guard = AsyncMock(return_value=None)
+    search.after_frame = search.after_time = None
+    monkeypatch.setattr(go2, '_velocity_command_active', False)
+    frame = {'frame_id': 'original-frame', 'received_at': 123.0, 'captured_at': captured_at}
+    monkeypatch.setattr(visual_target, 'observe_target', AsyncMock(return_value={
+        'found': True, 'frame': frame, 'pose': None,
+        'observation': {'scene_summary': '前方有纸箱。'}}))
+    observation = await search.observe({'mode': 'find_object', 'target': '纸箱',
+                                       'deadline': time.time() + 10})
+    facts = search_progress_facts('search_observe', {}, observation=observation)
+    assert observation['image_time'] == 123.0
+    assert facts['observation']['as_of'] == captured_at
+    assert facts['observation']['frame_id'] == 'original-frame'
+
+
 def test_visible_facts_keep_sighting_arrival_and_absence_distinct():
     state = {"target": "白色猫头鹰"}
     observation = {"found": True, "frame_id": "view-one", "observation": {
         "scene_summary": "白色猫头鹰位于椅子左侧。", "proximity": "far",
         "proximity_reason": "目标与相机之间仍有一段地面。"}}
     facts = search_progress_facts("search_candidate", state, observation=observation)
-    assert "疑似「白色猫头鹰」" in facts["text"]
-    assert "椅子左侧" in facts["text"]
-    assert "仍有一段地面" in facts["text"]
-    assert "还需要继续靠近" in facts["text"]
+    assert facts["text"] == "白色猫头鹰位于椅子左侧。"
+    assert facts["observation"]["proximity_reason"] == "目标与相机之间仍有一段地面。"
+    assert facts["observation"]["found"] is True
+    assert facts["observation"]["proximity"] == "far"
     assert "已到" not in facts["text"]
     assert facts["observation"]["frame_id"] == "view-one"
     missing = search_progress_facts("search_observe", state, observation={
         "found": False, "observation": {"scene_summary": "前方有桌腿和纸箱。"}})
     assert "桌腿和纸箱" in missing["text"]
-    assert "还不能判断其他区域" in missing["text"]
+    assert missing["observation"]["found"] is False
 
 
 def test_progress_bounds_model_text_and_tolerates_older_observations():
@@ -33,7 +56,9 @@ def test_progress_bounds_model_text_and_tolerates_older_observations():
         "observation": {"scene_summary": "长" * 1000, "proximity_reason": {"invalid": True}}})
     assert len(facts["observation"]["scene_summary"]) == 240
     assert facts["observation"]["proximity_reason"] == ""
-    assert search_progress_facts("search_observe", {})["text"]
+    unknown = search_progress_facts("search_observe", {})
+    assert unknown["observation"]["found"] is None
+    assert unknown["text"] == ""
 
 
 @pytest.mark.asyncio
@@ -146,7 +171,8 @@ async def test_observation_start_and_result_reach_sse_before_slow_operations(mon
         await asyncio.wait_for(captured.wait(), 2)
         started = channel.get_nowait()
         assert started["stage"] == "search_observing"
-        assert "正在观察" in started["text"]
+        assert started["fact_kind"] == "call"
+        assert started["tool"] == "go2_observe"
         assert not work.done()
         release_capture.set()
         await asyncio.wait_for(recording.wait(), 2)
@@ -165,7 +191,7 @@ async def test_observation_start_and_result_reach_sse_before_slow_operations(mon
         await asyncio.wait_for(work, 2)
         selecting = channel.get_nowait()
         assert selecting["stage"] == "search_selecting"
-        assert selecting["media_ref"] is None, "Do not repeat the previous photo as a new observation"
+        assert selecting.get("media_ref") is None, "Do not repeat the previous photo as a new observation"
     finally:
         release_capture.set()
         release_record.set()
@@ -173,27 +199,25 @@ async def test_observation_start_and_result_reach_sse_before_slow_operations(mon
         await asyncio.gather(work, return_exceptions=True)
 
 
-@pytest.mark.parametrize("source, phrase", [
-    ("target_reobservation", "疑似目标的方向"),
-    ("frontier", "未检查区域"),
-    ("observation_reposition", "换位"),
-    ("visual_coverage", "补充观察"),
+@pytest.mark.parametrize("source", [
+    "target_reobservation", "frontier", "observation_reposition", "visual_coverage",
 ])
-def test_next_step_explains_actual_selected_observation(source, phrase):
+def test_selected_candidate_keeps_executor_facts_without_invented_model_reason(source):
     facts = search_progress_facts("search_selected", {}, candidate={"source": source})
-    assert phrase in facts["text"]
-    assert facts["decision_summary"] in facts["text"]
-    assert "停稳后重新观察" in facts["text"]
+    assert facts["public_result"]["candidate"]["source"] == source
+    assert facts["text"] == ""
+    assert "decision_basis" not in facts
 
 
 def test_turn_and_blocked_movement_do_not_claim_approach_or_completion():
     turning = {"candidate": {"source": "target_reobservation", "view_kind": "turn"}}
     facts = search_progress_facts("search_navigate", turning)
-    assert "原地转向" in facts["text"]
-    assert "靠近" not in facts["text"]
+    assert facts["fact_kind"] == "call"
+    assert facts["text"] == ""
     blocked = search_progress_facts("search_move_result", turning, receipt={
         "result": "blocked", "reason": "observation_turn_unconfirmed"})
-    assert "未确认已转到选定方向" in blocked["text"]
+    assert blocked["reason"] == "observation_turn_unconfirmed"
+    assert blocked["public_result"]["result"] == "blocked"
     assert "已完成" not in blocked["text"]
 
 

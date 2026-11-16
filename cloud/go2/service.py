@@ -75,6 +75,31 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
     own_life = None
     last_result = {'result': 'unknown'}
 
+    def publish_step(resolved, trusted, *, result=None):
+        from cloud.api.intents import publish_agent_event
+        index = resolved['step_index']
+        definition = prepared['record'].get('definition') or {}
+        autonomous = trusted.origin_kind == 'agent_autonomous'
+        action = resolved['action']
+        tool = ('go2_sport' if action in SPORT_COMMANDS else next(
+            (spec.get('tool_name') for spec in CARD_SKILLS.values()
+             if (spec.get('invoke') or {}).get('action') == action), action))
+        arguments = ({'cmd': action, **resolved['params']} if action in SPORT_COMMANDS
+                     else resolved['params'])
+        publish_agent_event('agent_progress', agent_id='go2',
+            session_id='' if autonomous else trusted.session_id,
+            scope='space' if autonomous else 'session', space_id=trusted.space_id,
+            source='autonomous' if autonomous else 'training', run_id=run_id,
+            step_id=f'{run_id}:{index}', sequence=index * 2 + int(result is not None),
+            stage='observed' if result is not None else 'executing',
+            status=(result or {}).get('result', 'executing'),
+            fact_kind='result' if result is not None else 'call', result_kind='training',
+            teaching_id=prepared['record']['teaching_id'], version=prepared['record']['revision'],
+            name=definition.get('name') or prepared['record'].get('name') or '',
+            step_number=index + 1, tool=tool, arguments=arguments,
+            public_result=result or {}, activity_id=(trusted.session_id if autonomous
+                and trusted.session_id.startswith('act_') else None))
+
     async def before_step(resolved, trusted):
         nonlocal own_life
         current = go2.state_snapshot()
@@ -97,6 +122,7 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
         if resolved['action'] == 'LIFE' and resolved['params'].get('action') == 'request_rest' and own_life:
             go2.runtime.finish_life(own_life)
             own_life = None
+        publish_step(resolved, trusted)
         return None
 
     async def execute(action, params, trusted, request_id):
@@ -112,6 +138,7 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
 
     async def after_step(resolved, trusted, result):
         nonlocal own_life
+        publish_step(resolved, trusted, result=result)
         runtime = runtime_for(go2)
         if (result.get('result') == 'ok' and runtime is not None
                 and resolved['step_index'] + 1 < len(prepared['steps'])

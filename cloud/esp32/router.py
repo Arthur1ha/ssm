@@ -74,15 +74,6 @@ class SemanticTaskRequest(BaseModel):
     training: ApplyTraining | None = None
 
 
-class PhysicalReplyRequest(BaseModel):
-    task_id: str
-    goal: str
-    action: str
-    params: dict = Field(default_factory=dict)
-    trace_id: str
-    parent_run_id: str
-
-
 @router.get("/autonomy")
 async def esp32_autonomy_get(_session: dict = Depends(require_session)):
     """返回灯智能体当前自主模式（manual / reactive）。"""
@@ -221,26 +212,3 @@ async def get_lamp_semantic_task(unit_id: str, task_id: str,
                 else:
                     result = update_late_result(task_id, context.session_id, physical) or result
     return result
-
-
-@internal_router.post("/{unit_id}/agent/replies", include_in_schema=False)
-def reply_to_physical_task(unit_id: str, req: PhysicalReplyRequest,
-                           context: ExecutionContext = Depends(require_service_context)):
-    """Let the lamp describe a verified delegated MQTT result before the parent sums up."""
-    _require_led_unit(unit_id)
-    if context.origin_kind != "user_delegated" or context.expires_at <= time.time():
-        raise HTTPException(status_code=403, detail="a live delegated session is required")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", req.task_id):
-        raise HTTPException(status_code=400, detail="invalid task_id")
-    import asyncio
-    from cloud.api.main import _esp32_state
-    from cloud.api.intents import publish_agent_event
-    from cloud.cards.registry import get_registry
-    from cloud.agents.lamp.workflows.physical_reply import run_physical_reply
-    return asyncio.run(run_physical_reply(
-        task_id=req.task_id, goal=req.goal, action=req.action, params=req.params,
-        trace_id=req.trace_id, parent_run_id=req.parent_run_id,
-        unit_id=unit_id, session_id=context.session_id,
-        agent=_esp32_agent.get_agent(), device_state=_esp32_state,
-        registry=get_registry(), publish=publish_agent_event,
-    ))

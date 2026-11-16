@@ -184,7 +184,7 @@ def test_lamp_blocked_autonomous_action_stays_silent(monkeypatch):
 @pytest.mark.asyncio
 async def test_go2_does_not_generate_speech_for_duplicate_or_routine_failure(monkeypatch):
     from cloud.go2.mode import free_explore
-    from cloud.agents.go2.workflows import reply as go2_reply
+    from cloud.agents.go2.workflows import free_explore as go2_reply
     from cloud.api import intents
 
     drive = free_explore.Drive()
@@ -198,10 +198,9 @@ async def test_go2_does_not_generate_speech_for_duplicate_or_routine_failure(mon
 
     async def answer(**kwargs):
         generated.append(kwargs["run_id"])
-        assert kwargs["include_emotion"] is True
         return {"text": "我已经做到了。", "emotion": "happy"}
 
-    monkeypatch.setattr(go2_reply, "run_autonomous_reply_graph", answer)
+    monkeypatch.setattr(go2_reply, "resume_autonomy_result", answer)
     monkeypatch.setattr(intents, "publish_agent_event",
                         lambda kind, **facts: events.append((kind, facts)))
     await drive._publish_motion_reply("go2_sport", {"cmd": "Hello"}, {"result": "ok"})

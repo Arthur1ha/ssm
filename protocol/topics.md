@@ -147,6 +147,18 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 
 三类用户入口返回可信 `trace_id`；任务查询、继续和 SSE 反馈沿用原 ID。`ssm/intent/{session_id}` 的签名正文带 `trace_id`；同伴 `request/result` 带 `trace_id` 与 `parent_run_id`，HTTP 内部任务正文带同样字段。浏览器可显示该 ID 供排查，但不能用它声明角色或权限。
 
+### 对话过程的公开事实
+
+运行展示沿用 `agent_progress`、`agent_reply`、`run_stage` 和 `reply_error`，通过既有 `ssm/feedback/{session_id}` 与 `/api/events` 传输；活动事实还进入既有有界时间线。`stage` 是忙碌、追问或终结控制信号，不对应一句聊天记录；没有调用、观察或实际结果时不创建过程面板。
+
+`cloud/agents/common/progress_facts.py` 是实时事件与活动历史的共同公开投影。关联字段包括 `event_id/source_event_id`、`trace_id/run_id/parent_run_id/step_id/tool_call_id/task_id`、`sequence/model_turn` 和原始 `ts/as_of`。`agent_id` 表示执行或发言角色，`target_unit_id` 表示被调用目标。`fact_kind` 区分 observation、decision、call、result、question；`result_kind` 区分 action、query、message、activity、configuration、training 等业务结果。允许的业务参数来自既有工具/Card，`public_result` 按结果类型限深、限条数、限长度；不转发任意 context、memory、提示词、凭据或原始检查点。
+
+可选 `decision_reason/evidence_refs` 与本次原决策同轮产生，服务端从该轮可信 `decision_space` 解析为 `decision_basis.reason/evidence`。未记录或无效的可选说明省略，不额外调用解释模型；游戏等既有强制观察要求继续校验。展示元数据在动作指纹前分离，不因解释变化再次执行动作。证据保留来源、摘要和观测时间，不能用执行后状态替代原依据。
+
+同一调用的开始与回执更新原步骤，不同 tool call 保持独立。重放保留源身份；未知结果允许由原任务的迟到真实回执补全，陈旧阶段不能覆盖已确认结果。消息投递不表示设备动作完成；活动外层 `ok` 不覆盖成员加入失败；教导保存、加载与物理完成分别展示。因果只由明确的父子运行、触发消息和证据引用建立，不能由相邻时间或相同文本推断。
+
+人格发言复用原角色最终回复和 emotion。没有最终发言的工具结束才在原 Graph 的收尾节点生成一次结果回复；Go2 自主观察/运动结果进入既有自主 Graph 的结果回复分支，不重新仲裁或导航。委托设备回复按整个协调轮聚合并保持稳定身份，子回复可复用时不再次改写。结果回复生成失败使用 `reply_error/reply_source=runtime` 表达系统反馈，不能伪装成角色说过固定台词。旧历史中的 narrated 记录只在读取展示时过滤，不修改运行资产。
+
 ### 回复情绪与教导的物理表达
 
 模型的已有对话回复可增加可选 `emotion`，与 `text`（游戏发言为 `speech`）同轮生成。允许值为 `neutral/happy/curious/confused/surprised/angry/sad/relaxed`；缺失、null、未知名称和错误类型统一降级为 `neutral`，不拒绝其余合法回复或业务决定。纯文本回复和旧运行记录仍有效。动作收尾仍不调用业务工具，也不为选择情绪额外调用模型。
@@ -169,7 +181,7 @@ PWA 为新回复播放短暂情绪动画，日常眨眼和起伏在客户端运�
 |-------|--------|------|
 | `ssm/intent/{session_id}` | FastAPI（内部） | `{"text":"...","context":{...},"_mqtt_auth":{"alg":"HMAC-SHA256","timestamp":...,"nonce":"...","signature":"..."}}`；签名绑定完整 topic 与规范化 payload，编排器校验时间窗并拒绝 nonce 重放 |
 | `ssm/session/{session_id}/ended` | FastAPI（内部） | `{"context":{...},"reason":"logout\|expired\|revoked","_mqtt_auth":{...}}`；与 intent 使用相同 HMAC 验证，触发会话历史、任务结果与 Go2 资源清理 |
-| `ssm/feedback/{session_id}` | Cloud | `{"session_id":"...","stage":"planning\|ack\|executing\|step\|question\|done\|partial\|failed\|denied","text":"...","status":"ok\|accepted\|executing\|blocked\|rejected\|timeout\|cancelled\|error\|needs_clarification","run_id":"...","step_id":"...","step_number":1,"tool":"...","result":{},"question":"...","ts":...}`；步骤字段只在对应 stage 出现，API/SSE 只向同一会话转发。`step` 的 `result` 是实际工具结果，`question` 暂停原 `run_id`。 |
+| `ssm/feedback/{session_id}` | Cloud | `{"type":"run_stage\|agent_progress\|agent_reply\|reply_error","session_id":"...","agent_id":"...","stage":"...","status":"...","run_id":"...","trace_id":"...","step_id":"...","event_id":"...","sequence":1,"text":"...","ts":...}`；过程字段由上面的公开事实投影提供。`run_stage` 只承担忙碌、追问及终结控制，原始人格发言只在 `agent_reply`，生成失败和请求拒绝用 `reply_error`。`question` 暂停原 `run_id`。API/SSE 只向同一会话转发，委托设备发言保留原设备 `agent_id`。 |
 | `ssm/decision/active` | Cloud | `"true"` 或 `"false"`；编排器兼容在线标记，当前 ESP32 固件不订阅它 |
 
 旧 `ssm/rules/{device_id}` 规则下发已停用，当前云端不发布、固件不订阅。用户教导通过 `/api/training` 管理，由云端 Graph 和执行校验层使用。

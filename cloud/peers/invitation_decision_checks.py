@@ -232,7 +232,8 @@ def test_game_decision_is_visible_before_power_or_color_dispatch(monkeypatch, sp
     assert decision["action"] == tool and decision["status"] == "executing"
     assert decision["task_id"] == stable_task_id("esp32_desk_led", "run", "step")
     assert decision["trigger_message_id"] == "invite123"
-    assert "准备" in decision["text"] and "已" not in decision["text"]
+    assert decision["text"] == ""
+    assert decision["fact_kind"] == "call" and decision["result_kind"] == "action"
 
 
 def test_user_hold_blocks_game_decision_and_dispatch(monkeypatch, space, bus):

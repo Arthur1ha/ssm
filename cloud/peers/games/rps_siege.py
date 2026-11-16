@@ -117,11 +117,20 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         if odom_session is not None and getattr(go2, "_odom_session_id", None) != odom_session:
             raise GameStopped("odom_session_changed")
 
+    event_counts = {}
+
     def record(kind: str, text: str, *, role="go2", **facts):
+        identity = (kind, role, facts.get("task_id", task_id), facts.get("stage", ""), facts.get("action", ""))
+        ordinal = event_counts.get(identity, 0)
+        event_counts[identity] = ordinal + 1
+        source_id = "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, repr((invitation_id, identity, ordinal))).hex
+        fact_kind = {"action": "call", "action_progress": "call", "action_result": "result",
+                     "observation": "observation"}.get(kind, "observation")
         return get_activity_store().record_event(activity_id, kind,
             unit_id=LAMP if role == "lamp" else "go2", text=text,
             **{"game_id": GAME_ID, "trigger_message_id": invitation_id,
-               "task_id": task_id, **facts})
+               "task_id": task_id, "source_event_id": source_id,
+               "fact_kind": fact_kind, "result_kind": "action", **facts})
 
     def facts(state=None, role="go2"):
         state = state or {}
@@ -160,7 +169,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             dispatch=dispatch, source="peer_autonomous", task_id=physical_id,
             card=get_registry().get_card(LAMP),
             timeout=min(20, max(0.1, deadline - time.time())))
-        record("action_result", f"灯的游戏动作{('已确认' if result.get('result') == 'ok' else '未确认')}。",
+        record("action_result", "", public_result=result,
                role="lamp", action=action, arguments=params, status=result.get("result", "unknown"),
                task_id=result.get("task_id", physical_id))
         if result.get("result") != "ok":
@@ -211,6 +220,10 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             return {**observed_state, "result": "rejected", "reason": "game_target_not_visible"}
         return {**observed_state, "target_identification": dog}
 
+    record("action_result", "", stage="game_rules", fact_kind="result", result_kind="query",
+           public_result={"game_rules": {"rule_id": GAME_ID, "name": GAME.name,
+               "description": GAME.description, "rules": GAME.rules, "status": "proposed"}})
+
     async def setup(state):
         lamp, dog = await asyncio.gather(decision("lamp", "setup", state),
                                          decision("go2", "setup", state))
@@ -225,12 +238,14 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         for role, answer in (("lamp", lamp), ("go2", dog)):
             labels = (lamp["color_names"] if role == "lamp" else
                       {choice: gestures[command]["label"] for choice, command in dog["mapping"].items()})
-            mapping_text = "；".join(f"{label}＝{labels[choice]}" for choice, label in CHOICES.items())
-            record("message", f"本局映射提议：{mapping_text}。这是公开规则，待双方确认。\n{answer['speech']}",
-                   role=role, stage="mapping_proposal", emotion=answer.get("emotion"))
-        record("message", "待确认的规则：一把定胜负，平局重来。狗赢就沿安全路径到本局确认的灯附近停稳，"
-               "抬前腿象征性按灯，动作确认完成后关灯；"
-               "灯赢就由狗表演一次。双方确认映射后先认灯定位，再秘密选拳、同时展示。", stage="terms_proposal")
+            record("message", answer["speech"], role=role,
+                   stage="mapping_proposal", emotion=answer.get("emotion"),
+                   result_kind="query", fact_kind="result", public_result={"game_rules": {
+                       "mapping": [{"choice": choice, "label": labels[choice]} for choice in CHOICES],
+                       "rule_id": GAME_ID, "status": "proposed"}})
+        record("action_result", "", stage="terms_proposal", fact_kind="result", result_kind="query",
+               public_result={"game_rules": {"rule_id": GAME_ID, "name": GAME.name,
+                   "rules": GAME.rules, "status": "proposed"}})
         return {"proposals": {"lamp": lamp, "go2": dog}, "terms": terms,
                 "round": 1, "history": [], "arrived": False}
 
@@ -242,7 +257,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                    status="accepted" if answer["accepted"] else "rejected")
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "game_terms_not_agreed"}
-        record("message", "双方已确认本局映射和规则，接下来亮识别色、确认灯的位置，然后秘密选拳、同时展示。", stage="terms_confirmed")
+        record("action_result", "", stage="terms_confirmed", fact_kind="result", result_kind="query",
+               public_result={"game_rules": {"rule_id": GAME_ID, "status": "confirmed"}})
         return {}
 
     async def choose(state):
@@ -266,14 +282,15 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             check()
             result = await execute_tool("go2_sport", {"cmd": command}, context=context,
                                        request_id=f"rps_{invitation_id}_{number}_gesture")
-            record("action_result", f"狗的出拳动作{('已确认' if result.get('result') == 'ok' else '未确认')}。",
+            record("action_result", "", public_result=result,
                    action="go2_sport", arguments={"cmd": command}, status=result.get("result", "unknown"),
                    task_id=result.get("command_request_id") or task_id)
             if result.get("result") != "ok":
                 raise GameStopped("go2_gesture_unconfirmed:" + str(result.get("error") or result.get("result")))
             check()
 
-        record("message", f"第 {number} 回合：双方已锁定选择，同时开始展示。", stage="reveal")
+        record("action_progress", "", stage="reveal", status="executing",
+               public_result={"game_rules": {"rule_id": GAME_ID, "status": "revealing", "round": number}})
         for role in ("lamp", "go2"):
             record("message", choices[role]["speech"], role=role, stage="throw_announcement", emotion=choices[role].get("emotion"))
         # Dispatch both without waiting for either receipt. Collect both
@@ -287,10 +304,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         winner = round_winner(choices["lamp"]["choice"], choices["go2"]["choice"])
         if winner != "draw":
             adjudicated_winner = winner
-        label = {"go2": "狗赢，接下来靠近灯并关灯", "lamp": "灯赢，接下来由狗表演", "draw": "平局，重新出拳"}[winner]
-        record("message", f"第 {number} 回合：灯出{CHOICES[choices['lamp']['choice']]}，"
-               f"狗出{CHOICES[choices['go2']['choice']]}；{label}。",
-               stage="rps_result", reason=winner + "_won" if winner != "draw" else "draw",
+        record("action_result", "",               stage="rps_result", reason=winner + "_won" if winner != "draw" else "draw",
                game_round={"round": number,
                    "choices": {LAMP: choices["lamp"]["choice"], "go2": choices["go2"]["choice"]},
                    "mapping": {
@@ -307,13 +321,12 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         target = state["target_identification"]["target"]
         search_id = "rps_" + invitation_id + "_lamp"
-        record("action", "我赢了，准备边走边观察约定的灯，确认已在附近并停稳后关灯。",
-               action="go2_find_object", task_id=search_id)
+        record("action", "", action="go2_find_object", arguments={"target": target}, task_id=search_id)
         with search_request(search_id, deadline):
             result = await execute_tool("go2_find_object",
                 {"target": target}, context=context)
         record("action_result", str(result.get("message") or result.get("reason") or result.get("result")),
-               action="go2_find_object", status=result.get("result", "unknown"),
+               action="go2_find_object", public_result=result, status=result.get("result", "unknown"),
                task_id=result.get("task_id") or search_id)
         if (result.get("result") != "ok" or result.get("outcome") != "nearby"
                 or result.get("found") is not True or (result.get("stop") or {}).get("result") != "ok"
@@ -328,18 +341,15 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         if not state.get("arrived"):
             raise GameStopped("arrival_not_confirmed")
         gesture_id = f"rps_{invitation_id}_switch_off_gesture"
-        record("action", "已在约定目标附近停稳并复核，准备抬前腿象征性按一下灯。",
-               action="go2_sport", arguments={"cmd": "Hello"}, task_id=gesture_id)
+        record("action", "", action="go2_sport", arguments={"cmd": "Hello"}, task_id=gesture_id)
         result = await execute_tool("go2_sport", {"cmd": "Hello"}, context=context,
                                     request_id=gesture_id)
-        record("action_result", "象征性按灯的抬前腿动作" +
-               ("已确认完成。" if result.get("result") == "ok" else "尚未确认完成。"),
+        record("action_result", "", public_result=result,
                action="go2_sport", arguments={"cmd": "Hello"}, status=result.get("result", "unknown"),
                task_id=result.get("command_request_id") or gesture_id)
         if result.get("result") != "ok":
             raise GameStopped("game_switch_off_gesture_unconfirmed:" + str(result.get("error") or result.get("result")))
         check()
-        record("message", "抬前腿动作已确认完成，现在兑现本局的关灯约定。")
         await physical("SET_STATE", {"state": "OFF"}, "prize:off")
         return {"result": "ok", "reason": "go2_won_lamp_off_confirmed"}
 
@@ -347,10 +357,10 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         answer = await decision("go2", "performance", state)
         check()
         record("message", answer["speech"], emotion=answer.get("emotion"))
-        record("action", "狗准备兑现本局约定，表演一个动作。", action="go2_sport")
+        record("action", "", action="go2_sport", arguments={"cmd": answer["command"]})
         result = await execute_tool("go2_sport", {"cmd": answer["command"]}, context=context,
             request_id=f"rps_{invitation_id}_performance")
-        record("action_result", "狗的表演" + ("已确认完成。" if result.get("result") == "ok" else "尚未确认完成。"),
+        record("action_result", "", public_result=result,
                action="go2_sport", status=result.get("result", "unknown"),
                task_id=result.get("command_request_id") or task_id)
         if result.get("result") != "ok":
@@ -440,13 +450,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             reason = adjudicated_winner + "_won:" + reason
         await drive._advance_task(goal, stage="finish", result={"result": status, "reason": reason,
                                                               "game_winner": adjudicated_winner})
-    text = {"go2_won_lamp_off_confirmed": "猜拳攻灯结束：狗猜拳获胜，已确认在约定的灯附近停稳、抬前腿象征性按灯并关灯。",
-            "lamp_won_performance_confirmed": "猜拳攻灯结束：灯猜拳获胜，狗已完成约定的表演。"}.get(reason)
-    if text is None:
-        text = ("猜拳结果已确定：" + ("狗获胜" if adjudicated_winner == "go2" else "灯获胜")
-                + "；后续约定动作未确认完成或已中断：" + reason if adjudicated_winner else
-                "猜拳攻灯已中断或未达成开局约定，本局未决出胜负：" + reason)
-    record("message", text, stage="settlement", reason=reason, status=status)
+    record("action_result", "", stage="settlement", reason=reason, status=status,
+           public_result={"result": status, "reason": reason})
     messenger.send_result(event["message_id"], status, task_id=task_id, reason=reason)
 
 

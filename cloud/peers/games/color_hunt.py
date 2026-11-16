@@ -133,6 +133,13 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
                               reason="activity_ended")
         return
+    from cloud.space.activity import get_activity_store
+    get_activity_store().record_event(activity_id, "action_result", unit_id="go2", text="",
+        stage="game_rules", game_id=GAME.game_id, trigger_message_id=event["message_id"],
+        source_event_id="game:rules:" + event["message_id"],
+        fact_kind="result", result_kind="query", public_result={"game_rules": {
+            "rule_id": GAME.game_id, "name": GAME.name, "description": GAME.description,
+            "rules": GAME.rules, "status": "proposed"}})
     color, color_error = await _wait_for_lamp_color(event, drive)
     if not current():
         await finish("cancelled", "activity_ended")
@@ -143,9 +150,6 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         await finish("rejected", color_error)
         messenger.send_result(event["message_id"], "rejected", task_id=task_id,
                               reason=color_error)
-        messenger.send_message("go2", message["sender"],
-            "这局还没拿到灯出题后的新鲜颜色，先不凭邀请文字猜。",
-            reply_to=event["message_id"], reply_kind="reply")
         return
     try:
         snapshot, snapshot_error = navigator._snapshot()
@@ -326,16 +330,14 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
                              target_navigation_complete(visual, announced_target))
     if reached_candidate and not stop_reason:
         status, reason = "ok", "candidate_reached"
-        reply = (str((graph_result or {}).get("response") or "").strip()[:1000]
-                 or f"我已到达{announced_target}附近，停稳后重新确认了目标，这局找到了。")
+        reply = str((graph_result or {}).get("response") or "").strip()[:1000]
     elif stop_reason:
         status = ("cancelled" if stop_reason in {"activity_ended", "game_expired",
                                                  "autonomy_interrupted_or_offline",
                                                  "activity_ended_or_interrupted"}
                   else "unknown")
         reason = stop_reason
-        reply = ("这局已中断，停步结果还未确认。" if reason == "stop_unconfirmed"
-                 else "这局已中断，已执行的动作请以活动记录和设备回执为准。")
+        reply = ""
     else:
         status = (graph_result or {}).get("result", "unknown")
         if status not in {"blocked", "rejected", "error", "cancelled"}:
@@ -343,18 +345,15 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         last_receipt = (steps[-1].get("result") or {}) if steps else {}
         reason = (last_receipt.get("error") or last_receipt.get("reason") or
                   (graph_result or {}).get("error") or "no_confirmed_color_match")
-        reply = (str(last_receipt.get("message"))[:160] + "；还不能确认找到与灯同色的物品。"
-                 if status == "blocked" and last_receipt.get("message") else
-                 "我检查了当前画面，但还不能确认找到与灯同色的物品。")
+        reply = str((graph_result or {}).get("response") or "").strip()[:1000]
     await finish(status, reason, target_color=color,
                  graph_run_id=(graph_result or {}).get("run_id"), tool_results=steps)
     messenger.send_result(event["message_id"], status, task_id=task_id,
                           reason=reason)
-    messenger.send_message("go2", message["sender"], reply,
-                           reply_to=event["message_id"], reply_kind="reply",
-                           emotion=(graph_result or {}).get("emotion", "neutral")
-                           if reached_candidate and not stop_reason and (graph_result or {}).get("response")
-                           else "neutral")
+    if reply:
+        messenger.send_message("go2", message["sender"], reply,
+            reply_to=event["message_id"], reply_kind="reply",
+            emotion=(graph_result or {}).get("emotion", "neutral"))
 
 
 def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
@@ -449,9 +448,11 @@ def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
         if decision.get("event_decision") != "accept":
             reason = str(decision.get("decision_reason") or "decision_unavailable")[:200]
             messenger.send_result(message["message_id"], "rejected", reason=reason)
-            messenger.send_message("esp32_desk_led", "go2", reason,
-                                   reply_to=message["message_id"], reply_kind="declined",
-                                   emotion=decision.get("decision_emotion", "neutral"))
+            if (reason not in {"decision_unavailable", "invalid_arbitration_choice"}
+                    and not reason.startswith("arbitration_")):
+                messenger.send_message("esp32_desk_led", "go2", reason,
+                                       reply_to=message["message_id"], reply_kind="declined",
+                                       emotion=decision.get("decision_emotion", "neutral"))
             return
         if (time.time() >= message["deadline"]
                 or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
@@ -538,9 +539,10 @@ def _prepare_lamp_color(messenger, message: dict, state) -> None:
     if not any(item.get("kind") == "observation" for item in decision_evidence(space)):
         messenger.send_result(message["message_id"], "blocked",
                               reason="game_observation_required")
-        get_activity_store().record_event(activity_id, "message", unit_id="esp32_desk_led",
-            target_unit_id="go2", text="目前还没有可参考的环境观察，先不凭空选颜色。",
-            game_id="color_hunt", trigger_message_id=message["reply_to"])
+        get_activity_store().record_event(activity_id, "action_result", unit_id="esp32_desk_led",
+            target_unit_id="go2", status="blocked", reason="game_observation_required",
+            fact_kind="result", result_kind="action", game_id="color_hunt",
+            trigger_message_id=message["reply_to"])
         return
     context = ExecutionContext("peer_game_color_" + message["conversation_id"], "agent", False,
                                "main", "agent_autonomous", int(message["deadline"]))
@@ -648,7 +650,8 @@ def _prepare_lamp_color(messenger, message: dict, state) -> None:
             messenger.send_progress(message["message_id"], color_task_id)
         messenger.send_result(message["message_id"], "ok", task_id=color_task_id)
         get_activity_store().record_event(activity_id, "action_result",
-            unit_id="esp32_desk_led", text="游戏出题颜色已确认",
+            unit_id="esp32_desk_led", text="", fact_kind="result", result_kind="action",
+            public_result=color_step["result"], arguments=color_step.get("params") or {},
             action="set_led_color", status="ok", game_id="color_hunt",
             trigger_message_id=message["reply_to"], decision_basis=basis,
             task_id=(color_step.get("result") or {}).get("task_id"))

@@ -1,6 +1,6 @@
 /* Space activity placement; conversation rendering lives in ChatMessages. */
 function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
-  onEndActivity, onAnswerActivity, training, onReviseRule }) {
+  onEndActivity, onAnswerActivity, training, onReviseRule, busy = false }) {
   const currentActivityRef = React.useRef(null);
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
@@ -16,9 +16,7 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     const owner = sourceEventId
       ? entries.find(entry => entry.type === 'user' && entry.intentEventId === sourceEventId)
       : null;
-    const requestId = owner?.requestId || (!sourceEventId && card !== currentCard && context
-      ? [...entries].reverse().find(entry => entry.type === 'user' && entry.text === context)?.requestId
-      : null);
+    const requestId = owner?.requestId || null;
     if (!requestId) return -1;
     const finalIndex = entries.findIndex(entry => entry.type === 'ai'
       && entry.requestId === requestId && entry.final);
@@ -42,7 +40,7 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     (cardsAt.get(index) || []).forEach(card => rows.push({ type: 'space_activity', card }));
     if (index < entries.length) rows.push(entries[index]);
   }
-  return <ChatMessages entries={rows} agents={agents} training={training} onReviseRule={onReviseRule}
+  return <ChatMessages entries={rows} agents={agents} training={training} onReviseRule={onReviseRule} busy={busy}
     scrollTargetRef={activity?.activity_id ? currentActivityRef : null} scrollKey={activity?.activity_id} scrollTrigger={entries}
     autoScroll={Boolean(entries.length || activity?.activity_id)}
     renderEntry={e => {
@@ -60,25 +58,18 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
 }
 window.ActivityFeed = ActivityFeed;
 
-function activityActionText(event, name, compact) {
-  const label = processCapability(event);
-  if (event.event_type === 'action') return event.text?.trim() || `${compact ? '' : name}准备${label}`;
-  const state = event.state_at_event?.status === 'current' ? event.state_at_event.values : null;
-  if (['ok','accepted'].includes(event.status) && isActivityLightingAction(event.action) && state?.ism)
-    return `${compact ? '' : name}已调为${activityPhysicalLabel({tags:['lighting']}, state)}`;
-  return `${compact ? '' : name}${label} · ${processOutcome(event) || '处理中'}`;
-}
-
 function projectActivityEvents(events) {
   const seen = new Set();
   return events.filter(event => {
-    if (event.display === false || event.event_type === 'started') return false;
-    if (event.event_id && seen.has(event.event_id)) return false;
-    if (event.event_type === 'observation' && event.source === 'go2.camera' && activityMediaUrl(event)
+    if (event.display === false || event.event_type === 'started' || event.stage === 'narrated') return false;
+    const identity = event.source_event_id || event.event_id;
+    if (identity && seen.has(identity)) return false;
+    if (event.event_type === 'observation' && event.observation_event_id
       && events.some(other => other.event_type === 'search_progress' && other.display !== false
-        && other.unit_id === event.unit_id && activityMediaUrl(other) === activityMediaUrl(event))) return false;
-    if (event.event_id) seen.add(event.event_id);
-    return !(event.event_type === 'response' && event.status === 'ok');
+        && other.observation_event_id === event.observation_event_id && other.unit_id === event.unit_id)) return false;
+    if (identity) seen.add(identity);
+    return !(event.event_type === 'response' && (event.status === 'ok'
+      || event.result_kind === 'message' && ['received','accepted'].includes(event.status)));
   });
 }
 
@@ -89,6 +80,8 @@ function activityStatusText(event, name, compact = false) {
   if (type === 'started') return '活动已开始';
   if (type === 'ended') return '活动已结束';
   if (type === 'device_joined') return `${compact ? '' : name}已进入${mode}`;
+  if (type === 'response' && event.status === 'received') return '消息已送达';
+  if (type === 'response' && event.status === 'accepted') return '消息已接受';
   if (type === 'response') return `${compact ? '' : name}${event.status === 'timeout'
     ? '暂时没有收到回应' : '暂时无法回应'}`;
   if (type === 'device_left') return event.status === 'offline'
@@ -99,8 +92,7 @@ function activityStatusText(event, name, compact = false) {
       : event.status === 'unknown'
         ? `${compact ? '' : `${name}的`}活动状态还没有确认`
       : `${compact ? '' : name}暂时无法加入${mode}`;
-  if (['action', 'action_progress', 'action_result'].includes(type)) return activityActionText(event, name, compact);
-  return `${event.unit_id && !compact ? `${name} · ` : ''}${event.text || '有新进展'}`;
+  return `${event.unit_id && !compact ? `${name} · ` : ''}${event.text || activityReasonText(event) || processOutcome(event)}`;
 }
 
 /* Speech stays on the surface; actual runs/tasks have one shared disclosure. */
@@ -118,7 +110,9 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
   const isEnding = Boolean(activity?.status === 'ending' || ending);
   const isEnded = activity?.status === 'ended' || events.some(event => event.event_type === 'ended');
   const hasQuestion = isActive && allRows.some(row => row.kind === 'question');
-  const hasAttention = allRows.some(row => row.process.some(processNeedsAttention));
+  const hasAttention = allRows.some(row => row.process.some(processNeedsAttention)
+    || ['device_left','device_failed'].includes(row.event.event_type) && !['left','ok'].includes(row.event.status)
+    || row.event.physical_stop === 'unknown');
   const showTimeline = expanded || isActive || isEnding || hasQuestion || hasAttention;
   const incomingRows = expanded || hasQuestion || hasAttention ? allRows : allRows.slice(-16);
   const rows = readingWindow || incomingRows;
@@ -139,10 +133,10 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
       <span className="space-activity__live">{isEnding ? '正在结束' : isActive ? '进行中' : isEnded ? '已结束' : '同步中'}</span></h2></div>
       {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>{ending ? '正在结束…' : '结束活动'}</button>}
     </div>
-    {(expanded || isActive || isEnding) && <ActivityMembers activity={activity} events={events} agents={agents}
+    {(expanded || isActive || isEnding || hasAttention) && <ActivityMembers activity={activity} events={events} agents={agents}
       unitData={unitData} connected={connected} getName={getName}/>}
     {error && <div className="space-activity__error" role="alert">{error}</div>}
-    {!showTimeline && !isEnded && <div className="space-activity__summary"><span>最新动态</span><p>{latestSpeech
+    {!showTimeline && !isEnded && <div className="space-activity__summary"><p>{latestSpeech
       ? `${getName(latestSpeech.event.unit_id)}：${latestSpeech.event.text}` : '正在等待设备动态'}</p></div>}
     {showTimeline && <div className="space-activity__timeline" ref={timelineRef} onScroll={event => {
       const el=event.currentTarget, near=el.scrollHeight-el.scrollTop-el.clientHeight<80;
@@ -150,8 +144,12 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
       followTimeline.current=near;
       if (near) {setHasNewEvents(false);setReadingWindow(null);lastSeen.current=latestId;}
     }}>
-      {rows.map(row => {
-        const event=row.event, unit=event.unit_id || event.agent_id || 'cloud_orchestrator';
+      {rows.map((row,index) => {
+        const event=row.event, unit=event.agent_id || event.unit_id || 'cloud_orchestrator';
+        const previousSpeech = rows.slice(0,index).reverse().find(item => ['message','question','status','result'].includes(item.kind));
+        const showName = !previousSpeech || !['message','question'].includes(previousSpeech.kind)
+          || (previousSpeech.event.agent_id || previousSpeech.event.unit_id) !== unit
+          || previousSpeech.event.target_unit_id !== event.target_unit_id;
         const name=getName(unit), receipt=row.kind==='message' ? activityMessageReceipt(event,events) : '';
         return <div key={row.key} className={`space-activity__item space-activity__item--${row.kind}`}>
           <time className="space-activity__time">{timeLabel(event.ts)}</time><div className="space-activity__content">
@@ -160,13 +158,13 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
               {(row.process.length>0 || activityDecisionBasis(event)) && <RunProcess events={[...row.process,...(activityDecisionBasis(event) ? [event] : [])]}
                 allEvents={events} agents={agents} getName={getName} finished/>}
             </> : ['message','question'].includes(row.kind) ? <>
-              <AgentSpeech compact agent={unit} name={name} target={event.target_unit_id ? getName(event.target_unit_id) : ''}
-                text={event.text || '需要你补充信息。'}>
+              <AgentSpeech compact showName={showName} agent={unit} name={name} target={event.target_unit_id ? getName(event.target_unit_id) : ''}
+                text={event.text || ''}>
                 {receipt && <small className="space-activity__receipt">{receipt}</small>}
               </AgentSpeech>
               {row.kind==='question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>回答{name}</button>}
-              {(row.process.length>0 || activityDecisionBasis(event) || activityMediaUrl(event)) && <RunProcess
-                events={[...row.process,...(activityDecisionBasis(event) || activityMediaUrl(event) ? [event] : [])]}
+              {(row.process.length>0 || processHasContent({...event,text:undefined})) && <RunProcess
+                events={[...row.process,...(processHasContent({...event,text:undefined}) ? [event] : [])]}
                 allEvents={events} agents={agents} getName={getName} finished/>}
             </> : row.kind==='process' ? <>
               {row.process.filter(item => item.game_round).map(item => <ActivityGameRound key={item.event_id} event={item} getName={getName}/>)}
@@ -181,7 +179,7 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
       if (timelineRef.current) timelineRef.current.scrollTop=timelineRef.current.scrollHeight;
     }}>有新动态 · 回到最新 ↓</button>}
     {allRows.length>0 && !hasQuestion && (!isActive || allRows.length>rows.length || expanded) && <button type="button"
-      className="space-activity__toggle" aria-label={expanded ? '收起活动记录' : '展开活动记录'} aria-expanded={expanded}
+      className="space-activity__toggle" aria-label={expanded ? '收起活动详情' : '展开活动详情'} aria-expanded={expanded}
       onClick={() => {setReadingWindow(null);setExpanded(value => !value);}}>
       <span>{expanded ? '收起详情' : '查看详情'}</span><svg className="process-chevron" data-open={expanded} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
     </button>}
@@ -194,7 +192,7 @@ function ActivityGameRound({event,getName}) {
     <div className="activity-game-round__choices">{Object.entries(round.choices || {}).map(([unit,choice]) =>
       <div key={unit}>{typeof ShapeFace==='function' && <ShapeFace unitId={unit} shape={choice} size={40} label={labels[choice]}/>}
         <strong>{getName(unit)} · {labels[choice] || choice}</strong><small>{round.mapping?.[unit]?.label || ''}</small></div>)}</div>
-    <p>{round.winner==='draw' ? '平局' : round.winner ? `${getName(round.winner)}获胜` : '本轮完成'}</p>
+    {round.winner && <p>{round.winner==='draw' ? '平局' : `${getName(round.winner)}获胜`}</p>}
   </div>;
 }
 window.SpaceActivityFeed = SpaceActivityFeed;

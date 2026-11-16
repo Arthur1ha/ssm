@@ -312,7 +312,9 @@ class AgentMessenger:
                 activity_event = get_activity_store().record_event(
                     payload["activity_id"], "message", unit_id=sender,
                     text=payload["content"], target_unit_id=target, emotion=payload["emotion"],
-                    message_id=message_id, conversation_id=payload["conversation_id"],
+                    message_id=message_id, source_event_id="peer:message:" + message_id,
+                    fact_kind="observation", result_kind="message",
+                    conversation_id=payload["conversation_id"],
                     reply_to=reply_to, reply_kind=reply_kind,
                     interaction_kind=interaction_kind, game_id=game_id,
                     **({"decision_basis": payload["decision_basis"]}
@@ -495,7 +497,9 @@ class AgentMessenger:
                     activity_event = get_activity_store().record_event(
                         payload["activity_id"], "message", unit_id=sender,
                         text=content.strip(), target_unit_id=target, emotion=payload["emotion"],
-                        message_id=message_id, conversation_id=conversation_id,
+                        message_id=message_id, source_event_id="peer:message:" + message_id,
+                        fact_kind="observation", result_kind="message",
+                        conversation_id=conversation_id,
                         reply_to=reply_to, reply_kind=payload["reply_kind"],
                         interaction_kind=interaction_kind, game_id=game_id,
                         **({"decision_basis": payload["decision_basis"]}
@@ -514,6 +518,13 @@ class AgentMessenger:
                 return True
             if kind == "received":
                 prior["received"] = True
+                if prior.get("activity_id") and "cloud_orchestrator" not in self._local_ids:
+                    from cloud.space.activity import get_activity_store
+                    get_activity_store().record_event(prior["activity_id"], "response",
+                        unit_id=sender, message_id=message_id,
+                        conversation_id=conversation_id, fact_kind="result", result_kind="message",
+                        status="received", public_result={"delivery_status": "received"},
+                        source_event_id="peer:received:" + message_id)
             elif kind == "progress":
                 task_id = payload.get("task_id")
                 if not isinstance(task_id, str) or not _ID.fullmatch(task_id):
@@ -527,8 +538,9 @@ class AgentMessenger:
                     from cloud.space.activity import get_activity_store
                     get_activity_store().record_event(
                         prior["activity_id"], "action_progress", unit_id=sender,
-                        text="设备已接收动作请求", task_id=task_id,
-                        message_id=message_id, status="accepted")
+                        text="", task_id=task_id, fact_kind="call", result_kind="message",
+                        source_event_id="peer:progress:" + message_id + ":" + task_id,
+                        message_id=message_id, status="executing")
             else:
                 result = payload.get("result")
                 task_id = payload.get("task_id")
@@ -546,7 +558,8 @@ class AgentMessenger:
                         unit_id=sender,
                         text=str(payload.get("reason") or result),
                         task_id=task_id or prior["task_id"],
-                        message_id=message_id, status=result)
+                        message_id=message_id, status=result, fact_kind="result", result_kind="message",
+                        source_event_id="peer:result:" + message_id + ":" + result)
             prior["updated_at"] = now
             if kind in {"progress", "result"}:
                 self._workers.submit(self._on_message, dict(payload))

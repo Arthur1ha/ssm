@@ -181,6 +181,7 @@ class SessionMap:
         result.pending_recheck = pending
         result.last_observed = observed
         result.measured_floor_z = local.measured_floor_z
+        result.voxel_message = local.voxel_message
         result.has_observation = True
         result.cells = np.where(inflated, OCCUPIED, FREE).astype(np.uint8)
         result.grid = result.cells != FREE

@@ -72,7 +72,7 @@ async function main() {
         await delay(90);
       }
     }
-    for (const file of ['components/Icon.jsx', 'components/ActivityMembers.jsx', 'components/DeviceCard.jsx',
+    for (const file of ['utils/activityView.js', 'utils/runProcess.js', 'components/Icon.jsx', 'components/ActivityMembers.jsx', 'components/DeviceCard.jsx',
       'pages/DevicesPage.jsx', 'hooks/useActivityTimeline.js'])
       await page.addScriptTag({content:compile(fs.readFileSync('app/src/' + file, 'utf8'))});
     await page.evaluate(() => {

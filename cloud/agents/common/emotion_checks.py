@@ -87,7 +87,7 @@ async def test_action_then_emotional_closing_keeps_final_and_exactly_one_dispatc
             self.calls = 0
 
         def bind_tools(self, tools, **_kwargs):
-            assert set(tools[0]["function"]["parameters"]["properties"]) == {"brightness", "final"}
+            assert set(tools[0]["function"]["parameters"]["properties"]) == {"brightness", "final", "decision_reason", "evidence_refs"}
             return self
 
         async def ainvoke(self, messages):
@@ -131,35 +131,6 @@ async def test_invalid_reply_fallback_clears_previous_emotion(monkeypatch):
     assert run.reply_source == "runtime"
     model.ainvoke.assert_not_awaited()
 
-
-@pytest.mark.asyncio
-async def test_physical_reply_carries_emotion_and_recovery_does_not_recompose(tmp_path, monkeypatch):
-    from cloud.agents.lamp.workflows import physical_reply
-
-    monkeypatch.setattr("cloud.agents.common.replies.emit_agent_event", lambda *_a, **_k: None)
-    monkeypatch.setattr(physical_reply, "get_profile", lambda: {})
-    monkeypatch.setattr(physical_reply, "persona_reply_prompt", lambda *_a: "回应实际回执。")
-    model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(
-        content='{"text":"灯调好了。","emotion":"relaxed"}')))
-    events = []
-
-    def publish(kind, **facts):
-        events.append((kind, facts))
-        return {"event_id": "reply-event"}
-
-    options = dict(task_id="physical", goal="开灯", action="set_led_state", params={"state": "ON"},
-        trace_id="trace", parent_run_id="parent", unit_id="esp32_desk_led", session_id="s",
-        agent=SimpleNamespace(_llm=model),
-        device_state=SimpleNamespace(get_task_result=lambda _id: {"result": "accepted"}),
-        registry=SimpleNamespace(get_card=lambda _id: {"online": True}), publish=publish,
-        checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"))
-    first = await physical_reply.run_physical_reply(**options)
-    restored = await physical_reply.run_physical_reply(**options)
-    assert first == restored
-    assert first["emotion"] == "relaxed" and first["result"] == "accepted"
-    assert first["response"] == "灯调好了。"
-    assert len(events) == 1 and events[0][1]["emotion"] == "relaxed"
-    model.ainvoke.assert_awaited_once()
 
 
 def test_mqtt_feedback_preserves_emotion_and_service_identity(monkeypatch):

@@ -468,7 +468,7 @@ async def check_graph_handoff(confirmation: str = "odom_stopped_and_visual_reche
     assert receipts[0][0][1] == expected
     assert receipts[0][1]["reason"] == ("candidate_reached" if expected == "ok" else "no_confirmed_color_match")
     assert "plot_steps" not in drive._advance_task.await_args.kwargs["result"]
-    assert ("这局找到了" in replies[-1][0][2]) is (expected == "ok")
+    assert replies == []  # Receipts alone do not fabricate a personality utterance.
     candidate = next(facts for kind, _text, facts in activity_events
                      if kind == "message" and facts.get("decision_basis"))
     observation = next((kind, text, facts) for kind, text, facts in activity_events if kind == "observation")

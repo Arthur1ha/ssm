@@ -177,7 +177,6 @@ def entry(tmp_path, monkeypatch):
     monkeypatch.setattr("cloud.agents.go2.personality.behavior.reply_persona",
                         lambda _profile: "Go2 persona")
     monkeypatch.setattr(go2_graph, "persona_reply_prompt", lambda *_a, **_k: "reply")
-    monkeypatch.setattr("cloud.agents.common.progress.submit_progress", lambda *_a, **_k: None)
     monkeypatch.setattr(go2_graph, "emit_agent_event", lambda *_a, **_k: None)
     monkeypatch.setattr("cloud.agents.common.runner.emit_agent_event", lambda *_a, **_k: None)
     published = []

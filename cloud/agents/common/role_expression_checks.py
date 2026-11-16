@@ -30,7 +30,6 @@ def expression(monkeypatch, tmp_path):
     for key in ('SSM_CHECKPOINT_DIR', 'SSM_EFFECT_LEDGER_DIR', 'SSM_RUN_INDEX_DIR', 'SSM_TRAINING_DIR'):
         monkeypatch.setenv(key, str(tmp_path / key))
     monkeypatch.setattr('cloud.api.intents.publish_agent_event', lambda *_a, **_k: {})
-    monkeypatch.setattr('cloud.agents.common.progress.submit_progress', lambda *_a, **_k: None)
     monkeypatch.setattr('cloud.agents.common.runner.emit_agent_event', lambda *_a, **_k: None)
     selected, prepared, sent = [], [], []
 
@@ -64,7 +63,6 @@ def test_lamp_emotion_uses_saved_workflow_and_run_replay_is_read_only(expression
     monkeypatch.setattr(graph.cards, 'get_registry', lambda: SimpleNamespace(get_card=lambda _uid: lamp_card()))
     monkeypatch.setattr(graph, 'decision_messages', lambda run, **_: [HumanMessage(content=run.goal)])
     monkeypatch.setattr(graph, 'get_profile', lambda: {'prompt': '灯', 'name': '灯', 'traits': {}})
-    monkeypatch.setattr(graph, 'submit_progress', lambda *_a, **_k: None)
     monkeypatch.setattr(runtime, 'run_training_behavior', h.behavior)
     monkeypatch.setattr(graph, 'execute_lamp_tool', lambda *_a, **_k: pytest.fail('bypassed teaching workflow'))
     context = ExecutionContext('lamp-expression', 'agent' if origin == 'agent_autonomous' else 'admin',

@@ -76,7 +76,7 @@ assert.equal(merge(rebootedLamp,{ts:9999,ism:'ON'}).ism,'OFF',
   'Retained state without live receipt evidence replaced the live state');
 assert.equal(merge({ts:570,ism:'OFF'},{ts:19,ism:'ON',_received_at:1001}).ism,'ON',
   'First live post-reboot state was discarded behind a retained snapshot');
-const files = ['app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
+const files = ['app/src/avatars/registry.js','app/src/avatars/Avatar.jsx','app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
   'app/src/hooks/useTraining.js', 'app/src/components/TrainingPreview.jsx', 'app/src/components/TrainingDrawer.jsx', 'app/src/pages/TransitionInspector.jsx',
   'app/src/components/DeviceWidgets.jsx', 'app/src/pages/fsmWidgets.jsx',
   'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx',

@@ -5,6 +5,8 @@
 const SUGGESTIONS = [
   '让机器狗挥挥手，再把灯调成暖白色',
   '我要干活了，你们自己玩吧',
+  '你们两玩石头剪刀布',
+  '你们两玩送货游戏',
 ];
 
 function useHashLocal() {
@@ -102,12 +104,13 @@ function App({ session, logout, refreshSession }) {
   };
   const appendProcess = (requestId, agent, text, eventId, event = {}) => {
     text = typeof event.text === 'string' && event.text.trim() ? event.text.trim() : text;
-    if (!text && !event.media_ref && !event.tool && !event.action && !event.decision_basis) return;
+    if (!processHasContent({...event,text})) return;
     setActivityLog(prev => {
-      if (prev.some(entry => entry.type === 'process' && entry.requestId === requestId
-        && entry.agent === agent && (eventId && entry.eventId === eventId
-          || !eventId && !entry.eventId && entry.text === text && entry.step_id === event.step_id
-            && entry.run_id === event.run_id && entry.stage === event.stage && entry.media_ref === event.media_ref))) return prev;
+      const identity = event.source_event_id || eventId;
+      const existing = identity ? prev.findIndex(entry => entry.type === 'process'
+        && entry.requestId === requestId && (entry.source_event_id || entry.eventId) === identity) : -1;
+      if (existing >= 0) return prev.map((entry,index) => index === existing
+        ? mergeProcessFact(entry,{...processRecord(event),text}) : entry);
       return insertBeforeRequestEnd(prev, requestId,
         { ...processRecord(event), type: 'process', requestId, agent, text, eventId });
     });
@@ -129,7 +132,8 @@ function App({ session, logout, refreshSession }) {
     if (!item?.text) return;
     const requestId = traceRequests.current.get(item.trace_id);
     const avatarReceivedAt = (!requestId || requestId === nextRequestId.current) ? avatarReceiveTime(item) : undefined;
-    const replyKey = item.event_id ? `${requestId || 'space'}:${item.event_id}` : '';
+    const replyIdentity = item.source_event_id || item.event_id;
+    const replyKey = replyIdentity ? `${item.trace_id || 'space'}:${replyIdentity}` : '';
     if (replyKey && seenReplies.current.has(replyKey)) return;
     if (replyKey) seenReplies.current.add(replyKey);
     if (requestId && ['orchestrator', 'cloud_orchestrator'].includes(item.agent_id)) {
@@ -152,7 +156,7 @@ function App({ session, logout, refreshSession }) {
       if (item.scope === 'space' && item.activity_id) return;
       if (item.type === 'agent_progress' && item.scope === 'space'
           && item.source === 'object_search' && item.run_id) {
-        appendProcess(`search-${item.run_id}`, 'go2', processEventText(item), item.event_id,
+        appendProcess(`search-${item.run_id}`, 'go2', item.stage === 'narrated' ? '' : item.text || '', item.event_id,
           { ...item, task_id: null });
         return;
       }
@@ -170,8 +174,8 @@ function App({ session, logout, refreshSession }) {
           && item.stage !== 'finished') {
         const requestId = traceRequests.current.get(item.trace_id);
         if (requestId && completedRequests.current.has(requestId)) {
-          appendProcess(requestId, item.target_unit_id || item.agent_id || 'cloud_orchestrator',
-            processEventText(item), item.event_id, item);
+          appendProcess(requestId, item.agent_id || 'cloud_orchestrator',
+            item.stage === 'narrated' ? '' : item.text || '', item.event_id, item);
         }
         return;
       }
@@ -197,20 +201,19 @@ function App({ session, logout, refreshSession }) {
     const requestId = ++nextRequestId.current;
     setActivityLog(prev => [...prev,
       { type: 'user', text: t, requestId },
-      { type: 'process', agent: 'cloud_orchestrator', requestId,
-        text: '已收到请求', eventId: `initial:${requestId}` },
     ]);
     setTrainingSelection(null);
     send(t, {
       onMessage: (msg, agent, event) => appendReply({ ...event, text: msg,
         agent_id: agent || 'cloud_orchestrator' }),
       onProgress: event => {
-        if (event.stage === 'finished') return;
+        if (event.stage === 'finished' && !processHasContent(event)) return;
         appendProcess(requestId,
-          event.target_unit_id || event.agent_id || 'cloud_orchestrator',
-          processEventText(event), event.event_id, event);
+          event.agent_id || 'cloud_orchestrator',
+          event.stage === 'narrated' ? '' : event.text || '', event.event_id, event);
       },
-      onStatus: msg => finishRequest(requestId, msg),
+      onStatus: msg => setActivityLog(prev => insertBeforeRequestEnd(prev,requestId,
+        {type:'system',requestId,text:msg,eventId:`status:${requestId}`})),
       onTraceId: (traceId, eventId) => {
         traceRequests.current.set(traceId, requestId);
         if (eventId) setActivityLog(prev => prev.map(entry =>
@@ -315,7 +318,7 @@ function App({ session, logout, refreshSession }) {
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
           </>}
-          messageContent={<ActivityFeed entries={chatRows}
+          messageContent={<ActivityFeed entries={chatRows} busy={thinking}
             training={training} onReviseRule={p => setTrainingSelection({unit_id:p.unit_id,transition_id:trainingTransitionIds(p)[0],proposal_id:p.proposal_id})} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
@@ -326,7 +329,6 @@ function App({ session, logout, refreshSession }) {
             }}/>}
           >
           {trainingSelection && <div className="training-selection">修改规则：请直接输入新的要求。<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
-          {currentActivity && <p className="home-activity-input-note">发送新指令将结束当前自由活动</p>}
         </ChatPanel>
 
         </>}

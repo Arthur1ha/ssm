@@ -1,5 +1,7 @@
 """Dynamic steward prompt, refreshed before every model turn."""
 
+
+from copy import deepcopy
 import hashlib
 from cloud.agents.common.messages import role_messages
 from cloud.agents.common.runner import GraphRun as Run
@@ -36,6 +38,7 @@ def build_messages(current: Run, supplemental: str = ""):
                      prompt_trimmed=False)
     data = {"agent_names_by_id": agent_names(),
             "space": get_space_context(state=transport._state, registry=transport._registry)}
+    current.decision_space = deepcopy(data["space"])
     prompt = (
         f"澄清偏好：{clarification}\n"
         "你负责理解用户目标并协调当前空间的智能体；只用设备卡公开的技能，"

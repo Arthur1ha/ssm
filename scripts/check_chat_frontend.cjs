@@ -16,6 +16,8 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.setRequestInterception(true);
     const apiHeaders = [];
     page.on('request', request => {
+      if (/\/api\/.*photo/.test(request.url())) return request.respond({status:200,contentType:'image/svg+xml',
+        body:'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#475569"/><text x="24" y="94" fill="white" font-size="20">SIMULATED OBSERVATION</text></svg>'});
       if (new URL(request.url()).pathname.startsWith('/api/')) {
         apiHeaders.push(request.headers());
         return request.respond({status:200,contentType:'application/json',body:JSON.stringify({session_id:'login-kept'})});
@@ -26,6 +28,10 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.goto('http://localhost/');
     for (const file of [process.env.SSM_CHECK_REACT, process.env.SSM_CHECK_REACT_DOM]) await page.addScriptTag({path:file});
     for (const style of ['app','process','avatars']) await page.addStyleTag({path:`app/styles/${style}.css`});
+    if (process.env.SSM_CHECK_FONT) {
+      await page.evaluate(async data=>{const f=new FontFace('PresentationCJK',`url(data:font/otf;base64,${data})`);await f.load();document.fonts.add(f);},fs.readFileSync(process.env.SSM_CHECK_FONT).toString('base64'));
+      await page.addStyleTag({content:':root{--font-sans:PresentationCJK,sans-serif;--font-mono:PresentationCJK,monospace}input,button{font-family:inherit}'});
+    }
     for (const file of ['utils/stateMachine.js','utils/stateSnapshot.js','utils/agentMeta.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js',
       'components/Icon.jsx','avatars/Avatar.jsx','hooks/useTraining.js','components/TrainingPreview.jsx','components/ActivityMembers.jsx','components/RunProcess.jsx',
       'components/ChatMessages.jsx','components/ChatPanel.jsx','components/ActivityFeed.jsx','pages/FsmDevicePage.jsx']) {
@@ -99,11 +105,11 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       const run_id = sent[1].run_id;
       const event = (stage, text, more = {}) => apiClient.dispatchEvent(new CustomEvent('server-event', {
         detail:{type:'agent_progress',agent_id:lamp.unit_id,run_id,task_id:run_id,
-          source:'object_search',scope:'session',event_id:stage,stage,text,...more},
+          source:'object_search',scope:'session',event_id:stage,stage,text,fact_kind:stage === 'search_selected' ? 'decision' : stage === 'search_observe' ? 'observation' : undefined,...more},
       }));
       event('search_observing', '正在观察当前位置，识别猫头鹰。');
       event('search_observe', '这次画面暂未识别到猫头鹰。画面观察：前方有椅子和纸箱。',
-        {media_ref:'/api/search-photo'});
+        {media_ref:'/api/search-photo',observation_event_id:'search-observation'});
       event('search_selected', '当前视野仍有未检查区域，已选定可达的边界观察点。');
       // A following outer-Graph update must not hide the search record.
       apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
@@ -115,8 +121,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     const searching = await latestProcess.evaluate(node => ({
       open:node.open,text:node.textContent,photos:node.querySelectorAll('img').length,
     }));
-    assert.equal(searching.open, false, 'New process groups should start collapsed');
-    await latestProcess.$eval('summary', node => node.click());
+    assert.equal(searching.open, true, 'An executing concrete call should remain visible');
     assert.match(searching.text, /可达的边界观察点/);
     assert.doesNotMatch(searching.text, /停止搜索/);
     assert.equal(searching.photos, 1);
@@ -124,7 +129,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       'Process details should explain the agent actions without repeating the user request');
     await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
       agent_id:lamp.unit_id,run_id:sent[1].run_id,source:'object_search',stage:'search_observe',
-      event_id:'search-copy',text:'同一张照片的新说明',media_ref:'/api/search-photo'}})));
+      event_id:'search-copy',text:'同一张照片的新说明',media_ref:'/api/search-photo',observation_event_id:'search-observation'}})));
     await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('同一张照片的新说明'));
     assert.equal(await latestProcess.evaluate(node=>node.open),true,'A new progress record closed the user-opened process');
     assert.equal(await latestProcess.$$eval('img',nodes=>nodes.length),1,'Repeated media duplicated an observation');
@@ -162,6 +167,51 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('此前搜索的补充回复'));
     assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.emotion), 'relaxed',
       'A retained prior run must not override the latest request expression');
+    // Ordinary chat has only original role speech, without a process or avatar.
+    await page.evaluate(()=>root.render(React.createElement('div',{style:{display:'flex',height:'100dvh'}},React.createElement(ChatPanel,{
+      messages:[{type:'user',text:'今天陪我聊聊吧',requestId:'ordinary'},
+        {type:'ai',agent:'go2',text:'汪，我在这儿。今天过得怎么样？',requestId:'ordinary',final:true}],agents:[lamp],onSend(){},
+    }))));
+    await page.waitForFunction(()=>document.querySelector('.chat-messages')?.textContent.includes('今天过得怎么样'));
+    assert.equal(await page.$$('.chat-messages details').then(rows=>rows.length),0);
+    assert.equal(await page.$$('.chat-messages .shape-face').then(rows=>rows.length),0);
+    if(process.env.SCREENSHOT_DIR){await page.setViewport({width:390,height:844});await page.screenshot({path:process.env.SCREENSHOT_DIR+'/ordinary-chat-390.png'});}
+    // Waiting belongs to the current request's feed, then its concrete process.
+    for (const home of [true,false]) {
+      await page.evaluate(home=>{
+        window.waitRows=[{type:'user',requestId:'previous',text:'此前请求'},
+          {type:'process',requestId:'previous',tool:'go2_observe',status:'ok',step_id:'old-step'},
+          {type:'user',requestId:'waiting',text:'看看前面有什么'}];
+        window.renderWaiting=(busy=true)=>ReactDOM.flushSync(()=>root.render(React.createElement('div',
+          {style:{display:'flex',height:'100dvh'}},React.createElement(ChatPanel,{
+            key:home?'waiting-home':'waiting-device',messages:waitRows,agents:[lamp],busy,onSend(){},
+            messageContent:home?React.createElement(ActivityFeed,{entries:waitRows,agents:[lamp],busy}):null,
+          }))));
+        renderWaiting();
+      },home);
+      assert.equal(await page.$$('.chat-messages__waiting .run-process__waiting').then(nodes=>nodes.length),1);
+      assert.equal(await page.$('.run-process-summary .run-process__waiting'),null,'An old request acquired the spinner');
+      assert.equal(await page.$('.chat-panel__waiting'),null,'Waiting floated above the input');
+      assert(await page.$eval('.run-process__waiting',node=>Boolean(node.closest('.chat-panel__scroll'))));
+      await page.evaluate(()=>{waitRows.push({type:'process',requestId:'waiting',tool:'go2_observe',
+        status:'executing',step_id:'current-step'});renderWaiting();});
+      assert.equal(await page.$('.chat-messages__waiting'),null);
+      assert.equal(await page.$$('.run-process-summary .run-process__waiting').then(nodes=>nodes.length),1);
+      assert.match(await page.$eval('.run-process-summary .run-process__waiting',node=>node.textContent),/执行中/);
+      for (const width of [320,390]) {
+        await page.setViewport({width,height:568});
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+      }
+      await page.evaluate(()=>{waitRows[waitRows.length-1].status='ok';renderWaiting();});
+      assert.match(await page.$eval('.run-process-summary .run-process__waiting',node=>node.textContent),/等待回复/);
+      await page.evaluate(()=>{waitRows.push({type:'ai',requestId:'waiting',text:'已经观察好了。',final:true});renderWaiting(false);});
+      assert.equal(await page.$('.run-process__waiting'),null);
+      assert.equal(await page.$('.run-process-summary__status[data-completed]'),null);
+      assert.doesNotMatch(await page.$$eval('.run-process-summary summary',nodes=>nodes.map(node=>node.textContent).join('')),/✓/);
+      await page.evaluate(()=>{waitRows[waitRows.length-2].status='unknown';renderWaiting();});
+      assert.match(await page.$eval('.run-process-summary__status[data-attention]',node=>node.textContent),/待确认/);
+      assert.equal(await page.$$('.run-process-summary .run-process__waiting').then(nodes=>nodes.length),1);
+    }
     // Compare home/device presentation using the same messages and both real feed paths.
     const styles = [];
     for (const home of [true, false]) {

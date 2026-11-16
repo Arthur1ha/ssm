@@ -6,7 +6,6 @@ import hashlib
 import logging
 import time
 import uuid
-import threading
 import asyncio
 from dataclasses import replace
 
@@ -52,7 +51,7 @@ def _result(run: GraphRun) -> dict:
                        if s["result"]["result"] != "ok"), "error")
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status, "response": run.response,
-            "emotion": normalize_emotion(run.emotion),
+            "emotion": normalize_emotion(run.emotion), "reply_source": run.reply_source,
             "event_id": run.reply_event_id or None,
             "actions_taken": [s["tool"] for s in steps if s["result"]["result"] == "ok"],
             "tool_results": steps, "question": run.question or None,
@@ -309,52 +308,15 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                       parent_run_id=run.parent_run_id or None, agent_id="go2",
                       session_id=session_id, origin_kind=run.origin_kind):
         from cloud.api.intents import publish_agent_event
-        from cloud.agents.common.progress import submit_progress
         autonomous = context.origin_kind == "agent_autonomous"
         event_session = "" if autonomous else session_id
         event_source = "autonomous" if autonomous else (
             "delegated_skill" if run.parent_run_id else "device_chat")
-        progress_closed = threading.Event()
         def progress(phase, step):
-            from cloud.agents.common.progress_facts import step_progress_facts
-            result = (step or {}).get("result") or {}
-            publish_agent_event("agent_progress", agent_id="go2", session_id=event_session,
+            from cloud.agents.common.progress_facts import progress_event_facts
+            publish_agent_event("agent_progress", session_id=event_session,
                 scope="space" if autonomous else "session", space_id=context.space_id,
-                status=result.get("result") or phase, run_id=run.run_id,
-                trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
-                step_id=(step or {}).get("step_id", ""), source=event_source,
-                stage=phase, tool=(step or {}).get("tool"),
-                step_number=len(run.steps) if step is not None else None,
-                **({"goal": run.goal,
-                    "completed_count": sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
-                    "failed_count": sum((s.get("result") or {}).get("result") in
-                        {"blocked", "rejected", "cancelled", "error"} for s in run.steps)}
-                   if step is None else {k: v for k, v in step_progress_facts(step).items() if k != "tool"}),
-                event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
-                    f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex)
-            if publish_reply and phase == "observed" and step is not None:
-                from cloud.agents.go2.personality.profile import get_profile
-                from cloud.agents.go2.personality.behavior import reply_persona
-                persona = reply_persona(get_profile())
-                status = (step.get("result") or {}).get("result", "unknown")
-                def publish_text(answer):
-                    publish_agent_event("agent_progress", agent_id="go2",
-                        session_id=event_session, scope="space" if autonomous else "session",
-                        space_id=context.space_id, status=status, run_id=run.run_id,
-                        trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
-                        step_id=step["step_id"], source=event_source, stage="narrated",
-                        sequence=run.attempt * 10 + 3, text=answer,
-                        step_number=len(run.steps),
-                        **step_progress_facts(step))
-                def invoke_text(messages):
-                    from cloud.go2.models import get_text_llm as fresh_model
-                    return fresh_model().invoke(messages).content
-                if (step.get("tool") in {"go2_navigate_to_visible_target", "go2_find_object", "go2_move"}
-                        and status in {"ok", "blocked", "cancelled"}
-                        and isinstance(result.get("message"), str)):
-                    return
-                submit_progress(persona, run.goal, step, invoke_text, publish_text,
-                                progress_closed, min(run.deadline, time.time() + 4))
+                source=event_source, **progress_event_facts(run, phase, step))
         async def finalize(current: GraphRun) -> GraphRun:
             """Validate facts, speak as Go2 and checkpoint the user-visible reply."""
             if delegated:
@@ -384,12 +346,13 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                         current.run_id, session_id=event_session,
                         space_id=context.space_id)
                     publish_agent_event(
-                        "agent_reply", agent_id="go2", session_id=event_session,
+                        "agent_reply" if current.reply_source != "runtime" else "reply_error", agent_id="go2", session_id=event_session,
                         scope="space" if autonomous else "session", space_id=context.space_id,
                         status=_result(current)["result"], run_id=current.run_id,
                         trace_id=current.trace_id or current.run_id,
                         parent_run_id=current.parent_run_id, source=event_source,
                         text=current.response, emotion=current.emotion, reply_kind="final",
+                        reply_source=current.reply_source,
                         event_id=current.reply_event_id)
                 else:
                     publish_agent_event(
@@ -420,7 +383,6 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 terminal_tools=frozenset({initial_tool[0]} if delegated and initial_tool else set()),
                 resume_value=message if resume else None, checkpointer=view.checkpointer)
         except asyncio.CancelledError:
-            progress_closed.set()
             await view.reconcile_interrupted(session_id, cancelled=run)
             raise
         finally:
@@ -431,13 +393,12 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 from cloud.go2.mode.free_explore import drive
                 drive.resume_after_user()
 
-    progress_closed.set()
     progress("finished", None)
     if (run.status == "needs_clarification" and publish_reply
             and not context.session_id.startswith("peer_")):
         run.reply_event_id = stable_reply_event_id(
             run.run_id, session_id=event_session,
-            space_id=context.space_id, reply_kind="clarification")
+            space_id=context.space_id, reply_kind="clarification", model_turn=run.model_turn)
         publish_agent_event(
             "agent_reply", agent_id="go2", session_id=event_session,
             scope="space" if autonomous else "session", space_id=context.space_id,

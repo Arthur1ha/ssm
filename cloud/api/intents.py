@@ -362,13 +362,22 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
              "space_id": space_id, "scope": scope, "run_id": run_id or None,
              "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
              "step_id": step_id or None, "source": source,
-             "text": text.strip(), "ts": time.time(), **facts}
+             "text": text.strip(), "ts": time.time()}
     if event_type == "agent_reply":
         from cloud.agents.common.emotions import normalize_emotion
         event["emotion"] = normalize_emotion(emotion)
     from cloud.agents.common.progress_facts import public_process_facts
-    process = public_process_facts(event)
+    process = public_process_facts({**facts, **event, "ts": facts.get("ts", event["ts"])})
+    # Explicit passthroughs needed by existing media/control consumers. Every
+    # other detail goes through the shared bounded facts projection.
+    for key in ("stage", "reply_kind", "activity_id", "question_id", "media_ref", "mode", "target"):
+        item = facts.get(key)
+        if isinstance(item, str) and len(item) <= 600:
+            event[key] = item
     event.update(process)
+    history_process = {key: value for key, value in process.items()
+                       if key not in {"activity_id", "unit_id", "text"}}
+    event.setdefault("source_event_id", event["event_id"])
     if (event_type == "agent_progress" and scope == "space"
             and source == "object_search" and agent_id == "go2"):
         from cloud.space.activity import get_activity_store
@@ -380,9 +389,10 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
         if (activity_id and activity and activity.get("activity_id") == activity_id
                 and get_activity_mode_owner() == activity_id):
             get_activity_store().record_event(activity_id, "search_progress", unit_id=agent_id,
-                text=event["text"], status=status, task_id=facts.get("task_id") or run_id,
-                stage=facts.get("stage"), media_ref=facts.get("media_ref"), source=source,
-                **process, source_event_id=event["event_id"])
+                text=event["text"], **{**history_process, "status": status,
+                    "task_id": facts.get("task_id") or run_id, "stage": facts.get("stage"),
+                    "media_ref": facts.get("media_ref"), "source": source,
+                    "source_event_id": event["event_id"]})
     if scope == "space" and source == "autonomous" and agent_id in {"go2", "esp32_desk_led"}:
         from cloud.space.activity import get_activity_store
         activity = get_activity_store().current(space_id)
@@ -392,15 +402,14 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                 from cloud.go2.router import get_activity_mode_owner
             else:
                 from cloud.esp32.router import get_activity_mode_owner
-            if get_activity_mode_owner() == activity_id:
+            if (get_activity_mode_owner() == activity_id
+                    and (not facts.get("activity_id") or facts["activity_id"] == activity_id)):
                 event["activity_id"] = activity_id
                 if event_type == "agent_reply":
                     get_activity_store().record_event(activity_id, "message", unit_id=agent_id,
-                                                      text=event["text"], status=status,
-                                                      emotion=event["emotion"],
-                                                      **process, media_ref=facts.get("media_ref"),
-                                                      decision_basis=facts.get("decision_basis"),
-                                                      source_event_id=event["event_id"])
+                        text=event["text"], **{**history_process, "status": status,
+                            "emotion": event["emotion"], "media_ref": facts.get("media_ref"),
+                            "source_event_id": event["event_id"]})
                 elif (event_type == "agent_progress"
                       and facts.get("stage") in {"planned", "decision", "executing", "dispatching", "observed"}
                       and process.get("tool")):
@@ -415,14 +424,11 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                                      if agent_id == "esp32_desk_led" and run_id and step_id
                                      else facts.get("task_id") or step_id or run_id)
                     get_activity_store().record_event(activity_id, kind, unit_id=agent_id,
-                                                      text=event["text"], status=status,
-                                                      **{**process, "action": process["tool"]}, task_id=physical_task,
-                                                      stage=stage, media_ref=facts.get("media_ref"),
-                                                      decision_basis=facts.get("decision_basis"),
-                                                      trigger_message_id=facts.get("trigger_message_id"),
-                                                      decision_observation=facts.get("decision_observation"),
-                                                      reason=facts.get("reason"),
-                                                      source_event_id=event["event_id"])
+                        text=event["text"], **{**history_process, "status": status,
+                            "action": process["tool"], "task_id": physical_task,
+                            "stage": stage, "media_ref": facts.get("media_ref"),
+                            "decision_observation": facts.get("decision_observation"),
+                            "source_event_id": event["event_id"]})
     if scope == "space":
         _events.emit_space(space_id, event)
     else:
@@ -479,27 +485,32 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
             return True
         if payload.get("type") in {"agent_reply", "agent_progress", "run_stage", "reply_error"}:
             kind = payload["type"]
-            trusted = {key: payload.get(key) for key in (
-                "agent_id", "status", "run_id", "trace_id", "parent_run_id",
-                "step_id", "source", "text", "emotion", "event_id", "stage", "sequence", "reply_kind",
-                "tool", "target_unit_id", "skill_id", "arguments", "requested_text",
-                "reason", "result_state",
-                "goal", "completed_count", "failed_count", "step_number")}
-            if trusted["agent_id"] != "cloud_orchestrator":
-                return True
+            from cloud.agents.common.progress_facts import public_process_facts
+            trusted = public_process_facts(payload)
+            agent_id = payload.get("agent_id")
+            source = "orchestrator"
+            if agent_id != "cloud_orchestrator":
+                # Delegated role replies are published by the authenticated
+                # orchestrator feedback producer. Limit attribution to known,
+                # discovered members; this payload cannot assign scope.
+                if (agent_id not in {"go2", "esp32_desk_led"}
+                        or payload.get("source") != "delegated_skill"
+                        or kind not in {"agent_reply", "reply_error"}):
+                    return True
+                card = get_registry().get_card(agent_id)
+                configured = set(get_space_registry().get_space()["device_ids"])
+                if (not card or not ({agent_id, card_device_id(card)} & configured)):
+                    return True
+                source = "delegated_skill"
+            # Scope/actor come from this authenticated bus entry, never the
+            # model-supplied payload. Preserve source identity and timestamp.
+            fields = {key: value for key, value in trusted.items()
+                      if key not in {"agent_id", "status", "source", "text", "emotion",
+                                     "scope", "session_id", "space_id", "type"}}
             publish_agent_event(kind, session_id=session_id, scope="session",
-                                agent_id="cloud_orchestrator", status=trusted["status"] or "unknown",
-                                run_id=trusted["run_id"] or "", trace_id=trusted["trace_id"] or "",
-                                parent_run_id=trusted["parent_run_id"] or "",
-                                step_id=trusted["step_id"] or "", source="orchestrator",
-                                text=trusted["text"] or "", emotion=trusted["emotion"],
-                                event_id=trusted["event_id"] or "",
-                                stage=trusted["stage"], sequence=trusted["sequence"],
-                                reply_kind=trusted["reply_kind"] or "final",
-                                **{key: trusted[key] for key in ("tool", "target_unit_id", "skill_id",
-                                    "arguments", "requested_text", "reason", "result_state", "goal",
-                                    "completed_count", "failed_count", "step_number")
-                                   if trusted[key] is not None})
+                agent_id=agent_id, status=payload.get("status") or "unknown",
+                source=source, text=str(payload.get("text") or "")[:4000],
+                emotion=payload.get("emotion"), **fields)
             return True
         payload["session_id"] = session_id
         payload.setdefault("event_id", "evt_" + uuid.uuid4().hex)

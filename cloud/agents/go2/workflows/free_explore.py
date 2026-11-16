@@ -7,6 +7,7 @@ stage, next step and last receipt across short invocations.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -47,6 +48,11 @@ class MotivationState(TypedDict, total=False):
     next_action: str
     step_count: int
     activity_request: dict
+    reply_request: dict
+    reply_attempted: str
+    reply_text: str
+    reply_emotion: str
+    reply_error: str
 
 
 class EventDecision(EmotionModel):
@@ -257,8 +263,73 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                 "should_explore": False, "should_social": False,
                 "profile_revision": profile["revision"]}
 
+    async def claim_reply(state: MotivationState) -> MotivationState:
+        # Persist the claim before inference. Replaying a receipt, including a
+        # failed inference, cannot generate another personality response.
+        return {"reply_attempted": state["reply_request"]["run_id"],
+                "reply_text": "", "reply_emotion": "neutral", "reply_error": ""}
+
+    async def reply(state: MotivationState) -> MotivationState:
+        from cloud.agents.common.runner import GraphRun
+        from cloud.agents.common.replies import finalize_reply, valid_reply_format
+        from cloud.agents.go2.prompts import persona_reply_prompt
+        from cloud.agents.go2.personality.behavior import reply_persona
+
+        request = state["reply_request"]
+        receipt = request["result"]
+        run = GraphRun(request["run_id"], "", request.get("reason", ""), time.time() + 15,
+            steps=[{"step_id": request["run_id"], "tool": request["action"],
+                    "params": request.get("params") or {}, "result": receipt}],
+            status=str(receipt.get("result") or "unknown"), agent_id="go2",
+            origin_kind="agent_autonomous")
+        observation = request.get("observation") or ""
+        profile = profile_loader()
+        instructions = (f"{reply_persona(profile)}\n"
+            "你是刚观察完周围的机器狗。用第一人称和自己的性格说一句简短发现，"
+            "像自然聊天，不要照抄观察报告或使用项目符号。只谈观测中确实提到的东西；"
+            "画面不能确认的身份、距离和安全性不要补造。不要说已到「探索点」。"
+            "只输出要说的话。" if observation else persona_reply_prompt(run, profile))
+
+        def validate(answer, value):
+            return valid_reply_format(answer, value) and (not observation or
+                (len(answer) <= 160 and "\n" not in answer and "**" not in answer))
+
+        await finalize_reply(run, model=model, instructions=instructions,
+            validate=validate, fallback=lambda value: "",
+            context={"observation": observation} if observation else None)
+        return {"reply_text": run.response, "reply_emotion": run.emotion,
+                "reply_error": "reply_unavailable" if not run.response else ""}
+
+    async def entry(state):
+        request = state.get("reply_request") or {}
+        if request:
+            return END if state.get("reply_attempted") == request.get("run_id") else "claim_reply"
+        return "advance"
+
     graph = StateGraph(MotivationState)
     graph.add_node("advance", advance)
-    graph.add_edge(START, "advance")
+    graph.add_node("claim_reply", claim_reply)
+    graph.add_node("reply", reply)
+    graph.add_conditional_edges(START, entry)
     graph.add_edge("advance", END)
+    graph.add_edge("claim_reply", "reply")
+    graph.add_edge("reply", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+async def resume_autonomy_result(*, run_id: str, action: str, reason: str,
+                                params: dict, result: dict, model,
+                                profile_loader, observation: str = "") -> dict:
+    """Deliver a real result to the autonomy Graph, bypassing arbitration/motion."""
+    from cloud.agents.common.checkpoint import FileCheckpointSaver
+    saver = FileCheckpointSaver()
+    graph = build_motivation_graph(profile_loader=profile_loader, checkpointer=saver, model=model)
+    thread_id = "go2:motivation:result:" + run_id
+    async with saver.async_run_lock(thread_id):
+        state = await graph.ainvoke({"reply_request": {
+            "run_id": run_id, "action": action, "reason": reason,
+            "params": params, "result": result, "observation": observation}},
+            {"configurable": {"thread_id": thread_id}}, durability="sync")
+    return {"text": state.get("reply_text", ""),
+            "emotion": state.get("reply_emotion", "neutral"),
+            "error": state.get("reply_error", "")}

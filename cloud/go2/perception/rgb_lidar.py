@@ -380,7 +380,8 @@ def image_bearing(camera: dict, bbox: list, width: int, height: int) -> float:
 
 def associate_lidar_target(voxel: dict, pose: dict, camera: dict, frame: dict,
                            bbox_1000: list, floor_z: float, *,
-                           diagnostics: dict | None = None) -> dict | None:
+                           diagnostics: dict | None = None,
+                           target_points: list | None = None) -> dict | None:
     """Find one isolated, compact foreground component, using actual LiDAR range.
 
     Grow components outside the bbox too: cropping a wall to a small image box
@@ -424,7 +425,7 @@ def associate_lidar_target(voxel: dict, pose: dict, camera: dict, frame: dict,
     buckets = {}
     for index, key in enumerate(keys):
         buckets.setdefault(tuple(key), []).append(index)
-    seen, candidates = set(), []
+    seen, candidates, candidate_points = set(), [], []
     for seed in np.flatnonzero(matched):
         if seed in seen:
             continue
@@ -474,7 +475,11 @@ def associate_lidar_target(voxel: dict, pose: dict, camera: dict, frame: dict,
         candidates.append({'x': float(center[0]), 'y': float(center[1]),
                            'uncertainty_m': uncertainty, 'lidar_points': support,
                            'cluster_points': len(indices), 'bbox_padding_px': padding})
+        if target_points is not None:
+            candidate_points.append(component)
     report.update(candidate_count=len(candidates), reason=(
         'associated' if len(candidates) == 1 else
         'ambiguous_components' if len(candidates) > 1 else 'no_isolated_foreground_component'))
+    if len(candidates) == 1 and target_points is not None:
+        target_points.extend(candidate_points[0].tolist())
     return candidates[0] if len(candidates) == 1 else None

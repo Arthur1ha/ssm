@@ -166,10 +166,13 @@ class Navigator:
 
     async def move_relative(self, direction: str, *, distance_m: float | None = None,
                             angle_deg: float | None = None, speed: float = MOVE_DEFAULT_SPEED,
-                            context) -> dict:
+                            context, cargo_contact=None) -> dict:
         """Reuse navigation's velocity loop and stop proof for an odom goal."""
         from cloud.go2.tools.executor import validate_execution_context
         validate_execution_context(context)
+        if cargo_contact is not None and (context != cargo_contact.context
+                or direction != 'forward' or distance_m != cargo_contact.advance or speed > .25):
+            return {'result': 'blocked', 'reason': 'cargo_contact_scope_mismatch'}
         snapshot, reason = self.snapshot()
         if reason:
             return {"result": "blocked", "reason": reason,
@@ -193,6 +196,9 @@ class Navigator:
                "speed_limit": speed, "holonomic": True,
                "arrival_tolerance_m": MOVE_DISTANCE_TOLERANCE_M,
                "context": context}
+        if cargo_contact is not None:
+            loc['cargo_contact'] = cargo_contact
+            loc['minimum_command_speed'] = speed
         control_lease.acquire(context)
         task = asyncio.current_task()
         self._begin("相对移动", context.session_id, task)
@@ -323,6 +329,41 @@ class Navigator:
             progress = _MotionProgress()
             avoided_points = []
 
+            async def checked_snapshot():
+                snapshot, reason = self._snapshot()
+                contact = loc.get('cargo_contact')
+                if snapshot is not None and not reason and contact is not None:
+                    from cloud.go2.perception.visual_target import TargetUnlocalized
+                    pose, grid = snapshot
+                    try:
+                        checked_at = time.monotonic()
+                        grid = await invoke_blocking(contact.grid_for, grid, pose)
+                    except TargetUnlocalized as exc:
+                        return None, exc.reason
+                    # Matching runs off the event loop. Recheck authority and
+                    # sensor/session freshness after that yield, before Move.
+                    if self.owner_session_id != 'system':
+                        try:
+                            control_lease.heartbeat_session(self.owner_session_id)
+                        except LeaseConflict:
+                            return None, 'control_lease_lost'
+                    latest, latest_reason = self._snapshot()
+                    if latest_reason:
+                        return None, latest_reason
+                    live = latest[0]
+                    if (loc['session_id'] != getattr(go2, '_odom_session_id', None)
+                            or live.get('session_id') != loc['session_id']):
+                        return None, 'map_mismatch'
+                    if (time.monotonic() >= contact.until
+                            or context.expires_at and time.time() >= context.expires_at):
+                        return None, 'cargo_contact_scope_changed'
+                    if (time.monotonic() - checked_at > .3
+                            or math.hypot(live['x']-pose['x'], live['y']-pose['y']) > .03
+                            or abs(_normalize_angle(live['heading']-pose['heading'])) > .05):
+                        return None, 'map_unavailable'
+                    snapshot = pose, grid
+                return snapshot, reason
+
             motion_started = False
             async def send_motion(vx, vy, yaw, pose):
                 """Require progress in the dimension actually being commanded."""
@@ -332,13 +373,25 @@ class Navigator:
                     ready = await execute_action("EnterMoveControl", context=context)
                     if ready.get("result") not in {"ok", "accepted"}:
                         return {"reason": ready.get("error") or "motion_start_rejected", "start": ready}
+                    if loc.get('cargo_contact') is not None:
+                        latest, changed = await checked_snapshot()
+                        if changed:
+                            return {'reason': changed}
+                        live, grid = latest
+                        c, s = math.cos(live['heading']), math.sin(live['heading'])
+                        px = live['x'] + (vx*c-vy*s) * .3
+                        py = live['y'] + (vx*s+vy*c) * .3
+                        if (not grid.is_body_clear(live['x'], live['y'], live['heading'])
+                                or not grid.is_body_clear(px, py, live['heading']+yaw*.3)):
+                            return {'reason': 'cargo_contact_path_blocked'}
+                        control_lease.heartbeat_session(self.owner_session_id)
                     started = await execute_action("Move", {"x": vx, "y": vy, "z": yaw}, context=context)
                     if started.get("result") not in {"ok", "accepted"}:
                         return {"reason": started.get("error") or "motion_start_rejected", "start": started}
                     motion_started = True
                     # Gateway calls yield; recheck sensor and task ownership
                     # before beginning the periodic stream of this same action.
-                    _, changed = self._snapshot()
+                    _, changed = await checked_snapshot()
                     if changed or loc['session_id'] != getattr(go2, '_odom_session_id', None):
                         return {"reason": changed or "map_mismatch"}
                     control_lease.heartbeat_session(self.owner_session_id)
@@ -355,7 +408,7 @@ class Navigator:
                         control_lease.heartbeat_session(self.owner_session_id)
                     except LeaseConflict:
                         return self._finish("cancelled", "control_lease_lost", "运动租约已失效", task_id)
-                snapshot, reason = self._snapshot()
+                snapshot, reason = await checked_snapshot()
                 if reason:
                     progress.reset()
                     now = time.monotonic()
@@ -386,7 +439,8 @@ class Navigator:
                             if self.last_trusted_pose and start_pose else None,
                     }
                     return self._finish("failed", sensor_gap_reason if recoverable else reason,
-                                        "定位或地图数据中断，已停止导航", task_id,
+                                        "货物接触条件变化，已停止推送" if reason.startswith('cargo_contact_')
+                                        else "定位或地图数据中断，已停止导航", task_id,
                                         diagnostics=diagnostics)
                 if sensor_gap_since is not None:
                     logger.info("[Go2/Nav] telemetry resumed after %.2fs; replanning",
@@ -421,9 +475,11 @@ class Navigator:
                     planned = await invoke_blocking(self._plan_path, loc, fresh_grid, odom, avoided_points)
                     # Planning yields control. Its input may be stale or the
                     # device/session/owner may have changed before it returns.
-                    latest, latest_reason = self._snapshot()
+                    latest, latest_reason = await checked_snapshot()
                     if latest_reason:
                         go2.move_velocity(0, 0, 0)
+                        if latest_reason.startswith('cargo_contact_'):
+                            return self._finish('blocked', latest_reason, '货物接触条件变化，已停止推送', task_id)
                         progress.reset()
                         path = None
                         await asyncio.sleep(.1)

@@ -109,7 +109,12 @@ def test_lamp_can_message_only_at_a_discovery_opportunity(monkeypatch, has_disco
     model = SimpleNamespace(bind_tools=Mock(return_value=SimpleNamespace(invoke=Mock(
         return_value=AIMessage(content="", tool_calls=[{"name": "send_message", "id": "call_1",
             "args": {"target": "go2", "content": "刚看到的盒子是什么颜色？"}}])))))
-    monkeypatch.setattr(reactive, "_prompt", lambda *_: [])
+    def prompt(_agent, state):
+        # This social-admission fixture bypasses prompt assembly, while keeping
+        # the trusted model-turn snapshot normally supplied by that assembler.
+        state["decision_space"] = {"peers": [], "recent_discoveries": []}
+        return []
+    monkeypatch.setattr(reactive, "_prompt", prompt)
     dispatch = Mock(return_value=True)
     agent = SimpleNamespace(_autonomy_epoch=1, _find_led_unit=lambda: "esp32_desk_led",
         _should_act=lambda: True, _device_online=lambda: True, _beliefs_since_summary=0,

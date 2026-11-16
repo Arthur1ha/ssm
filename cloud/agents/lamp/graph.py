@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
 import uuid
 from dataclasses import replace
@@ -20,12 +19,10 @@ from cloud.agents.lamp.prompts import capture_lamp_baseline, decision_messages, 
 from cloud.agents.lamp.state import READ_ONLY_TOOLS
 from cloud.agents.lamp.tools.execute import execute_lamp_tool
 from cloud.agents.lamp.tools.schemas import visible_schemas
-from cloud.agents.common.progress import submit_progress
-from cloud.agents.common.progress_facts import step_progress_facts
+from cloud.agents.common.progress_facts import progress_event_facts
 from cloud.agents.common.replies import finalize_reply, valid_reply_format
 from cloud.agents.common.messages import context_message
 from cloud.agents.lamp.personality.profile import get_profile
-from cloud.personality.store import render_identity
 from cloud.esp32.physical_tasks import get as get_physical_task, stable_task_id
 from cloud.cards import registry as cards
 from cloud.observability import bind_context, emit_agent_event
@@ -39,7 +36,7 @@ def _response(run, *, runtime_reply: bool = False) -> dict:
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status,
             "reply": "" if runtime_reply and run.reply_source == "runtime" else run.response,
-            "emotion": normalize_emotion(run.emotion),
+            "emotion": normalize_emotion(run.emotion), "reply_source": run.reply_source,
             "event_id": run.reply_event_id or stable_reply_event_id(run, status),
             "question": run.question or None, "steps": run.steps,
             "task_id": next((s.get("result", {}).get("task_id") for s in reversed(run.steps)
@@ -70,6 +67,8 @@ def stable_reply_event_id(run: GraphRun, status: str) -> str | None:
     reply_kind = "clarification" if status == "needs_clarification" else "final"
     stable_key = ":".join(("agent_reply", scope, session_id or "main", run.run_id,
                            run.agent_id, "", reply_kind, "", ""))
+    if reply_kind == "clarification":
+        stable_key += f":turn:{run.model_turn}"
     return "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex
 
 
@@ -150,49 +149,14 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     event_session = "" if autonomous else context.session_id
     event_source = ("autonomous" if autonomous else
                     "delegated_skill" if run.parent_run_id else "device_chat")
-    progress_closed = threading.Event()
     run_model = None
 
     def progress(phase, step):
-        result = (step or {}).get("result") or {}
-        facts = ({"goal": run.goal,
-                  "completed_count": sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
-                  "failed_count": sum((s.get("result") or {}).get("result") in
-                                      {"blocked", "rejected", "cancelled", "error"} for s in run.steps)}
-                 if step is None else {k: v for k, v in step_progress_facts(step).items() if k != "tool"})
-        publish_agent_event(
-            "agent_progress", agent_id=unit_id, session_id=event_session,
+        publish_agent_event("agent_progress", session_id=event_session,
             scope="space" if autonomous else "session", space_id=context.space_id,
-            status=result.get("result") or phase, run_id=run.run_id,
-            trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
-            step_id=(step or {}).get("step_id", ""), source=event_source,
-            stage=phase, tool=(step or {}).get("tool"),
-            step_number=len(run.steps) if step is not None else None,
+            source=event_source,
             trigger_message_id=run.run_id if context.session_id.startswith("peer_") else None,
-            event_id="evt_" + uuid.uuid5(uuid.NAMESPACE_URL,
-                f"{run.run_id}:{run.attempt}:{phase}:{(step or {}).get('step_id', '')}").hex,
-            **facts,
-        )
-        if phase == "observed" and step is not None and not run.parent_run_id:
-            persona = render_identity(get_profile())
-            status = result.get("result", "unknown")
-
-            def publish_text(answer):
-                publish_agent_event("agent_progress", agent_id=unit_id,
-                    session_id=event_session, scope="space" if autonomous else "session",
-                    space_id=context.space_id, status=status, run_id=run.run_id,
-                    trace_id=run.trace_id or run.run_id, parent_run_id=run.parent_run_id,
-                    step_id=step["step_id"], source=event_source, stage="narrated",
-                    sequence=run.attempt * 10 + 3, text=answer,
-                    step_number=len(run.steps), **step_progress_facts(step))
-
-            def invoke_text(messages):
-                model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
-                return model.invoke(messages).content
-
-            submit_progress(persona + "\n进展只用自然语言，不展示 RGB、亮度或色温数值。",
-                            run.goal, step, invoke_text, publish_text,
-                            progress_closed, min(run.deadline, time.time() + 4))
+            **progress_event_facts(run, phase, step))
 
     training_attempt_start = len(run.steps)
 
@@ -245,12 +209,13 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                 current.reply_event_id = stable_reply_event_id(
                     current, _public_status(current)) or ""
                 publish_agent_event(
-                    "agent_reply", agent_id=unit_id, session_id=event_session,
+                    "agent_reply" if current.reply_source != "runtime" else "reply_error", agent_id=unit_id, session_id=event_session,
                     scope="space" if autonomous else "session", space_id=context.space_id,
                     status=_public_status(current), run_id=current.run_id,
                     trace_id=current.trace_id or current.run_id,
                     parent_run_id=current.parent_run_id, source=event_source,
                     text=current.response, emotion=current.emotion, reply_kind="final",
+                        reply_source=current.reply_source,
                     event_id=current.reply_event_id)
             else:
                 publish_agent_event(
@@ -308,7 +273,6 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     if run.status != "needs_clarification":
         pin_completed_run(run.run_id, context.session_id, unit_id,
                           index=index, checkpointer=saver)
-    progress_closed.set()
     progress("finished", None)
     status = _public_status(run)
     reply = run.response
@@ -329,7 +293,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                          reply_kind="final", channel="http", reply=reply)
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status, "reply": reply,
-            "emotion": normalize_emotion(run.emotion),
+            "emotion": normalize_emotion(run.emotion), "reply_source": run.reply_source,
             "event_id": run.reply_event_id or None,
             "question": run.question or None, "steps": run.steps,
             "task_id": next((s.get("result", {}).get("task_id") for s in reversed(run.steps)

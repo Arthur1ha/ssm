@@ -176,6 +176,30 @@ async def test_obstruction_reports_partial_distance_and_stops(movement):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('lost_during_activation', [False, True])
+async def test_contact_is_rechecked_after_activation_and_during_movement(movement, lost_during_activation):
+    from cloud.go2.perception.visual_target import TargetUnlocalized
+    checked = []
+    def grid_for(grid, pose):
+        checked.append(pose.copy())
+        travelled = math.hypot(pose['x']-movement.start['x'], pose['y']-movement.start['y'])
+        if (movement.gateway.await_count >= 1 if lost_during_activation else travelled > .06):
+            raise TargetUnlocalized('cargo_contact_tracking_lost')
+        return grid
+    contact = SimpleNamespace(context=movement.context, advance=.25, grid_for=grid_for,
+                              until=time.monotonic()+10.)
+    result = await movement.nav.move_relative('forward', distance_m=.25, speed=.25,
+        context=movement.context, cargo_contact=contact)
+    assert result['result'] == 'blocked' and result['reason'] == 'cargo_contact_tracking_lost'
+    assert result['stop']['result'] == 'ok'
+    assert 0 <= result['distance_m'] < .25
+    assert checked and movement.commands[-1] == (0, 0, 0)
+    if lost_during_activation:
+        assert not any(any(cmd) for cmd in movement.commands)
+        assert [call.args[0] for call in movement.gateway.await_args_list] == ['EnterMoveControl']
+
+
+@pytest.mark.asyncio
 async def test_no_motion_never_counts_time_as_distance(movement):
     from cloud.go2.tools.tools import go2_move
     movement.fault['stall'] = True

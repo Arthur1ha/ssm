@@ -78,19 +78,16 @@ def _run_intent(session_id: str, intent_context: dict) -> None:
             run_id = outcome.get("run_id") or intent_context.get("event_id") or ""
             trace_id = intent_context.get("trace_id") or run_id
             logger.warning("[Main] intent rejected session=%s reason=%s", session_id, reason)
-            agent_tools.do_publish_feedback(session_id, "failed", message, status="rejected",
-                                            run_id=run_id, trace_id=trace_id)
-            agent_tools.do_publish_ui_event(session_id, "agent_reply", run_id=run_id,
+            agent_tools.do_publish_ui_event(session_id, "reply_error", run_id=run_id,
                                             trace_id=trace_id, status="rejected", text=message)
         logger.info("[Main] ── 逐步任务完成 session=%s ──", session_id)
     except Exception as exc:
         logger.exception("[Main] 任务循环异常 session=%s: %s", session_id, exc)
         run_id = intent_context.get("resume_run_id") or intent_context.get("event_id") or ""
         trace_id = intent_context.get("trace_id") or run_id
-        agent_tools.do_publish_feedback(session_id, "failed", "任务处理异常，请查看任务状态。",
-                                        status="error", run_id=run_id, trace_id=trace_id)
         agent_tools.do_publish_ui_event(session_id, "reply_error", run_id=run_id,
-                                        trace_id=trace_id, status="error")
+                                        trace_id=trace_id, status="error",
+                                        text="任务处理异常，请查看任务状态。")
 
 
 def _handle_agent_message(message: dict) -> None:
@@ -334,13 +331,12 @@ def on_message(client, userdata, msg):
                          session_id=session_id, agent_id="orchestrator",
                          origin_kind="user_delegated", input=trusted["user_msg"],
                          entry="mqtt_intent")
-        client.publish(
-            f"ssm/feedback/{session_id}",
-            json.dumps({"stage": "planning", "text": "已收到请求，正在处理...",
-                        "session_id": session_id, "trace_id": trusted.get("trace_id"),
-                        "status": "ok", "ts": int(time.time())}),
-            qos=0,
-        )
+        run_id = trusted.get("resume_run_id") or trusted.get("event_id") or ""
+        agent_tools.do_publish_ui_event(
+            session_id, "run_stage", run_id=run_id,
+            trace_id=trusted.get("trace_id") or run_id,
+            stage="planning", status="executing",
+            event_id=f"{trusted.get('event_id') or run_id}:planning")
         event_queue.put({"trigger": "intent", "payload": trusted, "session_id": session_id})
         return
 

@@ -59,7 +59,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     id: 'welcome', type: 'ai', agent: unitId,
     text: greeting,
   };
-  const [messages, setMessages] = useSessionTranscript(sessionId, `device:${unitId}`, [initialMsg]);
+  const [messages, setMessages] = useSessionTranscript(sessionId, `device:${unitId}`, greeting ? [initialMsg] : []);
   const chatRows = useMemo(() => trainingTimeline(messages, actor === 'admin' ? training.proposals : []), [messages,training.proposals,actor]);
   useEffect(() => {
     setMessages(previous => {
@@ -103,12 +103,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   };
   const appendProcess = (requestId, text, eventId, event = {}) => {
     text = typeof event.text === 'string' && event.text.trim() ? event.text.trim() : text;
-    if (!text && !event.media_ref && !event.tool && !event.action && !event.decision_basis) return;
+    if (!processHasContent({...event,text})) return;
     const row = { ...processRecord(event), id: `${requestId}:process:${eventId || ++nextProcessId.current}`,
       type: 'process', agent: unitId, requestId, text, eventId };
     setMessages(previous => {
-      if (eventId && previous.some(message => message.type === 'process'
-        && message.requestId === requestId && message.eventId === eventId)) return previous;
+      const identity = event.source_event_id || eventId;
+      const existing = identity ? previous.findIndex(message => message.type === 'process'
+        && message.requestId === requestId && (message.source_event_id || message.eventId) === identity) : -1;
+      if (existing >= 0) return previous.map((message,index) => index === existing ? mergeProcessFact(message,row) : message);
       const endIndex = previous.findIndex(message => message.requestId === requestId
         && message.type === 'ai');
       if (endIndex >= 0) return [...previous.slice(0, endIndex), row,
@@ -144,7 +146,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       if (!autonomous && (!['device_chat', 'object_search'].includes(item.source) || !pending)) return;
       const requestId = autonomous ? `auto:${item.run_id || item.event_id}` : pending.key;
       if (item.type === 'agent_reply' && item.text) {
-        const replyKey = `${requestId}:${item.event_id}`;
+        const replyKey = `${item.run_id}:${item.source_event_id || item.event_id}`;
         if (seenReplies.current.has(replyKey)) return;
         seenReplies.current.add(replyKey);
         const currentRun = autonomous ? !activeRun.current : latestChatRun.current === item.run_id
@@ -160,11 +162,15 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           }
         }
       } else if (item.type === 'run_stage' || item.type === 'agent_progress') {
-        if (item.stage !== 'finished') {
-          appendProcess(requestId, processEventText(item), item.event_id, item);
+        if (item.stage !== 'finished' || processHasContent(item)) {
+          appendProcess(requestId, item.stage === 'narrated' ? '' : item.text || '', item.event_id, item);
+        }
+        if (item.stage === 'finished' && !autonomous && activeRun.current === item.run_id) {
+          setSending(false); activeRun.current=null; retainRun(item.run_id);
+          if (item.status === 'needs_clarification') setPendingRunId(item.run_id);
         }
       } else if (item.type === 'reply_error') {
-        const message = '这次没能给出完整回复，请稍后再试。';
+        const message = item.text || '这次没能给出完整回复，请稍后再试。';
         finishMessage(requestId, message, item.event_id, true);
         if (!autonomous) {
           retainRun(item.run_id);
@@ -306,9 +312,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       crypto.randomUUID().replaceAll('-', '');
     if (pendingRuns.current.has(runId)) forgetRun(runId);
     const requestId = `chat:${++nextRequestId.current}`;
-    setMessages(prev => [...prev, { id: `${requestId}:user`, type: 'user', text, requestId, runId },
-      { id: `${requestId}:initial`, type: 'process', agent: unitId, requestId,
-        text: '已收到请求', eventId: `initial:${requestId}` }]);
+    setMessages(prev => [...prev, { id: `${requestId}:user`, type: 'user', text, requestId, runId }]);
     setSending(true);
     activeRun.current = runId;
     latestChatRun.current = runId;
@@ -332,10 +336,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         // This callback belongs to the current HTTP request, unlike a delayed
         // SSE event. Older response formats may not include a timestamp.
         const replyTs = Number.isFinite(result?.ts) ? result.ts : Date.now() / 1000;
-        const replyKey = `${requestId}:${result?.event_id}`;
+        const replyKey = `${runId}:${result?.source_event_id || result?.event_id}`;
         if (result?.event_id && reply && !seenReplies.current.has(replyKey)) {
           seenReplies.current.add(replyKey);
-          finishMessage(requestId, reply, result.event_id, false, result.emotion,
+          finishMessage(requestId, reply, result.event_id, result.reply_source === 'runtime', result.emotion,
             latestChatRun.current === runId ? avatarReceiveTime({ts:replyTs}) : undefined, replyTs);
           setSending(false);
           activeRun.current = null;
@@ -344,10 +348,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           const fallback = reply || result?.question || apiErrorText(
             { message: commandBus.describe(result) }, '设备暂时无法完成处理，请稍后重试。');
           if (['accepted', 'executing', 'timeout'].includes(result?.result)) {
-            appendProcess(requestId, fallback, `pending:${result?.result}`);
+            appendProcess(requestId, '', `pending:${runId}:${result?.result}`,
+              {run_id:runId,agent_id:unitId,tool:'chat',status:result.result,dispatch_only:result.dispatch_only});
           } else {
             finishMessage(requestId, fallback, result?.event_id,
-              !reply && !result?.question, result?.emotion,
+              result?.reply_source === 'runtime' || !reply && !result?.question, result?.emotion,
               latestChatRun.current === runId ? avatarReceiveTime({ts:replyTs}) : undefined, replyTs);
           }
           setSending(false);

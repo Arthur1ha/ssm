@@ -7,7 +7,6 @@ import logging
 import os
 import time
 import uuid
-import threading
 from pathlib import Path
 
 from cloud.agents.common.runner import GraphRun as Run, run_role_graph
@@ -21,11 +20,9 @@ from cloud.agents.common.views import load_run, pin_completed_run
 from cloud.agents.common.models import get_text_model, async_model_clients
 from cloud.agents.steward.replies import finalize_steward_reply
 from cloud.agents.common.messages import context_message
-from cloud.agents.common.progress import submit_progress
-from cloud.agents.common.progress_facts import step_progress_facts
+from cloud.agents.common.progress_facts import progress_event_facts
 from cloud.observability import bind_context, emit_agent_event
 from cloud.agents.steward.personality.profile import get_profile
-from cloud.agents.steward.personality.behavior import current_persona
 
 from cloud.orchestrator import tools as transport
 
@@ -59,6 +56,12 @@ def _checkpoint_run(saver: FileCheckpointSaver, thread_id: str, run_id: str) -> 
 
 
 
+
+
+def stable_reply_event_id(run: Run) -> str:
+    kind = "clarification" if run.status == "needs_clarification" else "final"
+    identity = f"{run.run_id}:reply:{run.model_turn}:{kind}"
+    return "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
 
 
 def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
@@ -125,51 +128,9 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         context = {**context, "user_msg": run.goal}
     model = None
     execute = make_executor(run, context, resume)
-    transport.do_publish_feedback(session_id, "planning", "正在理解并执行目标…", run_id=run_id)
-
-
-
-    def on_step(step: dict) -> None:
-        result = step["result"]
-        transport.do_publish_feedback(session_id, "step", "步骤执行结果已更新。",
-                                      run_id=run_id, step_id=step["step_id"],
-                                      step_number=len(run.steps),
-                                      tool=step["tool"], result=result,
-                                      status=result["result"])
-
-    progress_closed = threading.Event()
-
     def on_progress(phase: str, step: dict | None) -> None:
-        if step is None:
-            transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
-                trace_id=run.trace_id or run_id, status=phase, stage=phase,
-                sequence=run.attempt, goal=run.goal,
-                completed_count=sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
-                failed_count=sum((s.get("result") or {}).get("result") in
-                    {"blocked", "rejected", "cancelled", "error"} for s in run.steps))
-        else:
-            result = step.get("result") or {}
-            transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
-                trace_id=run.trace_id or run_id, status=result.get("result") or phase,
-                step_id=step["step_id"], stage=phase,
-                sequence=run.attempt * 10 + {"decision": 0, "dispatching": 1,
-                    "observed": 2, "considering": 4}.get(phase, 3),
-                step_number=len(run.steps),
-                **step_progress_facts(step))
-            if phase == "observed":
-                status = result.get("result", "unknown")
-                def invoke_text(messages):
-                    return get_text_model("steward").invoke(messages).content
-                def publish_text(answer):
-                    transport.do_publish_ui_event(session_id, "agent_progress",
-                        run_id=run_id, trace_id=run.trace_id or run_id,
-                        status=status, text=answer, step_id=step["step_id"],
-                        stage="narrated", sequence=run.attempt * 10 + 3,
-                        step_number=len(run.steps),
-                        **step_progress_facts(step))
-                submit_progress(current_persona(), run.goal, step, invoke_text,
-                                publish_text, progress_closed,
-                                min(run.deadline, time.time() + 4))
+        transport.do_publish_ui_event(session_id, "agent_progress",
+                                      **progress_event_facts(run, phase, step))
 
     async def finalize(current: Run) -> Run:
         from cloud.agents.steward.device_replies import publish_device_replies
@@ -191,7 +152,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         return await run_role_graph(
             run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
             build_messages=messages_for, execute=execute,
-            on_step=on_step, on_progress=on_progress, checkpointer=saver,
+            on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
             effectful=lambda name: name in {"invoke_skill", "apply_training", "propose_training", "send_message", "start_activity",
                                               "set_space_constraint", "clear_space_constraints"},
@@ -206,25 +167,21 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
     stage = ("question" if run.status == "needs_clarification" else
              "done" if run.status == "ok" else
              "partial" if run.status == "partial" else "failed")
-    progress_closed.set()
-    transport.do_publish_feedback(session_id, stage, run.response, run_id=run_id,
-                                  trace_id=run.trace_id or run_id,
-                                  status=run.status, question=run.question or None, emotion=run.emotion)
-    transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
-        trace_id=run.trace_id or run_id, status=run.status, stage="finished",
-        sequence=run.attempt, goal=run.goal,
-        completed_count=sum((s.get("result") or {}).get("result") == "ok" for s in run.steps),
-        failed_count=sum((s.get("result") or {}).get("result") in
-            {"blocked", "rejected", "cancelled", "error"} for s in run.steps))
-    transport.do_publish_ui_event(session_id, "agent_reply" if run.response else "reply_error",
+    transport.do_publish_ui_event(session_id, "agent_reply" if run.response and run.reply_source != "runtime" else "reply_error",
         run_id=run_id, trace_id=run.trace_id or run_id, status=run.status,
-        text=run.response, emotion=run.emotion,
+        text=run.response, emotion=run.emotion, reply_source=run.reply_source,
+        event_id=stable_reply_event_id(run),
         reply_kind="clarification" if run.status == "needs_clarification" else "final")
+    transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+        trace_id=run.trace_id or run_id, status=run.status, stage=stage,
+        question=run.question or None, sequence=run.model_turn * 1000 + len(run.steps) * 10 + 10,
+        event_id=f"{run_id}:control:{run.model_turn}:{stage}")
+    on_progress("finished", None)
     if run.response:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
                          run_id=run.run_id, agent_id="cloud_orchestrator", session_id=session_id,
                          reply_kind="final", channel="mqtt_feedback", reply=run.response)
     return {"run_id": run_id, "trace_id": run.trace_id or run_id,
             "result": run.status, "response": run.response,
-            "emotion": run.emotion,
+            "emotion": run.emotion, "reply_source": run.reply_source,
             "steps": run.steps, "question": run.question or None}

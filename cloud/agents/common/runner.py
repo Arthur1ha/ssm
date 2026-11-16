@@ -60,6 +60,7 @@ class GraphRun:
     decision_space: dict = field(default_factory=dict)
     emotion: str = "neutral"
     emotion_step_id: str = ""
+    model_turn: int = 0
 
 
 class _State(TypedDict):
@@ -82,7 +83,12 @@ class DialogueResponse(EmotionModel):
 def _schema(name: str, declaration: Any) -> dict:
     schema = deepcopy(convert_to_openai_tool(declaration))
     schema["function"]["name"] = name
-    schema["function"]["parameters"].setdefault("properties", {})["final"] = {
+    properties = schema["function"]["parameters"].setdefault("properties", {})
+    properties.setdefault("decision_reason", {"type": "string", "maxLength": 400,
+        "description": "可选的简短公开选择说明，依据本次实际事实；不写私有推理。"})
+    properties.setdefault("evidence_refs", {"type": "array", "maxItems": 8, "items": {"type": "string"},
+        "description": "可选引用本轮 decision_evidence 的 ref；不能自行编造观察。"})
+    properties["final"] = {
         "type": "boolean",
         "description": "成功后是否结束本次任务。单个动作或整批最后一步默认 true；"
                        "明确还需观察结果并继续其他步骤时填写 false。此字段不传给设备。",
@@ -160,6 +166,8 @@ async def run_role_graph(
     text_parser = StrOutputParser()
     response_policy = SystemMessage(content=(
         "通过原生 tool calling 调用业务工具；调用时不输出面向用户的文字。"
+        "可在同次调用的 decision_reason 给出简短公开说明，并以 evidence_refs 引用本轮真实证据。"
+        "没有必要说明时省略；不输出私有推理，不为闲聊解释思考过程。"
         "同轮返回的多个调用会严格按返回顺序串行执行，每步确认成功后才执行下一步。"
         "仅在各步参数都已明确时一次返回多个调用；若后续参数或是否执行取决于前一步结果，"
         "先只调用前一步，观察真实结果后再决定下一步。不重复成功的动作。"
@@ -191,6 +199,7 @@ async def run_role_graph(
     async def model_node(state: _State) -> dict:
         current = GraphRun(**state["run"])
         turns = state["turns"] + 1
+        current.model_turn = turns
         sync_outer(current)
         emit("graph.node", node="model", phase="entered", turn=turns)
         if time.time() >= current.deadline:
@@ -200,7 +209,7 @@ async def run_role_graph(
             current.status, current.response = "blocked", "模型轮次已达上限；其余步骤未执行。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         if on_progress:
-            on_progress("considering" if current.steps else "planning", current.steps[-1] if current.steps else None)
+            on_progress("considering" if current.steps else "planning", None)
         messages = await _await(build_messages(current))
         history = trim_dialogue(state.get("messages", []), include_pending=True)
         # Clarifications belong to this run's live dialogue, not completed
@@ -280,6 +289,7 @@ async def run_role_graph(
                     dialogue = DialogueResponse(kind="final", text=text_parser.invoke(response))
                 current.emotion = dialogue.emotion
                 if dialogue.kind == "question":
+                    current.reply_source = "decision_model"
                     transcript = list(state.get("messages", []))
                     if not active:
                         transcript.append(HumanMessage(content=current.goal,
@@ -362,6 +372,32 @@ async def run_role_graph(
         final = args.pop("final", not remaining and effectful(name))
         if type(final) is not bool:
             return stop("rejected", "任务终结标记必须为布尔值，未执行新动作。")
+        # Display metadata never changes the business effect fingerprint. Existing
+        # schema-owned evidence remains available to mandatory game validation.
+        reason, refs = args.get("decision_reason"), args.get("evidence_refs")
+        own_fields = (declaration.model_fields if inspect.isclass(declaration)
+                      and issubclass(declaration, BaseModel) else
+                      (declaration.get("function", declaration).get("parameters", {}).get("properties", {})
+                       if isinstance(declaration, dict) else {}))
+        for field_name in ("decision_reason", "evidence_refs"):
+            if field_name not in own_fields:
+                args.pop(field_name, None)
+        basis = None
+        if reason is not None or refs is not None:
+            from cloud.agents.common.progress_facts import resolve_public_decision
+            try:
+                basis = resolve_public_decision(current.decision_space, reason, refs)
+            except (ValueError, TypeError):
+                emit("decision.explanation_discarded", tool=name, reason="invalid_public_metadata")
+                # Mandatory fields are validated by their original business
+                # executor; optional malformed display metadata is discarded.
+                for field_name in ("decision_reason", "evidence_refs"):
+                    field = own_fields.get(field_name)
+                    if field_name in args and (field is None or
+                            hasattr(field, "is_required") and not field.is_required()):
+                        # Game invitation evidence remains a business precondition.
+                        if name != "send_message" or args.get("interaction_kind") != "game_invite":
+                            args.pop(field_name, None)
         if inspect.isclass(declaration) and issubclass(declaration, BaseModel):
             try:
                 args = declaration.model_validate(args).model_dump(exclude_none=True)
@@ -369,12 +405,20 @@ async def run_role_graph(
                 return stop("rejected", "工具参数未通过校验，未执行新动作。")
         if effectful(name) and state["effects"] >= max_effects:
             return stop("blocked", "任务动作次数已达上限；其余步骤未执行。")
-        params, step_id = args, call["id"]
+        execute_params = args
+        params = {key: value for key, value in args.items()
+                  if key not in {"decision_reason", "evidence_refs"}}
+        step_id = call["id"]
         emit("graph.node", node="tool", phase="entered", step_id=step_id, tool=name)
         is_effect = effectful(name)
         step = {"step_id": step_id, "tool_call_id": step_id, "tool": name,
                 "params": params, "effectful": is_effect, "final": final,
-                "dispatch_status": "pending", "result": None}
+                "dispatch_status": "pending", "result": None,
+                "model_turn": current.model_turn,
+                "sequence": current.model_turn * 1000 + (len(current.steps) + 1) * 10,
+                "ts": time.time()}
+        if basis:
+            step["decision_basis"] = basis
         current.steps.append(step)
         sync_outer(current)
         if record:
@@ -399,7 +443,7 @@ async def run_role_graph(
                         result = {"result": "unknown", "error": "prior_dispatch_unconfirmed"}
                 else:
                     with use_effect(ledger, (current.agent_id, thread_id, current.run_id, step_id)):
-                        result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
+                        result = await asyncio.wait_for(_invoke(execute, name, execute_params, step_id),
                                                         timeout=max(0.1, current.deadline - time.time()))
                 if isinstance(result, dict) and result.get("result") not in {
                     "unknown", "timeout", "executing"
@@ -407,7 +451,7 @@ async def run_role_graph(
                     ledger.mark_result(current.agent_id, thread_id,
                                        current.run_id, step_id, result)
             else:
-                result = await asyncio.wait_for(_invoke(execute, name, params, step_id),
+                result = await asyncio.wait_for(_invoke(execute, name, execute_params, step_id),
                                                 timeout=max(0.1, current.deadline - time.time()))
         except asyncio.TimeoutError:
             result = {"result": "timeout", "error": "run_deadline_exceeded"}
@@ -537,8 +581,10 @@ async def run_role_graph(
                                              "effects": sum(bool(s.get("effectful")) for s in run.steps)},
                                             config, durability="sync")
     if "__interrupt__" in output:
+        run.__dict__.update(output["run"])
         payload = output["__interrupt__"][0].value
         run.status, run.question, run.response = "needs_clarification", payload["question"], payload["question"]
+        run.reply_source = "decision_model"
         emit("run.paused", reason="human_input", question=run.question)
     else:
         updated = GraphRun(**output["run"])

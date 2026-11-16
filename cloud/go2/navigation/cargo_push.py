@@ -1,8 +1,8 @@
 """One measured, bounded cargo nudge using ordinary guarded Go2 gait.
 
-This adapter never removes cargo from the obstacle map or invents a foot RPC.
-If the existing body sweep forbids contact, pushing is blocked. Progress and
-delivery are determined from cargo observations, never robot arrival alone.
+The shared obstacle map stays intact. A bounded contact step permits only the
+freshly re-associated cargo component; other obstacles remain blocked. Progress
+and delivery come from cargo observations, never robot arrival alone.
 """
 from __future__ import annotations
 
@@ -16,8 +16,10 @@ import time
 import uuid
 
 from cloud.agents.common.effects import FileEffectLedger, current_effect, use_effect
+from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.control import control_lease
 from cloud.go2.navigation.navigator import navigator
+from cloud.go2.navigation.cargo_contact import CargoContact, permit_contact
 from cloud.go2.navigation.occupancy_grid import ROBOT_HALF_LENGTH_M, SAFETY_MARGIN_M
 from cloud.go2.navigation.target_approach import _authorize, _await_authorized, _stop_approach
 from cloud.go2.perception.cargo import observe_cargo
@@ -38,6 +40,8 @@ _REASONS = {
     'cargo_association_unconfirmed': '货物的视觉与雷达对应关系尚未确认。',
     'cargo_contact_geometry_unavailable': '当前测量不足以确认可靠的靠近或腿部接触位置。',
     'cargo_contact_path_blocked': '机身避障检查未通过，靠近或接触货物的通路受阻。',
+    'cargo_contact_tracking_lost': '推送中无法继续核对同一货物，已停止。',
+    'cargo_contact_scope_changed': '本次短距接触范围或定位条件已变化，已停止。',
     'cargo_motion_unconfirmed': '尚未测得可靠的货物移动，本次不算推送完成。',
     'cargo_move_unconfirmed': '本次前进或停稳结果尚未确认，需要核对原任务。',
     'cargo_not_stable_or_identity_changed': '两次观察中的货物位置不稳定，或无法确认是同一件货物。',
@@ -208,9 +212,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                       'message': '两张新鲜停稳画面确认同一货物已在指定目的地附近，不要求完全覆盖标记。'}
         else:
             forward = _aligned(before)
-            # The target's conservative measured radius remains occupied. A
-            # distant box gets one safe approach increment; near it we attempt
-            # the same ordinary gait nudge only if the full body sweep permits.
+            # Distant cargo uses ordinary approach. Near cargo gets a scoped
+            # contact allowance shared by preflight and live Navigator checks.
             uncertainty = before['cargo_location'].get('uncertainty_m')
             if type(uncertainty) not in (int, float) or not math.isfinite(uncertainty):
                 raise TargetUnlocalized('cargo_contact_geometry_unavailable')
@@ -226,6 +229,12 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
             if pose.get('session_id') != before['odom_session_id']:
                 raise TargetUnlocalized('odom_session_mismatch')
             _ensure_stable(before['pose'], pose)
+            contact = None
+            if nudge_attempted:
+                if not _stable_cluster_shape(first, before):
+                    raise TargetUnlocalized('cargo_contact_geometry_unavailable')
+                contact = CargoContact(before, pose, advance, context)
+                grid = await _await_authorized(invoke_blocking(contact.grid_for, grid, pose), context)
             for offset in (advance * index / 5 for index in range(6)):
                 if not grid.is_body_clear(pose['x'] + offset * math.cos(pose['heading']),
                                           pose['y'] + offset * math.sin(pose['heading']), pose['heading']):
@@ -233,12 +242,13 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
             moving = True
             # The child effect identity keeps native training/action accounting
             # tied to this original step, including cancellation uncertainty.
-            with use_effect(ledger, identity):
+            with use_effect(ledger, identity), permit_contact(contact):
                 movement = await execute_tool('go2_move',
                     {'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
             moving = False
             if movement.get('result') != 'ok' or (movement.get('stop') or {}).get('result') != 'ok':
-                raise TargetUnlocalized('cargo_move_unconfirmed')
+                reason = movement.get('reason') or ''
+                raise TargetUnlocalized(reason if reason.startswith('cargo_contact_') else 'cargo_move_unconfirmed')
             stopped_at = time.monotonic()
             candidate = await _await_authorized(observe_cargo(cargo, destination,
                 after_frame_id=before['frame_id'], after_received_at=stopped_at), context)
@@ -309,6 +319,11 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                   'movement': movement, 'stop': stopped,
                   'reference': _reference_for(after or before, cargo, destination) if after or before else reference,
                   'message': _REASONS.get(reason, '当前观测或设备条件不足，本次推送尚未确认完成。')}
+    # Raw component points are an in-process allowance, not a public tool
+    # parameter, checkpoint capability, or retained observation projection.
+    for key in ('cargo_before', 'cargo_after'):
+        if isinstance(result.get(key), dict):
+            result[key] = {k: v for k, v in result[key].items() if k != 'contact_observation'}
     result = {**result, 'request_id': request_id}
     ledger.mark_result(*identity, result)
     return result

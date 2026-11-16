@@ -1,122 +1,103 @@
-/* useSendIntent — intents enter FastAPI; feedback returns on session-scoped SSE. */
-
+/* Intents enter FastAPI; trace-scoped facts and original replies return on SSE. */
 function useSendIntent() {
-  const { useState, useCallback, useEffect, useRef } = React;
-  const [thinking, setThinking] = useState(false);
+  const {useState,useCallback,useEffect,useRef} = React;
+  const [thinking,setThinking] = useState(false);
   const activeRef = useRef(null);
+  const latestRef = useRef(null);
+  const completedRef = useRef(new Map());
   const pendingRunRef = useRef(null);
   const seenRef = useRef(new Set());
 
-  const finish = useCallback(() => {
-    const active = activeRef.current;
-    if (!active) return;
-    clearTimeout(active.timeoutId);
-    activeRef.current = null;
-    setThinking(false);
-  }, []);
-
-  const resetTimeout = useCallback((milliseconds = 150000) => {
-    const active = activeRef.current;
-    if (!active) return;
-    clearTimeout(active.timeoutId);
-    active.timeoutId = setTimeout(() => {
-      const onStatus = activeRef.current?.callbacks?.onStatus;
-      finish();
-      onStatus?.('操作超时，设备可能无响应');
-    }, milliseconds);
-  }, [finish]);
+  // Releasing input does not unsubscribe the trace: the original reply can
+  // follow its terminal lifecycle event, including after a new request starts.
+  const finish = useCallback((request = activeRef.current) => {
+    if (!request) return;
+    clearTimeout(request.timeoutId);
+    if (request.traceId) {
+      completedRef.current.set(request.traceId,request);
+      while (completedRef.current.size > 20) completedRef.current.delete(completedRef.current.keys().next().value);
+    }
+    if (activeRef.current === request) {activeRef.current=null;setThinking(false);}
+  },[]);
+  const resetTimeout = useCallback((request,milliseconds=150000) => {
+    if (!request || activeRef.current !== request) return;
+    clearTimeout(request.timeoutId);
+    request.timeoutId=setTimeout(() => {
+      finish(request);
+      request.callbacks.onStatus?.('操作超时，设备可能无响应');
+    },milliseconds);
+  },[finish]);
 
   useEffect(() => {
     const onEvent = event => {
-      const active = activeRef.current;
-      if (!active) return;
-      const outer = event.detail || {};
-      const payload = outer.payload || outer.data || outer;
+      const outer=event.detail || {}, payload=outer.payload || outer.data || outer;
       if (payload.scope === 'space') return;
-      if (!active.traceId) {
+      const active=activeRef.current;
+      if (active && !active.traceId) {
         if (payload.trace_id && active.pendingEvents.length < 100) active.pendingEvents.push(payload);
         return;
       }
-      if (active.traceId && payload.trace_id && payload.trace_id !== active.traceId) return;
-      if (payload.event_id && seenRef.current.has(payload.event_id)) return;
-      if (payload.event_id) seenRef.current.add(payload.event_id);
+      if (!payload.trace_id) return;
+      const request=active?.traceId === payload.trace_id ? active : completedRef.current.get(payload.trace_id);
+      if (!request) return;
+      const source=payload.source_event_id || payload.event_id;
+      const identity=source ? `${payload.trace_id}:${source}` : '';
+      if (identity && seenRef.current.has(identity)) return;
+      if (identity) {
+        seenRef.current.add(identity);
+        while(seenRef.current.size>500) seenRef.current.delete(seenRef.current.values().next().value);
+      }
+      const current=latestRef.current === request;
+      const awaiting=payload.status === 'needs_clarification' || payload.stage === 'question';
+      if (current && awaiting) pendingRunRef.current=payload.run_id || null;
       if (payload.type === 'agent_reply') {
-        if (payload.agent_id === 'cloud_orchestrator'
-            && payload.status === 'needs_clarification') {
-          pendingRunRef.current = payload.run_id || null;
-        }
-        if (payload.text) active.callbacks.onMessage?.(payload.text, payload.agent_id, payload);
-        if (payload.agent_id === 'cloud_orchestrator') finish();
+        if (payload.text) request.callbacks.onMessage?.(payload.text,payload.agent_id,payload);
+        if (['cloud_orchestrator','orchestrator'].includes(payload.agent_id)) finish(request);
         return;
       }
-      if (['run_stage', 'agent_progress'].includes(payload.type)) {
-        if (payload.stage === 'finished' && payload.status === 'needs_clarification') {
-          pendingRunRef.current = payload.run_id || null;
-        }
-        resetTimeout();
-        active.callbacks.onProgress?.(payload);
+      if (['run_stage','agent_progress'].includes(payload.type)) {
+        request.callbacks.onProgress?.(payload);
+        const terminal=['finished','done','partial','failed','denied','question'].includes(payload.stage);
+        if (terminal && ['cloud_orchestrator','orchestrator'].includes(payload.agent_id)) {
+          if (current && !awaiting) pendingRunRef.current=null;
+          finish(request);
+        } else resetTimeout(request);
         return;
       }
       if (payload.type === 'reply_error') {
-        active.callbacks.onStatus?.('回复生成失败，任务状态仍可查询');
-        if (payload.agent_id === 'cloud_orchestrator') finish();
+        request.callbacks.onStatus?.(payload.text || '回复生成失败');
+        if (['cloud_orchestrator','orchestrator'].includes(payload.agent_id)) finish(request);
         return;
       }
-      const stage = payload.stage;
-      if (!stage) return;
-      const callbacks = active.callbacks;
-      if (['planning', 'executing', 'ack'].includes(stage)) {
-        resetTimeout();
-      } else if (stage === 'question') {
-        pendingRunRef.current = payload.run_id || null;
-        if (!payload.question) callbacks.onStatus?.('请补充信息');
-      } else if (stage === 'discovery_candidates') {
-        finish();
-        // Discovery messages inform the user; device onboarding uses its
-        // dedicated flow instead of treating a chat event as consent.
-        callbacks.onStatus?.(payload.text || '当前空间成员已经显示在设备列表中。');
-      } else if (['done', 'partial', 'failed', 'denied'].includes(stage)) {
-        pendingRunRef.current = null;
-        if (!payload.text) callbacks.onStatus?.(stage === 'done' ? '已处理' : '请求未完成，请查看任务状态');
-      }
     };
-    apiClient.addEventListener('server-event', onEvent);
-    return () => apiClient.removeEventListener('server-event', onEvent);
-  }, [finish, resetTimeout]);
+    apiClient.addEventListener('server-event',onEvent);
+    return () => apiClient.removeEventListener('server-event',onEvent);
+  },[finish,resetTimeout]);
 
-  const send = useCallback(async (text, callbacks = {}) => {
+  const send=useCallback(async (text,callbacks={}) => {
     if (!text.trim() || activeRef.current) return;
-    setThinking(true);
-    activeRef.current = { callbacks, timeoutId: null, traceId: null,
-      pendingEvents: [] };
-    resetTimeout(150000);
-    const body = { text: text.trim() };
-    if (pendingRunRef.current) body.resume_run_id = pendingRunRef.current;
-    if (callbacks.selection) body.selection = callbacks.selection;
-    if (callbacks.deviceHint) body.device_hint = callbacks.deviceHint;
-    if (callbacks.intentHint) body.intent_hint = callbacks.intentHint;
+    const request={callbacks,timeoutId:null,traceId:null,pendingEvents:[]};
+    activeRef.current=request;latestRef.current=request;setThinking(true);
+    resetTimeout(request);
+    const body={text:text.trim()};
+    if (pendingRunRef.current) body.resume_run_id=pendingRunRef.current;
+    if (callbacks.selection) body.selection=callbacks.selection;
+    if (callbacks.deviceHint) body.device_hint=callbacks.deviceHint;
+    if (callbacks.intentHint) body.intent_hint=callbacks.intentHint;
     try {
-      const accepted = await apiClient.request('/api/intents', { method: 'POST', body });
-      if (activeRef.current) {
-        if (accepted.trace_id) {
-          activeRef.current.traceId = accepted.trace_id;
-          callbacks.onTraceId?.(accepted.trace_id, accepted.event_id);
-          const buffered = activeRef.current.pendingEvents.splice(0);
-          buffered.forEach(payload => apiClient.dispatchEvent(Object.assign(
-            new Event('server-event'), { detail: payload })));
-        }
-        if (accepted.stage && ['done', 'partial', 'failed'].includes(accepted.stage)) {
-          finish();
-          if (!accepted.text) callbacks.onStatus?.(accepted.stage === 'done' ? '已处理' : '请求未完成，请查看任务状态');
-        }
+      const accepted=await apiClient.request('/api/intents',{method:'POST',body});
+      if (activeRef.current !== request) return;
+      request.traceId=accepted.trace_id || null;
+      if (request.traceId) {
+        callbacks.onTraceId?.(request.traceId,accepted.event_id);
+        const buffered=request.pendingEvents.splice(0);
+        buffered.forEach(payload=>apiClient.dispatchEvent(Object.assign(new Event('server-event'),{detail:payload})));
       }
-    } catch (error) {
-      finish();
-      callbacks.onStatus?.(apiErrorText(error, '命令没有送达，请稍后再试'));
+    } catch(error) {
+      finish(request);
+      callbacks.onStatus?.(apiErrorText(error,'命令没有送达，请稍后再试'));
     }
-  }, [finish, resetTimeout]);
-
-  return { thinking, send };
+  },[finish,resetTimeout]);
+  return {thinking,send};
 }
-
-window.useSendIntent = useSendIntent;
+window.useSendIntent=useSendIntent;

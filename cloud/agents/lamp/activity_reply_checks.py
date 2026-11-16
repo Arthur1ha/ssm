@@ -35,7 +35,8 @@ def activity_reply(monkeypatch, tmp_path):
         _find_led_unit=lambda: 'esp32_desk_led')
     state.agent = agent
 
-    def run(response, *, after_model=lambda: None, opportunity_kind='activity_request'):
+    def run(response, *, after_model=lambda: None, opportunity_kind='activity_request',
+            run_id=None, checkpointer=None):
         class Model:
             def bind_tools(self, *_args, **_kwargs):
                 return self
@@ -50,7 +51,7 @@ def activity_reply(monkeypatch, tmp_path):
             'game_readiness': {'go2': {'ready': False, 'reason': 'lamp_result_unconfirmed'}},
             'social_opportunity': {'kind': opportunity_kind, 'activity_id': activity_id,
                                    'event_ids': ['activity_request:' + activity_id]}},
-            model=Model(), checkpointer=InMemorySaver(),
+            model=Model(), checkpointer=checkpointer or InMemorySaver(), run_id=run_id,
             publish=lambda kind, **facts: state.published.append((kind, facts)))
 
     state.run = run
@@ -67,6 +68,30 @@ def test_busy_lamp_activity_final_text_reaches_existing_space_reply(activity_rep
         'agent_id': 'esp32_desk_led', 'scope': 'space', 'space_id': 'main',
         'source': 'autonomous', 'status': 'ok', 'run_id': result['run_id'], 'text': answer,
         'emotion': 'neutral'})]
+
+
+def test_same_autonomous_event_replays_saved_reply_without_model_or_publication(activity_reply):
+    h = activity_reply
+    saver = InMemorySaver()
+    first = h.run(AIMessage(content='先等等。'), run_id='same-activity-event', checkpointer=saver)
+    second = h.run(AIMessage(content='不得生成第二句。'), run_id='same-activity-event', checkpointer=saver)
+    assert first['reply'] == second['reply'] == '先等等。'
+    assert second['replayed'] is True
+    assert h.calls == len(h.published) == 1
+
+
+def test_failed_autonomous_generation_does_not_run_again_on_event_replay(activity_reply):
+    h = activity_reply
+    saver = InMemorySaver()
+    def fail():
+        raise RuntimeError('model unavailable')
+    first = h.run(AIMessage(content=''), after_model=fail,
+                  run_id='failed-activity-event', checkpointer=saver)
+    second = h.run(AIMessage(content='不得重试生成。'),
+                   run_id='failed-activity-event', checkpointer=saver)
+    assert first['status'] == second['status'] == 'error'
+    assert second['replayed'] is True
+    assert h.calls == 1 and h.published == []
 
 
 @pytest.mark.parametrize('emotion,expected', [('curious', 'curious'), (None, 'neutral'),
@@ -162,7 +187,8 @@ def test_activity_emotion_uses_confirmed_behavior_and_preserves_receipt(
     assert result['steps'][0]['tool'] == 'apply_training'
     assert result['steps'][0]['params'] == arguments
     assert result['steps'][0]['result']['result'] == status
-    reply = next(fields for kind, fields in h.published if kind == 'agent_reply')
+    reply = next(fields for kind, fields in h.published
+                 if kind == ('agent_reply' if status == 'ok' else 'reply_error'))
     assert reply['status'] == status and reply['emotion'] == 'happy'
     if status == 'ok':
         assert reply['text'] == '听你这么说真开心。'

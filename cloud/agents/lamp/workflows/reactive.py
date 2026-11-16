@@ -10,6 +10,8 @@ import json
 import asyncio
 import time
 import uuid
+from copy import deepcopy
+from contextlib import nullcontext
 from typing import TypedDict
 
 from langchain_core.messages import AIMessage
@@ -28,17 +30,6 @@ PHYSICAL = {"set_led_state", "set_led_color", "blink_led"}
 VISIBLE = PHYSICAL | {"send_message", "request_peer_skill", "list_peers", "get_space_context"}
 
 
-def _action_text(name: str, args: dict, stage: str) -> str:
-    if name == "set_led_state":
-        action = "关掉桌面灯" if args.get("state") == "OFF" else "打开桌面灯"
-    elif name == "blink_led":
-        action = "让灯闪几下"
-    else:
-        action = "调整桌面光线"
-    return (f"准备{action}" if stage == "planned"
-            else f"正在核对并尝试{action}")
-
-
 class ReactiveState(TypedDict, total=False):
     sense: dict
     run_id: str
@@ -52,6 +43,8 @@ class ReactiveState(TypedDict, total=False):
     emotion: str
     emotion_step_id: str
     autonomy_epoch: int
+    decision_space: dict
+    replayed: bool
 
 
 class TrainingEventSelection(BaseModel):
@@ -70,6 +63,7 @@ def _prompt(agent, state: ReactiveState):
 
     profile = get_profile()
     space = get_space_context(agent._find_led_unit(), state=agent._state)
+    state["decision_space"] = deepcopy(space)
     games = []
     if state["sense"].get("social_opportunity"):
         from cloud.peers.games import playable_games
@@ -94,7 +88,7 @@ def _prompt(agent, state: ReactiveState):
         "同一轮完成一次灯光动作后不要再改灯。无需动作时直接回答。"
         "新活动用户原话的直接最终回答面向用户；真正向同伴交流或邀请须调用 send_message，"
         "不能仅在回答正文说已邀请、已发消息或对方已答应。"
-        "accepted、executing、timeout 不表示完成。"
+        "物理动作 accepted 与 ok 都按成功处理；executing、timeout、unknown 尚未确认。"
         "同伴消息投递不等于接受或物理完成；只给活动中的同伴发有用消息。"
         "社交机会只是重新判断的时机，不要求发消息或邀请游戏。"
         "根据当前活动、用户要求、同伴新鲜状态及近期观察，决定邀请、询问、普通交流或跳过。"
@@ -253,7 +247,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         call = calls[0]
         if call.get("name") not in VISIBLE or not isinstance(call.get("args"), dict):
             return {"status": "rejected", "call": None}
-        return {"turns": state.get("turns", 0) + 1,
+        return {"decision_space": state["decision_space"], "turns": state.get("turns", 0) + 1,
                 "call": {"name": call["name"], "args": call["args"],
                          "id": call.get("id") or "call_" + uuid.uuid4().hex}}
 
@@ -363,24 +357,45 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if name == "request_peer_skill":
             args["request_id"] = call["id"]
         event(state, "tool.dispatch", tool=name, params=args, tool_call_id=call["id"])
-        observation = {key: state["sense"][key] for key in
-                       ("light_level", "sound_detected", "time_period") if key in state["sense"]}
+        from cloud.agents.common.progress_facts import step_progress_facts
+        basis = None
+        reason, refs = args.get("decision_reason"), args.get("evidence_refs")
+        if reason is not None or refs is not None:
+            from cloud.agents.common.progress_facts import resolve_public_decision
+            try:
+                basis = resolve_public_decision(state.get("decision_space") or {}, reason, refs)
+            except (ValueError, TypeError):
+                # Optional display metadata cannot block an ordinary valid action.
+                if name in PHYSICAL:
+                    args.pop("decision_reason", None)
+                    args.pop("evidence_refs", None)
+                event(state, "decision.explanation_discarded", tool=name,
+                      reason="invalid_public_metadata")
+        step = {"step_id": call["id"], "tool_call_id": call["id"], "tool": name,
+                "params": {key: value for key, value in args.items()
+                           if key not in {"decision_reason", "evidence_refs"}},
+                "model_turn": state.get("turns", 0),
+                "sequence": state.get("turns", 0) * 10,
+                "ts": time.time(), "result": None}
+        if basis:
+            step["decision_basis"] = basis
         if name in PHYSICAL:
-            for stage in ("planned", "executing"):
+            for index, stage in enumerate(("planned", "executing")):
                 publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
                         space_id="main", source="autonomous", status=stage,
-                        run_id=state["run_id"], step_id=call["id"],
-                        stage=stage, tool=name, text=_action_text(name, args, stage),
-                        decision_observation=observation)
+                        run_id=state["run_id"], stage=stage,
+                        event_id=f"{state['run_id']}:{call['id']}:{stage}",
+                        **{**step_progress_facts(step), "sequence": step["sequence"] + index})
         started = time.monotonic()
         if name in PHYSICAL:
             from cloud.esp32.physical_tasks import stable_task_id
             task_id = stable_task_id(agent._find_led_unit(), state["run_id"], call["id"])
-            ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id)
+            ok = agent._dispatch_tool(name, args, agent._find_led_unit(), task_id=task_id,
+                                      decision_space=state.get("decision_space"))
         else:
             ok = agent._dispatch_tool(name, args, agent._find_led_unit())
         result = getattr(agent, "_last_reactive_tool_result", {"result": "unknown"})
-        step = {"step_id": call["id"], "tool": name, "params": args, "result": result}
+        step["result"] = result
         event(state, "tool.result", tool=name, step_id=call["id"], result=result,
               status=result.get("result", "unknown"),
               duration_ms=round((time.monotonic() - started) * 1000))
@@ -388,9 +403,9 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             publish("agent_progress", agent_id=agent._find_led_unit(), scope="space",
                     space_id="main", source="autonomous",
                     status=result.get("result", "unknown"), run_id=state["run_id"],
-                    step_id=call["id"], stage="observed", tool=name,
-                    decision_observation=observation,
-                    reason=result.get("error") or result.get("reason"))
+                    stage="observed",
+                    event_id=f"{state['run_id']}:{call['id']}:observed",
+                    **{**step_progress_facts(step), "sequence": step["sequence"] + 2})
         status = ("executing" if ok and result.get("result") == "ok"
                   else result.get("result", "error"))
         return {"steps": [*state.get("steps", []), step], "call": None,
@@ -410,7 +425,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                                agent_id=agent._find_led_unit(), status=state['status'],
                                steps=state.get('steps', []))
                 answer = factual_fallback(run.agent_id, run.status, run)
-            publish('agent_reply', agent_id=agent._find_led_unit(), scope='space',
+            publish('agent_reply' if state.get('status') == 'ok' else 'reply_error',
+                    agent_id=agent._find_led_unit(), scope='space',
                     space_id='main', source='autonomous', status=state['status'],
                     run_id=state['run_id'], text=answer, emotion=state.get('emotion', 'neutral'))
             return {'reply': answer}
@@ -460,6 +476,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             agent_id=agent._find_led_unit(), origin_kind="agent_autonomous")
         prompt = persona_reply_prompt(run, get_profile()) + "\n" + REPLY_INSTRUCTIONS
         emotion = "neutral"
+        reply_source = "persona_model"
         try:
             answer, emotion = parse_emotional_reply(model.invoke(reply_messages(prompt, run)).content)
             if not valid_reply_format(answer, run):
@@ -467,13 +484,15 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         except Exception:
             answer = factual_fallback(agent._find_led_unit(), validation_status, run)
             emotion = "neutral"
+            reply_source = "runtime"
         if (state["autonomy_epoch"] == agent._autonomy_epoch
                 and agent._should_act() and agent._device_online()
                 and agent._reply_gate.mark_replied(scope, completed=completed,
                                                    material_key=material_key, error=error)):
-            publish("agent_reply", agent_id=agent._find_led_unit(), scope="space",
+            publish("agent_reply" if reply_source != "runtime" else "reply_error",
+                    agent_id=agent._find_led_unit(), scope="space",
                     space_id="main", source="autonomous", status=status,
-                    run_id=state["run_id"], text=answer, emotion=emotion)
+                    run_id=state["run_id"], text=answer, emotion=emotion, reply_source=reply_source)
         return {"reply": answer, "emotion": emotion}
 
     def remember(state):
@@ -536,12 +555,23 @@ def run_reactive_event(agent, sense: dict, *, model=None, publish=None,
         checkpointer = FileCheckpointSaver()
     graph = build_reactive_graph(agent, model=model, publish=publish,
                                  checkpointer=checkpointer)
-    return graph.invoke({"sense": sense, "run_id": run_id,
-                         "trace_id": "tr_" + uuid.uuid4().hex,
-                         "autonomy_epoch": (agent._autonomy_epoch if autonomy_epoch is None
-                                            else autonomy_epoch),
-                         "steps": [], "turns": 0},
-                        {"configurable": {"thread_id": f"lamp-reactive:{run_id}"}})
+    thread_id = f"lamp-reactive:{run_id}"
+    config = {"configurable": {"thread_id": thread_id}}
+    lock = checkpointer.run_lock(thread_id) if hasattr(checkpointer, 'run_lock') else nullcontext()
+    with lock:
+        saved = checkpointer.get_tuple(config)
+        values = saved.checkpoint.get('channel_values', {}) if saved else {}
+        if values.get('run_id') == run_id:
+            # A replay reads its original facts. Restarting an old autonomous
+            # decision could repeat inference or dispatch a physical action
+            # whose receipt was lost, even when its reply never reached UI.
+            return {**{key: value for key, value in values.items()
+                       if key in ReactiveState.__annotations__}, 'replayed': True}
+        return graph.invoke({"sense": sense, "run_id": run_id,
+                             "trace_id": "tr_" + uuid.uuid4().hex,
+                             "autonomy_epoch": (agent._autonomy_epoch if autonomy_epoch is None
+                                                else autonomy_epoch),
+                             "steps": [], "turns": 0}, config)
 
 
 def prepare_sensor_event(agent, event: dict, *, now: float | None = None) -> tuple[dict, tuple] | None:

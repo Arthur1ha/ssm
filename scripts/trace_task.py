@@ -89,23 +89,37 @@ def _brief(event: dict) -> str:
     return "  ".join(parts)
 
 
+def _user_session(identifier: object) -> bool:
+    """Recognize server-issued scopes, excluding named offline fixtures."""
+    return isinstance(identifier, str) and re.fullmatch(
+        r"(?:chat_[a-f0-9]{40}|ses_[A-Za-z0-9_-]{24})", identifier
+    ) is not None
+
+
+def _latest_log_session(paths: list[Path]) -> str | None:
+    candidates = [path for path in paths if _user_session(path.stem[8:])]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime_ns).stem[8:]
+
+
 def _select(events: list[dict], args: argparse.Namespace) -> list[dict]:
     identifier = args.identifier
     if args.latest and not identifier:
-        # Authenticated browser conversations use ses_ IDs; offline checks use
-        # named fixture sessions and must not become the apparent latest chat.
+        # Prefer a newly received user request over background updates to an
+        # older conversation. Browser page scopes use chat_, login scopes ses_.
         for event in reversed(events):
             if (event.get("event") == "task.received"
-                    and str(event.get("session_id", "")).startswith("ses_")):
+                    and _user_session(event.get("session_id"))):
                 identifier = event["session_id"]
                 break
     if args.latest and not identifier:
         for event in reversed(events):
-            if event.get("session_id") and event["session_id"] != "system":
+            if _user_session(event.get("session_id")):
                 identifier = event["session_id"]
                 break
-        if not identifier and events:
-            identifier = "system"
+        if not identifier:
+            return []
     if args.errors:
         events = [event for event in events if _error(event)]
     if identifier:
@@ -138,13 +152,7 @@ def _follow(log_dir: Path, args: argparse.Namespace) -> None:
         paths = _files(log_dir)
         latest = None
         if args.latest and not args.identifier:
-            candidates = [path for path in paths if path.name.startswith("session-ses_")]
-            if not candidates:
-                candidates = [path for path in paths if path.name != "session-system.jsonl"]
-            if candidates:
-                latest = max(candidates, key=lambda path: path.stat().st_mtime_ns).stem[8:]
-            elif paths:
-                latest = "system"
+            latest = _latest_log_session(paths)
         for path in paths:
             try:
                 with path.open("rb") as source:
@@ -177,7 +185,9 @@ def _follow(log_dir: Path, args: argparse.Namespace) -> None:
                             or event.get("trace_id") == args.identifier
                         ):
                             continue
-                        if latest and (event.get("session_id") or "system") != latest:
+                        if args.latest and not args.identifier and (
+                            latest is None or (event.get("session_id") or "system") != latest
+                        ):
                             continue
                         if args.agent_id and event.get("agent_id") != args.agent_id:
                             continue

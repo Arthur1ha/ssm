@@ -48,10 +48,39 @@ async def run_training_behavior(prepared, context, *, run_id, agent, dispatch=No
         return {**(agent._state.actuator_snapshot().get(unit_id, {}).get('state') or {}),
                 'connected': card.get('online') is True}
 
+    def training_progress(resolved, trusted, result=None):
+        from cloud.api.intents import publish_agent_event
+        from cloud.agents.common.progress_facts import public_arguments, public_tool_result
+        from cloud.observability import current_event_context
+        correlation = current_event_context()
+        index = trusted.training_step_index
+        tool = (PHYSICAL_ACTIONS.get(resolved['action']) or {}).get('tool', resolved['action'])
+        phase = 'observed' if result is not None else 'executing'
+        autonomous = context.origin_kind == 'agent_autonomous'
+        publish_agent_event('agent_progress', agent_id=unit_id,
+            session_id='' if autonomous else context.session_id,
+            scope='space' if autonomous else 'session', space_id=context.space_id,
+            source='autonomous' if autonomous else 'training',
+            run_id=run_id, parent_run_id=correlation.get("run_id") or context.training_run_id or '',
+            trace_id=correlation.get("trace_id") or run_id,
+            step_id=f'{run_id}:training:{index}',
+            event_id=f'{run_id}:training:{index}:{phase}',
+            teaching_id=prepared['training_ref'], version=prepared['training_revision'],
+            name=prepared['record'].get('name', ''), step_number=index + 1,
+            stage=phase, fact_kind='result' if result is not None else 'call',
+            result_kind='training', tool=tool,
+            arguments=public_arguments(resolved['params'], tool=tool),
+            public_result=public_tool_result(result or {}, result_kind='training'),
+            status=(result or {}).get('result', 'executing'), sequence=index * 2 + (result is not None))
+
     def before_step(resolved, trusted):
         if not available():
             return {'result': 'cancelled', 'error': 'lamp_control_changed'}
+        training_progress(resolved, trusted)
         return None
+
+    def after_step(resolved, trusted, result):
+        training_progress(resolved, trusted, result)
 
     def send(uid, action, params, trusted, source, *, task_id):
         if dispatch is not None:
@@ -78,7 +107,7 @@ async def run_training_behavior(prepared, context, *, run_id, agent, dispatch=No
     try:
         return await run_training_workflow(prepared, context, run_id=run_id,
                                            snapshot=snapshot, execute=execute,
-                                           before_step=before_step, observe=observe)
+                                           before_step=before_step, after_step=after_step, observe=observe)
     finally:
         if getattr(agent, '_training_behavior_run_id', None) == run_id:
             agent._training_behavior_run_id = None
@@ -144,7 +173,7 @@ class ReactiveMind:
         return (snap.get(led_unit, {}).get("state") or {}).get("ism", "").upper()
 
     def _dispatch_tool(self, tool_name: str, params: dict, led_unit: str,
-                       *, task_id: str | None = None) -> bool:
+                       *, task_id: str | None = None, decision_space: dict | None = None) -> bool:
         """Keep ordinary reactive work outside a game's lamp reservation."""
         reserves_output = tool_name in {'set_led_state', 'set_led_color', 'blink_led',
                                         'request_peer_skill'}
@@ -155,14 +184,15 @@ class ReactiveMind:
             if reserves_output:
                 self._reactive_dispatches = getattr(self, '_reactive_dispatches', 0) + 1
         try:
-            return self._dispatch_reactive_tool(tool_name, params, led_unit, task_id=task_id)
+            return self._dispatch_reactive_tool(tool_name, params, led_unit, task_id=task_id,
+                                                decision_space=decision_space)
         finally:
             if reserves_output:
                 with getattr(self, '_conversation_lock', nullcontext()):
                     self._reactive_dispatches -= 1
 
     def _dispatch_reactive_tool(self, tool_name: str, params: dict, led_unit: str,
-                                *, task_id: str | None = None) -> bool:
+                                *, task_id: str | None = None, decision_space: dict | None = None) -> bool:
         """单一执行口：冷却判定 → 执行 → 记录。返回是否真正执行。
 
         set_led_state / set_led_color / blink_led 共享 self._cooldown（同参 5 分钟内只发一次）；
@@ -201,13 +231,13 @@ class ReactiveMind:
             refs = params.pop("evidence_refs", None)
             if reason is not None or refs is not None:
                 from cloud.space.context import get_space_context
-                from cloud.space.decisions import resolve_decision
+                from cloud.agents.common.progress_facts import resolve_public_decision
                 try:
-                    decision_basis = resolve_decision(
-                        get_space_context(led_unit, state=self._state), reason, refs)
-                except ValueError as exc:
-                    self._last_reactive_tool_result = {"result": "rejected", "error": str(exc)}
-                    return False
+                    decision_basis = resolve_public_decision(
+                        get_space_context(led_unit, state=self._state), reason, refs,
+                        observed_space=decision_space)
+                except (ValueError, TypeError) as exc:
+                    logger.debug("optional reactive explanation discarded: %s", str(exc))
             from cloud.cards.registry import get_registry
             card = get_registry().get_card(led_unit)
             valid = valid_lamp_params(action, params, card=card)

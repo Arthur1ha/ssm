@@ -196,7 +196,6 @@ def test_lamp_graph_enters_saved_behavior_without_rewrite(
     monkeypatch.setattr(graph.cards, 'get_registry', lambda: SimpleNamespace(get_card=lambda _uid: lamp_card()))
     monkeypatch.setattr(graph, 'decision_messages', lambda run, **_: [HumanMessage(content=run.goal)])
     monkeypatch.setattr(graph, 'get_profile', lambda: {'prompt': '灯', 'name': '灯', 'traits': {}})
-    monkeypatch.setattr(graph, 'submit_progress', lambda *_a, **_k: None)
     monkeypatch.setattr('cloud.api.intents.publish_agent_event', lambda *_a, **_k: {})
     sent = []
 
@@ -244,7 +243,6 @@ async def test_go2_graph_enters_saved_behavior_without_rewrite(context, prepare,
     monkeypatch.setattr(graph.go2, 'is_connected', True)
     monkeypatch.setattr('cloud.agents.go2.personality.profile.get_profile', lambda: {
         'prompt': '狗', 'revision': 1, 'traits': {'extraversion': 50}})
-    monkeypatch.setattr('cloud.agents.common.progress.submit_progress', lambda *_a, **_k: None)
     monkeypatch.setattr('cloud.api.intents.publish_agent_event', lambda *_a, **_k: {})
     model = ApplyModel('go2')
     monkeypatch.setattr(graph, 'get_text_llm', lambda: model)

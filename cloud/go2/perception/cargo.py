@@ -100,9 +100,10 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     live = visual_target._live_pose(frame['odom_session_id'])
     visual_target._ensure_stable(pose, live)
     camera = go2_camera_profile(frame['width'], frame['height'])
-    diagnostics = {}
+    diagnostics, target_points = {}, []
     cluster = await invoke_blocking(associate_lidar_target, voxel, pose, camera, frame,
-        detected['cargo_bbox_1000'], grid.measured_floor_z, diagnostics=diagnostics)
+        detected['cargo_bbox_1000'], grid.measured_floor_z, diagnostics=diagnostics,
+        target_points=target_points)
     if cluster is None:
         raise TargetUnlocalized('cargo_returns_unavailable')
     live = visual_target._live_pose(frame['odom_session_id'])
@@ -114,6 +115,8 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     if len(accepted) != 1:
         raise TargetUnlocalized('cargo_association_unconfirmed')
     return {**geometry, 'cargo_location': location, 'pose': live,
+            'contact_observation': {'points_odom': target_points, 'pose': pose,
+                                    'frame': {'width': frame['width'], 'height': frame['height']}},
             'frame_id': frame['frame_id'], 'received_at': frame['received_at'],
             'odom_session_id': frame['odom_session_id'], 'quality': quality,
             'cluster_extent_xyz_m': accepted[0]['extent_xyz_m'],

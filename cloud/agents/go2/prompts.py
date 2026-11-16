@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from cloud.agents.go2.personality.behavior import reply_persona
 from cloud.agents.go2.personality.profile import get_profile
 from cloud.personality.names import agent_names
@@ -43,6 +45,7 @@ def build_messages(run, *, supplement: str = "", memory: str = "", space_id: str
                "space": prompt_space_context(),
                "training": decision_context("go2", space_id=space_id,
                    origin_kind=run.origin_kind or "user_delegated")}
+    run.decision_space = deepcopy(context["space"])
     if memory:
         context["memory"] = memory
     instructions = (_FIXED_RULES + "\n" + DECISION_GUIDANCE + "\n" + persona_reply_prompt(run, profile)

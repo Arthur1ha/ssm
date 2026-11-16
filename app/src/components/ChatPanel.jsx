@@ -3,11 +3,11 @@
 function ChatPanel({ messages = [], agents, defaultAgent, training, onReviseRule,
   onSend, busy, disabled, placeholder, focusKey, suggestions = [],
   beforeMessages, messageContent, children }) {
-  return <div className="chat-panel">
+  return <div className="chat-panel" aria-busy={Boolean(busy)}>
     <div className="chat-panel__scroll">
       {beforeMessages}
       {messageContent || <ChatMessages entries={messages} agents={agents} defaultAgent={defaultAgent}
-        training={training} onReviseRule={onReviseRule}/>}
+        training={training} onReviseRule={onReviseRule} busy={busy && !disabled}/>}
       <div style={{ height: 16 }}/>
     </div>
     <div className="chat-panel__footer">

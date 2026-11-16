@@ -18,11 +18,13 @@ function useActivityTimeline() {
       const byId = new Map();
       [...previous, ...incoming].forEach(item => {
         if (item && item.event_id && item.activity_id === activityIdRef.current) {
-          byId.set(item.event_id, item);
+          const identity = item.source_event_id || item.event_id;
+          byId.set(identity,mergeProcessFact(byId.get(identity) || {},item));
         }
       });
       return [...byId.values()].sort((a, b) =>
-        (Number(a.ts) || 0) - (Number(b.ts) || 0) ||
+        (a.run_id && a.run_id === b.run_id && a.sequence != null && b.sequence != null
+          ? Number(a.sequence) - Number(b.sequence) : (Number(a.ts) || 0) - (Number(b.ts) || 0)) ||
         String(a.event_id).localeCompare(String(b.event_id))).slice(-160);
     });
   }, []);
@@ -50,14 +52,16 @@ function useActivityTimeline() {
         seenActiveIdsRef.current.has(activityIdRef.current);
       const id = current?.activity_id ||
         (latestSeen ? data.latest_activity_id : priorSeen ? activityIdRef.current : null);
-      setActivity(current);
+      setActivity(previous => previous?.activity_id === current?.activity_id
+        && Number(previous?.revision) > Number(current?.revision) ? previous : current);
       setError('');
       if (activityIdRef.current !== id) {
         activityIdRef.current = id;
         setEvents([]);
         setDisplayActivity(current);
       } else if (current) {
-        setDisplayActivity(current);
+        setDisplayActivity(previous => previous?.activity_id === current.activity_id
+          && (Number(previous.revision) > Number(current.revision) || previous.status === 'ended') ? previous : current);
       } else {
         setDisplayActivity(previous => previous?.activity_id === id
           ? (previous.status === 'ended' ? previous : { ...previous, status: 'ended' }) : null);

@@ -388,7 +388,8 @@ class DeviceSearch:
                 self.after_frame = frame["frame_id"]
                 self.after_time = frame["received_at"]
                 return {"found": bool(sample.get("found")), "frame_id": frame["frame_id"],
-                        "image_time": frame["received_at"], "pose": sample["pose"],
+                        "image_time": frame["received_at"], "as_of": frame.get("captured_at"),
+                        "pose": sample["pose"],
                         "pose_reason": sample.get('pose_reason'),
                         "target_hint": make_target_hint(sample) if sample['pose'] else None,
                         "quality": sample.get("quality", 0.0),

@@ -47,24 +47,6 @@ def peer_feedback_scope():
         _peer_request.reset(token)
 
 
-def do_publish_feedback(session_id: str, stage: str, text: str, status: str = "ok", **extra):
-    """向 PWA 发布编排进度反馈（ssm/feedback/{session_id}）。
-
-    extra 为附加字段（如 RuleBuilderNode 的 rule），会并入 payload 一同发出。
-    """
-    if _peer_request.get():
-        return
-    if _mqtt is None:
-        return
-    payload = {"session_id": session_id, "stage": stage,
-               "text": text, "status": status, "ts": int(_time.time())}
-    payload.update(extra)
-    _mqtt.publish(
-        f"ssm/feedback/{session_id}",
-        json.dumps(payload, ensure_ascii=False),
-    )
-
-
 def do_publish_ui_event(session_id: str, event_type: str, *, run_id: str,
                         trace_id: str, status: str, text: str = "", step_id: str = "",
                         stage: str = "", sequence: int = 0,

@@ -24,6 +24,9 @@ OCCUPIED = 2
 
 class OccupancyGrid:
     def __init__(self, voxel_msg: dict, robot_pose: dict | None = None) -> None:
+        # Retain the original measurement for scoped cargo-contact checks.
+        # The shared map and its obstacle masks remain unchanged.
+        self.voxel_message = voxel_msg
         d = voxel_msg.get("data", {})
         self.resolution = float(d.get("resolution", 0.05))
         self.origin = d.get("origin", [0.0, 0.0, 0.0])

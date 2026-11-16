@@ -372,7 +372,7 @@ async def test_preflight_failure_completes_announced_task(game_harness, monkeypa
     assert not h.calls and not h.decisions
     h.drive._advance_task.assert_not_awaited()
     assert h.agent._peer_game_id is None
-    assert any(entry["event_type"] == "action_result" and entry["status"] == "blocked"
+    assert any(entry["event_type"] == "action_result" and entry.get("status") == "blocked"
                and entry["task_id"] == "task_test_rps" and "无法开局" in entry["text"]
                for entry in h.timeline)
 
@@ -433,9 +433,14 @@ async def test_public_mapping_is_complete_before_agreement_even_with_vague_model
     assert stages.index("recognition") < stages.index("reveal") < stages.index("rps_result")
     proposals = [row for row in h.timeline if row.get("stage") == "mapping_proposal"]
     assert proposals[0]["unit_id"] == rps_siege.LAMP
-    assert "石头＝红色；剪刀＝绿色；布＝蓝色" in proposals[0]["text"]
+    assert proposals[0]["public_result"]["game_rules"]["mapping"] == [
+        {"choice": "rock", "label": "红色"}, {"choice": "scissors", "label": "绿色"},
+        {"choice": "paper", "label": "蓝色"}]
+    assert proposals[0]["text"] == "我选好这局的表达了。"
     assert proposals[1]["unit_id"] == "go2"
-    assert "石头＝挥手；剪刀＝伸展；布＝开心" in proposals[1]["text"]
+    assert proposals[1]["public_result"]["game_rules"]["mapping"] == [
+        {"choice": "rock", "label": "挥手"}, {"choice": "scissors", "label": "伸展"},
+        {"choice": "paper", "label": "开心"}]
     agreements = [facts for _, phase, facts in h.decisions if phase == "agree"]
     throws = [facts for _, phase, facts in h.decisions if phase == "throw"]
     assert all(facts["canonical_terms"] == agreements[0]["canonical_terms"] for facts in agreements + throws)
@@ -540,7 +545,8 @@ async def test_unconfirmed_search_keeps_dog_win_but_never_switches_off(game_harn
     assert not h.switch_off_started.is_set()
     assert h.messenger.send_result.call_args.kwargs["reason"].startswith("go2_won:game_approach_unconfirmed:")
     assert any(row.get("stage") == "rps_result" and row.get("reason") == "go2_won" for row in h.timeline)
-    assert "狗获胜" in h.timeline[-1]["text"] and "未确认完成" in h.timeline[-1]["text"]
+    assert h.timeline[-1]["public_result"]["reason"].startswith("go2_won:")
+    assert h.timeline[-1]["status"] != "ok"
 
 
 async def test_navigation_failure_does_not_change_winner(game_harness):
@@ -579,7 +585,8 @@ async def test_unconfirmed_symbolic_press_preserves_dog_win_without_switching_of
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
     assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:game_switch_off_gesture_unconfirmed:" + result
     assert h.drive._advance_task.await_args.kwargs["result"]["game_winner"] == "go2"
-    assert "狗获胜" in h.timeline[-1]["text"] and "未确认完成" in h.timeline[-1]["text"]
+    assert h.timeline[-1]["public_result"]["reason"].startswith("go2_won:")
+    assert h.timeline[-1]["status"] != "ok"
     h.navigator.stop_and_confirm.assert_awaited_once()
     h.agent.end_peer_game.assert_called_once_with("rps:msg_test_rps", preserve_output=False)
 
@@ -617,7 +624,8 @@ async def test_unconfirmed_performance_preserves_lamp_win(game_harness):
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert h.messenger.send_result.call_args.kwargs["reason"] == "lamp_won:game_performance_unconfirmed:accepted"
     assert h.drive._advance_task.await_args.kwargs["result"]["game_winner"] == "lamp"
-    assert "灯获胜" in h.timeline[-1]["text"] and "未确认完成" in h.timeline[-1]["text"]
+    assert h.timeline[-1]["public_result"]["reason"].startswith("lamp_won:")
+    assert h.timeline[-1]["status"] != "ok"
 
 
 async def test_user_interruption_after_arrival_prevents_switch_off(game_harness):

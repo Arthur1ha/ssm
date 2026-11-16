@@ -106,10 +106,23 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                     or current["brightness"] != expected_color["brightness"]):
                 raise DeliveryStopped("delivery_signal_changed_or_stale")
 
+    event_counts = {}
+
     def record(kind, text, *, role=DOG, **details):
+        identity = (kind, role, details.get("task_id", task_id), details.get("stage", ""), details.get("action", ""))
+        ordinal = event_counts.get(identity, 0)
+        event_counts[identity] = ordinal + 1
+        source_id = "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, repr((invitation_id, identity, ordinal))).hex
+        fact_kind = {"action": "call", "action_progress": "call", "action_result": "result",
+                     "observation": "observation"}.get(kind, "observation")
         return get_activity_store().record_event(activity_id, kind, unit_id=role,
             text=str(text)[:1000], **{"game_id": GAME_ID, "trigger_message_id": invitation_id,
-                                     "task_id": task_id, **details})
+                "task_id": task_id, "source_event_id": source_id,
+                "fact_kind": fact_kind, "result_kind": "action", **details})
+
+    record("action_result", "", stage="game_rules", fact_kind="result", result_kind="query",
+           public_result={"game_rules": {"rule_id": GAME_ID, "name": GAME.name,
+               "description": GAME.description, "rules": GAME.rules, "status": "proposed"}})
 
     def facts(state, role):
         return {"game": GAME.metadata(), "stage": state.get("stage", ""),
@@ -175,8 +188,11 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         return {"sequence": 0}
 
     async def cargo(state):
-        observed = await observe("描述当前可辨认的地面货物及配送区域。请区分可移动物体、地面区域和普通杂物；"
-                                 "没有看见就如实说明，不编造货物或站点。")
+        observed = await observe("为灯选择货物描述当前地面场景：分别描述有一定体积、可辨认厚度或高度的独立物品，"
+                                 "以及地面色块、贴纸、小站点标记和普通杂物。提供物品相对狗的远近、外形、"
+                                 "地面接触及周围通路等可见线索，帮助灯优先选择较近、容易接近和推动的货物；"
+                                 "用途推测与实际外观分开，不把彩色标记直接归为货物，"
+                                 "不凭画面断言重量或一定能推动，不编造距离、货物或站点。")
         answer = await decision("lamp", "cargo", {**state, "stage": "cargo", "observation": observed})
         record("message", answer["speech"], emotion=answer.get("emotion"), role=LAMP)
         if not answer["accepted"]:
@@ -186,10 +202,10 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     async def find(state):
         check()
         search_id = "delivery_" + invitation_id + "_cargo"
-        record("action", "按指挥官公布的特征寻找本单货物。", action="go2_find_object", task_id=search_id)
+        record("action", "", action="go2_find_object", arguments={"target": state["cargo"]}, task_id=search_id)
         with search_request(search_id, deadline):
             receipt = await execute_tool("go2_find_object", {"target": state["cargo"]}, context=context)
-        record("action_result", receipt.get("message") or receipt.get("reason") or receipt.get("result"),
+        record("action_result", receipt.get("message") or "", public_result=receipt,
                action="go2_find_object", status=receipt.get("result", "unknown"),
                task_id=receipt.get("task_id") or search_id)
         if (receipt.get("result") != "ok" or receipt.get("outcome") != "nearby"
@@ -302,7 +318,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                           signal_rgb=expected_color["rgb"]), search_request(push_id, deadline):
             receipt = await execute_tool("go2_push_cargo", {"cargo": state["cargo"],
                 "destination": order["destination"], "distance_m": answer["distance_m"]}, context=context)
-        record("action_result", receipt.get("message") or receipt.get("reason") or receipt.get("result"),
+        record("action_result", receipt.get("message") or "", public_result=receipt,
                action="go2_push_cargo", status=receipt.get("result", "unknown"),
                task_id=receipt.get("task_id") or push_id)
         check()
@@ -441,13 +457,17 @@ GAME = Game(
         "准备：不要求安装推板；允许机器狗在既有运动门禁和避障校验内以短距离行走尝试用腿推动地面货物。"
         "没有专用踢腿动作，不用挥手、伸展或跳跃冒充受控推送；具体货物是否能推动由真实实机反馈决定。"
         "场地布置可识别的货物和目的地；目的地可以是一片色块、小地面标记或物体标识，不要求完整区域边界。"
-        "货物需要狗根据特征寻找，不预先指定在狗面前。"
+        "货物需要狗根据特征寻找和核对，可以已经在狗附近，不要求固定摆放位置。"
         "邀请与角色：灯与狗须处于同一个有效空间活动内，任一方均可结合当前任务和观察自主邀请对方；"
         "邀请及接受开局前须确认双方当前没有正在执行或等待确认的任务，任意一方忙碌时延后；空闲不等于愿意接受。"
         "不固定发起方，不用随机定时器强制邀请。对方自主决定是否接受，邀请送达不等于接受。"
         "接受后双方确认本局角色和职责：灯负责指挥与颜色信号，狗负责找货与配送；"
         "邀请方不默认成为指挥官，角色扮演不授予设备控制权限。"
-        "公布货物：角色确认后，指挥官依据用户提供的信息或真实观察公布可辨认的货物特征；"
+        "公布货物：角色确认后，灯作为指挥官依据用户提供的信息或真实观察直接决定货物并公布可辨认特征，"
+        "不向狗征求选货意见；狗负责提供真实观察并按指令找货。用户未指定时，灯综合观察优先选离狗较近、"
+        "容易接近、看起来方便推动且有一定体积的独立物品，不设固定距离、尺寸门槛或物品种类。"
+        "区分货物与站点标记，地面色块、贴纸及用于标识目的地的小标记留作目的地，"
+        "不因颜色鲜明就选作货物；不凭外观保证货物能推动。"
         "不固定货物、特征或描述句式，不编造尚未观察到的货物事实。"
         "找货：狗依据公布的特征自主观察、搜索并核对货物身份；特征不清或存在歧义时自主询问、复查。"
         "仅看见相似物或口头声称找到不算确认，须保留真实观察依据。"
@@ -459,7 +479,9 @@ GAME = Game(
         "指令或目标不清时先澄清、观察，不盲推。"
         "配送：狗在目标明确且执行条件满足后，自主选择受控短距推送行动，每次0.1至0.25米，"
         "逐步靠近或尝试用腿推动，每步核验停稳、同一货物的真实位置及指定区域；"
-        "机器人自身移动不等于货物移动，单纯画面框变化不算推送成功，不绕过原有避障或抹除货物障碍。"
+        "机器人自身移动不等于货物移动，单纯画面框变化不算推送成功。"
+        "执行器仅在本步受控接触范围内允许接触刚确认的同一货物，持续核对雷达货物簇，"
+        "保留共享地图和其他障碍检查；不能用普通移动、清空地图或关闭避障替代。"
         "货物偏离、卡住、丢失或通路受阻时停止，根据真实情况决定询问、复查或报告受阻，"
         "不凭移动距离猜测货物位置。"
         "送达：只有同一目标货物到达本单指定目的地附近、狗停稳已由真实反馈确认，"
@@ -478,6 +500,7 @@ GAME = Game(
         "结合人格 traits、活动要求、货物与配送区域的新鲜观察决定是否游玩；"
         "可玩列表本身不构成邀请理由。任何一方都可主动邀请，角色与邀请方向独立。"
         "先明确货物再搜索，确认找到后等待配送指令，颜色用于匹配目的地而不是提前跳过找货。"
+        "灯自主决定货物，优先考虑较近、容易接近和推动且有一定体积的物品；站点标记留作目的地。"
         "双方用自己的口吻交流，依据真实观察选择问题、回应、搜索、等待和配送行动；"
         "不预设货物特征、站点颜色顺序、固定延时、固定问答或成功剧情。"
         "模型决定目标、交流与下一步策略，具体推送、停止和送达判定由已有可信执行链及实机适配核验。"

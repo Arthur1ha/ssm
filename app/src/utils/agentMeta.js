@@ -62,22 +62,24 @@ function getAgentDisplayName(agent) {
   return typeof agent === 'object' && agent?.name || '智能体';
 }
 
+// Fixed openings based on the three personas, revised after user feedback.
+// Page visits reuse these lines; names follow the current profile.
 function getAgentOpeningLine(agent) {
   const id = typeof agent === 'string' ? agent : (agent?.agent_id || agent?.unit_id || '');
   const name = getAgentDisplayName(agent);
   if (id === 'orchestrator' || id === 'cloud_orchestrator') {
-    return `我是${name}。你说要办什么，我来安排。`;
+    return `我是${name}。想做点什么，或只是想聊聊，都可以慢慢说。`;
   }
   if (id === 'esp32_desk_led') {
-    return `我是${name}。想怎么调光？我帮你弄得像样点。`;
+    return `我是${name}。灯光这事我有点讲究，有什么想法，尽管说。`;
   }
   if (id === 'go2' || id.startsWith('go2_')) {
-    return `汪，我是${name}！已经准备好和你玩耍啦。`;
+    return `我是${name}！你想聊什么？我已经有点好奇啦。`;
   }
-  return `我是${name}。想做什么，告诉我吧。`;
+  return '';
 }
 
-// Legacy/public tool labels are shared by text progress and structured disclosures.
+// Capability labels complement the discovered Card names.
 function agentCapabilityLabel(id) {
   return ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
     set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
@@ -89,102 +91,6 @@ function agentCapabilityLabel(id) {
     go2_chat: '回应当前问题',
     start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
     clear_space_constraints: '撤销空间里的共同要求' })[id] || id || '处理请求';
-}
-
-function describeRunProgress(event, compact = false) {
-  if (event.source === 'object_search' && typeof event.text === 'string' && event.text.trim()) {
-    return event.text.trim();
-  }
-  const searchStage = {
-    search_observing: '正在观察当前位置，识别画面内容',
-    search_rechecking: '正在用新画面复核目标',
-    search_selecting: '正在根据观察与可通行区域选择下一观察点',
-    search_selected: '已选定下一观察点，准备移动',
-    search_telemetry: '画面已观察，正在等待定位或地图反馈',
-    search_move_result: '本段移动结果已更新',
-    search_observe: '正在搜索，观察当前位置', search_candidate: '发现疑似目标，正在复核',
-    search_confirmed: '已确认目标', search_navigate: '正在前往下一观察点',
-    search_approach: '正在靠近目标', search_finished: event.status === 'ok'
-      ? event.mode === 'explore' ? '本轮探索已完成' : '已到目标附近并复核' : '搜索已结束，任务未完成',
-  }[event.stage];
-  if (searchStage) {
-    const reason = {
-      budget_exhausted: '搜索预算已用完', time_budget_exhausted: '搜索时间已用完',
-      distance_budget_exhausted: '搜索路程预算已用完', step_budget_exhausted: '观察次数已达上限',
-      coverage_complete: '可观察区域已检查，遮挡区域仍未确认', no_reachable_observation: '没有可达的观察点',
-      calibration_unavailable: '已发现目标，尚缺相机实测标定，无法确认接近位置',
-      stop_unconfirmed: '停止指令尚未得到设备确认',
-      no_reachable_observation_point: '没有可达的观察点，部分区域尚未检查',
-      coverage_exhausted: '可观察区域已检查，遮挡区域仍未确认',
-      cancelled: '用户已中断', authorization_expired: '本次操作授权已到期',
-      disconnected: '机器狗连接已断开', map_session_changed: '定位会话已变化，需要重新观察',
-    }[event.reason];
-    return `${searchStage}${reason ? `：${reason}` : ''}`;
-  }
-  if (['planning', 'executing', 'summarizing', 'finished'].includes(event.stage)) {
-    if (event.stage === 'planning') return compact ? '正在核对可用设备与当前状态'
-      : `正在核对可用设备与当前状态，处理：${event.goal || '当前请求'}`;
-    if (event.stage === 'executing') return compact ? '正在执行计划'
-      : `已选定下一步，正在处理：${event.goal || '当前请求'}`;
-    if (event.stage === 'summarizing') return `正在核对执行结果：${event.completed_count || 0} 项完成，${event.failed_count || 0} 项未完成`;
-    if (event.stage === 'finished') {
-      if (event.status === 'needs_clarification') return '等待补充信息，已执行步骤的结果已保留';
-      const counts = `${event.completed_count || 0} 项完成，${event.failed_count || 0} 项未完成`;
-      return ['error', 'timeout', 'blocked'].includes(event.status)
-        ? `任务中断：${counts}` : `任务结束：${counts}`;
-    }
-    return event.stage || '处理中';
-  }
-  const targetName = event.target_unit_id ? getAgentDisplayName(event.target_unit_id) : '';
-  const actionId = event.skill_id || event.tool || '操作';
-  const action = event.capability_name || agentCapabilityLabel(actionId);
-  // Structured parameters are rendered by RunProcess; this is the short fallback.
-  const argumentLabels = { duration: '时长', duration_s: '时长', speed: '速度', distance_m: '距离', angle_deg: '转角' };
-  const args = Object.entries(event.arguments || {}).filter(([key, value]) =>
-    argumentLabels[key] && typeof value === 'number' && Number.isFinite(value))
-    .map(([key, value]) => `${argumentLabels[key]} ${value}${key.startsWith('duration') ? ' 秒' : key === 'distance_m' ? ' 米' : key === 'angle_deg' ? ' 度' : ''}`);
-  const detailArgs = args.length ? `（${args.join('，')}）` : '';
-  const state = event.arguments?.state;
-  const cmd = event.arguments?.cmd;
-  const sport = { StandDown: '趴下', StandUp: '站起来', Hello: '打招呼',
-    StopMove: '停止移动', Stretch: '伸展' };
-  const task = ['set_light_state', 'set_led_state'].includes(actionId) && (targetName || compact)
-    ? `${compact ? '' : `请${targetName}`}${state === 'ON' ? '开灯' : state === 'OFF' ? '关灯' : `调整灯光${detailArgs}`}`
-    : actionId === 'go2_chat' && (targetName || compact) && event.requested_text
-      ? `${compact ? '' : `请${targetName}`}处理“${event.requested_text}”`
-      : actionId === 'go2_sport' && sport[cmd]
-        ? `${compact ? '' : `让${targetName || '机器狗'}`}${sport[cmd]}`
-        : `${compact ? '' : targetName ? `请${targetName}` : '正在'}${action}${detailArgs}`;
-  if (event.stage === 'decision') return compact ? `下一步：${task}` : `接下来${task}`;
-  if (event.stage === 'dispatching') return `${task}，等待执行结果`;
-  if (event.stage === 'considering') {
-    const outcome = ['ok', 'accepted'].includes(event.status) ? '已确认完成'
-      : event.status === 'executing' || event.status === 'timeout'
-        ? '完成情况未确认' : '未完成';
-    return `${task}${outcome}，正在判断下一步`;
-  }
-  if (event.status === 'timeout' && event.reason === 'edge_result_unconfirmed') {
-    return `${task}：等待设备执行回执超时，无法确认是否完成`;
-  }
-  const status = {
-    ok: '已完成', accepted: '已完成', executing: '仍在执行',
-    timeout: '等待结果超时，完成情况未确认', blocked: '未执行',
-    rejected: '被拒绝', cancelled: '已取消', error: '执行失败',
-  }[event.status] || '结果已更新';
-  const stateLabels = { ON: '已开启', OFF: '已关闭', BLINKING: '正在闪烁' };
-  const detail = stateLabels[event.result_state] ? `，设备${stateLabels[event.result_state]}` : '';
-  const reason = typeof event.reason === 'string' && /^[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\s，。！？：；、（）“”·0-9]+$/.test(event.reason)
-    ? `：${event.reason}` : '';
-  return `${task}：${status}${detail}${reason}`;
-}
-
-function processEventText(event) {
-  if (event.tool === 'start_activity') {
-    return event.stage === 'decision' ? '正在邀请空间成员加入活动' : '';
-  }
-  if (event.stage === 'summarizing' || event.stage === 'considering') return '';
-  return event.stage === 'narrated' && event.text
-    ? event.text : describeRunProgress(event, true);
 }
 
 function isDeviceOnline(agent, unitData) {

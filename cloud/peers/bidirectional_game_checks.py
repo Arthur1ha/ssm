@@ -60,6 +60,15 @@ def test_lamp_can_decline_or_defer_without_lighting_action(reverse, choice):
     assert reverse.messenger.send_message.call_args.kwargs["reply_kind"] == "declined"
 
 
+@pytest.mark.parametrize("reason", ["decision_unavailable", "arbitration_ValueError", "invalid_arbitration_choice"])
+def test_arbitration_failure_stays_a_result_without_fabricated_lamp_speech(reverse, reason):
+    reverse.decision.return_value = {"event_decision": "defer", "decision_reason": reason}
+    color_hunt._handle_color_hunt_invitation(reverse.messenger, reverse.message, None)
+    reverse.prepare.assert_not_called()
+    reverse.messenger.send_message.assert_not_called()
+    assert reverse.messenger.send_result.call_args.kwargs["reason"] == reason
+
+
 def test_old_invitation_never_runs_lamp_graph_or_setup(reverse):
     reverse.message["deadline"] = time.time() - 1
     color_hunt._handle_color_hunt_invitation(reverse.messenger, reverse.message, None)

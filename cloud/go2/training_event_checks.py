@@ -571,7 +571,7 @@ async def test_provider_identity_reaches_graph_and_original_executor(bound_liste
     robot._sport_state_observed_at = time.monotonic()
     robot.send_command.return_value = {'result': 'ok', 'confirmation_scope': 'completion'}
     monkeypatch.setattr(events, 'get_text_llm', OwnerSituationModel)
-    monkeypatch.setattr('cloud.space.activity.get_activity_store', lambda: SimpleNamespace(current=lambda: None))
+    monkeypatch.setattr('cloud.space.activity.get_activity_store', lambda: SimpleNamespace(current=lambda *_: None))
     person = SimpleNamespace(person_id='owner-1', name='主人', role='owner')
     provider = SimpleNamespace(search_persons=AsyncMock(return_value=FaceSearchResult(
         (FaceCandidate('owner-1', '主人', 99),))))

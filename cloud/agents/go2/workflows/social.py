@@ -178,9 +178,7 @@ def build_social_graph(
         if status != "unknown":
             ledger.mark_result("go2", f"go2:social:{run_id}", run_id,
                                "send_message", outcome)
-        return {"delivery": outcome, "status": status,
-                "response": ("消息已发送，尚未确认同伴回复" if status == "accepted"
-                             else "消息未成功投递")}
+        return {"delivery": outcome, "status": status}
 
     async def after_gate(state: SocialState) -> str:
         return "decide" if state.get("status") == "deciding" else END

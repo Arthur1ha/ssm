@@ -71,6 +71,11 @@ assert.equal(activityDecisionBasis(processSteps([
 assert.equal(activityMessageReceipt(invite,[invite]),'等待对方决定');
 assert.equal(activityMessageReceipt(invite,events),'对方已接受');
 assert.equal(activityMemberView(go2,states.go2.state,{status:'joined'},true,now).label,'玩耍 · 站立');
+assert.equal(activityMemberView(go2,states.go2.state,{status:'joined'},true,now).detail,'',
+  'Normal participation belongs in the shared stage footer');
+assert.equal(activityMemberView(lamp,{...states.esp32_desk_led.state,control_state:'holding'},
+  {status:'joined'},true,now).detail,'暂时保留你的设置 · 亮度适中');
+assert.equal(activityMemberView(go2,states.go2.state,{status:'offline'},true,now).detail,'未加入 · 设备离线');
 assert.equal(activityMemberView(lamp,states.esp32_desk_led.state,{status:'joined'},true,now).label,'常亮 · 蓝色');
 assert.equal(activityMemberView(lamp,{...states.esp32_desk_led.state,_received_at:now-7200},{status:'joined'},true,now).label,
   '常亮 · 蓝色','An unchanged lamp setting was replaced by a freshness warning');
@@ -89,21 +94,22 @@ assert.equal(grouped.filter(row=>row.kind==='message').every(row=>!row.process.l
   'A shared invitation attached every action to every message');
 const searchSteps = ['search_observing','search_observe','search_selected','search_observe'].map((stage,index) =>
   event('search-step-'+index,'search_progress',{stage,task_id:'activity-search',source:'object_search',
+    fact_kind:stage === 'search_observe' ? 'observation' : stage === 'search_selected' ? 'decision' : undefined,
+    observation_event_id:stage === 'search_observe' ? 'search-observation-'+index : undefined,
     text:stage === 'search_observe' ? '前方有纸箱。' : '搜索步骤 '+stage,
     media_ref:stage === 'search_observe' ? '/api/activity-photo-'+index : null}));
 assert.equal(processSteps(projectActivityEvents([...searchSteps,
-  {...result,task_id:'activity-search',status:'ok'}])).length,5,
+  {...result,task_id:'activity-search',status:'ok'}])).length,4,
   'Search completion erased its individual observations and steps');
 assert.equal(projectActivityEvents([...searchSteps,event('scene-copy','observation',{
-  source:'go2.camera',text:'前方有纸箱。',media_ref:'/api/activity-photo-1'})]).length,4,
+  source:'go2.camera',text:'前方有纸箱。',media_ref:'/api/activity-photo-1',observation_event_id:'search-observation-1'})]).length,4,
   'A shared scene duplicated a search photo');
 const lampPlan=event('lamp-plan','action',{unit_id:lamp.unit_id,task_id:'light-task',action:'set_led_color',
   state_at_event:{status:'current',as_of:now-10,values:{ism:'ON',r:255,g:200,b:80}}});
 const lampResult=event('lamp-result','action_result',{unit_id:lamp.unit_id,task_id:'light-task',action:'set_led_color',status:'ok',
   state_at_event:{status:'current',as_of:now-9,values:{ism:'ON',r:0,g:0,b:255}}});
-// Public events are canonical already; stale snapshots cannot supply a color.
-assert.equal(context.activityActionText(lampResult,'皮皮灯',true),'已调为常亮 · 蓝色');
-assert.doesNotMatch(context.activityActionText({...lampResult,state_at_event:{status:'stale'}},'',true),/蓝色/);
+// Public state rendering reads only the saved, current snapshot.
+assert.equal(context.activityPhysicalLabel(lamp,lampResult.state_at_event.values),'常亮 · 蓝色');
 assert.equal(processSteps([lampPlan,lampResult]).length,1);
 assert.equal(processSteps([{...lampPlan,arguments:{r:0,g:0,b:255}},
   {...lampResult,arguments:{}}])[0].event.arguments.b,255,'A receipt without parameters erased the selected color');
@@ -237,15 +243,25 @@ async function browserChecks() {
     },{activity,events,go2,lamp,states});
     await page.waitForSelector('.activity-member');
     console.log('Browser: activity card mounted.');
+    assert.match(await page.$eval('.activity-members__footer',el=>el.textContent),/2 位伙伴参与活动/);
+    const activityHash = await page.evaluate(()=>location.hash);
+    for (const member of await page.$$('.activity-member')) await member.click();
+    assert.equal(await page.evaluate(()=>location.hash),activityHash,'Companion presentation must not navigate');
     await page.waitForSelector('.run-process-summary');
-    assert.equal(await page.$$eval('.run-process-summary', rows=>rows.every(row=>!row.open)),true);
-    assert.match(await page.$eval('.run-process__attention',el=>el.innerText),/确认/,
-      'An unconfirmed result disappeared into the closed process');
+    assert.equal(await page.$$eval('.run-process-summary', rows=>rows.every(row=>row.open)),true,
+      'An unconfirmed result must expose its cause by default');
+    assert.match(await page.$eval('.run-process-summary summary',el=>el.innerText),/确认/);
     assert(await page.$eval('.space-activity',e=>e.textContent.includes('对方已接受')));
     for(const width of [320,390,1280]) {
       await page.setViewport({width,height:900});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'Horizontal overflow');
-      await page.click('.run-process-summary summary');
+      assert.equal(await page.$$eval('.activity-member',members=>members.every(member=>{
+        const style=getComputedStyle(member), portrait=member.querySelector('.activity-member__portrait').getBoundingClientRect();
+        const name=member.querySelector('.activity-member__heading').getBoundingClientRect();
+        return style.backgroundColor==='rgba(0, 0, 0, 0)' && parseFloat(style.borderTopWidth)===0
+          && portrait.bottom<=name.top && member.scrollWidth<=member.clientWidth;
+      })),true,'Shared stage avatars, names and states must fit without individual card chrome');
+      await page.$eval('.run-process-summary',el=>{el.open=true;});
       assert.equal(await page.$eval('.run-process-summary',el=>el.open),true);
       assert.match(await page.$eval('.run-process__body',el=>el.innerText),/停止结果尚未确认/);
       assert.equal(await page.$eval('.run-process__body',el=>el.scrollWidth<=el.clientWidth),true);
@@ -327,6 +343,10 @@ async function browserChecks() {
     assert(await page.$eval('.activity-members',e=>e.textContent.includes('常亮 · 蓝色')));
     await page.evaluate(()=>__render({connected:true,activity:{...__props.activity,status:'ended'},events:[]}));
     await page.waitForFunction(()=>!document.querySelector('.activity-members'));
+    if(process.env.SCREENSHOT_DIR) {
+      await page.setViewport({width:390,height:900});
+      await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'activity-ended-390.png'),fullPage:true});
+    }
     // Hook restores the server's ended metadata rather than retaining joined modes.
     await page.evaluate(()=>{
       const ended={...__props.activity,status:'ended',revision:8,devices:{go2:{status:'left',physical_stop:'unknown'}}};
@@ -386,7 +406,7 @@ async function browserChecks() {
     await home.waitForSelector('.space-activity .activity-member');
     assert.equal(await home.$$('.space-activity').then(nodes=>nodes.length),1);
     assert.equal(await home.evaluate(()=>location.hash),'');
-    assert(await home.$eval('.home-activity-input-note',e=>e.textContent.includes('发送新指令')));
+    assert.equal(await home.$('.home-activity-input-note'),null);
     // Activity progress must not enter either the global search feed or an
     // unrelated request that is currently waiting for its own SSE feedback.
     await home.type('.chat-panel input','查看当前情况');
@@ -419,13 +439,27 @@ async function browserChecks() {
     // Autonomous searches outside an activity still retain their own feed.
     await home.evaluate(()=>apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
       type:'agent_progress',scope:'space',source:'object_search',agent_id:'go2',
-      run_id:'standalone-search',event_id:'standalone-step',stage:'search_selected',text:'独立搜索的下一步。'}})));
-    await home.waitForFunction(()=>[...document.querySelectorAll('.run-process-summary')]
-      .some(row=>row.textContent.includes('独立搜索的下一步')));
+      run_id:'standalone-search',event_id:'standalone-step',fact_kind:'decision',stage:'search_selected',text:'独立搜索的下一步。'}})));
+    await home.waitForFunction(()=>[...document.querySelectorAll('.run-process__body')]
+      .some(row=>!row.closest('.space-activity') && row.textContent.includes('独立搜索的下一步。')));
     console.log('PASS: activity photos and search steps stay inside their card during a pending chat; standalone search stays in chat.');
     assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-activity-390.png')});
     assert.deepEqual(errors,[]);
+    // The production activity result shape keeps partial joins visible even
+    // though the start_activity tool itself returned ok.
+    await page.evaluate(({activity,lamp})=>__render({connected:true,activity:{...activity,
+      context:'我要干活了，你们自己玩吧',devices:{esp32_desk_led:{status:'joined',mode:'reactive'},go2:{status:'offline'}}},
+      events:[{event_id:'partial-call',agent_id:'cloud_orchestrator',unit_id:'cloud_orchestrator',run_id:'partial-run',step_id:'partial-step',
+        event_type:'action_result',tool:'start_activity',status:'ok',result_kind:'activity',ts:Date.now()/1000,
+        public_result:{activity:{revision:1,members:[{unit_id:lamp.unit_id,status:'joined',mode:'reactive'},
+          {unit_id:'go2',status:'offline',reason:'device_offline'}]}}}]}),{activity,lamp});
+    await page.waitForFunction(()=>document.querySelector('.run-process-summary')?.textContent.includes('部分完成'));
+    assert.equal(await page.$eval('.run-process-summary',el=>el.open),true);
+    assert.match(await page.$eval('.run-process__notes',el=>el.textContent),/呆呆狗当前离线，未能加入活动/);
+    assert.match(await page.$eval('.activity-members__footer',el=>el.textContent),/1 位伙伴参与活动/);
+    assert.match(await page.$eval('.activity-members',el=>el.textContent),/未加入 · 设备离线/);
+    if(process.env.SCREENSHOT_DIR){await page.setViewport({width:390,height:900});await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'activity-partial-390.png'),fullPage:true});}
     console.log('PASS: real activity card at 320/390/1280px, shared disclosure/evidence, reading position, stale feedback and ended metadata.');
   } finally {await browser.close();}
 }

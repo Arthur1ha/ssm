@@ -1,4 +1,4 @@
-/* Device controls share result handling; transport acceptance is never completion. */
+/* Device controls retain the backend action-result and dispatch-only semantics. */
 const commandBus = {
   async command(unitId, action, params = {}, options = {}) {
     const go2Chat = unitId === 'go2' && action === 'chat';
@@ -33,7 +33,7 @@ const commandBus = {
       if (unitId === 'go2' && data?.result === 'executing' && data.task_id) return this.waitForGo2Task(data.task_id);
       if (typeof data?.result === 'string') return data;
       if (data?.status === 'dispatched' || data?.accepted === true || data?.ok === true && !data?.result) {
-        return { ...data, result: 'accepted' };
+        return { ...data, result: 'accepted', dispatch_only:true };
       }
       return data;
     } catch (error) {
@@ -100,7 +100,8 @@ const commandBus = {
         );
         if (result?.result === 'unknown' && result.error === 'receipt_unavailable'
             && result.execution_active === false) return result;
-        if (!['executing', 'accepted', 'unknown'].includes(result?.result)) return result;
+        if (!['executing', 'unknown'].includes(result?.result)
+            && !(result?.result === 'accepted' && result?.dispatch_only)) return result;
       } catch (error) {
         if ([401, 403, 404].includes(error.status)) {
           return { result: 'error', task_id: taskId, error: error.message };
@@ -127,7 +128,7 @@ const commandBus = {
     if (result?.result === 'needs_clarification' && result.question) return result.question;
     if (result?.error === 'training_blocked' && result.reasons?.length) return result.reasons.map(reason => reason.code === 'cooldown' ? `冷却中，还需等待 ${Math.ceil(reason.remaining_s)} 秒` : ({condition_unsatisfied:'未满足教导条件',condition_unknown:'无法确认教导条件',awaiting_load:'教导等待加载'})[reason.code] || reason.code).join('；');
     if (result?.error === 'stop_unconfirmed') return '停止指令尚未确认，请查看机器狗当前状态';
-    if (result?.result === 'accepted') return '指令已发送，尚未确认完成';
+    if (result?.result === 'accepted') return result.result_kind === 'message' ? '已接受' : '执行完成';
     if (result?.result === 'executing') return '正在执行';
     if (result?.result === 'timeout') return '等待完成反馈超时，结果尚未确认';
     if (result?.result === 'unknown' && result.error === 'receipt_unavailable'
@@ -143,7 +144,7 @@ const commandBus = {
       }
     }
     const messages = {
-      ok: '执行完成', accepted: '指令已发送，尚未确认完成', executing: '正在执行',
+      ok: '执行完成', accepted: '执行完成', executing: '正在执行',
       blocked: '当前状态或参数不允许执行', rejected: '指令参数或权限不符合设备要求', cancelled: '动作已被后续指令打断',
       timeout: '等待完成反馈超时，结果尚未确认', error: '执行失败',
       needs_clarification: result?.question || '请补充执行所需的信息',

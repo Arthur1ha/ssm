@@ -173,8 +173,10 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
                     agent = get_agent()
                     if agent and not (agent._sense() or {}).get("light_available"):
                         store.record_event(
-                            activity_id, "message", unit_id=unit_id,
-                            text="光线传感器暂无新读数，暂不自动调灯；收到新读数后会重新评估。",
+                            activity_id, "observation", unit_id=unit_id,
+                            text="光线传感器暂无新读数，自主调光等待新鲜观测。",
+                            fact_kind="observation", result_kind="query", status="unavailable",
+                            source="sensor", reason="light_observation_unavailable",
                         )
             except Exception as exc:
                 store.set_device(activity_id, unit_id, mode=mode or "", status="unavailable",

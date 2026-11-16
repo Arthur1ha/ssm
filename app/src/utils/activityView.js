@@ -48,16 +48,17 @@ function activityMemberView(card, state, membership, connected, now) {
   const stale = !knownLamp && (!connected || age === null || age > 60);
   const label = activityPhysicalLabel(card, state);
   const join = {joined:'自主活动中',offline:'未加入 · 设备离线',unavailable:'暂未加入',
-    unknown:'参与状态待确认',left:'已退出活动'}[membership?.status] || '正在确认参与情况';
+    unknown:'参与状态待确认',left:'已退出活动'}[membership?.status] || '';
   const mode = membership?.status === 'joined' && state.autonomy_mode === 'manual' ? '仅听指令'
     : membership?.status === 'joined' && state.control_state === 'holding' ? '暂时保留你的设置' : join;
   const brightness = state.ism && state.ism !== 'OFF' && Number.isInteger(state.brightness)
     && state.brightness >= 0 && state.brightness <= 255
     ? `亮度${state.brightness <= 85 ? '偏暗' : state.brightness <= 170 ? '适中' : '偏亮'}` : '';
+  const notice = !connected ? '状态连接正在恢复' : disconnected ? join
+    : stale ? age !== null ? `最近反馈 · ${age < 120 ? '1 分钟前' : `${Math.floor(age / 60)} 分钟前`}`
+      : '尚未收到状态反馈' : '';
   return { label: disconnected ? '离线' : stale ? '状态待确认' : label,
-    detail: !connected ? '状态连接正在恢复' : disconnected ? join
-      : stale ? age !== null ? `最近反馈 · ${age < 120 ? '1 分钟前' : `${Math.floor(age / 60)} 分钟前`}`
-        : '尚未收到状态反馈' : [mode, brightness].filter(Boolean).join(' · '),
+    detail: notice || [membership?.status !== 'joined' || mode !== join ? mode : '', brightness].filter(Boolean).join(' · '),
     previous: stale && age !== null && !disconnected ? label : '',
     color: !disconnected && !stale && state.ism !== 'OFF' && agentKind(card || {}) === 'led'
       ? getLedStateInfo(state).color : null,
@@ -76,6 +77,12 @@ function activityMessageReceipt(event, events) {
   if (replies.some(item => item.reply_kind === 'accepted')) return '对方已接受';
   if (replies.some(item => item.reply_kind === 'declined')) return '对方未接受';
   if (replies.length) return '已收到回应';
+  const receipts = events.filter(item => item.message_id === event.message_id
+    && item.event_type !== 'message' && item.result_kind === 'message');
+  if (receipts.some(item => item.status === 'executing')) return '对方已开始处理';
+  if (receipts.some(item => item.status === 'accepted')) return '对方已接受';
+  if (receipts.some(item => item.status === 'received' || item.public_result?.delivery_status === 'received'))
+    return '对方已收到';
   return event.interaction_kind === 'game_invite' ? '等待对方决定' : '等待回应';
 }
 
@@ -102,11 +109,15 @@ function activityDecisionBasis(event) {
 
 function activityEventKind(event = {}) {
   const type = String(event.event_type || '').toLowerCase();
+  // A received message is an observation for the decision model, while its
+  // original content remains speech in the conversation.
+  if (type.includes('question')) return 'question';
+  if (type.includes('message') || type.includes('proposal') || type.includes('reply')) return 'message';
+  if (event.fact_kind === 'question') return 'question';
+  if (event.fact_kind === 'observation') return 'observation';
   if (type === 'search_progress') return ['search_observe', 'search_candidate', 'search_confirmed']
     .includes(event.stage) ? 'observation' : 'status';
-  if (type.includes('question')) return 'question';
   if (type.includes('observation') || type.includes('observed') || type === 'person_identified') return 'observation';
-  if (type.includes('message') || type.includes('proposal') || type.includes('reply')) return 'message';
   return 'status';
 }
 
@@ -132,12 +143,12 @@ function activityDecisionEvidence(item, event, events, now = Date.now() / 1000) 
   const expiredNow = maxAge !== null && hasTime && now - recordedAt > maxAge;
   const ref = String(item.ref || '').replace(/^event:/, '');
   const original = item.kind === 'observation' ? events.find(row => row.event_id === ref) : null;
-  return {label:labels[item.kind] || '参考信息', source:item.source || original?.unit_id || '',
+  return {label:labels[item.kind] || '', source:item.source || original?.unit_id || '',
     recordedAt:hasTime ? recordedAt : null, summary:item.summary,
     notice:item.status === 'unknown' ? '这条依据在决策时尚未确认，不能据此陈述事实'
       : expiredThen ? '这条依据在决策时已过期，不能据此确认当时情况'
-      : expiredNow ? '这是当时参考的记录，当前情况需要重新确认'
-      : !hasTime ? '记录时间未提供，无法确认信息新鲜度' : '这是决策时参考的记录',
+      : expiredNow ? '记录已过期，当前情况需要重新确认'
+      : !hasTime ? '记录时间未提供，无法确认信息新鲜度' : '',
     missingOriginal:item.kind === 'observation' && !original};
 }
 

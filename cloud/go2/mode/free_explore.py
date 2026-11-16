@@ -207,7 +207,7 @@ class Drive:
 
     async def _publish_scene_reply(self, summary: str, observation_event_id: str) -> None:
         """Let Go2 speak about a recorded view, without turning raw vision into dialogue."""
-        from cloud.agents.go2.workflows.reply import run_autonomous_reply_graph
+        from cloud.agents.go2.workflows.free_explore import resume_autonomy_result
         from cloud.api.intents import publish_agent_event
 
         generation, owner = self._generation, self.owner_session_id
@@ -215,12 +215,12 @@ class Drive:
         if not activity_id or not go2.is_connected or self.user_interrupt:
             return
         try:
-            answer = await run_autonomous_reply_graph(
+            answer = await resume_autonomy_result(
                 run_id="scene_" + observation_event_id, action="go2_observe",
-                reason="到达后观察周围", params={},
+                reason="", params={},
                 result={"result": "ok", "message": summary},
                 model=get_text_llm(), profile_loader=get_profile,
-                observation=summary, include_emotion=True)
+                observation=summary)
         except Exception:
             logger.exception("[Drive] 场景人格回复失败")
             return
@@ -233,11 +233,12 @@ class Drive:
             run_id="scene_" + observation_event_id,
             text=answer["text"] if isinstance(answer, dict) else answer,
             emotion=answer.get("emotion", "neutral") if isinstance(answer, dict) else "neutral",
-            observation_event_id=observation_event_id)
+            event_id="reply:scene:" + observation_event_id,
+            observation_event_id=observation_event_id, activity_id=activity_id)
 
     def _motion_announcement(self, name: str, params: dict, result: dict) -> tuple:
         scope = self._activity_id() or self.owner_session_id or "go2-autonomous"
-        completed = result.get("result") == "ok"
+        completed = result.get("result") in {"ok", "accepted"} and not result.get("dispatch_only")
         error = actionable_error(result)
         if not completed:
             material_key = None
@@ -462,15 +463,17 @@ class Drive:
                              reason=error, display=bool(task_id) or visible)
         if publish_reply and go2.is_connected:
             asyncio.create_task(self._publish_motion_reply(
-                name, params, result, run_scope=(generation, owner)))
+                name, params, result, run_scope=(generation, owner), task_id=task_id))
         return result
 
     async def _publish_motion_reply(self, name: str, params: dict, result: dict, *,
-                                    run_scope: tuple[int, str | None] | None = None) -> None:
-        from cloud.agents.go2.workflows.reply import run_autonomous_reply_graph
+                                    run_scope: tuple[int, str | None] | None = None,
+                                    task_id: str | None = None) -> None:
+        from cloud.agents.go2.workflows.free_explore import resume_autonomy_result
         from cloud.api.intents import publish_agent_event
 
         generation, owner = run_scope or (self._generation, self.owner_session_id)
+        activity_id = self._activity_id()
         if (not go2.is_connected or self.user_interrupt
                 or generation != self._generation or owner != self.owner_session_id):
             return
@@ -479,22 +482,24 @@ class Drive:
         if not self._reply_gate.should_reply(scope, completed=completed,
                                               material_key=material_key, error=error):
             return
-        run_id = "auto_" + uuid.uuid4().hex
+        run_id = task_id or result.get("task_id") or "auto_" + uuid.uuid4().hex
         publish_agent_event("agent_progress", agent_id="go2", scope="space",
             space_id=self._context.space_id, source="autonomous", status=status,
-            run_id=run_id, step_id=run_id, stage="observed")
-        answer = await run_autonomous_reply_graph(
-            run_id=run_id, action=name, reason="根据环境自主探索与互动",
+            run_id=run_id, step_id=run_id, task_id=task_id, stage="observed",
+            fact_kind="result", tool=name, arguments=params, public_result=result, result_kind="action")
+        answer = await resume_autonomy_result(
+            run_id=run_id, action=name, reason="",
             params=params, result=result, model=get_text_llm(),
-            profile_loader=get_profile, include_emotion=True)
+            profile_loader=get_profile)
         if (self.user_interrupt or not go2.is_connected or generation != self._generation
-                or owner != self.owner_session_id
+                or owner != self.owner_session_id or activity_id != self._activity_id()
+                or not answer.get("text")
                 or not self._reply_gate.mark_replied(scope, completed=completed,
                                                      material_key=material_key, error=error)):
             return
         publish_agent_event("agent_reply", agent_id="go2", scope="space",
             space_id=self._context.space_id, source="autonomous",
-            status=status, run_id=run_id,
+            status=status, run_id=run_id, event_id="reply:" + run_id, activity_id=activity_id,
             text=answer["text"] if isinstance(answer, dict) else answer,
             emotion=answer.get("emotion", "neutral") if isinstance(answer, dict) else "neutral")
 

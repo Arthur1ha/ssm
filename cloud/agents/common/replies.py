@@ -23,6 +23,8 @@ def step_kind(step: dict) -> str:
     if result.get("result_kind"):
         return result["result_kind"]
     tool = step.get("tool")
+    if tool == "apply_training":
+        return "training"
     if tool == "propose_training":
         return "training_proposal"
     if tool == "list_training" or step.get("effectful") is False:
@@ -92,88 +94,30 @@ def valid_reply_format(value: object, run: Run | None = None) -> bool:
 
 def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
     """Report observed results when a role's reply model is unavailable."""
-    role = "go2" if agent_id == "go2" else ("lamp" if agent_id.startswith("esp32") else "orchestrator")
-    if status == "accepted":
-        status = "ok"
     if status in UNCERTAIN:
-        return {"go2": "我还没收到动作完成的确认。", "lamp": "我还没收到调灯完成的确认。",
-                "orchestrator": "这项安排尚无完成确认。"}[role]
-    if status == "error" and run is not None and not run.steps:
-        return {"go2": "我这次没能好好处理你的话，稍后再问我一下。",
-                "lamp": "我这次处理请求出了问题，还没做任何动作。稍后再试。",
-                "orchestrator": "这次对话处理出了问题，请稍后再试。"}[role]
-    if run is not None and run.steps:
-        results = [(step, step.get("result") or {}) for step in effective_steps(run.steps)]
-        completed = [step for step, result in results
-                     if step_kind(step) == "action" and result.get("result") in SUCCESS]
-        proposals = [step for step, result in results
-                     if step_kind(step) == "training_proposal" and result.get("result") == "ok"]
-        failed = [result for _, result in results if result.get("result") in
-                  {"blocked", "rejected", "error", "timeout", "unknown", "cancelled", "partial"}]
-        offline = any(result.get("device_connected") is False
-                      or result.get("device_fsm") == "offline"
-                      or result.get("error") in {"device_precondition", "robot_disconnected", "offline"}
-                      or any((item.get("result") or {}).get("device_connected") is False
-                             or (item.get("result") or {}).get("device_fsm") == "offline"
-                             for item in (result.get("tool_results") or [])
-                             if isinstance(item, dict))
-                      for _, result in results)
-        if role == "go2" and (offline or status == "offline"):
-            return ("汪，你的话我听到了，但机身还没连上。"
-                    + ("前面的步骤有结果了，后面的动作这次做不了。" if completed
-                       else "这次动作没能执行。"))
-        if failed:
-            reason = failed[-1].get("message") or failed[-1].get("error") or ""
-            reason = reason if isinstance(reason, str) and reason and len(reason) <= 80 else ""
-            if completed:
-                prefix = {"go2": "汪，前面的动作完成了，后面的没做成。",
-                          "lamp": "前一步已经到位，后一步没做成。",
-                          "orchestrator": "部分安排已完成，其余未完成。"}[role]
-            elif not any(step_kind(step) == "action" for step, _ in results):
-                prefix = "这次要求还没有处理成功。"
-            else:
-                prefix = {"go2": "汪，这次动作还没做成。",
-                          "lamp": "这次没调成。",
-                          "orchestrator": "这次安排没能完成。"}[role]
-            return prefix + (f"反馈：{reason}。" if reason else "")
-        if role == "lamp" and completed and status == "error":
-            return "已执行的灯光调整已生效，但这次对话处理出了问题。"
-        if proposals and not completed:
-            return "这项要求已整理好，请核对对话中的修改卡片。"
-        if not completed and status == "ok":
-            kinds = {step_kind(step) for step, result in results if result.get("result") in SUCCESS}
-            if "message" in kinds:
-                return "消息已发出，等待对方回应。"
-            if "configuration" in kinds:
-                return "这项要求已记录。"
-            if "activity" in kinds:
-                return "活动已启动，设备的加入情况已更新。"
-            return "这次查询已返回结果。"
-    if status == "offline":
-        return {"go2": "呜，我的身体还未连接，这次动作做不了。",
-                "lamp": "设备当前离线，这次没能调整灯光。",
-                "orchestrator": "设备当前离线，这次安排无法完成。"}[role]
-    if status == "ok":
-        if run is not None and not any(
-            step_kind(step) == "action" and (step.get("result") or {}).get("result") in SUCCESS
-            for step in run.steps
-        ):
-            return {"go2": "唔，我这会儿没法好好回答。等一下再问我，好吗？",
-                    "lamp": "我这会儿没法给出可靠回答，稍后再试。",
-                    "orchestrator": "当前无法可靠回答，请稍后再试。"}[role]
-        return {"go2": "好耶，这件事我办好了！", "lamp": "这才像样，灯已经调好了。",
-                "orchestrator": "这次安排已完成。"}[role]
-    if status == "partial":
-        return {"go2": "有一部分做好啦，剩下的还没完成呢。", "lamp": "部分调整已完成，其余还没有完成。",
-                "orchestrator": "部分安排已经完成，其余还没完成。"}[role]
-    if status == "needs_clarification":
-        return {"go2": "我还没听明白要做什么呀，能再说一点吗？", "lamp": "还需要补充具体的照明目标。",
-                "orchestrator": "我还需要一个具体目标，才能继续安排。"}[role]
-    if status == "cancelled":
-        return {"go2": "我停下啦，这次动作取消了。", "lamp": "这次灯光调整已取消。",
-                "orchestrator": "这次安排已取消。"}[role]
-    return {"go2": "唔，这个动作我现在做不到。", "lamp": "这次灯光调整未完成。",
-            "orchestrator": "这次安排没能完成。"}[role]
+        return "请求已提交，实际完成尚未确认。"
+    if run is None or not run.steps:
+        return "对话回复暂时不可用，请稍后再试。"
+    results = [(step, step.get("result") or {}) for step in effective_steps(run.steps)]
+    failed = [result for _, result in results if result.get("result") not in SUCCESS]
+    completed = [step for step, result in results
+                 if step_kind(step) == "action" and result.get("result") in SUCCESS]
+    if failed:
+        reason = failed[-1].get("message") or failed[-1].get("error") or failed[-1].get("reason")
+        prefix = "部分操作已有成功回执，其余未完成。" if completed else "本次请求未完成。"
+        return prefix + (f"执行反馈：{reason[:160]}" if isinstance(reason, str) and reason else "")
+    kinds = {step_kind(step) for step, result in results if result.get("result") in SUCCESS}
+    if "training_proposal" in kinds:
+        return "教导草案已生成，请核对后确认；尚未执行物理动作。"
+    if "activity" in kinds:
+        return "活动状态已更新。"
+    if "message" in kinds:
+        return "消息已提交。"
+    if "configuration" in kinds:
+        return "配置已保存。"
+    if completed:
+        return "操作已有成功回执；角色回复暂时不可用。"
+    return "查询已有回执；角色回复暂时不可用。"
 
 
 def reply_facts(run: Run) -> dict:

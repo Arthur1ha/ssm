@@ -48,15 +48,18 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
         if game_setup or reason is not None or refs is not None:
             from cloud.space.context import get_space_context
             from cloud.space.decisions import resolve_decision
+            from cloud.agents.common.progress_facts import resolve_public_decision
             try:
                 current_space = get_space_context(unit_id, state=agent._state)
-                decision_basis = resolve_decision(
-                    current_space, reason, refs,
-                    require_observation=game_setup,
-                    observed_space=decision_space)
-            except ValueError as exc:
-                return {"result": "rejected", "error": str(exc),
-                        "execution_phase": "preflight"}
+                decision_basis = (resolve_decision(
+                    current_space, reason, refs, require_observation=True,
+                    observed_space=decision_space) if game_setup else
+                    resolve_public_decision(current_space, reason, refs,
+                                            observed_space=decision_space))
+            except (ValueError, TypeError) as exc:
+                if game_setup:
+                    return {"result": "rejected", "error": str(exc),
+                            "execution_phase": "preflight"}
         from cloud.cards.registry import get_registry
         card = get_registry().get_card(unit_id)
         if not card:
@@ -72,10 +75,9 @@ def execute_lamp_tool(name: str, params: dict, step_id: str, *, agent, unit_id: 
                     or not activity_allows(activity_id, unit_id, "go2")
                     or not agent._should_act() or not agent._device_online()):
                 return {"result": "blocked", "error": "game_activity_unavailable"}
-            intent = ("我准备开灯，亮出这局的题目颜色。" if name == "set_led_state"
-                      else "我准备亮出这局的题目颜色。")
             announced = store.record_event(
-                activity_id, "action", unit_id=unit_id, text=intent,
+                activity_id, "action", unit_id=unit_id, text="",
+                fact_kind="call", result_kind="action",
                 source_event_id="decision_" + task_id,
                 action=name, task_id=task_id, game_id="color_hunt",
                 trigger_message_id=context.session_id.removeprefix("peer_game_color_"),

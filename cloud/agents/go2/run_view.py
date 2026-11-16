@@ -30,10 +30,12 @@ class _RecoveryState(TypedDict):
 
 
 def stable_reply_event_id(run_id: str, *, session_id: str = "",
-                          space_id: str = "main", reply_kind: str = "final") -> str:
+                          space_id: str = "main", reply_kind: str = "final", model_turn: int = 0) -> str:
     scope = "session" if session_id else "space"
     stable_key = ":".join(("agent_reply", scope, session_id or space_id,
                            run_id, "go2", "", reply_kind, "", ""))
+    if reply_kind == "clarification":
+        stable_key += ":" + str(model_turn)
     return "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex
 
 
@@ -75,7 +77,7 @@ class Go2RunView:
                 current.response = current.question
                 if current.origin_kind != "agent_autonomous":
                     current.reply_event_id = stable_reply_event_id(
-                        run_id, session_id=session_id, reply_kind="clarification")
+                        run_id, session_id=session_id, reply_kind="clarification", model_turn=current.model_turn)
             return current
         return None
 

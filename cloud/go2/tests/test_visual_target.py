@@ -310,12 +310,18 @@ async def test_visual_result_preserves_arrival_boundary_in_user_reply(tmp_path, 
     from cloud.agents.common.run_index import FileRunIndex
     from cloud.space.execution import ExecutionContext
 
-    class UnusedModel:
+    class ResultModel:
+        calls = 0
+
         def bind_tools(self, schemas, parallel_tool_calls=False):
             return self
 
         async def ainvoke(self, messages):
-            raise AssertionError('visual result must not ask a model to change the confirmed outcome')
+            from langchain_core.messages import AIMessage
+            self.calls += 1
+            # One original decision/closing response may describe the receipt;
+            # no additional tool is needed to preserve its arrival boundary.
+            return AIMessage(content=json.dumps({'kind': 'final', 'text': tool_result['message']}))
 
     async def execute_visual(name, params, *, context):
         assert name == 'go2_navigate_to_visible_target'
@@ -325,7 +331,8 @@ async def test_visual_result_preserves_arrival_boundary_in_user_reply(tmp_path, 
     monkeypatch.setattr(graph, 'get_store', lambda: Go2RunView(
         checkpointer=FileCheckpointSaver(tmp_path / 'checkpoints'),
         index=FileRunIndex(tmp_path / 'index')))
-    monkeypatch.setattr(graph, 'get_text_llm', lambda: UnusedModel())
+    model = ResultModel()
+    monkeypatch.setattr(graph, 'get_text_llm', lambda: model)
     monkeypatch.setattr(graph, 'execute_tool', execute_visual)
     monkeypatch.setattr(graph.go2, 'is_connected', True)
     monkeypatch.setattr('cloud.api.intents.publish_agent_event', lambda *_a, **_k: {})
@@ -337,6 +344,7 @@ async def test_visual_result_preserves_arrival_boundary_in_user_reply(tmp_path, 
         run_id='visual-reply-run')
     assert result['result'] == tool_result['result']
     assert result['response'] == tool_result['message']
+    assert model.calls == 1
     if tool_result['result'] == 'ok':
         assert '尚未确认到达' in result['response']
     assert result['actions_taken'] == (['go2_navigate_to_visible_target']

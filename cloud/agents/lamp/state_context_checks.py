@@ -139,7 +139,6 @@ def test_delegated_lamp_entry_dispatches_once_and_reuses_completed_run(facts, mo
         monkeypatch.setenv(variable, str(tmp_path / variable))
     monkeypatch.setattr(graph.cards, "get_registry", lambda: SimpleNamespace(get_card=lambda _uid: card()))
     monkeypatch.setattr(graph, "get_profile", prompts.get_profile)
-    monkeypatch.setattr(graph, "submit_progress", lambda *_a, **_k: None)
     monkeypatch.setattr(graph, "emit_agent_event", lambda *_a, **_k: None)
     monkeypatch.setattr("cloud.api.intents.publish_agent_event", lambda *_a, **_k: {})
     dispatched = []
@@ -156,7 +155,8 @@ def test_delegated_lamp_entry_dispatches_once_and_reuses_completed_run(facts, mo
 
         def bind_tools(self, tools, **_kwargs):
             color = next(item for item in tools if item["function"]["name"] == "set_led_color")
-            assert "evidence_refs" not in color["function"]["parameters"]["properties"]
+            assert "evidence_refs" in color["function"]["parameters"]["properties"]
+            assert "evidence_refs" not in color["function"]["parameters"].get("required", [])
             return self
 
         async def ainvoke(self, messages):

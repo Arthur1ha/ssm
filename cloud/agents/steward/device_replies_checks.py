@@ -17,7 +17,8 @@ def delegated(step_id, unit_id, skill_id, result):
 
 
 @pytest.mark.asyncio
-async def test_each_device_speaks_once_after_all_receipts_and_uses_original_goal(monkeypatch):
+async def test_each_device_speaks_once_after_all_receipts_and_uses_original_goal(tmp_path, monkeypatch):
+    monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
     monkeypatch.setenv("ESP32_LED_UNIT_ID", "test_lamp")
     monkeypatch.setattr("cloud.agents.lamp.prompts.persona_reply_prompt", lambda *_: "lamp")
     monkeypatch.setattr("cloud.agents.go2.prompts.persona_reply_prompt", lambda *_: "go2")
@@ -62,3 +63,53 @@ async def test_internal_status_query_is_silent(monkeypatch):
         model_factory=lambda _: pytest.fail("A status query must not generate device speech"))
     assert published == []
     assert device_outcomes(run)["go2"]["status"] == "ok"
+
+
+@pytest.mark.parametrize('fail', [False, True])
+@pytest.mark.asyncio
+async def test_delegated_reply_generation_and_publication_are_not_replayed(tmp_path, monkeypatch, fail):
+    from copy import deepcopy
+    monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
+    monkeypatch.setenv('ESP32_LED_UNIT_ID', 'fixture_lamp')
+    monkeypatch.setattr('cloud.agents.lamp.prompts.persona_reply_prompt', lambda *_: '灯人格')
+    monkeypatch.setattr('cloud.agents.steward.device_replies.emit_agent_event', lambda *_a, **_k: None)
+    calls, outputs = [], []
+    run = GraphRun('reply-parent', 'session', '开灯', time.time() + 60,
+        steps=[delegated('step', 'fixture_lamp', 'set_light_state', {'result': 'ok'})], status='ok')
+
+    class Model:
+        async def ainvoke(self, messages):
+            calls.append(messages)
+            if fail:
+                raise RuntimeError('model unavailable')
+            return AIMessage(content='{"text":"亮起来了。","emotion":"relaxed"}')
+
+    options = dict(context={}, model_factory=lambda _: Model(),
+                   transport=SimpleNamespace(do_publish_ui_event=lambda *a, **fields: outputs.append((a, fields))))
+    await publish_device_replies(run, **options)
+    await publish_device_replies(deepcopy(run), **options)
+    assert len(calls) == len(outputs) == 1
+    fields = outputs[0][1]
+    assert fields['event_id'].startswith('reply_')
+    if fail:
+        assert outputs[0][0][1] == 'reply_error'
+        assert fields['reply_source'] == 'runtime'
+        assert '角色回复暂时不可用' in fields['text']
+    else:
+        assert fields['emotion'] == 'relaxed' and fields['text'] == '亮起来了。'
+
+
+@pytest.mark.asyncio
+async def test_original_delegated_reply_preserves_emotion_and_skips_composition(tmp_path, monkeypatch):
+    monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
+    monkeypatch.setenv('ESP32_LED_UNIT_ID', 'fixture_lamp')
+    monkeypatch.setattr('cloud.agents.lamp.prompts.persona_reply_prompt', lambda *_: '灯人格')
+    monkeypatch.setattr('cloud.agents.steward.device_replies.emit_agent_event', lambda *_a, **_k: None)
+    outputs = []
+    run = GraphRun('original-parent', 'session', '开灯', time.time() + 60,
+        steps=[delegated('step', 'fixture_lamp', 'set_light_state', {
+            'result': 'ok', 'reply': '这就亮了。', 'emotion': 'happy', 'reply_source': 'decision_model'})], status='ok')
+    await publish_device_replies(run, context={},
+        model_factory=lambda _: pytest.fail('The original final reply must be reused'),
+        transport=SimpleNamespace(do_publish_ui_event=lambda *_a, **fields: outputs.append(fields)))
+    assert outputs[0]['text'] == '这就亮了。' and outputs[0]['emotion'] == 'happy'

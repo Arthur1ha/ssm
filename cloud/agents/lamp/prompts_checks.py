@@ -1,4 +1,4 @@
-"""Regression checks for the lamp speaking as itself after failed actions."""
+"""Persona guidance and explicit system feedback when model speech is unavailable."""
 
 from types import SimpleNamespace
 
@@ -16,8 +16,9 @@ def test_lamp_voice_is_model_guidance_not_a_wording_gate():
     assert valid_reply_format("亮度为120，RGB 255,255,255。")
 
 
-def test_lamp_no_dispatch_fallback_uses_first_person():
+def test_lamp_no_dispatch_fallback_is_system_feedback_without_invented_speech():
     run = SimpleNamespace(goal="闪烁三次提醒我", status="error", steps=[])
     reply = factual_fallback("esp32_desk_led", "error", run)
-    assert "我" in reply and "还没做任何动作" in reply
-    assert "灯那边" not in reply and "回执" not in reply
+    assert "回复暂时不可用" in reply
+    assert "我" not in reply and "灯那边" not in reply
+    assert "完成" not in reply and "已执行" not in reply

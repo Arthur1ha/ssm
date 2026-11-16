@@ -1,11 +1,15 @@
 """Push receipts and delivery separation using fake camera, LiDAR and motion."""
 import time
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import numpy as np
 
 from cloud.go2.navigation import cargo_push as push
+from cloud.go2.navigation.cargo_contact import CargoContact, claim_contact, permit_contact
+from cloud.go2.navigation.occupancy_grid import OccupancyGrid
 from cloud.go2.perception import cargo as perception
 from cloud.go2.perception.visual_target import TargetUnlocalized
 from cloud.space.execution import ExecutionContext, use_context
@@ -14,14 +18,25 @@ from cloud.space.execution import ExecutionContext, use_context
 @pytest.fixture
 def nudge(monkeypatch, tmp_path):
     monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
-    pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'odom-test'}
+    pose = {'x': 0., 'y': 0., 'z': .3, 'orientation': [0, 0, 0, 1],
+            'heading': 0., 'session_id': 'odom-test'}
+    cargo_points = [[x, y, z] for x in (.60, .65, .70)
+                    for y in (-.025, .025) for z in (.20, .25)]
+    floor = [[x, y, 0.] for x in np.arange(-1., 1.1, .1) for y in np.arange(-1., 1.1, .1)]
+    def build_grid(extra=(), shift=0., cargo=True):
+        shifted = [[x+shift, y, z] for x, y, z in cargo_points] if cargo else []
+        return OccupancyGrid({'data': {'resolution': .05, 'origin': [-2., -2., -.5],
+            'width': [100, 100, 40], 'header': {'frame_id': 'odom'},
+            'data': {'points': np.asarray([*floor, *shifted, *extra])}}}, robot_pose=pose)
     samples = []
     for index in range(4):
         samples.append({
             'odom_session_id': 'odom-test', 'frame_id': index + 1,
             'received_at': time.monotonic() + index, 'pose': dict(pose),
             'cargo_location': {'x': .65, 'y': 0., 'uncertainty_m': .1},
-            'cargo_bbox_1000': [450, 600, 550, 800],
+            'cargo_bbox_1000': [400, 550, 600, 1000],
+            'contact_observation': {'points_odom': cargo_points, 'pose': dict(pose),
+                                    'frame': {'width': 640, 'height': 360}},
             'destination_anchor_1000': None, 'near_destination': False,
             'destination_precision': 'approximate_visual_proximity',
             'cluster_extent_xyz_m': [.15, .15, .15], 'cluster_points': 12,
@@ -31,7 +46,7 @@ def nudge(monkeypatch, tmp_path):
         sample['cargo_location']['x'] += .15
     observe = AsyncMock(side_effect=samples)
     move = AsyncMock(return_value={'result': 'ok', 'stop': {'result': 'ok'}})
-    grid = SimpleNamespace(is_body_clear=lambda *_: True)
+    grid = build_grid()
     monkeypatch.setattr(push, 'observe_cargo', observe)
     monkeypatch.setattr(push, '_authorize', lambda *_: None)
     async def authorized(operation, _context):
@@ -41,6 +56,7 @@ def nudge(monkeypatch, tmp_path):
     monkeypatch.setattr('cloud.go2.tools.executor.execute_tool', move)
     monkeypatch.setattr(push, '_stop_approach', AsyncMock(return_value={'result': 'ok'}))
     return SimpleNamespace(samples=samples, observe=observe, move=move, grid=grid,
+                           build_grid=build_grid, pose=pose,
                            context=ExecutionContext('push-test', 'admin', False))
 
 
@@ -53,6 +69,8 @@ async def test_basic_nudge_confirms_cargo_displacement_without_delivery_region(n
     assert result['confirmation'] == 'measured_cargo_displacement_and_stop'
     assert result['cargo_forward_displacement_m'] == .15
     assert result['delivered'] is False
+    assert 'contact_observation' not in result['cargo_before']
+    assert 'contact_observation' not in result['cargo_after']
     assert nudge.move.await_args.args == ('go2_move', {
         'direction': 'forward', 'distance_m': .15, 'speed': .25})
     assert nudge.move.await_count == 1 and repeated['replayed'] is True
@@ -83,12 +101,135 @@ async def test_camera_approach_alone_cannot_complete_delivery(nudge):
 
 
 @pytest.mark.asyncio
-async def test_contact_block_still_prevents_all_motion(nudge):
-    nudge.grid.is_body_clear = lambda *_: False
+async def test_contact_block_still_prevents_all_motion(nudge, monkeypatch):
+    grid = nudge.build_grid(extra=[[.35, .15, .30]])
+    monkeypatch.setattr(push.navigator, 'snapshot', lambda: ((dict(nudge.pose), grid), None))
     with use_context(nudge.context):
         result = await push.push_cargo('盒子')
     assert result['result'] == 'blocked' and result['reason'] == 'cargo_contact_path_blocked'
     nudge.move.assert_not_awaited()
+
+
+def test_contact_allows_only_measured_cargo_without_changing_shared_map(nudge):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context)
+    obstacles = nudge.grid.obstacles.copy()
+    view = contact.grid_for(nudge.grid, nudge.pose)
+    assert nudge.grid.is_body_clear(.25, 0., 0.) is False
+    assert view.is_body_clear(.25, 0., 0.) is True
+    assert view.is_body_clear(.31, 0., 0.) is False
+    assert view.is_body_clear(.10, .08, 0.) is False
+    assert np.array_equal(nudge.grid.obstacles, obstacles)
+
+
+def test_contact_tracks_forward_cargo_motion_in_fresh_voxels(nudge):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context)
+    shifted = nudge.build_grid(shift=.10)
+    view = contact.grid_for(shifted, {**nudge.pose, 'x': .10})
+    assert view.is_body_clear(.25, 0., 0.) is True
+
+
+def test_contact_uses_latest_measurement_from_real_session_map(nudge):
+    from cloud.go2.navigation.session_map import SessionMap
+    maps = SessionMap()
+    maps.update(nudge.grid.voxel_message, nudge.pose, session_id='odom-test', observed_at=1.)
+    shifted = nudge.build_grid(shift=.10)
+    current = maps.update(shifted.voxel_message, {**nudge.pose, 'x': .10},
+                          session_id='odom-test', observed_at=2.)
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context)
+    view = contact.grid_for(current, {**nudge.pose, 'x': .10})
+    assert current.voxel_message is shifted.voxel_message
+    assert view.is_body_clear(.25, 0., 0.) is True
+    assert current.obstacles.any()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('allow_contact', [False, True])
+async def test_native_move_loop_reaches_contact_goal_only_with_measured_allowance(nudge, monkeypatch, allow_contact):
+    from cloud.go2.navigation import navigator as nav_module
+    from cloud.go2.navigation.session_map import SessionMap
+    from cloud.go2.control import ControlLease
+    from cloud.go2.tools import executor
+    from cloud.go2.tools.tools import go2_move
+    nav = nav_module.Navigator()
+    maps, pose, commands = SessionMap(), dict(nudge.pose), []
+    robot = SimpleNamespace(is_connected=True, _odom_session_id='odom-test', odom=pose,
+        odom_frame_id='odom', voxel_frame_id='odom')
+    def refresh():
+        stamp = time.monotonic()
+        # Simulate a parcel moving only once the robot reaches contact range.
+        grid = nudge.build_grid(shift=max(0., pose['x']-.18))
+        robot.occupancy_grid = maps.update(grid.voxel_message, pose,
+            session_id='odom-test', observed_at=stamp)
+        robot.odom_received_at = robot.voxel_received_at = stamp
+    def move(vx, vy, yaw, **_kwargs):
+        commands.append((vx, vy, yaw))
+        pose['x'] += vx*.1
+    real_sleep = asyncio.sleep
+    async def tick(_delay):
+        await real_sleep(.001)
+        refresh()
+    robot.move_velocity = move
+    refresh()
+    monkeypatch.setattr(nav_module, 'go2', robot)
+    monkeypatch.setattr(nav_module, 'navigator', nav)
+    monkeypatch.setattr(nav_module, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(nav_module, 'control_lease', ControlLease())
+    monkeypatch.setattr(nav_module.asyncio, 'sleep', tick)
+    monkeypatch.setattr(executor, 'execute_action', AsyncMock(return_value={'result': 'accepted'}))
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context) if allow_contact else None
+    with use_context(nudge.context), permit_contact(contact):
+        result = await go2_move('forward', distance_m=.25, speed=.25)
+    assert result['result'] == ('ok' if allow_contact else 'blocked'), result
+    assert result['stop']['result'] == 'ok' and commands[-1] == (0, 0, 0)
+    if allow_contact:
+        assert .20 <= result['distance_m'] <= .30
+        assert contact.claimed is True
+    assert robot.occupancy_grid.obstacles.any()
+
+
+@pytest.mark.parametrize('obstacle', [[.95, 0., .25], [.65, 0., .50]])
+def test_contact_keeps_other_obstacles_in_cargo_sweep_including_same_xy(nudge, obstacle):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context)
+    with pytest.raises(TargetUnlocalized, match='cargo_contact_path_blocked'):
+        contact.grid_for(nudge.build_grid(extra=[obstacle]), nudge.pose)
+
+
+def test_contact_does_not_exempt_a_neighboring_body_obstacle(nudge):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context)
+    view = contact.grid_for(nudge.build_grid(extra=[[.35, .15, .30]]), nudge.pose)
+    assert view.is_body_clear(.15, 0., 0.) is False
+
+
+@pytest.mark.parametrize('change', ['missing', 'jumped', 'session', 'expired'])
+def test_contact_stops_when_target_or_scope_cannot_be_confirmed(nudge, change):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .25, nudge.context)
+    grid, pose = nudge.grid, dict(nudge.pose)
+    if change == 'missing':
+        grid = nudge.build_grid(cargo=False)
+    elif change == 'jumped':
+        grid = nudge.build_grid(shift=.25)
+    elif change == 'session':
+        pose['session_id'] = 'other-session'
+    else:
+        contact.until = time.monotonic() - 1
+    with pytest.raises(TargetUnlocalized, match='cargo_contact_'):
+        contact.grid_for(grid, pose)
+
+
+@pytest.mark.parametrize('direction,distance,speed', [('backward', .15, .25),
+    ('forward', .25, .25), ('forward', .15, .30)])
+def test_contact_cannot_be_repurposed_for_another_motion(nudge, direction, distance, speed):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .15, nudge.context)
+    with permit_contact(contact), pytest.raises(ValueError, match='cargo_contact_scope_mismatch'):
+        claim_contact(direction, distance, speed, nudge.context)
+
+
+def test_contact_is_consumed_once_and_does_not_leak_to_ordinary_move(nudge):
+    contact = CargoContact(nudge.samples[1], nudge.pose, .15, nudge.context)
+    with permit_contact(contact):
+        assert claim_contact('forward', .15, .25, nudge.context) is contact
+        assert claim_contact('forward', .15, .25, nudge.context) is None
+    assert claim_contact('forward', .15, .25, nudge.context) is None
 
 
 @pytest.mark.asyncio
@@ -188,7 +329,7 @@ async def test_cargo_and_destination_perception_share_measured_localization(monk
     geometry = Mock(wraps=perception._destination_geometry)
     monkeypatch.setattr(perception, '_destination_geometry', geometry)
     monkeypatch.setattr(rgb_lidar, 'go2_camera_profile', lambda *_: {})
-    def associate(*_args, diagnostics):
+    def associate(*_args, diagnostics, target_points):
         diagnostics['components'] = [{'extent_xyz_m': [.15] * 3, 'points': 12}]
         return {'x': .65, 'y': 0., 'uncertainty_m': .1}
     monkeypatch.setattr(rgb_lidar, 'associate_lidar_target', associate)

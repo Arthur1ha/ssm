@@ -86,7 +86,7 @@ def test_public_lamp_status_and_factual_reply_agree_after_recovery():
     assert _public_status(run) == "ok"
     run.status = completed_status(steps)
     answer = factual_fallback(run.agent_id, run.status, run)
-    assert "调好了" in answer and "没做成" not in answer
+    assert "成功回执" in answer and "未完成" not in answer
     run.initial_context = {"lamp_before": {"status": "current", "values": {"ism": "OFF"}}}
     assert reply_facts(run)["initial_context"] == run.initial_context
     assert reply_facts(run)["outcomes"]["unresolved_attempts"] == []

@@ -194,8 +194,6 @@ async def test_steward_respects_final_after_accepted_blink(monkeypatch, tmp_path
         raise AssertionError('accepted already counts as success under the current result contract')
 
     def http(endpoint, body, timeout):
-        if endpoint.endswith("/agent/replies"):
-            return {}
         assert endpoint == "/api/go2/chat"
         assert body["skill_id"] == "go2_sport" and body["params"] == {"cmd": "Hello"}
         assert sequence[-1] == "blink_dispatched"
