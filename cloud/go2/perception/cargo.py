@@ -1,16 +1,12 @@
-"""Paired cargo/colored-zone geometry from stationary camera and measured LiDAR.
+"""Cargo LiDAR measurements and approximate visual destination proximity.
 
-Vision proposes image regions. Actual image-color connectivity verifies the
-zone outline; LiDAR supplies cargo odom coordinates. No model delivery verdict
-or image-size change is interpreted as cargo movement.
+A destination may be a floor patch, a tiny marker, or an object's visible base.
+Proximity is image geometry, not a measured world distance or a model verdict.
 """
 from __future__ import annotations
 
 import math
 import time
-
-import cv2
-import numpy as np
 
 from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.connection import go2
@@ -18,85 +14,37 @@ from cloud.go2.perception import visual_target
 from cloud.go2.perception.visual_target import TargetUnlocalized
 
 
-def _points(value, width, height):
-    if (not isinstance(value, list) or not 3 <= len(value) <= 12
-            or any(not isinstance(point, list) or len(point) != 2
-                   or any(type(v) not in (int, float) or not math.isfinite(v)
-                          or not 0 <= v <= 1000 for v in point) for point in value)):
-        raise TargetUnlocalized('delivery_polygon_invalid')
-    points = np.asarray(value, dtype=np.float32) * [width / 1000, height / 1000]
-    contour = np.rint(points).astype(np.int32).reshape(-1, 1, 2)
-    if not cv2.isContourConvex(contour) or cv2.contourArea(contour) < width * height * .005:
-        raise TargetUnlocalized('delivery_polygon_invalid')
-    return contour
+def _destination_geometry(frame, detected):
+    """Accept about one cargo width of separation at the visible floor level."""
+    cargo, target = detected.get('cargo_bbox_1000'), detected.get('destination_bbox_1000')
+    for box in (cargo, target):
+        visual_target.target_offset({'found': True, 'bbox_1000': box}, frame)
+    kind = detected.get('destination_kind')
+    if kind not in {'region', 'marker', 'object'}:
+        raise TargetUnlocalized('destination_geometry_invalid')
+    # For an upright object, the visible base matters; its upper silhouette
+    # cannot make a distant cargo seem close. Regions use the visible patch,
+    # with no minimum area, full-outline or full-containment requirement.
+    cx, cy = (cargo[0] + cargo[2]) / 2, cargo[3]
+    if kind == 'object':
+        tx, ty = (target[0] + target[2]) / 2, target[3]
+    else:
+        tx = min(max(cx, target[0]), target[2])
+        ty = min(max(cy, target[1]), target[3])
+    gap_px = math.hypot((cx - tx) * frame['width'] / 1000,
+                        (cy - ty) * frame['height'] / 1000)
+    cargo_width_px = (cargo[2] - cargo[0]) * frame['width'] / 1000
+    gap_widths = gap_px / cargo_width_px
+    return {'cargo_bbox_1000': cargo, 'destination_bbox_1000': target,
+            'destination_kind': kind, 'destination_anchor_1000': [tx, ty],
+            'destination_gap_cargo_widths': round(gap_widths, 3),
+            'near_destination': gap_widths <= 1.,
+            'destination_precision': 'approximate_visual_proximity'}
 
 
-def _zone_geometry(jpeg, frame, detected, expected_hsv=None, expected_rgb=None):
-    """Check actual colored pixels and containment, independently of prose."""
-    image = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-    if image is None or image.shape[:2] != (frame['height'], frame['width']):
-        raise TargetUnlocalized('frame_dimensions_invalid')
-    height, width = image.shape[:2]
-    box = detected.get('cargo_bbox_1000')
-    # Reuse the existing bbox validator rather than accepting arbitrary pixels.
-    visual_target.target_offset({'found': True, 'bbox_1000': box}, frame)
-    box = np.asarray(box, dtype=float) * [width / 1000, height / 1000, width / 1000, height / 1000]
-    left, top, right, bottom = box.tolist()
-    polygon = _points(detected.get('destination_polygon_1000'), width, height)
-    if np.any(polygon[:, 0, 0] <= 2) or np.any(polygon[:, 0, 0] >= width - 3) or np.any(polygon[:, 0, 1] <= 2) or np.any(polygon[:, 0, 1] >= height - 3):
-        raise TargetUnlocalized('delivery_boundary_truncated')
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    region = np.zeros((height, width), np.uint8)
-    cv2.fillPoly(region, [polygon], 1)
-    samples = region.copy()
-    samples[max(0, int(top)):min(height, math.ceil(bottom)),
-            max(0, int(left)):min(width, math.ceil(right))] = 0
-    saturated = (samples != 0) & (hsv[:, :, 1] >= 65) & (hsv[:, :, 2] >= 40)
-    if np.count_nonzero(saturated) < max(100, width * height * .001):
-        raise TargetUnlocalized('delivery_color_unverified')
-    histogram = np.bincount(hsv[:, :, 0][saturated], minlength=180)
-    hue = int(np.argmax(histogram))
-    difference = np.abs(hsv[:, :, 0].astype(float) - hue)
-    hue_match = np.minimum(difference, 180 - difference) <= 12
-    selected = saturated & hue_match
-    if np.count_nonzero(selected) < .55 * np.count_nonzero(samples):
-        raise TargetUnlocalized('delivery_color_not_uniform')
-    signature = [hue, int(np.median(hsv[:, :, 1][selected])), int(np.median(hsv[:, :, 2][selected]))]
-    if expected_rgb is not None:
-        signal = cv2.cvtColor(np.asarray([[expected_rgb]], dtype=np.uint8), cv2.COLOR_RGB2HSV)[0, 0]
-        hue_error = abs(float(signal[0]) - hue)
-        if signal[1] < 65 or min(hue_error, 180 - hue_error) > 12:
-            raise TargetUnlocalized('delivery_zone_signal_mismatch')
-    if expected_hsv is not None:
-        if not isinstance(expected_hsv, list) or len(expected_hsv) != 3:
-            raise TargetUnlocalized('delivery_reference_invalid')
-        hue_error = abs(float(expected_hsv[0]) - hue)
-        if min(hue_error, 180 - hue_error) > 12:
-            raise TargetUnlocalized('delivery_zone_changed')
-    actual = ((region != 0) & hue_match & (hsv[:, :, 1] >= 65) & (hsv[:, :, 2] >= 40)).astype(np.uint8)
-    contours, _ = cv2.findContours(actual, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = [contour for contour in contours if cv2.contourArea(contour) >= width * height * .003]
-    if not contours:
-        raise TargetUnlocalized('delivery_region_not_connected')
-    contour = max(contours, key=cv2.contourArea)
-    # A conservative completion proof: the entire cargo image bbox, including
-    # its visible floor contact, is enclosed by the same real color region's
-    # outside boundary AND the fully visible floor-zone polygon. A partially
-    # hidden boundary or mere overlap can never become a delivery result.
-    corners = [(left, top), (right, top), (right, bottom), (left, bottom)]
-    inside = all(cv2.pointPolygonTest(shape, point, True) >= 3
-                 for shape in (polygon, contour) for point in corners)
-    center = np.mean(polygon[:, 0, :], axis=0)
-    return {'zone_color_hsv': signature,
-            'zone_polygon_1000': detected['destination_polygon_1000'],
-            'zone_pixel_contour': contour[:, 0, :].tolist(),
-            'zone_center_1000': [float(center[0] * 1000 / width), float(center[1] * 1000 / height)],
-            'cargo_bbox_1000': detected['cargo_bbox_1000'], 'contained': inside}
-
-
-async def observe_cargo(cargo: str, destination: str, *, after_frame_id=None,
-                        after_received_at=None, expected_hsv=None, expected_rgb=None) -> dict:
-    """Observe both exact targets on one stationary, sensor-paired image."""
+async def observe_cargo(cargo: str, destination: str | None = None, *, after_frame_id=None,
+                        after_received_at=None) -> dict:
+    """Measure cargo and locate a destination patch, marker or object base."""
     from cloud.go2.navigation.occupancy_grid import OccupancyGrid
     from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
 
@@ -114,26 +62,41 @@ async def observe_cargo(cargo: str, destination: str, *, after_frame_id=None,
     if grid.measured_floor_z is None:
         raise TargetUnlocalized('measured_floor_unavailable')
     instruction = (
-        '只定位本张图像中指定的同一货物和指定颜色的地面配送区域，不判断送达或动作成功。'
+        '只定位本张图像中指定的同一地面货物和指定目的地，不判断送达、是否靠近或动作成功。'
         '输出JSON：{"cargo_count":整数,"destination_count":整数,"cargo_ground_contact_visible":布尔值,'
-        '"destination_is_floor":布尔值,"destination_boundary_complete":布尔值,'
-        '"cargo_bbox_1000":[左,上,右,下],"destination_polygon_1000":[[x,y],...]}。'
-        '坐标相对整张图归一化0到1000；配送区域多边形3到12个顶点，沿真实可见边界顺序排列。'
+        '"destination_ground_contact_visible":布尔值,"destination_kind":"region或marker或object",'
+        '"cargo_bbox_1000":[左,上,右,下],"destination_bbox_1000":[左,上,右,下]}。'
+        '坐标相对整张图归一化0到1000。目的地可为一片色块、小标记或用户指定的具体物体；'
+        'region为地面区域，marker为地面小标记，object为物体标识，bbox下边缘须对应其可见底部。'
+        '目的地不需要完整边界、特定面积或能够容纳货物；只框出当前实际可见部分，不补画遮挡边界。'
         'cargo_count和destination_count必须分别是符合完整描述的目标数量，有歧义或相似多个不能选一个冒充唯一。'
-        '只接受确在地面的货物以及指定的有色地面区域；同色杂物、墙面或箱子不能当作配送区域。'
-        '看不清完整区域外边界时destination_boundary_complete=false，不能补画被遮挡、画面外或想象的边界。'
+        'destination_ground_contact_visible表示能看到指定区域在地面的位置或物体底部与地面的接触处；'
+        '同色但不符合指定描述的杂物不能冒充目的地，货物本身不能冒充目的地。'
         'cargo_ground_contact_visible仅在货物与地面接触处真实可见时为true。'
         '不输出世界坐标、距离或送达结论。')
+    if destination is None:
+        instruction = (
+            '只定位本张图像中指定的同一地面货物，不判断动作成功，不要求配送区域。'
+            '输出JSON：{"cargo_count":整数,"cargo_ground_contact_visible":布尔值,'
+            '"cargo_bbox_1000":[左,上,右,下]}。坐标相对整张图归一化0到1000。'
+            'cargo_count必须是符合完整描述的目标数量，有歧义或相似多个不能冒充唯一。'
+            'cargo_ground_contact_visible仅在货物与地面接触处真实可见时为true。'
+            '不输出世界坐标、距离或货物移动结论。')
     detected = await visual_target._ask_vision(jpeg,
-        '货物：' + cargo + '；本单唯一配送区域：' + destination,
-        frame, instruction, 'cargo_delivery_geometry')
+        '货物：' + cargo + ('；本单唯一目的地：' + destination if destination is not None else ''),
+        frame, instruction, 'cargo_delivery_geometry' if destination is not None else 'cargo_geometry')
     if (type(detected.get('cargo_count')) is not int or detected.get('cargo_count') != 1
-            or type(detected.get('destination_count')) is not int or detected.get('destination_count') != 1
-            or detected.get('cargo_ground_contact_visible') is not True
-            or detected.get('destination_is_floor') is not True
-            or detected.get('destination_boundary_complete') is not True):
-        raise TargetUnlocalized('cargo_or_destination_ambiguous')
-    geometry = await invoke_blocking(_zone_geometry, jpeg, frame, detected, expected_hsv, expected_rgb)
+            or detected.get('cargo_ground_contact_visible') is not True):
+        raise TargetUnlocalized('cargo_ambiguous' if destination is None else 'cargo_or_destination_ambiguous')
+    if destination is not None:
+        if (type(detected.get('destination_count')) is not int or detected.get('destination_count') != 1
+                or detected.get('destination_ground_contact_visible') is not True):
+            raise TargetUnlocalized('cargo_or_destination_ambiguous')
+        geometry = _destination_geometry(frame, detected)
+    else:
+        visual_target.target_offset({'found': True, 'bbox_1000': detected.get('cargo_bbox_1000')}, frame)
+        geometry = {'cargo_bbox_1000': detected['cargo_bbox_1000'], 'near_destination': False,
+                    'destination_anchor_1000': None}
     live = visual_target._live_pose(frame['odom_session_id'])
     visual_target._ensure_stable(pose, live)
     camera = go2_camera_profile(frame['width'], frame['height'])

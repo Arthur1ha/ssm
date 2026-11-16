@@ -218,7 +218,7 @@ async def go2_find_object(target: str) -> dict:
     return await run_search(target)
 
 
-async def go2_push_cargo(cargo: str, destination: str, distance_m: float = .15) -> dict:
+async def go2_push_cargo(cargo: str, destination: str | None = None, distance_m: float = .15) -> dict:
     """One guarded gait advance; only actual cargo/zone evidence proves delivery."""
     from cloud.go2.navigation.cargo_push import push_cargo
     return await push_cargo(cargo, destination, distance_m)

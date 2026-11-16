@@ -417,8 +417,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 on_step=on_step, on_progress=progress,
                 effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
                 initial_tool=initial_tool, resume=resume,
-                terminal_tools=frozenset({"go2_navigate_to_visible_target", "go2_find_object"}
-                    | ({initial_tool[0]} if delegated and initial_tool else set())),
+                terminal_tools=frozenset({initial_tool[0]} if delegated and initial_tool else set()),
                 resume_value=message if resume else None, checkpointer=view.checkpointer)
         except asyncio.CancelledError:
             progress_closed.set()

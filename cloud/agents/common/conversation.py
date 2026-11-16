@@ -4,13 +4,14 @@ from langchain_core.messages import AIMessage, HumanMessage, trim_messages
 from langchain_core.messages.utils import count_tokens_approximately
 
 
-def trim_dialogue(messages):
+def trim_dialogue(messages, *, include_pending=False):
     """Keep complete recent exchanges, within both a turn and token budget."""
+    end_on = ("human", "ai") if include_pending else "ai"
     recent = trim_messages(messages, max_tokens=16, token_counter=len,
-                           strategy="last", start_on="human", end_on="ai")
+                           strategy="last", start_on="human", end_on=end_on)
     return trim_messages(recent, max_tokens=3000,
                          token_counter=count_tokens_approximately,
-                         strategy="last", start_on="human", end_on="ai")
+                         strategy="last", start_on="human", end_on=end_on)
 
 
 def dialogue_turn(run):

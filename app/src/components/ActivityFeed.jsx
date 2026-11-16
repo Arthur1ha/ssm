@@ -142,8 +142,8 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     {(expanded || isActive || isEnding) && <ActivityMembers activity={activity} events={events} agents={agents}
       unitData={unitData} connected={connected} getName={getName}/>}
     {error && <div className="space-activity__error" role="alert">{error}</div>}
-    {!showTimeline && <div className="space-activity__summary"><span>最新动态</span><p>{latestSpeech
-      ? `${getName(latestSpeech.event.unit_id)}：${latestSpeech.event.text}` : isEnded ? '本次活动已结束' : '正在等待设备动态'}</p></div>}
+    {!showTimeline && !isEnded && <div className="space-activity__summary"><span>最新动态</span><p>{latestSpeech
+      ? `${getName(latestSpeech.event.unit_id)}：${latestSpeech.event.text}` : '正在等待设备动态'}</p></div>}
     {showTimeline && <div className="space-activity__timeline" ref={timelineRef} onScroll={event => {
       const el=event.currentTarget, near=el.scrollHeight-el.scrollTop-el.clientHeight<80;
       if (!near && followTimeline.current) setReadingWindow(rows);
@@ -161,7 +161,7 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
                 allEvents={events} agents={agents} getName={getName} finished/>}
             </> : ['message','question'].includes(row.kind) ? <>
               <AgentSpeech compact agent={unit} name={name} target={event.target_unit_id ? getName(event.target_unit_id) : ''}
-                text={event.text || '需要你补充信息。'} emotion={event.emotion}>
+                text={event.text || '需要你补充信息。'}>
                 {receipt && <small className="space-activity__receipt">{receipt}</small>}
               </AgentSpeech>
               {row.kind==='question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>回答{name}</button>}
@@ -183,7 +183,7 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     {allRows.length>0 && !hasQuestion && (!isActive || allRows.length>rows.length || expanded) && <button type="button"
       className="space-activity__toggle" aria-label={expanded ? '收起活动记录' : '展开活动记录'} aria-expanded={expanded}
       onClick={() => {setReadingWindow(null);setExpanded(value => !value);}}>
-      <span>活动记录 · {allRows.length}</span><svg className="process-chevron" data-open={expanded} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+      <span>{expanded ? '收起详情' : '查看详情'}</span><svg className="process-chevron" data-open={expanded} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
     </button>}
   </section>;
 }

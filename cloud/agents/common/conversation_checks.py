@@ -89,6 +89,17 @@ def test_dialogue_keeps_recent_complete_pairs_with_a_budget():
     assert recent[-1].content == "answer 11"
 
 
+def test_pending_clarification_keeps_latest_answer_within_history_budget():
+    messages = [message for number in range(12) for message in (
+        HumanMessage(content=f"question {number}"), AIMessage(content=f"answer {number}"))]
+    messages.append(HumanMessage(content="暖一点吧"))
+    recent = trim_dialogue(messages, include_pending=True)
+    assert len(recent) <= 16
+    assert isinstance(recent[0], HumanMessage)
+    assert recent[-1].content == "暖一点吧"
+    assert recent[-2].content == "answer 11"
+
+
 @pytest.mark.asyncio
 async def test_go2_recovery_preserves_previous_dialogue(tmp_path, monkeypatch):
     import asyncio

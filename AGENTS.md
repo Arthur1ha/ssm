@@ -29,7 +29,7 @@
 | 边缘库 | `umqtt.simple`、`neopixel`、`machine`、`ujson` | 需确认固件提供或另行安装 `umqtt.simple` |
 | 消息代理 | Mosquitto + paho-mqtt | 模板仅 TCP 1883，无 WS 9001；云端 paho `>=1.6.1,<2.0` |
 | 云端 AI | LangChain 工具调用 + LangGraph 逐步任务图、文件检查点 | langchain≥1、langgraph≥1 |
-| LLM | 兼容 OpenAI 的服务，统一由 `agents/common/models.py` 构造 | 管家用 `MODEL_LIST`；灯/Go2 用 `DEVICE_TEXT_MODEL`；视觉用 `GO2_VISION_MODEL` |
+| LLM | 兼容 OpenAI 的服务，统一由 `agents/common/models.py` 构造 | 全系统文字推理共用 `TEXT_MODEL`；视觉识别共用 `VISION_MODEL` |
 | Go2 机器狗 | `unitree-webrtc-connect` ≥2.1.2 + OpenCV HOG/Haar + 视觉语言模型、RGB/LiDAR | 数据面 HTTP/SSE/WebRTC，控制面 card/status/state 仍走 MQTT |
 | 人员库 | 腾讯云 IAI 3.0 + 空间人员元数据 | 手机照片登记，见 `cloud/space/people/` |
 | 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
@@ -258,6 +258,8 @@ Go2 加入活动仍配置 `free_explore`，但活动原话先进入既有 Graph 
 普通同伴回复沿用可信入口关联的 `conversation_id/reply_to`，同一处理轮显式发信与自动最终回复共用一个出口；需要续谈时回到原会话的现有角色 Graph，不另起确认气泡模型或无条件消息往返。管家执行收尾只总结当前运行的目标及真实回执，历史用于承接指代和偏好，不主动续写旧任务。
 
 游戏在 `peers/games/` 按游戏分文件维护规则、玩法、策略说明、可用条件和执行入口；统一注册表汇总，不在角色提示词中重复维护各游戏规则。自主社交不使用固定发送间隔、次数配额或同话题冷却，由现有 Graph 结合 traits、环境、任务和近期互动判断；保留新事件去重、活动与任务占用检查、消息期限及真实回执约束。
+
+配送 `push_delivery` 的目的地可为地面色块、小标记或物体标识；送到大概附近即可，不要求货物完全覆盖、最小区域面积或完整边界。送达沿用真实货物测量、停稳和两张新鲜画面的近邻复核，精度明确为视觉大致到位，不把机器人到站或模型自述当货物送达。灯色可作为双方约定的目的地指令，不要求目标物体与灯同色。单独推物测试可省略目的地，不能因此声称送达。
 
 活动消息/动作可保存 `decision_basis`、`state_at_event`、`trigger_message_id`。决策理由与引用经 `space/decisions.py` 校验，依据只来自新鲜、同活动的真实观察/状态/用户要求；不能让模型自填观察事实。历史摘要不能当成当前事实，相邻消息也不能被 UI 推断成动作原因或成功证据。
 

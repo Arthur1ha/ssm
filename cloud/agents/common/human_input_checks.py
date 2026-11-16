@@ -11,6 +11,7 @@ from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.effects import FileEffectLedger
+from cloud.agents.common.messages import role_messages
 from cloud.agents.common.runner import GraphRun, run_role_graph
 
 
@@ -38,6 +39,69 @@ class Model(JsonReplyModel):
 
 def response(kind, text):
     return AIMessage(content=json.dumps({"kind": kind, "text": text}, ensure_ascii=False))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_id", ["cloud_orchestrator", "esp32_desk_led", "go2"])
+async def test_repeated_clarifications_survive_reopen_and_next_turn(agent_id, tmp_path, monkeypatch):
+    monkeypatch.setattr("cloud.agents.common.runner.emit_agent_event", lambda *_a, **_k: None)
+    executed = []
+
+    async def execute(name, args, step_id):
+        executed.append(step_id)
+        return {"result": "ok", "receipt": "confirmed"}
+
+    goal = "先开灯，再调整阅读光"
+    deadline = time.time() + 60
+    common = dict(tool_schemas={"adjust_device": adjust_device}, execute=execute,
+                  build_messages=lambda run: role_messages("当前角色", run.goal,
+                      context={"sensor": "fresh"}, supplement=run.supplement))
+
+    def new_run():
+        return GraphRun("clarifications", "session", goal, deadline, agent_id=agent_id)
+
+    def saver():
+        return FileCheckpointSaver(tmp_path / "checkpoints")
+
+    ledger = FileEffectLedger(tmp_path / "effects")
+    first = Model([
+        AIMessage(content="", tool_calls=[{
+            "name": "adjust_device", "args": {"final": False}, "id": "physical-on"}]),
+        response("question", "偏暖还是偏冷？")])
+    paused = await run_role_graph(new_run(), model=first, checkpointer=saver(),
+                                  effect_ledger=ledger, **common)
+    assert paused.status == "needs_clarification"
+    config = {"configurable": {"thread_id": thread_id_for(agent_id, "session")}}
+
+    def saved_dialogue():
+        return saver().get_tuple(config).checkpoint["channel_values"]["messages"]
+
+    assert [m.content for m in saved_dialogue()] == [goal, "偏暖还是偏冷？"]
+    second = Model([response("question", "还要再亮一点吗？")])
+    await run_role_graph(new_run(), model=second, checkpointer=saver(),
+                         effect_ledger=ledger, resume=True, resume_value="暖一点吧", **common)
+    assert [m.content for m in saved_dialogue()] == [
+        goal, "偏暖还是偏冷？", "暖一点吧", "还要再亮一点吗？"]
+    third = Model([response("final", "明白，保留暖光偏好。")])
+    final = await run_role_graph(new_run(), model=third, checkpointer=saver(),
+        effect_ledger=ledger, resume=True, resume_value="不用再亮了", **common)
+    assert final.status == "ok"
+    expected = [goal, "偏暖还是偏冷？", "暖一点吧", "还要再亮一点吗？", "不用再亮了"]
+    dialogue = [m for m in third.inputs[0] if isinstance(m, (HumanMessage, AIMessage))
+                and m.name is None and not getattr(m, "tool_calls", None)]
+    assert [m.content for m in dialogue] == expected
+    assert [m.type for m in dialogue] == ["human", "ai", "human", "ai", "human"]
+    assert final.steps[0]["result"]["receipt"] == "confirmed"
+    assert executed == ["physical-on"]
+    assert [m.content for m in saved_dialogue()] == [*expected, "明白，保留暖光偏好。"]
+
+    following = Model([response("final", "你说过暖一点。")])
+    await run_role_graph(GraphRun("next-turn", "session", "我刚才选的什么光？", deadline,
+        agent_id=agent_id), model=following, checkpointer=saver(), effect_ledger=ledger, **common)
+    contents = [m.content for m in following.inputs[0]]
+    assert contents.count("暖一点吧") == contents.count(goal) == 1
+    assert "不用再亮了" in contents
+    assert len(saved_dialogue()) == 8
 
 
 @pytest.mark.asyncio

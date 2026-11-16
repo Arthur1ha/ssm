@@ -228,7 +228,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             mapping_text = "；".join(f"{label}＝{labels[choice]}" for choice, label in CHOICES.items())
             record("message", f"本局映射提议：{mapping_text}。这是公开规则，待双方确认。\n{answer['speech']}",
                    role=role, stage="mapping_proposal", emotion=answer.get("emotion"))
-        record("message", "待确认的规则：一把定胜负，平局重来。狗赢就沿安全路径到本局确认的灯附近关灯；"
+        record("message", "待确认的规则：一把定胜负，平局重来。狗赢就沿安全路径到本局确认的灯附近停稳，"
+               "抬前腿象征性按灯，动作确认完成后关灯；"
                "灯赢就由狗表演一次。双方确认映射后先认灯定位，再秘密选拳、同时展示。", stage="terms_proposal")
         return {"proposals": {"lamp": lamp, "go2": dog}, "terms": terms,
                 "round": 1, "history": [], "arrived": False}
@@ -326,7 +327,19 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         if not state.get("arrived"):
             raise GameStopped("arrival_not_confirmed")
-        record("message", "已在约定目标附近停稳并复核，兑现本局的关灯约定。")
+        gesture_id = f"rps_{invitation_id}_switch_off_gesture"
+        record("action", "已在约定目标附近停稳并复核，准备抬前腿象征性按一下灯。",
+               action="go2_sport", arguments={"cmd": "Hello"}, task_id=gesture_id)
+        result = await execute_tool("go2_sport", {"cmd": "Hello"}, context=context,
+                                    request_id=gesture_id)
+        record("action_result", "象征性按灯的抬前腿动作" +
+               ("已确认完成。" if result.get("result") == "ok" else "尚未确认完成。"),
+               action="go2_sport", arguments={"cmd": "Hello"}, status=result.get("result", "unknown"),
+               task_id=result.get("command_request_id") or gesture_id)
+        if result.get("result") != "ok":
+            raise GameStopped("game_switch_off_gesture_unconfirmed:" + str(result.get("error") or result.get("result")))
+        check()
+        record("message", "抬前腿动作已确认完成，现在兑现本局的关灯约定。")
         await physical("SET_STATE", {"state": "OFF"}, "prize:off")
         return {"result": "ok", "reason": "go2_won_lamp_off_confirmed"}
 
@@ -427,7 +440,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             reason = adjudicated_winner + "_won:" + reason
         await drive._advance_task(goal, stage="finish", result={"result": status, "reason": reason,
                                                               "game_winner": adjudicated_winner})
-    text = {"go2_won_lamp_off_confirmed": "猜拳攻灯结束：狗猜拳获胜，已确认在约定的灯附近停稳并关灯。",
+    text = {"go2_won_lamp_off_confirmed": "猜拳攻灯结束：狗猜拳获胜，已确认在约定的灯附近停稳、抬前腿象征性按灯并关灯。",
             "lamp_won_performance_confirmed": "猜拳攻灯结束：灯猜拳获胜，狗已完成约定的表演。"}.get(reason)
     if text is None:
         text = ("猜拳结果已确定：" + ("狗获胜" if adjudicated_winner == "go2" else "灯获胜")
@@ -456,9 +469,11 @@ GAME = Game(
            "双方私下锁定选择后并发派发变色和动作，不等待一方完成才派发另一方；设备与网络存在时延，不承诺物理上精确同步。不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
            "一把定胜负，平局原地重来，直到分出胜负或本局期限到达。展示须灯物理回执与狗真实动作反馈均确认才能判拳。"
            "狗赢后用找物流程接近约定的圆球灯，沿可通行路径分段移动、停稳再看；"
-           "连续新鲜画面确认已在附近且真实停稳后才关灯，不要求雷达分离出灯的点簇或精确目标距离，须真实关灯回执；"
+           "连续新鲜画面确认已在附近且真实停稳后，执行Hello挥手抬前腿象征性按灯，"
+           "等待真实动作完成反馈后才发送关灯命令，不要求实际碰灯；"
+           "不要求雷达分离出灯的点簇或精确目标距离，须真实关灯回执；"
            "灯赢后由狗结合当前条件选择一个支持的表演动作，可以跳舞或其他动作，须真实完成回执。"
-           "猜拳胜负与后续动作完成分开记录，导航、关灯或表演失败不能改判输赢，未确认不能声称兑现成功。"
+           "猜拳胜负与后续动作完成分开记录，导航、抬前腿、关灯或表演失败不能改判输赢，未确认不能声称兑现成功。"
            "游戏期间灯暂停普通自主调光；用户介入、活动结束、断连、定位会话改变或期限到达则中断，"
            "动作未知按原任务核对，重启不重放旧游戏。本局履约完成后释放游戏占用，保留原自主许可，"
            "由既有自主Graph继续自由探索；用户接管或活动结束不恢复。"

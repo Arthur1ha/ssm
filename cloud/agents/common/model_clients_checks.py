@@ -9,11 +9,42 @@ import pytest
 from cloud.agents.common import models
 
 
+@pytest.mark.asyncio
+async def test_all_roles_share_text_model_and_vision_uses_its_own_setting(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "local-test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("TEXT_MODEL", " deepseek-text ")
+    monkeypatch.setenv("VISION_MODEL", " shared-vision ")
+    requests = []
+    real_client = httpx.AsyncClient
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body["model"])
+        return httpx.Response(200, json={
+            "id": "test", "object": "chat.completion", "created": 1,
+            "model": body["model"], "choices": [{"index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"}],
+        })
+
+    class LocalClient(real_client):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(models.httpx, "AsyncClient", LocalClient)
+    async with models.async_model_clients():
+        for role in ("steward", "lamp", "go2"):
+            assert (await models.get_text_model(role).ainvoke("hello")).content == "ok"
+        assert (await models.get_vision_model().ainvoke("inspect")).content == "ok"
+    assert requests == ["deepseek-text"] * 3 + ["shared-vision"]
+
+
 @pytest.mark.parametrize("role", ["lamp", "go2", "steward", "vision"])
 def test_successive_event_loops_get_fresh_clients(role, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "local-test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://model.test/v1")
-    monkeypatch.setenv("MODEL_LIST", "local-model")
+    monkeypatch.setenv("TEXT_MODEL", "local-model")
     clients = []
     loops = []
     real_client = httpx.AsyncClient

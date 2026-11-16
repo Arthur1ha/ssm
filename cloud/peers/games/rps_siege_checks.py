@@ -78,7 +78,7 @@ async def game_harness(monkeypatch):
     calls, timeline, decisions, observations = [], [], [], []
     fixture = SimpleNamespace(
         lamp_choices=["scissors"], dog_choices=["rock"],
-        gesture_result="ok", performance_result="ok", physical_result="ok", off_result="ok",
+        gesture_result="ok", switch_off_gesture_result="ok", performance_result="ok", physical_result="ok", off_result="ok",
         observation={"result": "ok", "message": "桌上的智能灯清楚可见。"}, target_visible=True,
         agreement=True, interrupt_after=None, interrupt_after_off=False,
         physical_results=[], interrupt_decision=None, concurrent_reveal=False,
@@ -158,6 +158,8 @@ async def game_harness(monkeypatch):
     reveal_release = {role: asyncio.Event() for role in ("lamp", "go2")}
     for release in reveal_release.values():
         release.set()
+    switch_off_started, switch_off_release = asyncio.Event(), asyncio.Event()
+    switch_off_release.set()
 
     @contextmanager
     def search_request(request_id, deadline):
@@ -177,6 +179,13 @@ async def game_harness(monkeypatch):
             observations.append(deepcopy(kwargs))
             return fixture.observation
         if name == "go2_sport":
+            if kwargs.get("request_id", "").endswith("_switch_off_gesture"):
+                assert kwargs["request_id"] == "rps_msg_test_rps_switch_off_gesture"
+                assert kwargs["context"].session_id == drive._context.session_id
+                switch_off_started.set()
+                await switch_off_release.wait()
+                return {"result": fixture.switch_off_gesture_result,
+                        "command_request_id": kwargs["request_id"]}
             if fixture.concurrent_reveal and kwargs.get("request_id", "").endswith("_gesture"):
                 reveal_started["go2"].set()
                 await asyncio.wait_for(reveal_started["lamp"].wait(), timeout=1)
@@ -238,7 +247,8 @@ async def game_harness(monkeypatch):
                            messenger=messenger, navigator=navigator, calls=calls,
                            timeline=timeline, decisions=decisions,
                            observations=observations,
-                           searches=searches, reveal_started=reveal_started, reveal_release=reveal_release)
+                           searches=searches, reveal_started=reveal_started, reveal_release=reveal_release,
+                           switch_off_started=switch_off_started, switch_off_release=switch_off_release)
 
 
 async def test_dog_wins_then_searches_nearby_without_metric_location_and_switches_off(game_harness):
@@ -253,6 +263,16 @@ async def test_dog_wins_then_searches_nearby_without_metric_location_and_switche
     off_indices = [index for index, call in enumerate(h.calls)
                    if call == ("SET_STATE", {"state": "OFF"})]
     assert len(off_indices) == 1 and off_indices[0] == len(h.calls)-1
+    assert h.calls[-3:] == [("go2_find_object", {"target": "桌上的智能灯"}),
+                            ("go2_sport", {"cmd": "Hello"}), ("SET_STATE", {"state": "OFF"})]
+    gesture_events = [row for row in h.timeline
+                      if row["task_id"] == "rps_msg_test_rps_switch_off_gesture"]
+    assert [row["event_type"] for row in gesture_events] == ["action", "action_result"]
+    assert all(row["action"] == "go2_sport" and row["arguments"] == {"cmd": "Hello"}
+               for row in gesture_events)
+    assert gesture_events[-1]["status"] == "ok"
+    assert h.timeline.index(gesture_events[-1]) < next(i for i, row in enumerate(h.timeline)
+                                                    if row.get("arguments") == {"state": "OFF"})
     h.messenger.send_result.assert_called_once_with(
         "msg_test_rps", "ok", task_id="task_test_rps", reason="go2_won_lamp_off_confirmed")
     h.messenger.get_status.assert_called_with("msg_test_acceptance")
@@ -316,7 +336,7 @@ async def test_draw_repeats_without_moving_until_first_decisive_throw(game_harne
     h.config.lamp_choices = ["rock"] * 35 + ["scissors"]
     h.config.dog_choices = ["rock"] * 36
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
-    assert len([1 for name, _ in h.calls if name == "go2_sport"]) == 36
+    assert len([1 for name, _ in h.calls if name == "go2_sport"]) == 37  # 36 throws, then symbolic press.
     assert [params for name, params in h.calls if name == "go2_find_object"] == [{"target": "桌上的智能灯"}]
     last_throw = [facts for _role, phase, facts in h.decisions if phase == "throw"][-1]
     assert last_throw["round"] == 36 and all(row["winner"] == "draw" for row in last_throw["history"])
@@ -517,6 +537,7 @@ async def test_unconfirmed_search_keeps_dog_win_but_never_switches_off(game_harn
     h.config.search_results[0].update(patch)
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert ("SET_STATE", {"state": "OFF"}) not in h.calls
+    assert not h.switch_off_started.is_set()
     assert h.messenger.send_result.call_args.kwargs["reason"].startswith("go2_won:game_approach_unconfirmed:")
     assert any(row.get("stage") == "rps_result" and row.get("reason") == "go2_won" for row in h.timeline)
     assert "狗获胜" in h.timeline[-1]["text"] and "未确认完成" in h.timeline[-1]["text"]
@@ -547,6 +568,46 @@ async def test_unconfirmed_switch_off_preserves_dog_win_without_preserving_outpu
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:lamp_action_unconfirmed:timeout"
     h.agent.end_peer_game.assert_called_once_with("rps:msg_test_rps", preserve_output=False)
+
+
+@pytest.mark.parametrize("result", ["accepted", "executing", "unknown", "error", "timeout"])
+async def test_unconfirmed_symbolic_press_preserves_dog_win_without_switching_off(game_harness, result):
+    h = game_harness
+    h.config.switch_off_gesture_result = result
+    await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
+    assert h.switch_off_started.is_set()
+    assert ("SET_STATE", {"state": "OFF"}) not in h.calls
+    assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:game_switch_off_gesture_unconfirmed:" + result
+    assert h.drive._advance_task.await_args.kwargs["result"]["game_winner"] == "go2"
+    assert "狗获胜" in h.timeline[-1]["text"] and "未确认完成" in h.timeline[-1]["text"]
+    h.navigator.stop_and_confirm.assert_awaited_once()
+    h.agent.end_peer_game.assert_called_once_with("rps:msg_test_rps", preserve_output=False)
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_symbolic_press_waits_for_completion_and_respects_user_interruption(game_harness, interrupt):
+    h = game_harness
+    h.switch_off_release.clear()
+    task = asyncio.create_task(rps_siege.GAME.execute(h.drive, h.event, "task_test_rps"))
+    try:
+        await asyncio.wait_for(h.switch_off_started.wait(), timeout=2)
+        assert not task.done()
+        assert ("SET_STATE", {"state": "OFF"}) not in h.calls
+        assert not any(row.get("stage") == "settlement" for row in h.timeline)
+        h.drive.user_interrupt = interrupt
+        h.switch_off_release.set()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        h.switch_off_release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert (("SET_STATE", {"state": "OFF"}) in h.calls) is not interrupt
+    if interrupt:
+        assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:autonomy_interrupted_or_offline"
+        h.agent.end_peer_game.assert_called_once_with("rps:msg_test_rps", preserve_output=False)
+    else:
+        assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won_lamp_off_confirmed"
 
 
 async def test_unconfirmed_performance_preserves_lamp_win(game_harness):

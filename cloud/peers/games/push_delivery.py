@@ -209,8 +209,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
 
     async def destination(state):
         observed = await observe("货物已按原任务找到。本单现在等待指挥官指定目的地。描述当前真正的配送区域"
-                                 "（地面标记或区域）的颜色、边界和可辨认特征；不要把同色杂物当配送区域。"
-                                 "若区域不可见或有多个相同区域，明确说明。")
+                                 "（色块、小地面标记或物体标识）的位置及可辨认特征；只需大概送到附近，"
+                                 "不要求区域完整边界或能够容纳货物。若目标不可见或有多个相似目标，明确说明。")
         answer = await decision("lamp", "destination", {**state, "stage": "destination", "observation": observed})
         record("message", answer["speech"], emotion=answer.get("emotion"), role=LAMP)
         if not answer["accepted"]:
@@ -310,7 +310,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             raise DeliveryStopped("cargo_push_unconfirmed:" + str(receipt.get("reason") or receipt.get("error") or receipt.get("result")))
         if (receipt.get("stop") or {}).get("result") != "ok":
             raise DeliveryStopped("cargo_push_stop_unconfirmed")
-        if receipt.get("delivered") is True and receipt.get("confirmation") != "cargo_contained_in_verified_zone_and_stopped":
+        if receipt.get("delivered") is True and receipt.get("confirmation") != "cargo_near_destination_and_stopped":
             raise DeliveryStopped("delivery_completion_unconfirmed")
         if not receipt.get("reference"):
             raise DeliveryStopped("cargo_identity_unconfirmed")
@@ -320,14 +320,14 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     async def complete(state):
         receipt = state.get("push_receipt") or {}
         if (receipt.get("result") != "ok" or receipt.get("delivered") is not True
-                or receipt.get("confirmation") != "cargo_contained_in_verified_zone_and_stopped"
+                or receipt.get("confirmation") != "cargo_near_destination_and_stopped"
                 or (receipt.get("stop") or {}).get("result") != "ok"):
             raise DeliveryStopped("delivery_completion_unconfirmed")
         check()
         # Final wording comes from the courier after observing the real result.
         answer = await decision("go2", "next", {**state, "stage": "delivered"})
         record("message", answer["speech"], emotion=answer.get("emotion"))
-        return {"result": "ok", "reason": "cargo_in_zone_confirmed"}
+        return {"result": "ok", "reason": "cargo_near_destination_confirmed"}
 
     def terminal_or(next_node):
         return lambda state: END if state.get("result") else next_node
@@ -425,8 +425,8 @@ GAME = Game(
     game_id=GAME_ID,
     name="指挥官与送货员",
     description=("灯与狗任一方都可自主邀请对方，确认指挥官与送货员角色后公布货物特征；"
-                 "狗先找货，找到后等待目的地指令，再按灯色匹配配送区域并推送货物。"
-                 "狗以短距离行走尝试用腿推动货物，每步停稳、重新观察货物，入区复核后才算送达。"),
+                 "狗先找货，找到后等待目的地指令，再按约定灯色和目的地描述推送货物。"
+                 "狗以短距离行走尝试用腿推动货物，每步停稳、重新观察货物，到指定标识附近复核后算送达。"),
     participants=("esp32_desk_led", "go2"),
     bidirectional=True,
     requires_idle=True,
@@ -440,7 +440,8 @@ GAME = Game(
     rules=(
         "准备：不要求安装推板；允许机器狗在既有运动门禁和避障校验内以短距离行走尝试用腿推动地面货物。"
         "没有专用踢腿动作，不用挥手、伸展或跳跃冒充受控推送；具体货物是否能推动由真实实机反馈决定。"
-        "场地布置可识别的货物及颜色不同的配送区域；货物需要狗根据特征寻找，不预先指定在狗面前。"
+        "场地布置可识别的货物和目的地；目的地可以是一片色块、小地面标记或物体标识，不要求完整区域边界。"
+        "货物需要狗根据特征寻找，不预先指定在狗面前。"
         "邀请与角色：灯与狗须处于同一个有效空间活动内，任一方均可结合当前任务和观察自主邀请对方；"
         "邀请及接受开局前须确认双方当前没有正在执行或等待确认的任务，任意一方忙碌时延后；空闲不等于愿意接受。"
         "不固定发起方，不用随机定时器强制邀请。对方自主决定是否接受，邀请送达不等于接受。"
@@ -453,15 +454,17 @@ GAME = Game(
         "等待指令：狗确认找到货物后报告结果并等待目的地指令，不能自行猜测或提前开始配送；"
         "等待期间可以自主问答、询问目的地或补充观察，不强制固定对白、问答轮次或等待时长。"
         "目的地：找到货物后，指挥官依据当前站点事实自主决定送往哪个区域，通过灯色给出指令；"
-        "灯设置对应颜色并等待物理回执，狗将真实灯色与当前可识别的配送区域匹配，"
-        "不把任意同色杂物当站点，也不凭历史摘要编造站点。指令或匹配不清时先澄清、观察，不盲推。"
+        "灯设置本单约定的指令色并等待物理回执，狗结合真实灯色、目的地描述和当前观察确认站点，"
+        "物体标识不必与灯同色，指令色不冒充目标的观察颜色；不凭历史摘要编造站点。"
+        "指令或目标不清时先澄清、观察，不盲推。"
         "配送：狗在目标明确且执行条件满足后，自主选择受控短距推送行动，每次0.1至0.25米，"
         "逐步靠近或尝试用腿推动，每步核验停稳、同一货物的真实位置及指定区域；"
         "机器人自身移动不等于货物移动，单纯画面框变化不算推送成功，不绕过原有避障或抹除货物障碍。"
         "货物偏离、卡住、丢失或通路受阻时停止，根据真实情况决定询问、复查或报告受阻，"
         "不凭移动距离猜测货物位置。"
-        "送达：只有同一目标货物进入本单指定的配送区域、狗停稳已由真实反馈确认，"
-        "且停稳后用新鲜画面复核货物入区、目标区域一致，才算送达；"
+        "送达：只有同一目标货物到达本单指定目的地附近、狗停稳已由真实反馈确认，"
+        "且停稳后用两张新鲜画面复核货物已到指定标识附近，才算大致送达；"
+        "不要求货物完全覆盖标记、完整区域边界或精确对位。"
         "狗自身到站、普通导航成功、请求 accepted、模型描述或消息送达都不能替代。"
         "送达不等于签收，取件或签收由人完成并另行确认。"
         "中断：用户介入、活动结束、配送中目标灯色改变、设备断连、定位会话改变、观测过期或任务期限结束时停止并核验结果；"

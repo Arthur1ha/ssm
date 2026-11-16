@@ -33,7 +33,6 @@
 .activity-member__gesture { display:block; color:var(--color-text-muted); font-size:10px; line-height:1.5; overflow-wrap:anywhere; }
 .activity-member--companion[data-stale="true"] .shape-face { opacity:.55; }
 .activity-member--companion:focus-visible { outline:2px solid var(--color-accent); outline-offset:3px; }
-.agent-speech__name .shape-face { display:inline-block; vertical-align:middle; margin:-5px 7px -3px 0; }
 @keyframes avatar-breathe { 0%,100% { transform:scale(1); } 50% { transform:translateY(-1px) scale(1.012,1.025); } }
 @keyframes avatar-blink { 0%,91%,97%,100% { transform:scaleY(1); } 94% { transform:scaleY(.08); } }
 @keyframes avatar-look { 0%,100% { transform:translateX(0); } 35%,60% { transform:translateX(3px); } }

@@ -20,7 +20,7 @@ from typing import Annotated, Any, Callable, Literal, TypedDict
 from langchain_core.exceptions import OutputParserException
 from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_core.messages import AnyMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Command, interrupt
@@ -202,7 +202,17 @@ async def run_role_graph(
         if on_progress:
             on_progress("considering" if current.steps else "planning", current.steps[-1] if current.steps else None)
         messages = await _await(build_messages(current))
-        history = trim_dialogue(state.get("messages", []))
+        history = trim_dialogue(state.get("messages", []), include_pending=True)
+        # Clarifications belong to this run's live dialogue, not completed
+        # historical requests. The role builder's goal/latest supplement are
+        # already present in this checkpoint transcript.
+        active = [message for message in history
+                  if (message.id or "").startswith(current.run_id + ":")]
+        if active:
+            history = [message for message in history if message not in active]
+            messages = [message for message in messages
+                        if not (isinstance(message, HumanMessage) and message.name is None)]
+            messages.extend(active)
         if history:
             # Keep role policy first and the current request last. History is
             # conversational context, never a receipt or permission to act.
@@ -270,7 +280,20 @@ async def run_role_graph(
                     dialogue = DialogueResponse(kind="final", text=text_parser.invoke(response))
                 current.emotion = dialogue.emotion
                 if dialogue.kind == "question":
+                    transcript = list(state.get("messages", []))
+                    if not active:
+                        transcript.append(HumanMessage(content=current.goal,
+                                                       id=f"{current.run_id}:user"))
+                        # Compatibility for a run paused before clarification
+                        # exchanges were added to the messages channel.
+                        if current.supplement:
+                            transcript.append(HumanMessage(content=current.supplement,
+                                id=f"{current.run_id}:clarification:legacy"))
+                    transcript.append(AIMessage(content=dialogue.text,
+                        id=f"{current.run_id}:clarification:question:{turns}"))
                     return {"run": asdict(current),
+                            "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                                         *trim_dialogue(transcript)],
                             "decision": {"kind": "ask", "question": dialogue.text[:500]}, "turns": turns}
                 current.status = completed_status(current.steps)
                 current.decision_draft = dialogue.text
@@ -447,7 +470,14 @@ async def run_role_graph(
             updated = await _await(finalize(current))
             if isinstance(updated, GraphRun):
                 current = updated
-        history = trim_dialogue([*state.get("messages", []), *dialogue_turn(current)])
+        history = state.get("messages", [])
+        if any((message.id or "").startswith(current.run_id + ":") for message in history):
+            answer = current.response or current.decision_draft
+            turn = ([AIMessage(content=answer, id=f"{current.run_id}:assistant")]
+                    if answer else [])
+        else:
+            turn = dialogue_turn(current)
+        history = trim_dialogue([*history, *turn])
         return {"run": asdict(current),
                 "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *history]}
 
@@ -458,7 +488,18 @@ async def run_role_graph(
         current.question = ""
         current.supplement = str(answer)
         current.status = "executing"
-        return {"run": asdict(current)}
+        transcript = list(state.get("messages", []))
+        if not any((message.id or "").startswith(current.run_id + ":") for message in transcript):
+            transcript.extend([
+                HumanMessage(content=current.goal, id=f"{current.run_id}:user"),
+                AIMessage(content=question,
+                          id=f"{current.run_id}:clarification:question:{state['turns']}")])
+        history = trim_dialogue([*transcript,
+            HumanMessage(content=str(answer),
+                         id=f"{current.run_id}:clarification:answer:{state['turns']}")],
+            include_pending=True)
+        return {"run": asdict(current),
+                "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *history]}
 
     graph = StateGraph(_State)
     graph.add_node("model", model_node)

@@ -263,6 +263,8 @@ async function browserChecks() {
     assert.match(await page.$eval('[data-decision-reason]',el=>el.innerText),/刚才它看到了白色玩偶/);
     assert.match(await page.$eval('[data-decision-evidence]',el=>el.innerText),/白色猫头鹰/);
     assert.match(await page.$eval('[data-decision-evidence]',el=>el.innerText),/原记录未保留/);
+    assert.equal(await page.$eval('.run-process__body',el=>el.textContent.includes('来玩找颜色吧')),false,
+      'Decision details repeated the message already displayed in its bubble');
     // A new event must preserve the user's explicit open state.
     await page.evaluate(()=>__render({events:[...__props.events,{event_id:'unrelated-new',event_type:'message',
       unit_id:'go2',text:'另一个独立消息',ts:Date.now()/1000}]}));
@@ -271,6 +273,24 @@ async function browserChecks() {
       decision_basis:{...basis,evidence:basis.evidence.map(row=>({...row,as_of:1}))}}]}),
       {invite:groundedInvite,basis:decisionBasis});
     await page.waitForFunction(()=>document.querySelector('[data-decision-evidence]')?.textContent.includes('决策时已过期'));
+    // Keep the deciding role distinct from its target, and keep receipt text
+    // visible even when the action has both arguments and a saved rationale.
+    await page.evaluate(({planned,result,basis})=>__render({events:[
+      {...planned,unit_id:'cloud_orchestrator',target_unit_id:'go2',arguments:{distance_m:0.2},decision_basis:basis},
+      {...result,unit_id:'cloud_orchestrator',target_unit_id:'go2'},
+    ]}),{planned,result, basis:decisionBasis});
+    await page.waitForSelector('.run-process__execution');
+    assert.equal(await page.$eval('.run-process__actor',el=>el.textContent),
+      await page.evaluate(()=>getAgentDisplayName('cloud_orchestrator')));
+    assert.match(await page.$eval('.run-process__target',el=>el.textContent),/呆呆狗/);
+    assert.match(await page.$eval('.run-process__notes',el=>el.textContent),/停止结果尚未确认/);
+    assert.deepEqual(await page.$$eval('.run-process__step-content > div',els=>els.map(el=>el.className)),
+      ['run-process__decision','run-process__execution','run-process__notes']);
+    if(process.env.SCREENSHOT_DIR) {
+      await page.setViewport({width:390,height:900});
+      await page.$eval('.run-process-summary',el=>{el.open=true;});
+      await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'activity-decision-390.png'),fullPage:true});
+    }
     await page.evaluate(round=>__render({events:[round]}),explicitRound);
     await page.waitForSelector('.activity-game-round');
     assert.equal(await page.$$eval('.activity-game-round .shape-face',rows=>rows.length),2);

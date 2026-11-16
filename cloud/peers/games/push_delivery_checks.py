@@ -79,7 +79,7 @@ async def delivery_harness(monkeypatch):
     monkeypatch.setattr(loop, "run_in_executor", inline_executor)
     calls, events, trace, search_ids, cargo_contexts = [], [], [], [], []
     search_evidence = {"frame_id": "found_cargo_frame", "target": "地上的小纸盒"}
-    config = SimpleNamespace(push_result="ok")
+    config = SimpleNamespace(push_result="ok", destination="红色地垫")
     lamp_color = {"rgb": (40, 80, 120), "brightness": 160}
     agent = SimpleNamespace(
         _autonomy_epoch=1, _command_epoch=1, _peer_game_id=None,
@@ -134,10 +134,10 @@ async def delivery_harness(monkeypatch):
         if phase == "destination":
             assert facts["cargo_receipt"]["found"] is True
             assert facts["courier_report"]["action"] == "question"
-            return {"accepted": True, "destination": "红色地垫", "color_name": "红色",
+            return {"accepted": True, "destination": config.destination, "color_name": "红色",
                     "color": {"r": 255, "g": 0, "b": 0, "brightness": 160},
                     "evidence_refs": [facts["observation"]["ref"]],
-                    "speech": "送到红色地垫，我用红光标示。"}
+                    "speech": f"送到{config.destination}附近，这单约定用红光表示。"}
         assert role == "go2" and phase == "next"
         if stage == "waiting_destination":
             assert facts["destination_confirmed"] is False
@@ -146,10 +146,10 @@ async def delivery_harness(monkeypatch):
         assert facts["destination_confirmed"] is True
         if stage == "delivered":
             assert facts["latest_push"]["delivered"] is True
-            assert facts["latest_push"]["confirmation"] == "cargo_contained_in_verified_zone_and_stopped"
+            assert facts["latest_push"]["confirmation"] == "cargo_near_destination_and_stopped"
             assert facts["latest_push"]["stop"]["result"] == "ok"
             return {"action": "finish", "question": "", "distance_m": None,
-                    "speech": "同一货物已确认在指定区域里，这单送到了。"}
+                    "speech": "同一货物已确认在指定标识附近，这单大致送到了。"}
         assert stage == "delivery"
         return {"action": "push", "question": "", "distance_m": 0.15,
                 "speech": "我沿已确认的方向短距推送这件货物。"}
@@ -172,14 +172,14 @@ async def delivery_harness(monkeypatch):
         trace.append(("tool", name))
         calls.append((name, deepcopy(params)))
         if name == "go2_observe":
-            return {"result": "ok", "message": "地面有一个小纸盒，旁边有边界清楚的红色地垫。"}
+            return {"result": "ok", "message": f"地面有一个小纸盒，旁边有可辨认的{config.destination}。"}
         if name == "go2_find_object":
             return {"result": "ok", "outcome": "nearby", "found": True,
                     "target": params["target"], "task_id": search_ids[-1], "stop": {"result": "ok"},
                     "evidence": deepcopy(search_evidence)}
         assert name == "go2_push_cargo"
         return {"result": config.push_result, "delivered": config.push_result == "ok",
-                "confirmation": "cargo_contained_in_verified_zone_and_stopped",
+                "confirmation": "cargo_near_destination_and_stopped",
                 "task_id": search_ids[-1], "stop": {"result": "ok"},
                 "reference": {"cargo": params["cargo"], "destination": params["destination"]}}
 
@@ -242,8 +242,10 @@ async def test_preflight_failure_keeps_announced_task_id(delivery_harness, monke
     h.drive._advance_task.assert_not_awaited()
 
 
-async def test_delivery_orders_find_report_destination_signal_and_real_push(delivery_harness):
+@pytest.mark.parametrize('destination', ['红色地垫', '白色椅子脚旁'])
+async def test_delivery_orders_find_report_destination_signal_and_real_push(delivery_harness, destination):
     h = delivery_harness
+    h.config.destination = destination
     await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
     ordered = [("decision", "lamp", "cargo", "cargo"), ("tool", "go2_find_object"),
                ("decision", "go2", "next", "waiting_destination"),
@@ -252,13 +254,13 @@ async def test_delivery_orders_find_report_destination_signal_and_real_push(deli
                ("decision", "go2", "next", "delivered")]
     assert [h.trace.index(step) for step in ordered] == sorted(h.trace.index(step) for step in ordered)
     assert [(name, params) for name, params in h.calls if name == "go2_push_cargo"] == [
-        ("go2_push_cargo", {"cargo": "地上的小纸盒", "destination": "红色地垫", "distance_m": 0.15})]
+        ("go2_push_cargo", {"cargo": "地上的小纸盒", "destination": destination, "distance_m": 0.15})]
     assert h.cargo_contexts == [{
-        "reference": {"cargo": "地上的小纸盒", "destination": "红色地垫",
+        "reference": {"cargo": "地上的小纸盒", "destination": destination,
                       "search_evidence": h.search_evidence},
         "request_id": "delivery_msg_delivery_push_0", "signal_rgb": (255, 0, 0)}]
     h.messenger.send_result.assert_called_once_with(
-        "msg_delivery", "ok", task_id="task_delivery", reason="cargo_in_zone_confirmed")
+        "msg_delivery", "ok", task_id="task_delivery", reason="cargo_near_destination_confirmed")
     assert h.agent._peer_game_id is None
 
 

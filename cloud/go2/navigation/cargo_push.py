@@ -29,15 +29,11 @@ _request: ContextVar[str | None] = ContextVar('cargo_push_request', default=None
 _signal: ContextVar[tuple | None] = ContextVar('cargo_push_signal', default=None)
 
 _REASONS = {
+    'cargo_alignment_required': '货物尚未在机身正前方的可推送方向，需要先重新对齐。',
     'cargo_destination_alignment_required': '货物与指定配送区域尚未在同一推送方向，需要先重新对齐。',
-    'cargo_or_destination_ambiguous': '当前画面无法唯一确认货物和完整的指定地面配送区域。',
-    'delivery_polygon_invalid': '指定配送区域的可见边界不足以可靠核验。',
-    'delivery_boundary_truncated': '指定配送区域边界未完整进入画面，暂不确认送达。',
-    'delivery_color_unverified': '尚未从实际画面确认配送区域的颜色。',
-    'delivery_color_not_uniform': '配送区域的颜色或范围尚不明确，需要重新观察。',
-    'delivery_zone_signal_mismatch': '画面中的配送区域颜色与灯已确认的指令颜色不一致。',
-    'delivery_zone_changed': '当前配送区域与本单先前确认的区域颜色不一致。',
-    'delivery_region_not_connected': '当前画面不能确认一个完整连续的配送区域。',
+    'cargo_or_destination_ambiguous': '当前画面尚不能辨认指定货物或目的地在地面的位置。',
+    'cargo_ambiguous': '当前画面无法唯一确认指定的地面货物或其地面接触位置。',
+    'destination_geometry_invalid': '尚未辨认出指定色块、地面标记或物体标识的位置。',
     'cargo_returns_unavailable': '雷达尚不能可靠分离这件货物，未开始推送。',
     'cargo_association_unconfirmed': '货物的视觉与雷达对应关系尚未确认。',
     'cargo_contact_geometry_unavailable': '当前测量不足以确认可靠的靠近或腿部接触位置。',
@@ -110,7 +106,7 @@ def _reference_for(sample, cargo, destination):
     return {'cargo': cargo, 'destination': destination,
             'odom_session_id': sample['odom_session_id'],
             'cargo_location': sample['cargo_location'],
-            'zone_color_hsv': sample['zone_color_hsv']}
+            'destination_kind': sample.get('destination_kind')}
 
 
 def _check_search_reference(reference, sample):
@@ -143,24 +139,24 @@ def _aligned(sample):
     forward = dx * math.cos(pose['heading']) + dy * math.sin(pose['heading'])
     lateral = -dx * math.sin(pose['heading']) + dy * math.cos(pose['heading'])
     box = sample['cargo_bbox_1000']
-    zone = sample['zone_center_1000']
+    zone = sample.get('destination_anchor_1000')
     # Screen geometry only constrains the push direction. It supplies neither
     # world distances nor successful movement evidence.
     if (forward <= 0 or abs(lateral) > .10
             or abs(math.atan2(lateral, forward)) > .18
             or abs((box[0] + box[2]) / 2 - 500) > 100
-            or abs(zone[0] - 500) > 150
-            or zone[1] >= box[3] - 10):
-        raise TargetUnlocalized('cargo_destination_alignment_required')
+            or zone is not None and (abs(zone[0] - 500) > 150 or zone[1] >= box[3] - 10)):
+        raise TargetUnlocalized('cargo_alignment_required' if zone is None else 'cargo_destination_alignment_required')
     return forward
 
 
-async def push_cargo(cargo: str, destination: str, distance_m: float = .15) -> dict:
+async def push_cargo(cargo: str, destination: str | None = None, distance_m: float = .15) -> dict:
     """Observe twice, make at most one measured forward move, then reobserve."""
     from cloud.go2.tools.executor import execute_tool
 
     if (not isinstance(cargo, str) or not cargo.strip() or len(cargo) > 150
-            or not isinstance(destination, str) or not destination.strip() or len(destination) > 150
+            or destination is not None and (not isinstance(destination, str)
+                or not destination.strip() or len(destination) > 150)
             or type(distance_m) not in (float, int) or not math.isfinite(distance_m)
             or not .1 <= distance_m <= .25):
         return {'result': 'rejected', 'error': 'invalid_cargo_push_parameters', 'delivered': False}
@@ -186,14 +182,12 @@ async def push_cargo(cargo: str, destination: str, distance_m: float = .15) -> d
         if reference is not None and (reference.get('cargo') != cargo
                 or reference.get('destination') != destination):
             raise TargetUnlocalized('cargo_delivery_contract_changed')
+        if _signal.get() is not None and destination is None:
+            raise TargetUnlocalized('cargo_delivery_contract_changed')
         _authorize(context)
-        hsv = (reference or {}).get('zone_color_hsv')
-        signal = _signal.get()
-        first = await _await_authorized(observe_cargo(cargo, destination,
-            expected_hsv=hsv, expected_rgb=signal), context)
+        first = await _await_authorized(observe_cargo(cargo, destination), context)
         before = await _await_authorized(observe_cargo(cargo, destination,
-            after_frame_id=first['frame_id'], after_received_at=first['received_at'],
-            expected_hsv=first['zone_color_hsv'], expected_rgb=signal), context)
+            after_frame_id=first['frame_id'], after_received_at=first['received_at']), context)
         before_jitter = _same_stationary_cargo(first, before)
         if reference is not None and reference.get('search_evidence') is not None:
             _check_search_reference(reference, before)
@@ -202,15 +196,16 @@ async def push_cargo(cargo: str, destination: str, distance_m: float = .15) -> d
                 raise TargetUnlocalized('odom_session_mismatch')
             if _distance(reference['cargo_location'], before['cargo_location']) > .20:
                 raise TargetUnlocalized('cargo_identity_or_position_changed')
-        if first['contained'] and before['contained']:
+        if destination is not None and first['near_destination'] and before['near_destination']:
             stopped = await _stop_approach(context, bounded=True)
             if stopped.get('result') != 'ok':
                 raise TargetUnlocalized('stop_unconfirmed')
             result = {'result': 'ok', 'delivered': True,
-                      'confirmation': 'cargo_contained_in_verified_zone_and_stopped',
+                      'confirmation': 'cargo_near_destination_and_stopped',
+                      'destination_precision': 'approximate_visual_proximity',
                       'reference': _reference_for(before, cargo, destination),
                       'cargo_after': before, 'stop': stopped,
-                      'message': '同一货物已由两张新鲜停稳画面确认完整位于本单指定颜色区域内。'}
+                      'message': '两张新鲜停稳画面确认同一货物已在指定目的地附近，不要求完全覆盖标记。'}
         else:
             forward = _aligned(before)
             # The target's conservative measured radius remains occupied. A
@@ -246,11 +241,9 @@ async def push_cargo(cargo: str, destination: str, distance_m: float = .15) -> d
                 raise TargetUnlocalized('cargo_move_unconfirmed')
             stopped_at = time.monotonic()
             candidate = await _await_authorized(observe_cargo(cargo, destination,
-                after_frame_id=before['frame_id'], after_received_at=stopped_at,
-                expected_hsv=before['zone_color_hsv'], expected_rgb=signal), context)
+                after_frame_id=before['frame_id'], after_received_at=stopped_at), context)
             after = await _await_authorized(observe_cargo(cargo, destination,
-                after_frame_id=candidate['frame_id'], after_received_at=candidate['received_at'],
-                expected_hsv=before['zone_color_hsv'], expected_rgb=signal), context)
+                after_frame_id=candidate['frame_id'], after_received_at=candidate['received_at']), context)
             after_jitter = _same_stationary_cargo(candidate, after)
             if before['odom_session_id'] != after['odom_session_id']:
                 raise TargetUnlocalized('odom_session_mismatch')
@@ -273,15 +266,19 @@ async def push_cargo(cargo: str, destination: str, distance_m: float = .15) -> d
                                    _stable_cluster_shape(candidate, after)))
             pushed = (nudge_attempted and geometry_stable and along > noise
                       and abs(cross) <= max(.08, along * .5))
-            delivered = candidate['contained'] and after['contained']
+            # A closer camera viewpoint alone cannot complete a delivery.
+            # An already-near cargo is handled before movement above.
+            delivered = (destination is not None and pushed
+                         and candidate['near_destination'] and after['near_destination'])
             approach_gain = (_distance(before['pose'], before['cargo_location'])
                              - _distance(after['pose'], after['cargo_location']))
             if not delivered and not pushed and approach_gain <= .05:
                 raise TargetUnlocalized('cargo_motion_unconfirmed')
             result = {'result': 'ok', 'delivered': delivered,
                       'progress': 'delivered' if delivered else 'pushed' if pushed else 'approached',
-                      'confirmation': ('cargo_contained_in_verified_zone_and_stopped' if delivered
+                      'confirmation': ('cargo_near_destination_and_stopped' if delivered
                                        else 'measured_cargo_displacement_and_stop' if pushed else 'measured_approach_and_stop'),
+                      'destination_precision': after.get('destination_precision'),
                       'cargo_displacement_m': round(displacement, 3),
                       'cargo_forward_displacement_m': round(along, 3),
                       'cargo_motion_noise_m': round(noise, 3),
@@ -293,7 +290,7 @@ async def push_cargo(cargo: str, destination: str, distance_m: float = .15) -> d
                       'reference': _reference_for(after, cargo, destination),
                       'cargo_before': before, 'cargo_after': after,
                       'movement': movement, 'stop': movement['stop'],
-                      'message': ('货物已在指定颜色区域内，停稳后由两张新鲜画面复核。' if delivered else
+                      'message': ('货物已大致送到指定目的地附近，停稳后由两张新鲜画面复核。' if delivered else
                                   '测得货物沿本单方向移动，已停稳；尚未确认送达。' if pushed else
                                   '已按实测位移靠近同一货物并停稳，尚未确认货物移动或送达。')}
     except asyncio.CancelledError:

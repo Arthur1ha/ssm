@@ -64,10 +64,10 @@ class DestinationColor(DecisionModel):
 
 class DestinationDecision(Agreement):
     destination: str = Field(default="", max_length=100,
-                             description="确实存在的地面配送区域及可辨认特征；不是任意同色杂物")
+                             description="确实存在的配送色块、小地面标记或物体标识及可辨认特征")
     color: DestinationColor | None = None
     color_name: str = Field(default="", max_length=30,
-                           description="与选定配送区域及RGB灯色一致的自然语言颜色名")
+                           description="本单约定的RGB灯色名称；可以是目的地颜色或明确约定的指令色")
     evidence_refs: list[str] = Field(default_factory=list, max_length=8,
                                      description="引用本次提供的真实观察ref，支持目标区域及颜色；接受目的地必须至少一条")
 
@@ -185,13 +185,14 @@ def _instructions(phase: str) -> str:
     if phase == "destination":
         return common + (
             "狗报告找到本单货物后，现在由灯依据提供的新鲜场景或用户明确的场地信息，"
-            "选择一个实际存在、可识别的地面配送区域；不得选任意同色杂物或编造站点。"
-            "destination写明同一配送区域的可辨认特征，color_name写区域的真实颜色，"
-            "color给出与该区域肉眼可匹配的RGB及1到255亮度；颜色用于明确配送区。"
-            "evidence_refs至少引用一条提供的真实新鲜观察ref，必须支持所选区域及颜色；"
+            "选择一个实际存在、可识别的配送目的地，可以是色块、小地面标记或物体标识；不得编造站点。"
+            "destination写明同一目的地的可辨认特征，不要求完整边界或面积足够容纳货物。"
+            "color_name与color给出本单约定的指令灯色及1到255亮度；可沿用目标颜色，"
+            "物体标识没有合适颜色时明确约定一个指令色，不能把指令色冒充观察到的物体颜色。"
+            "evidence_refs至少引用一条提供的真实新鲜观察ref，必须支持所选目的地；"
             "只能从本次observation或decision_evidence的真实ref中选择，不自造引用。"
             "speech自然告诉狗这次送往哪里并说明灯将显示的信号，不声称已设色或已送达。"
-            "缺少可靠配送区域、颜色信息或货物找到的可信依据就accepted=false，"
+            "缺少可靠目的地或货物找到的可信依据就accepted=false，"
             "可将destination、color_name留空且color为null；不能提前猜站点。"
         )
     return common + (
@@ -199,9 +200,10 @@ def _instructions(phase: str) -> str:
         "可选observe重新观察、push短距推送、question向同伴询问、stop如实中止、finish结束。"
         "stage为waiting_destination时先报告发现或向灯提问，不能推送或宣称结束。"
         "只有destination_confirmed为true才可push，填写0.1到0.25米的单次距离；"
-        "不因自己到站或移动过就推断货物已入区。货物丢失、身份不明或路径受阻时先观察、询问或停止。"
+        "不因自己到站或移动过就推断货物送达。货物丢失、身份不明或路径受阻时先观察、询问或停止。"
         "question时question填写实际要问的问题；observe可用question说明需要核对的画面。"
-        "只有latest_push的权威回执已确认delivered=true，即同一货物进入指定区域且停稳后视觉复核通过，才可finish。"
+        "只有latest_push的权威回执已确认delivered=true，即停稳后两张画面复核同一货物已在指定目的地附近，才可finish；"
+        "这是大致到位，不要求完全覆盖标记、精确对位或完整入区。"
         "accepted、executing、unknown、口头报告或历史快照均不满足结束条件。"
     )
 

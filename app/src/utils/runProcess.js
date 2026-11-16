@@ -49,6 +49,15 @@ function processNeedsAttention(event) {
   return ['error','blocked','rejected','timeout','unknown','needs_clarification'].includes(event.status)
     || activityEventKind(event) === 'question';
 }
+function processStepTitle(event) {
+  const kind = activityEventKind(event);
+  if (activityMediaUrl(event) || kind === 'observation') return '观察';
+  if (kind === 'question') return '提出问题';
+  if (kind === 'message') return '发出消息';
+  return ({planning:'理解请求',decision:'选择行动',dispatching:'发起行动',observed:'收到反馈',
+    considering:'核对反馈',finished:'结束处理',narrated:'生成回复',
+    search_observing:'观察周围',search_selected:'选择观察点'})[event.stage] || '处理请求';
+}
 function processSteps(events) {
   const steps = [], keyed = new Map(), seen = new Set();
   events.forEach((event,index) => {
@@ -104,4 +113,4 @@ function activityProcessRows(events) {
   return rows.filter(row => !row.attached);
 }
 Object.assign(window,{processRecord,processGroupKey,processCapability,processArguments,processOutcome,
-  processNeedsAttention,processSteps,activityProcessRows});
+  processNeedsAttention,processStepTitle,processSteps,activityProcessRows});

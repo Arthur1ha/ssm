@@ -120,7 +120,8 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     assert.match(searching.text, /可达的边界观察点/);
     assert.doesNotMatch(searching.text, /停止搜索/);
     assert.equal(searching.photos, 1);
-    assert.match(await latestProcess.$eval('.run-process__context',node=>node.textContent), /去找猫头鹰/);
+    assert.doesNotMatch(await latestProcess.$eval('.run-process__body',node=>node.textContent), /上下文|去找猫头鹰/,
+      'Process details should explain the agent actions without repeating the user request');
     await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
       agent_id:lamp.unit_id,run_id:sent[1].run_id,source:'object_search',stage:'search_observe',
       event_id:'search-copy',text:'同一张照片的新说明',media_ref:'/api/search-photo'}})));

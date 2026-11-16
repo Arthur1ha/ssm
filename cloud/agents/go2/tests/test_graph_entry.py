@@ -382,6 +382,34 @@ async def test_natural_find_runs_real_search_graph_without_scope_and_returns_evi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('approach_tool', ['go2_find_object', 'go2_navigate_to_visible_target'])
+async def test_composite_push_continues_after_successful_approach(entry, monkeypatch, approach_tool):
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': approach_tool, 'id': 'approach',
+            'args': {'target': '眼前带白色图案的深色盒子', 'final': False}}]),
+        AIMessage(content='', tool_calls=[{'name': 'go2_push_cargo', 'id': 'push',
+            'args': {'cargo': '眼前带白色图案的深色盒子', 'distance_m': .15}}]),
+        AIMessage(content='我试着前进了，盒子还没有确认移动。'),
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    monkeypatch.setattr('cloud.go2.mode.free_explore.drive.resume_after_user', lambda: None)
+    dispatched = []
+    async def execute(name, params, **_kwargs):
+        dispatched.append((name, params))
+        return {'result': 'ok', 'outcome': 'nearby'} if name == approach_tool else {
+            'result': 'ok', 'progress': 'approached', 'delivered': False,
+            'message': '已靠近，尚未确认货物移动。'}
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    context = ExecutionContext('push-chat', 'admin', False, expires_at=int(time.time()) + 60)
+    result = await go2_graph.run_go2_loop('push-chat', '先测试推一下眼前的盒子', context=context)
+    assert [call[0] for call in dispatched] == [approach_tool, 'go2_push_cargo']
+    assert result['tool_results'][0]['result']['final'] is False
+    assert result['tool_results'][1]['result']['delivered'] is False
+    assert result['result'] == 'ok'
+
+
+@pytest.mark.asyncio
 async def test_measured_move_reply_uses_persona_and_keeps_actual_distance(entry, monkeypatch):
     model = ScriptedModel([
         AIMessage(content='', tool_calls=[{'name': 'go2_move',
@@ -463,7 +491,7 @@ async def test_game_graph_exposes_only_allowed_tools_and_checks_live_guard(entry
     model = ScriptedModel([AIMessage(content="", tool_calls=[
         {"name": "go2_navigate_to_visible_target", "args": {"target": "红杯子"},
          "id": "game-visual"},
-    ])])
+    ]), AIMessage(content="需要先观察，尚未接近目标。")])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
     dispatched = []
 
