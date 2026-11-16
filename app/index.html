@@ -10,6 +10,8 @@
   <title>SSM</title>
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="styles/app.css">
+  <link rel="stylesheet" href="styles/process.css">
+  <link rel="stylesheet" href="styles/avatars.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -34,6 +36,8 @@
   <script src="src/utils/color.js"></script>
   <script src="src/utils/stateSnapshot.js"></script>
   <script src="src/utils/activityView.js"></script>
+  <script src="src/utils/runProcess.js"></script>
+  <script src="src/avatars/registry.js"></script>
   <script src="src/utils/qrLibrary.js"></script>
   <script src="src/ApiClient.js"></script>
 
@@ -41,6 +45,7 @@
 
   <!-- JSX components (dependency order) -->
   <script type="text/babel" src="src/components/Icon.jsx"></script>
+  <script type="text/babel" src="src/avatars/Avatar.jsx"></script>
   <script type="text/babel" src="src/components/QrScanner.jsx"></script>
   <script type="text/babel" src="src/components/SessionGate.jsx"></script>
   <script type="text/babel" src="src/components/SpaceMenu.jsx"></script>
@@ -51,10 +56,11 @@
   <script type="text/babel" src="src/pages/TransitionInspector.jsx"></script>
   <script type="text/babel" src="src/components/TrainingPreview.jsx"></script>
   <script type="text/babel" src="src/components/TrainingDrawer.jsx"></script>
+  <script type="text/babel" src="src/components/RunProcess.jsx"></script>
   <script type="text/babel" src="src/components/ChatMessages.jsx"></script>
   <script type="text/babel" src="src/components/ChatPanel.jsx"></script>
   <script type="text/babel" src="src/components/DeviceCard.jsx"></script>
-  <script type="text/babel" src="src/components/ActivityDetails.jsx"></script>
+  <script type="text/babel" src="src/components/ActivityMembers.jsx"></script>
   <script type="text/babel" src="src/components/ActivityFeed.jsx"></script>
   <script type="text/babel" src="src/pages/DevicesPage.jsx"></script>
   <script type="text/babel" src="src/components/DeviceWidgets.jsx"></script>

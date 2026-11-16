@@ -4,20 +4,15 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
   training, onReviseRule, renderEntry, scrollTargetRef, scrollKey, scrollTrigger = entries, autoScroll = true }) {
   const bottomRef = React.useRef(null);
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
-  const rows = [];
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index];
-    const previous = rows[rows.length - 1]?.entry;
-    if (entry.type === 'process' && previous?.type === 'process_group'
-      && previous.requestId === entry.requestId) {
-      previous.items.push(entry);
-    } else if (entry.type === 'process') {
-      rows.push({ entry: { type: 'process_group', requestId: entry.requestId,
-        items: [entry] }, index });
-    } else {
-      rows.push({ entry, index });
-    }
-  }
+  const rows = [], groups = new Map();
+  entries.forEach((entry,index) => {
+    if (entry.type !== 'process') { rows.push({entry,index}); return; }
+    const key = entry.requestId || processGroupKey(entry) || entry.eventId || `record:${index}`;
+    let group = groups.get(key);
+    if (!group) { group = {type:'process_group',requestId:entry.requestId,key,items:[]};
+      groups.set(key,group); rows.push({entry:group,index}); }
+    group.items.push(entry);
+  });
 
   React.useEffect(() => {
     if (!autoScroll) return;
@@ -32,28 +27,10 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
             onConfirm={training?.confirm} onCancel={training?.cancel} onRevise={onReviseRule}/>
         </div>;
         if (e.type === 'process_group') {
-          const finished = entries.some(item => item.requestId === e.requestId
-            && item.type === 'ai' && item.final);
-          const latest = e.items[e.items.length - 1];
-          const search = [...e.items].reverse().find(item => item.stage?.startsWith('search_'));
-          return <details key={`process-${e.requestId}-${i}`} className="run-process-summary"
-            open={!finished && search ? true : undefined}>
-            <summary>
-              <span className="run-process-summary__marker" aria-hidden="true"/>
-              <span className="run-process-summary__text">{finished
-                ? `处理过程 · ${e.items.length} 条记录` : `正在处理 · ${latest.text}`}</span>
-              <span className="run-process-summary__toggle" aria-hidden="true"/>
-            </summary>
-            <div className="run-process-summary__list">
-              {e.items.map((item, itemIndex) => <div key={item.eventId || itemIndex}
-                className="run-process-summary__item">
-                <span>{getName(item.agent || defaultAgent)}</span>
-                <p>{item.text}</p>
-                {activityMediaUrl(item) && <img src={activityMediaUrl(item)} alt="搜索观察照片"
-                  loading="lazy" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8 }}/>}
-              </div>)}
-            </div>
-          </details>;
+          const finished = entries.some(item => item.requestId === e.requestId && item.type === 'ai' && item.final);
+          const contextText = e.requestId ? entries.find(item => item.type === 'user' && item.requestId === e.requestId)?.text : '';
+          return <RunProcess key={`process-${e.key}`} events={e.items} agents={agents} getName={getName}
+            finished={finished} contextText={contextText}/>;
         }
         if (e.type === 'user') {
           return (
@@ -73,27 +50,8 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
         }
         if (e.type === 'ai' || e.type === 'peer_message') {
           const agent = e.sender || e.agent || defaultAgent;
-          const oc = getAgentBubbleColor(agent);
-          return (
-            <div key={e.id || e.eventId || `${e.type}-${i}`} style={{ display: 'flex', justifyContent: 'flex-start',
-              marginBottom: 8 }}>
-              <div style={{ maxWidth: '88%', minWidth: 0, display: 'flex',
-                flexDirection: 'column', gap: 4 }}>
-                <div style={{ fontSize: 10, paddingLeft: 4, color: oc, opacity: 0.75,
-                  fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                  {getName(agent)}{e.type === 'peer_message' && e.target
-                    ? ` → ${getName(e.target)}${e.replyTo ? ' · 回应' : ''}` : ''}
-                </div>
-                <div style={{
-                  padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
-                  borderRadius: 'var(--radius-card)',
-                  background: `${oc}10`,
-                  border: `1px solid ${oc}25`,
-                  color: 'var(--color-text)',
-                }}>{e.text}</div>
-              </div>
-            </div>
-          );
+          return <AgentSpeech key={e.id || e.eventId || `${e.type}-${i}`} agent={agent} name={getName(agent)}
+            target={e.type === 'peer_message' && e.target ? getName(e.target) : ''} text={e.text}/>;
         }
         return renderEntry?.(e) || null;
       })}

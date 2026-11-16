@@ -77,6 +77,20 @@ function getAgentOpeningLine(agent) {
   return `我是${name}。想做什么，告诉我吧。`;
 }
 
+// Legacy/public tool labels are shared by text progress and structured disclosures.
+function agentCapabilityLabel(id) {
+  return ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
+    set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
+    go2_sport: '完成姿态动作', go2_move: '移动', go2_observe: '观察前方',
+    go2_navigate_to_visible_target: '视觉定位并导航到目标附近', go2_find_object: '在指定范围内找物',
+    go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
+    get_space_context: '查看空间信息', read_state: '查看传感器状态',
+    await_result: '核对执行结果', request_peer_skill: '协同处理请求',
+    go2_chat: '回应当前问题',
+    start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
+    clear_space_constraints: '撤销空间里的共同要求' })[id] || id || '处理请求';
+}
+
 function describeRunProgress(event, compact = false) {
   if (event.source === 'object_search' && typeof event.text === 'string' && event.text.trim()) {
     return event.text.trim();
@@ -123,17 +137,8 @@ function describeRunProgress(event, compact = false) {
   }
   const targetName = event.target_unit_id ? getAgentDisplayName(event.target_unit_id) : '';
   const actionId = event.skill_id || event.tool || '操作';
-  const action = ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
-    set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
-    go2_sport: '完成姿态动作', go2_move: '移动', go2_observe: '观察前方',
-    go2_navigate_to_visible_target: '视觉定位并导航到目标附近', go2_find_object: '在指定范围内找物',
-    go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
-    get_space_context: '查看空间信息', read_state: '查看传感器状态',
-    await_result: '核对执行结果', request_peer_skill: '协同处理请求',
-    go2_chat: '回应当前问题',
-    start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
-    clear_space_constraints: '撤销空间里的共同要求' })[actionId] || '处理当前请求';
-  // Raw light settings belong in the device detail view, not conversational progress.
+  const action = event.capability_name || agentCapabilityLabel(actionId);
+  // Structured parameters are rendered by RunProcess; this is the short fallback.
   const argumentLabels = { duration: '时长', duration_s: '时长', speed: '速度', distance_m: '距离', angle_deg: '转角' };
   const args = Object.entries(event.arguments || {}).filter(([key, value]) =>
     argumentLabels[key] && typeof value === 'number' && Number.isFinite(value))
@@ -141,7 +146,7 @@ function describeRunProgress(event, compact = false) {
   const detailArgs = args.length ? `（${args.join('，')}）` : '';
   const state = event.arguments?.state;
   const cmd = event.arguments?.cmd;
-  const sport = { StandDown: '坐下', StandUp: '站起来', Hello: '打招呼',
+  const sport = { StandDown: '趴下', StandUp: '站起来', Hello: '打招呼',
     StopMove: '停止移动', Stretch: '伸展' };
   const task = ['set_light_state', 'set_led_state'].includes(actionId) && (targetName || compact)
     ? `${compact ? '' : `请${targetName}`}${state === 'ON' ? '开灯' : state === 'OFF' ? '关灯' : `调整灯光${detailArgs}`}`
@@ -153,8 +158,8 @@ function describeRunProgress(event, compact = false) {
   if (event.stage === 'decision') return compact ? `下一步：${task}` : `接下来${task}`;
   if (event.stage === 'dispatching') return `${task}，等待执行结果`;
   if (event.stage === 'considering') {
-    const outcome = event.status === 'ok' ? '已确认完成'
-      : event.status === 'accepted' || event.status === 'executing' || event.status === 'timeout'
+    const outcome = ['ok', 'accepted'].includes(event.status) ? '已确认完成'
+      : event.status === 'executing' || event.status === 'timeout'
         ? '完成情况未确认' : '未完成';
     return `${task}${outcome}，正在判断下一步`;
   }
@@ -162,12 +167,11 @@ function describeRunProgress(event, compact = false) {
     return `${task}：等待设备执行回执超时，无法确认是否完成`;
   }
   const status = {
-    ok: '已完成', accepted: '已受理，等待完成反馈', executing: '仍在执行',
+    ok: '已完成', accepted: '已完成', executing: '仍在执行',
     timeout: '等待结果超时，完成情况未确认', blocked: '未执行',
     rejected: '被拒绝', cancelled: '已取消', error: '执行失败',
   }[event.status] || '结果已更新';
-  const stateLabels = { ON: '已开启', OFF: '已关闭', BLINKING: '正在闪烁', ERROR: '硬件异常',
-    DIM: '柔光', BRIGHT: '亮光', COLOR: '彩光' };
+  const stateLabels = { ON: '已开启', OFF: '已关闭', BLINKING: '正在闪烁' };
   const detail = stateLabels[event.result_state] ? `，设备${stateLabels[event.result_state]}` : '';
   const reason = typeof event.reason === 'string' && /^[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\s，。！？：；、（）“”·0-9]+$/.test(event.reason)
     ? `：${event.reason}` : '';
@@ -191,14 +195,12 @@ function isDeviceOnline(agent, unitData) {
   return state[connectionField] === true;
 }
 
-// 灯的运行状态与颜色参数分开显示。旧固件的 retained 状态只作迁移期展示。
+// 灯的运行状态只使用契约中的三种状态，颜色参数独立显示。
 function getLedStateInfo(state = {}) {
   const labels = {
-    OFF: '熄灭', ON: '常亮', BLINKING: '闪烁', ERROR: '硬件异常',
-    DIM: '柔光', BRIGHT: '亮光', COLOR: '彩光', BLINK: '闪烁',
+    OFF: '熄灭', ON: '常亮', BLINKING: '闪烁',
   };
   const ism = state.ism || '';
-  if (ism === 'ERROR') return { label: labels.ERROR, details: '', color: null };
   const channel = value => Number.isInteger(value) && value >= 0 && value <= 255;
   const hasRgb = channel(state.r) && channel(state.g) && channel(state.b);
   const hasBrightness = channel(state.brightness);

@@ -107,7 +107,8 @@ ssm/
 │       ├── ApiClient.js / CommandBus.js ← 会话 API/SSE 与设备命令入口
 │       ├── hooks/       ← useSendIntent、useSsmCore、useTraining、useSpaceActivity、useActivityTimeline
 │       ├── pages/       ← FsmDevicePage、DevicesPage 与状态机图组件
-│       ├── components/  ← SessionGate、ActivityFeed/ActivityDetails、ChatPanel、TrainingDrawer、SpacePeopleDrawer 等
+│       ├── components/  ← SessionGate、ActivityFeed/ActivityMembers、RunProcess、ChatPanel、TrainingDrawer 等
+│       ├── avatars/     ← 轻量 SVG 形象、表情、动作与事件呈现映射；不定义设备能力或物理状态
 │       └── utils/       ← agentMeta、stateMachine、stateSnapshot、activityView、color、二维码工具
 ├── protocol/            ← MQTT 协议契约（单一真实来源）
 │   ├── topics.md        ← MQTT 消息、签名封套、状态与任务语义

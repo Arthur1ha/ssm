@@ -117,3 +117,75 @@ def test_lamp_progress_keeps_one_physical_task_and_explicit_message_link(monkeyp
     assert len(recorded) == 3
     assert {row["task_id"] for row in recorded} == {stable_task_id("esp32_desk_led", "msg_one", "call_one")}
     assert all(row["trigger_message_id"] == "msg_one" for row in recorded)
+
+
+def test_canonical_capability_same_in_live_and_history_without_migrating_old_file(tmp_path):
+    store, activity_id = start(tmp_path)
+    emitted = []
+    store.configure(emit=emitted.append)
+    event = store.record_event(activity_id, 'action_result', unit_id='esp32_desk_led',
+        action='SET_COLOR', tool='set_light_color', status='ok', run_id='run_one',
+        parent_run_id='run_parent', step_id='step_one',
+        arguments={'r': 120, 'g': 30, 'b': 255, 'brightness': 90, 'secret': 'hidden',
+                   'internal_notes': 'hidden', 'context': {'prompt': 'hidden'}})
+    assert event['action'] == event['tool'] == 'set_led_color'
+    assert event['capability_name'] == '设置灯光颜色'
+    assert event['arguments'] == {'r': 120, 'g': 30, 'b': 255, 'brightness': 90}
+    assert {key: event[key] for key in ('run_id', 'parent_run_id', 'step_id')} == {
+        'run_id': 'run_one', 'parent_run_id': 'run_parent', 'step_id': 'step_one'}
+    assert emitted[-1] == store.events(activity_id)[-1] == event
+    path = tmp_path / 'activity.json'
+    saved = json.loads(path.read_text())
+    saved['events'][activity_id][-1]['action'] = 'SET_COLOR'
+    saved['events'][activity_id][-1]['tool'] = 'set_light_color'
+    path.write_text(json.dumps(saved))
+    original = path.read_bytes()
+    loaded = ActivityStore(path)
+    assert loaded.events(activity_id)[-1] == event
+    assert path.read_bytes() == original, 'Reading legacy events must not rewrite runtime assets'
+
+
+def test_go2_process_uses_existing_card_names_and_only_declared_arguments(tmp_path):
+    store, activity_id = start(tmp_path)
+    event = store.record_event(activity_id, 'action_result', unit_id='go2', tool='go2_sport',
+        action='go2_sport', status='accepted', run_id='run_dog', step_id='step_gesture',
+        arguments={'cmd': 'Hello', 'private_context': 'hidden', 'api_key': 'hidden'})
+    assert event['capability_name'] == '预定义动作'
+    assert event['arguments'] == {'cmd': 'Hello'}
+    assert event['status'] == 'accepted'
+    assert event['state_at_event'] == {'status': 'unknown'}
+
+
+def test_autonomous_go2_keeps_run_step_and_photo_in_activity_projection(monkeypatch):
+    from cloud.api import intents
+    recorded = []
+    store = SimpleNamespace(current=lambda _space: {'activity_id': 'act_test'},
+                            record_event=lambda *_args, **facts: recorded.append(facts))
+    monkeypatch.setattr('cloud.space.activity.get_activity_store', lambda: store)
+    monkeypatch.setattr('cloud.go2.router.get_activity_mode_owner', lambda: 'act_test')
+    monkeypatch.setattr(intents, '_events', SimpleNamespace(emit_space=lambda *_args: None))
+    event = intents.publish_agent_event('agent_progress', agent_id='go2', scope='space',
+        source='autonomous', status='accepted', run_id='run_dog', parent_run_id='run_parent',
+        step_id='step_wave', stage='observed', tool='go2_sport',
+        arguments={'cmd': 'Hello', 'internal_notes': 'hidden'}, media_ref='/api/go2/activity-media/a/b')
+    assert recorded[0]['run_id'] == event['run_id'] == 'run_dog'
+    assert recorded[0]['parent_run_id'] == 'run_parent'
+    assert recorded[0]['step_id'] == 'step_wave'
+    assert recorded[0]['arguments'] == event['arguments'] == {'cmd': 'Hello'}
+    assert recorded[0]['media_ref'] == event['media_ref']
+
+
+def test_game_round_is_bounded_and_only_published_for_revealed_result(tmp_path):
+    store, activity_id = start(tmp_path)
+    result = {'round': 1, 'choices': {'esp32_desk_led': 'paper', 'go2': 'scissors'},
+        'mapping': {'esp32_desk_led': {'choice': 'paper', 'color': {'r': 12, 'g': 240, 'b': 12}, 'label': '绿光'},
+                    'go2': {'choice': 'scissors', 'action': 'go2_sport', 'arguments': {'cmd': 'Hello'}, 'label': '挥手'}},
+        'winner': 'go2', 'private_reasoning': 'hidden'}
+    public = store.record_event(activity_id, 'message', game_id='rps_siege', stage='rps_result', game_round=result)
+    assert public['game_round']['choices'] == result['choices']
+    assert 'private_reasoning' not in public['game_round']
+    hidden = store.record_event(activity_id, 'message', game_id='rps_siege', stage='reveal', game_round=result)
+    assert 'game_round' not in hidden
+    result['mapping']['go2']['arguments'] = ['bad']
+    malformed = store.record_event(activity_id, 'message', game_id='rps_siege', stage='rps_result', game_round=result)
+    assert 'game_round' not in malformed

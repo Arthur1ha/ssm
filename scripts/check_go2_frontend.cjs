@@ -356,6 +356,8 @@ async function checkInteractions() {
     for (const name of files) await page.addScriptTag({ content: compile(name) });
     if (process.argv.includes('--training-only')) {
       await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
+      await page.addScriptTag({content:compile('app/src/utils/runProcess.js')});
+      await page.addScriptTag({content:compile('app/src/components/RunProcess.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
     }
@@ -690,6 +692,8 @@ async function checkInteractions() {
     }
     if (process.argv.includes('--layout-only')) {
       await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
+      await page.addScriptTag({content:compile('app/src/utils/runProcess.js')});
+      await page.addScriptTag({content:compile('app/src/components/RunProcess.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
       await page.evaluate(()=>{
@@ -1135,6 +1139,8 @@ async function checkInteractions() {
     assert.equal(await page.$$eval('.fsm-whiteboard__edge[data-action]',nodes=>nodes.every(node=>node.dataset.available==='false')),true);
     // Verify the real shared chat as well; a stub cannot catch flex overflow.
     await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
+      await page.addScriptTag({content:compile('app/src/utils/runProcess.js')});
+      await page.addScriptTag({content:compile('app/src/components/RunProcess.jsx')});
     await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
     await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
     await page.evaluate(()=>{

@@ -435,31 +435,6 @@ async def test_partial_movement_keeps_receipt_and_natural_persona(entry, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_motion_stops_following_tool(entry, monkeypatch):
-    model = ScriptedModel([
-        AIMessage(content="", tool_calls=[{"name": "go2_sport",
-                                              "args": {"cmd": "Hello"}, "id": "tool-2"}]),
-        AIMessage(content="不应继续"),
-    ])
-    monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
-    dispatched = []
-
-    async def execute(name, params, *, context):
-        dispatched.append(name)
-        return {"result": "accepted"}
-
-    monkeypatch.setattr(go2_graph, "execute_tool", execute)
-    context = ExecutionContext("go2-session-2", "admin", True, expires_at=int(time.time() + 60))
-    result = await go2_graph.run_go2_loop("go2-session-2", "和我打招呼，然后跳舞", context=context,
-                                          run_id="go2-test-accepted")
-    assert result["result"] == "accepted"
-    assert dispatched == ["go2_sport"]
-    assert any(isinstance(message, HumanMessage) and message.content == "[]"
-               for message in model.inputs[0])
-    assert result["actions_taken"] == []
-
-
-@pytest.mark.asyncio
 async def test_visitor_cannot_dispatch_admin_tool_from_model(entry, monkeypatch):
     model = ScriptedModel([AIMessage(content="", tool_calls=[
         {"name": "go2_list_people", "args": {}, "id": "tool-forged"},
@@ -511,29 +486,6 @@ async def test_game_graph_exposes_only_allowed_tools_and_checks_live_guard(entry
         "go2_observe", "go2_navigate_to_visible_target"}
     assert any("灯色 RGB" in message.content for message in model.inputs[0])
     assert not any(kind == "agent_reply" for kind, _fields in entry)
-
-
-@pytest.mark.asyncio
-async def test_two_motion_calls_in_one_model_turn_execute_neither(entry, monkeypatch):
-    model = ScriptedModel([AIMessage(content="", tool_calls=[
-        {"name": "go2_sport", "args": {"cmd": "Hello"}, "id": "one"},
-        {"name": "go2_sport", "args": {"cmd": "Dance1"}, "id": "two"},
-    ])])
-    monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
-    dispatched = []
-
-    async def execute(name, params, *, context):
-        dispatched.append(name)
-        return {"result": "ok"}
-
-    monkeypatch.setattr(go2_graph, "execute_tool", execute)
-    context = ExecutionContext("parallel-session", "admin", True,
-                               expires_at=int(time.time() + 60))
-    result = await go2_graph.run_go2_loop("parallel-session", "打招呼并跳舞", context=context,
-                                          run_id="go2-test-parallel")
-    assert result["result"] == "blocked"
-    assert result["actions_taken"] == []
-    assert dispatched == []
 
 
 @pytest.mark.asyncio

@@ -25,9 +25,9 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     });
     await page.goto('http://localhost/');
     for (const file of [process.env.SSM_CHECK_REACT, process.env.SSM_CHECK_REACT_DOM]) await page.addScriptTag({path:file});
-    await page.addStyleTag({path:'app/styles/app.css'});
-    for (const file of ['utils/stateMachine.js','utils/stateSnapshot.js','utils/agentMeta.js','utils/activityView.js',
-      'components/Icon.jsx','hooks/useTraining.js','components/TrainingPreview.jsx','components/ActivityDetails.jsx',
+    for (const style of ['app','process','avatars']) await page.addStyleTag({path:`app/styles/${style}.css`});
+    for (const file of ['utils/stateMachine.js','utils/stateSnapshot.js','utils/agentMeta.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js',
+      'components/Icon.jsx','avatars/Avatar.jsx','hooks/useTraining.js','components/TrainingPreview.jsx','components/ActivityMembers.jsx','components/RunProcess.jsx',
       'components/ChatMessages.jsx','components/ChatPanel.jsx','components/ActivityFeed.jsx','pages/FsmDevicePage.jsx']) {
       await page.addScriptTag({content:compile('app/src/'+file)});
     }
@@ -107,13 +107,22 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
         tool:'go2_find_object'}}));
     });
     await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('前方有椅子和纸箱'));
-    const searching = await page.$eval('.run-process-summary:last-of-type', node => ({
+    const latestProcess = (await page.$$('.run-process-summary')).at(-1);
+    const searching = await latestProcess.evaluate(node => ({
       open:node.open,text:node.textContent,photos:node.querySelectorAll('img').length,
     }));
-    assert.equal(searching.open, true);
+    assert.equal(searching.open, false, 'New process groups should start collapsed');
+    await latestProcess.$eval('summary', node => node.click());
     assert.match(searching.text, /可达的边界观察点/);
     assert.doesNotMatch(searching.text, /停止搜索/);
     assert.equal(searching.photos, 1);
+    assert.match(await latestProcess.$eval('.run-process__context',node=>node.textContent), /去找猫头鹰/);
+    await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
+      agent_id:lamp.unit_id,run_id:sent[1].run_id,source:'object_search',stage:'search_observe',
+      event_id:'search-copy',text:'同一张照片的新说明',media_ref:'/api/search-photo'}})));
+    await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('同一张照片的新说明'));
+    assert.equal(await latestProcess.evaluate(node=>node.open),true,'A new progress record closed the user-opened process');
+    assert.equal(await latestProcess.$$eval('img',nodes=>nodes.length),1,'Repeated media duplicated an observation');
     await page.evaluate(() => finishCommand({result:'blocked',reply:'本次搜索结束，遮挡区域仍未确认。'}));
     await page.waitForFunction(() => !document.querySelector('input').disabled);
     if (process.env.SCREENSHOT_DIR) {

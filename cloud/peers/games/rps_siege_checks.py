@@ -618,3 +618,28 @@ def test_round_winner_covers_every_pair_and_rejects_unknown_choice():
             assert rps_siege.round_winner(lamp, dog) == expected
     with pytest.raises(ValueError, match="invalid_rps_choice"):
         rps_siege.round_winner("unknown", "rock")
+
+
+async def test_public_round_is_receipt_gated_and_throw_speech_precedes_verdict(game_harness):
+    h = game_harness
+    await rps_siege.GAME.execute(h.drive, h.event, 'task_test_rps')
+    verdict_index, verdict = next((i, row) for i, row in enumerate(h.timeline)
+                                  if row.get('stage') == 'rps_result')
+    public = verdict['game_round']
+    assert public['round'] == 1 and public['winner'] == 'go2'
+    assert public['choices'] == {rps_siege.LAMP: 'scissors', 'go2': 'rock'}
+    assert public['mapping']['go2']['arguments'] == {'cmd': 'Hello'}
+    assert public['mapping'][rps_siege.LAMP]['choice'] == 'scissors'
+    announcements = [i for i, row in enumerate(h.timeline) if row.get('stage') == 'throw_announcement']
+    reveal = next(i for i, row in enumerate(h.timeline) if row.get('stage') == 'reveal')
+    assert len(announcements) == 2 and reveal < min(announcements) < max(announcements) < verdict_index
+    receipts = [row for row in h.timeline[max(announcements)+1:verdict_index] if row['event_type'] == 'action_result']
+    assert len(receipts) == 2 and all(row['status'] == 'ok' for row in receipts)
+    assert all('game_round' not in row for row in h.timeline[:verdict_index])
+
+
+async def test_unknown_throw_never_publishes_structured_choices(game_harness):
+    h = game_harness
+    h.config.gesture_result = 'unknown'
+    await rps_siege.GAME.execute(h.drive, h.event, 'task_test_rps')
+    assert all('game_round' not in row for row in h.timeline)

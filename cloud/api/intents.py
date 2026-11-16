@@ -362,6 +362,9 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
              "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
              "step_id": step_id or None, "source": source,
              "text": text.strip(), "ts": time.time(), **facts}
+    from cloud.agents.common.progress_facts import public_process_facts
+    process = public_process_facts(event)
+    event.update(process)
     if (event_type == "agent_progress" and scope == "space"
             and source == "object_search" and agent_id == "go2"):
         from cloud.space.activity import get_activity_store
@@ -375,7 +378,7 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
             get_activity_store().record_event(activity_id, "search_progress", unit_id=agent_id,
                 text=event["text"], status=status, task_id=facts.get("task_id") or run_id,
                 stage=facts.get("stage"), media_ref=facts.get("media_ref"), source=source,
-                source_event_id=event["event_id"])
+                **process, source_event_id=event["event_id"])
     if scope == "space" and source == "autonomous" and agent_id in {"go2", "esp32_desk_led"}:
         from cloud.space.activity import get_activity_store
         activity = get_activity_store().current(space_id)
@@ -390,22 +393,27 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                 if event_type == "agent_reply":
                     get_activity_store().record_event(activity_id, "message", unit_id=agent_id,
                                                       text=event["text"], status=status,
+                                                      **process, media_ref=facts.get("media_ref"),
+                                                      decision_basis=facts.get("decision_basis"),
                                                       source_event_id=event["event_id"])
-                elif (event_type == "agent_progress" and agent_id == "esp32_desk_led"
+                elif (event_type == "agent_progress"
                       and facts.get("stage") in {"planned", "decision", "executing", "dispatching", "observed"}
-                      and facts.get("tool") in {"set_led_state", "set_led_color", "blink_led"}):
+                      and process.get("tool")):
                     stage = facts["stage"]
                     kind = ("action" if stage in {"planned", "decision"} else
                             "action_progress" if stage in {"executing", "dispatching"} else
-                            "action_result" if status in {"ok", "error", "blocked", "cancelled",
+                            "action_result" if status in {"ok", "accepted", "error", "blocked", "cancelled",
                                                            "timeout", "rejected", "unknown"}
                             else "action_progress")
                     from cloud.esp32.physical_tasks import stable_task_id
                     physical_task = (stable_task_id(agent_id, run_id, step_id)
-                                     if run_id and step_id else step_id or run_id)
+                                     if agent_id == "esp32_desk_led" and run_id and step_id
+                                     else facts.get("task_id") or step_id or run_id)
                     get_activity_store().record_event(activity_id, kind, unit_id=agent_id,
                                                       text=event["text"], status=status,
-                                                      action=facts["tool"], task_id=physical_task,
+                                                      **{**process, "action": process["tool"]}, task_id=physical_task,
+                                                      stage=stage, media_ref=facts.get("media_ref"),
+                                                      decision_basis=facts.get("decision_basis"),
                                                       trigger_message_id=facts.get("trigger_message_id"),
                                                       decision_observation=facts.get("decision_observation"),
                                                       reason=facts.get("reason"),

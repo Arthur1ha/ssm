@@ -64,59 +64,8 @@ function activityMemberView(card, state, membership, connected, now) {
     stale, disconnected };
 }
 
-function activityTaskKey(event) {
-  // A run may contain multiple different actions; a shared task alone is not a step ID.
-  return event.task_id ? JSON.stringify([event.unit_id, event.task_id, event.action || '']) : null;
-}
-
 function isActivityLightingAction(action) {
-  return ['set_led_state', 'set_led_color', 'blink_led'].includes(action);
-}
-
-function activityTaskRows(events) {
-  const rows = [], tasks = new Map();
-  for (const event of events) {
-    if (!['action', 'action_progress', 'action_result'].includes(event.event_type)) {
-      rows.push(event); continue;
-    }
-    const key = activityTaskKey(event);
-    if (!key) { rows.push(event); continue; }
-    const previous = tasks.get(key);
-    if (previous?.event_type === 'action_result' && event.event_type === 'action_progress') continue;
-    // Each lamp task identifies one physical dispatch. Graph, game and peer
-    // receipts for that task are confirmations of the same operation. Go2 may
-    // reuse a whole goal's task for multiple actual observations or actions.
-    if (previous && (!(previous.event_type === 'action_result' && event.event_type === 'action_result')
-      || isActivityLightingAction(event.action) && (previous.status === event.status
-        || ['accepted', 'executing', 'timeout', 'unknown'].includes(previous.status)))) {
-      const index = rows.indexOf(previous);
-      const merged = {...previous, ...event,
-        trigger_message_id:event.trigger_message_id || previous.trigger_message_id,
-        decision_basis:event.decision_basis || previous.decision_basis};
-      rows[index] = merged;
-      tasks.set(key, merged);
-    } else {
-      rows.push(event);
-      tasks.set(key, event);
-    }
-  }
-  return rows;
-}
-
-function activityRelatedEvents(event, events) {
-  const ids = new Set([event.message_id, event.reply_to, event.trigger_message_id].filter(Boolean));
-  const linkedTasks = new Set([...(event.related_task_ids || []), ...(event.task_id ? [event.task_id] : [])]);
-  if (!event.task_id) events.filter(item => item.event_type !== 'message'
-    && (ids.has(item.message_id) || ids.has(item.trigger_message_id)))
-    .forEach(item => { if (item.task_id) linkedTasks.add(item.task_id); });
-  const task = events.filter(item => linkedTasks.has(item.task_id)
-    && (event.event_type === 'message' || item.unit_id === event.unit_id)
-    && (event.related_task_ids?.length || !event.action || !item.action || item.action === event.action));
-  task.forEach(item => [item.message_id, item.reply_to, item.trigger_message_id].filter(Boolean)
-    .forEach(id => ids.add(id)));
-  const messages = events.filter(item => item.event_type === 'message'
-    && (ids.has(item.message_id) || item.reply_to && ids.has(item.reply_to)));
-  return { task, messages };
+  return ['set_led_state','set_led_color','blink_led'].includes(action);
 }
 
 function activityMessageReceipt(event, events) {
@@ -128,18 +77,6 @@ function activityMessageReceipt(event, events) {
   if (replies.some(item => item.reply_kind === 'declined')) return '对方未接受';
   if (replies.length) return '已收到回应';
   return event.interaction_kind === 'game_invite' ? '等待对方决定' : '等待回应';
-}
-
-function activityFeedbackChange(event, events, card) {
-  if (event.event_type !== 'action_result' || event.status !== 'ok') return '';
-  const after = event.state_at_event;
-  const before = [...events].reverse().find(item => item.event_type === 'action' && item.unit_id === event.unit_id
-    && item.task_id && item.task_id === event.task_id && item.action === event.action
-    && item.ts <= event.ts)?.state_at_event;
-  if (before?.status !== 'current' || after?.status !== 'current' || after.as_of < before.as_of) return '';
-  const from = activityPhysicalLabel(card, before.values), to = activityPhysicalLabel(card, after.values);
-  return from !== to && ![from, to].some(label => label.includes('待确认') || label.includes('待同步'))
-    ? `设备反馈：${from} → ${to}` : '';
 }
 
 function activityReasonText(event) {
@@ -205,9 +142,9 @@ function activityDecisionEvidence(item, event, events, now = Date.now() / 1000) 
 }
 
 Object.assign(window, {activityStateAge, activityLightColor, activityPhysicalLabel, activityMemberView,
-  activityTaskKey, activityTaskRows, activityRelatedEvents, activityMessageReceipt, activityReasonText,
-  activityDecisionBasis, activityEventKind, activityDecisionText, activityDecisionEvidence, isActivityLightingAction});
-window.activityFeedbackChange = activityFeedbackChange;
+  activityMessageReceipt, activityReasonText,
+  activityDecisionBasis, activityEventKind, activityDecisionText, activityDecisionEvidence,
+  isActivityLightingAction});
 
 function activityMediaUrl(event) {
   const candidate = event.media_ref || event.media_url;

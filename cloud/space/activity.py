@@ -16,6 +16,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
+from cloud.agents.common.progress_facts import public_process_facts
 from cloud.mqtt_signing import MqttSignatureError, verify_message
 from cloud.space.registry import DEFAULT_SPACE_ID
 
@@ -76,6 +77,42 @@ def _state_at_event(unit_id: str, now: float) -> dict[str, Any]:
                    or isinstance(state[key], float) and math.isfinite(state[key]))}
     return {"status": "current" if now - observed <= 60 else "stale",
             "as_of": observed, "values": values}
+
+
+def _game_round_snapshot(value: Any) -> dict[str, Any] | None:
+    """Keep the game's receipt-gated public reveal, never its private state."""
+    if not isinstance(value, dict) or type(value.get("round")) is not int or value["round"] < 1:
+        return None
+    choices, mapping = value.get("choices"), value.get("mapping")
+    units = ("esp32_desk_led", "go2")
+    if not isinstance(choices, dict) or not isinstance(mapping, dict):
+        return None
+    if any(not isinstance(choices.get(unit), str) or choices[unit] not in {"rock", "scissors", "paper"}
+           for unit in units):
+        return None
+    if not isinstance(value.get("winner"), str) or value["winner"] not in {*units, "draw"}:
+        return None
+    projected = {}
+    for unit in units:
+        item = mapping.get(unit)
+        if not isinstance(item, dict) or item.get("choice") != choices[unit]:
+            return None
+        projected[unit] = {"choice": choices[unit], "label": str(item.get("label") or "")[:80]}
+        if unit == "esp32_desk_led":
+            color = item.get("color")
+            if not isinstance(color, dict) or any(type(color.get(key)) is not int or not 0 <= color[key] <= 255
+                                                  for key in ("r", "g", "b")):
+                return None
+            projected[unit]["color"] = {key: color[key] for key in ("r", "g", "b", "brightness")
+                                        if type(color.get(key)) is int and 0 <= color[key] <= 255}
+        else:
+            arguments = item.get("arguments")
+            command = arguments.get("cmd") if isinstance(arguments, dict) else None
+            if item.get("action") != "go2_sport" or not isinstance(command, str) or len(command) > 80:
+                return None
+            projected[unit].update(action="go2_sport", arguments={"cmd": command})
+    return {"round": value["round"], "choices": {unit: choices[unit] for unit in units},
+            "mapping": projected, "winner": value["winner"]}
 
 
 class ActivityStore:
@@ -155,7 +192,8 @@ class ActivityStore:
 
     def events(self, activity_id: str) -> list[dict[str, Any]]:
         with self._lock:
-            return deepcopy(self._events.get(activity_id, []))
+            return [{**deepcopy(event), **public_process_facts(event)}
+                    for event in self._events.get(activity_id, [])]
 
     def recent_discoveries(self, receiver_unit_id: str, *, now: float | None = None,
                            limit: int = 6, max_age_s: float = 600) -> list[dict[str, Any]]:
@@ -347,6 +385,10 @@ class ActivityStore:
                                  "interaction_kind", "game_id",
                                  "question_id", "action", "physical_stop", "reason",
                                  "source", "confidence", "source_event_id", "display", "stage"}})
+        event.update(public_process_facts({**facts, "unit_id": unit_id}))
+        game_round = _game_round_snapshot(facts.get("game_round"))
+        if event.get("game_id") == "rps_siege" and event.get("stage") == "rps_result" and game_round:
+            event["game_round"] = game_round
         trigger = facts.get("trigger_message_id")
         if isinstance(trigger, str) and 0 < len(trigger) <= 120:
             event["trigger_message_id"] = trigger

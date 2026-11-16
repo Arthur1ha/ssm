@@ -101,14 +101,15 @@ function App({ session, logout, refreshSession }) {
     return [...entries, row];
   };
   const appendProcess = (requestId, agent, text, eventId, event = {}) => {
-    if (!text) return;
+    text = typeof event.text === 'string' && event.text.trim() ? event.text.trim() : text;
+    if (!text && !event.media_ref && !event.tool && !event.action && !event.decision_basis) return;
     setActivityLog(prev => {
       if (prev.some(entry => entry.type === 'process' && entry.requestId === requestId
         && entry.agent === agent && (eventId && entry.eventId === eventId
-          || entry.text === text && entry.media_ref === event.media_ref))) return prev;
+          || !eventId && !entry.eventId && entry.text === text && entry.step_id === event.step_id
+            && entry.run_id === event.run_id && entry.stage === event.stage && entry.media_ref === event.media_ref))) return prev;
       return insertBeforeRequestEnd(prev, requestId,
-        { type: 'process', requestId, agent, text, eventId,
-          media_ref: event.media_ref, taskId: event.task_id, stage: event.stage });
+        { ...processRecord(event), type: 'process', requestId, agent, text, eventId });
     });
   };
   const finishRequest = (requestId, text, eventId) => {

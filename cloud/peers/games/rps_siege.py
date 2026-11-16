@@ -161,7 +161,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             card=get_registry().get_card(LAMP),
             timeout=min(20, max(0.1, deadline - time.time())))
         record("action_result", f"灯的游戏动作{('已确认' if result.get('result') == 'ok' else '未确认')}。",
-               role="lamp", action=action, status=result.get("result", "unknown"),
+               role="lamp", action=action, arguments=params, status=result.get("result", "unknown"),
                task_id=result.get("task_id", physical_id))
         if result.get("result") != "ok":
             raise GameStopped("lamp_action_unconfirmed:" + str(result.get("error") or result.get("result")))
@@ -266,13 +266,15 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             result = await execute_tool("go2_sport", {"cmd": command}, context=context,
                                        request_id=f"rps_{invitation_id}_{number}_gesture")
             record("action_result", f"狗的出拳动作{('已确认' if result.get('result') == 'ok' else '未确认')}。",
-                   action="go2_sport", status=result.get("result", "unknown"),
+                   action="go2_sport", arguments={"cmd": command}, status=result.get("result", "unknown"),
                    task_id=result.get("command_request_id") or task_id)
             if result.get("result") != "ok":
                 raise GameStopped("go2_gesture_unconfirmed:" + str(result.get("error") or result.get("result")))
             check()
 
         record("message", f"第 {number} 回合：双方已锁定选择，同时开始展示。", stage="reveal")
+        for role in ("lamp", "go2"):
+            record("message", choices[role]["speech"], role=role, stage="throw_announcement")
         # Dispatch both without waiting for either receipt. Collect both
         # outcomes before scoring; never leave a sibling task unobserved.
         results = await asyncio.gather(
@@ -287,9 +289,15 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         label = {"go2": "狗赢，接下来靠近灯并关灯", "lamp": "灯赢，接下来由狗表演", "draw": "平局，重新出拳"}[winner]
         record("message", f"第 {number} 回合：灯出{CHOICES[choices['lamp']['choice']]}，"
                f"狗出{CHOICES[choices['go2']['choice']]}；{label}。",
-               stage="rps_result", reason=winner + "_won" if winner != "draw" else "draw")
-        for role in ("lamp", "go2"):
-            record("message", choices[role]["speech"], role=role)
+               stage="rps_result", reason=winner + "_won" if winner != "draw" else "draw",
+               game_round={"round": number,
+                   "choices": {LAMP: choices["lamp"]["choice"], "go2": choices["go2"]["choice"]},
+                   "mapping": {
+                       LAMP: {"choice": choices["lamp"]["choice"], "color": color,
+                              "label": terms["lamp_color_names"][choices["lamp"]["choice"]]},
+                       "go2": {"choice": choices["go2"]["choice"], "action": "go2_sport",
+                               "arguments": {"cmd": command}, "label": gesture_options()[command]["label"]}},
+                   "winner": LAMP if winner == "lamp" else winner})
         history = [*state["history"], {"round": number, "lamp": choices["lamp"]["choice"],
                    "go2": choices["go2"]["choice"], "winner": winner}]
         return {"winner": winner, "history": history}

@@ -178,7 +178,11 @@ Go2 加入活动后仍配置为 `free_explore`，启动事件及活动原话从�
 
 活动动作记录可附 `trigger_message_id`（执行入口明确关联的同伴消息）、`state_at_event`（记录时从现有设备卡投影读取的最近反馈：`status=current|stale|unknown`、`as_of`、有界 `values`），以及灯本轮实际采用的 `decision_observation`（仅光线级别、近期声音、时间段）。这些是历史记录，不是第二套实时设备状态，也不表示单凭对话或相邻时间即可证明动作原因或完成。旧记录缺少这些字段时保持未知。`GET /api/activity/{activity_id}/events` 同时返回活动元数据 `activity`，用于恢复真实退出状态与停止确认结果。
 
-活动消息与动作还可附 `decision_basis={reason,evidence:[{ref,kind,source,as_of,summary,status?}]}`。`reason` 是最多 400 字的选择摘要，`evidence` 最多 8 条；摘要由当前共享上下文或真实工具观察生成，不接受模型自填的观察事实。模型通过工具参数 `decision_reason` 与 `evidence_refs` 引用 `space.decision_evidence`，发送或执行前重新校验引用；未知、过期和跨活动的观察不能支持新动作。物理工具剥离这些解释参数后才下发硬件。消息气泡直接展示正文，不自动拼接决策原因；邀请简短说明邀请和必要玩法，回执校验与安全执行细节留在内部协议。PWA 在“查看进展”中按需展示当时保存的来源、时间和摘要；历史依据不因当前已过期而丢失，也不代表当前状态。
+活动消息与动作还可附 `decision_basis={reason,evidence:[{ref,kind,source,as_of,summary,status?}]}`。`reason` 是最多 400 字的选择摘要，`evidence` 最多 8 条；摘要由当前共享上下文或真实工具观察生成，不接受模型自填的观察事实。模型通过工具参数 `decision_reason` 与 `evidence_refs` 引用 `space.decision_evidence`，发送或执行前重新校验引用；未知、过期和跨活动的观察不能支持新动作。物理工具剥离这些解释参数后才下发硬件。消息气泡直接展示正文，不自动拼接决策原因；邀请简短说明邀请和必要玩法，回执校验与安全执行细节留在内部协议。PWA 在统一折叠过程面板中按需展示当时保存的来源、时间和摘要；历史依据不因当前已过期而丢失，也不代表当前状态。
+
+活动与聊天的公开过程使用同一投影：`run_id/parent_run_id/step_id` 关联原 Graph 运行及步骤，`tool/action`、`target_unit_id`、`skill_id`、`arguments`、`requested_text`、`result_state` 保留有界公开事实。`arguments` 最多 32 个标量参数，不含上下文、凭据、模型提示或私有推理；标识最多 120 字。灯能力统一使用模型工具名 `set_led_state/set_led_color/blink_led`；活动写入、SSE 与历史读取均从 `LAMP_SKILLS` 归一化，旧文件不迁移、硬件 MQTT 命令不改变。`capability_name` 从既有灯能力声明或目标 Card 派生；同任务合并只依赖真实 task/run/step 身份，不按名称或相邻时间猜测关联。`state_at_event` 仍是当时最近反馈，不证明当前动作造成该状态。详情缺字段时保持缺失，不能补造原因或观测。
+
+猜拳的 `type=activity,event_type=message,stage=rps_result` 事件在双方展示动作回执确认后附 `game_round={round,choices,mapping,winner}`：`choices` 以真实 unit_id 为键，值为 `rock|scissors|paper`；`mapping` 保存该轮对应的灯 `color={r,g,b,brightness?}` 与中文 `label`，狗的 `action=go2_sport,arguments={cmd},label`，各项同时含 `choice`；`winner` 为获胜 unit_id 或 `draw`。出拳台词在公开展示开始后、判决之前发布；秘密选拳与未确认回合不发布结构化选择/胜负。前端仅据该公开结果绘制历史虚拟形象，不将其当作当前物理姿态；旧游戏记录没有结构化结果时不解析自由文本补造。
 
 ### 智能体定向消息（内部，非 retained）
 

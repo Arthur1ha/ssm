@@ -61,107 +61,25 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
 window.ActivityFeed = ActivityFeed;
 
 function activityActionText(event, name, compact) {
-  const action = event.action || '';
-  const label = {
-    go2_sport: '执行动作', go2_move: '移动', go2_navigate_to: '前往指定地点',
-    go2_observe: '观察周围', go2_navigate_to_visible_target: '安全接近目标',
-    go2_navigate_to_coordinate: '前往目标位置', explore_frontier: '探索新区域',
-    set_led_state: '切换灯光', set_led_color: '调整灯光颜色', blink_led: '闪烁灯光',
-  }[action] || (event.unit_id === 'go2' ? '行动' : '调整灯光');
-  const subject = name || (event.unit_id === 'go2' ? '机器狗' : '智能灯');
-  if (event.event_type === 'action_result' && event.status === 'ok' && isActivityLightingAction(action)) {
-    const state = event.state_at_event?.status === 'current' ? event.state_at_event.values : null;
-    if (state?.ism === 'OFF') return '灯已熄灭';
-    if (state?.ism) return `已调为${activityPhysicalLabel({tags:['lighting']}, state)}`;
-    if (event.lighting_summary) return '灯光已调整';
-  }
-  // A planned action is an intention, never a completion claim.
-  if (event.event_type === 'action') return event.text?.trim() || `${compact ? '' : subject}准备${label}`;
-  if (event.event_type === 'action_progress' && event.text?.trim()
-      && event.text.trim() !== action) return event.text.trim();
-  if (event.event_type === 'action_progress') return `${compact ? '' : subject}正在${label}`;
-  const outcome = {
-    ok: ['explore_frontier', 'go2_navigate_to_coordinate'].includes(action)
-      ? '自由探索已到达新的地图探索点' : `已${label}`,
-    accepted: `已收到${label}请求`, executing: `正在${label}`,
-    blocked: `暂时无法${label}`, rejected: `无法${label}`,
-    cancelled: `本次${label}已取消`, error: `${label}没有成功`,
-    timeout: `${label}的结果还没有确认`, unknown: `${label}的结果还没有确认`,
-  }[event.status] || `${label}的状态已更新`;
-  return `${compact ? '' : subject}${outcome}`;
+  const label = processCapability(event);
+  if (event.event_type === 'action') return event.text?.trim() || `${compact ? '' : name}准备${label}`;
+  const state = event.state_at_event?.status === 'current' ? event.state_at_event.values : null;
+  if (['ok','accepted'].includes(event.status) && isActivityLightingAction(event.action) && state?.ism)
+    return `${compact ? '' : name}已调为${activityPhysicalLabel({tags:['lighting']}, state)}`;
+  return `${compact ? '' : name}${label} · ${processOutcome(event) || '处理中'}`;
 }
 
 function projectActivityEvents(events) {
-  const generic = /^(?:ok|error|blocked|accepted|executing|unknown|动作已完成|处理结束|(?:空间管家)?(?:已完成[，,、·\s]*)+)$/i;
-  const visible = [];
-  for (const event of events) {
-    if (event.display === false) continue;
-    if (event.event_type === 'started') continue; // The activity heading already says this.
-    // Search steps are individual records, even when they share a task and
-    // repeat a description while inspecting a different camera frame.
-    if (event.event_type === 'search_progress') { visible.push(event); continue; }
-    if (event.event_type === 'observation' && event.source === 'go2.camera'
-      && activityMediaUrl(event) && events.some(item => item.event_type === 'search_progress' && item.display !== false
-        && item.unit_id === event.unit_id && activityMediaUrl(item) === activityMediaUrl(event))) continue;
-    if (event.event_type === 'response' && event.status === 'ok') continue;
-    // Message delivery is already expressed under the conversation. It is not
-    // another device action and does not deserve its own progress row.
-    if (event.event_type === 'action_progress' && !event.action && event.status === 'accepted') continue;
-    // A peer's final receipt repeats a typed device result for the same task.
-    // Keep it in raw history for evidence, not as another user-visible action.
-    if (event.event_type === 'action_result' && !event.action && event.task_id && events.some(item =>
-      item.event_type === 'action_result' && item.unit_id === event.unit_id
-      && item.task_id === event.task_id && item.action && item.status === event.status
-      && item.display !== false)) continue;
-    const kind = activityEventKind(event);
-    if ((kind === 'message' || kind === 'observation')
-      && (!event.text?.trim() || generic.test(event.text.trim()))) continue;
-    if (event.event_type === 'action' && event.task_id && events.some(later =>
-      later.unit_id === event.unit_id && later.task_id === event.task_id && later.action === event.action
-      && later.ts >= event.ts
-      && ['action_progress', 'action_result'].includes(later.event_type))) continue;
-    // Replace a running status only with the receipt for the same action step.
-    if (event.event_type === 'action_progress' && events.some(later =>
-      later.event_type === 'action_result' && later.unit_id === event.unit_id
-      && later.ts >= event.ts
-      && (event.task_id && later.task_id === event.task_id && later.action === event.action
-        || !event.task_id && later.action === event.action
-          && later.ts >= event.ts && later.ts - event.ts < 30))) continue;
-    // Keep confirmed actions alongside the device's later persona reply.
-    const text = (kind === 'message' || kind === 'question' || kind === 'observation')
-      ? (event.text || '').trim() : activityStatusText(event, '', true);
-    const prior = [...visible].reverse().find(item => item.unit_id === event.unit_id
-      && Math.abs((item.ts || 0) - (event.ts || 0)) < 30);
-    if (prior && (!event.task_id || prior.task_id === event.task_id)
-      && (prior.event_type === event.event_type
-      || (['message', 'observation'].includes(activityEventKind(prior))
-        && ['message', 'observation'].includes(kind)))) {
-      const priorKind = activityEventKind(prior);
-      const priorText = ['message', 'question', 'observation'].includes(priorKind)
-        ? (prior.text || '').trim() : activityStatusText(prior, '', true);
-      if (text && text === priorText) continue;
-    }
-    visible.push(event);
-  }
-  return visible;
-}
-
-function compactActiveActivityEvents(events) {
-  const compact = [];
-  for (const event of events) {
-    const previous = compact[compact.length - 1];
-    const lighting = item => item?.event_type === 'action_result' && item.status === 'ok'
-      && isActivityLightingAction(item.action);
-    // Power-on and color-setting are steps of one explicitly linked request.
-    // Present its final light once; retain both physical tasks in the inspector.
-    if (lighting(event) && lighting(previous) && event.unit_id === previous.unit_id
-      && event.trigger_message_id && event.trigger_message_id === previous.trigger_message_id) {
-      compact[compact.length - 1] = {...event, lighting_summary:true,
-        decision_basis:event.decision_basis || previous.decision_basis,
-        related_task_ids:[...new Set([...(previous.related_task_ids || [previous.task_id]), event.task_id].filter(Boolean))]};
-    } else compact.push(event);
-  }
-  return compact;
+  const seen = new Set();
+  return events.filter(event => {
+    if (event.display === false || event.event_type === 'started') return false;
+    if (event.event_id && seen.has(event.event_id)) return false;
+    if (event.event_type === 'observation' && event.source === 'go2.camera' && activityMediaUrl(event)
+      && events.some(other => other.event_type === 'search_progress' && other.display !== false
+        && other.unit_id === event.unit_id && activityMediaUrl(other) === activityMediaUrl(event))) return false;
+    if (event.event_id) seen.add(event.event_id);
+    return !(event.event_type === 'response' && event.status === 'ok');
+  });
 }
 
 function activityStatusText(event, name, compact = false) {
@@ -185,163 +103,98 @@ function activityStatusText(event, name, compact = false) {
   return `${event.unit_id && !compact ? `${name} · ` : ''}${event.text || '有新进展'}`;
 }
 
-/* Device messages, observations and confirmed state use different treatments.
- * An invitation therefore never looks like an action that already happened. */
-function SpaceActivityFeed({ activity, events, ending, error, onEnd, onAnswer,
-  agents = [], unitData = {}, connected = false,
-  getName = getAgentDisplayName }) {
-  const { useEffect, useRef, useState } = React;
-  const [expanded, setExpanded] = useState(false);
-  const [selectedEvent, setSelectedEvent] = useState(null);
-  const [hasNewEvents, setHasNewEvents] = useState(false);
-  const [readingWindow, setReadingWindow] = useState(null);
-  const timelineRef = useRef(null);
-  const lastTimelineActivity = useRef('');
-  const followTimeline = useRef(true);
-  const lastSeenEvent = useRef(null);
-  const visibleEvents = projectActivityEvents(events);
-  const context = activity?.context || activity?.user_text || activity?.text ||
-    events.find(event => event.event_type === 'started')?.text || '';
+/* Speech stays on the surface; actual runs/tasks have one shared disclosure. */
+function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[],unitData={},connected=false,
+  getName=getAgentDisplayName}) {
+  const [expanded,setExpanded] = React.useState(false);
+  const [hasNewEvents,setHasNewEvents] = React.useState(false);
+  const [readingWindow,setReadingWindow] = React.useState(null);
+  const timelineRef = React.useRef(null), followTimeline = React.useRef(true);
+  const lastSeen = React.useRef(null);
   const activityId = activity?.activity_id || events[0]?.activity_id || '';
-  const isActive = Boolean(activity && !['ending', 'ended'].includes(activity.status));
+  const visibleEvents = projectActivityEvents(events);
+  const allRows = activityProcessRows(visibleEvents);
+  const isActive = Boolean(activity && !['ending','ended'].includes(activity.status));
   const isEnding = Boolean(activity?.status === 'ending' || ending);
   const isEnded = activity?.status === 'ended' || events.some(event => event.event_type === 'ended');
-  const isPending = !activity && !isEnded && events.length > 0;
-  // Keep questions visible so the user can answer without opening the record.
-  const hasActiveQuestion = isActive && visibleEvents.some(event =>
-    activityEventKind(event) === 'question');
-  const showTimeline = expanded || isActive || isEnding || hasActiveQuestion;
-  // Show the current sequence without turning a long autonomous session into
-  // an unbounded page. Older events remain available through the toggle.
-  const compactEvents = compactActiveActivityEvents(activityTaskRows(visibleEvents));
-  const incomingTimeline = expanded || hasActiveQuestion
-    ? compactEvents : compactEvents.slice(-16);
-  const timelineEvents = readingWindow || incomingTimeline;
-  const latestEventId = incomingTimeline[incomingTimeline.length - 1]?.event_id;
-  const summaryEvent = [...visibleEvents].reverse().find(event => event.event_type !== 'ended');
-  const summaryName = summaryEvent?.unit_id || summaryEvent?.agent_id
-    ? getName(summaryEvent.unit_id || summaryEvent.agent_id) : '空间管家';
-  const summary = summaryEvent
-    ? ['message', 'observation', 'question'].includes(activityEventKind(summaryEvent))
-      ? `${summaryName}：${(summaryEvent.text || '').slice(0, 140)}`
-      : summaryEvent.event_type === 'action' && summaryEvent.text
-        ? `${summaryName}：${summaryEvent.text}`
-      : activityStatusText(summaryEvent, summaryName)
-    : isEnded ? '本次活动已结束' : '正在等待设备动态';
-  useEffect(() => {
-    setExpanded(false); setSelectedEvent(null); setHasNewEvents(false); setReadingWindow(null);
-    followTimeline.current = true;
-    lastSeenEvent.current = null;
-  }, [activityId]);
-  useEffect(() => {
-    const timeline = timelineRef.current;
-    if (!showTimeline || !latestEventId || !timeline) return;
-    const newActivity = lastTimelineActivity.current !== activityId;
-    if (newActivity || followTimeline.current) {
-      timeline.scrollTop = timeline.scrollHeight;
-      setHasNewEvents(false);
-      lastSeenEvent.current = latestEventId;
-    } else setHasNewEvents(lastSeenEvent.current !== latestEventId);
-    lastTimelineActivity.current = activityId;
-  }, [activityId, isActive, showTimeline, latestEventId, readingWindow]);
-  if (!activity && events.length === 0 && !error) return null;
-  const timeLabel = ts => ts ? new Date(Number(ts) < 1e11 ? Number(ts) * 1000 : Number(ts))
-    .toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
-
-  return <section className={`space-activity${isActive || isEnding || isPending ? ' space-activity--live' : ' space-activity--ended'}`} aria-label="空间活动">
-    <div className="space-activity__heading">
-      <div>
-        <small>空间活动</small>
-        <h2>{context || '最近的空间活动'}{(activity || events.length > 0) &&
-          <span className="space-activity__live">
-            {isEnding ? '正在结束' : isActive ? '进行中' : isPending ? '同步中' : '已结束'}</span>}</h2>
-      </div>
-      {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>
-        {ending ? '正在结束…' : '结束活动'}
-      </button>}
+  const hasQuestion = isActive && allRows.some(row => row.kind === 'question');
+  const hasAttention = allRows.some(row => row.process.some(processNeedsAttention));
+  const showTimeline = expanded || isActive || isEnding || hasQuestion || hasAttention;
+  const incomingRows = expanded || hasQuestion || hasAttention ? allRows : allRows.slice(-16);
+  const rows = readingWindow || incomingRows;
+  const latestId = visibleEvents[visibleEvents.length - 1]?.event_id;
+  const context = activity?.context || activity?.user_text || activity?.text || events.find(event => event.event_type === 'started')?.text || '';
+  const latestSpeech = [...allRows].reverse().find(row => row.kind === 'message');
+  const timeLabel = ts => ts ? new Date(Number(ts) < 1e11 ? Number(ts)*1000 : Number(ts))
+    .toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}) : '';
+  React.useEffect(() => {setExpanded(false);setReadingWindow(null);setHasNewEvents(false);followTimeline.current=true;},[activityId]);
+  React.useEffect(() => {
+    if (!showTimeline || !timelineRef.current) return;
+    if (followTimeline.current) {timelineRef.current.scrollTop=timelineRef.current.scrollHeight;lastSeen.current=latestId;setHasNewEvents(false);}
+    else setHasNewEvents(lastSeen.current !== latestId);
+  },[activityId,latestId,showTimeline,readingWindow]);
+  if (!activity && !events.length && !error) return null;
+  return <section className={`space-activity${isActive || isEnding ? ' space-activity--live' : ' space-activity--ended'}`} aria-label="空间活动">
+    <div className="space-activity__heading"><div><small>空间活动</small><h2>{context || '最近的空间活动'}
+      <span className="space-activity__live">{isEnding ? '正在结束' : isActive ? '进行中' : isEnded ? '已结束' : '同步中'}</span></h2></div>
+      {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>{ending ? '正在结束…' : '结束活动'}</button>}
     </div>
-    {(expanded || isActive || isEnding) && <ActivityMembers activity={activity} events={events}
-      agents={agents} unitData={unitData} connected={connected} getName={getName}/>}
+    {(expanded || isActive || isEnding) && <ActivityMembers activity={activity} events={events} agents={agents}
+      unitData={unitData} connected={connected} getName={getName}/>}
     {error && <div className="space-activity__error" role="alert">{error}</div>}
-    {!showTimeline && <div className="space-activity__summary">
-      <span>最新动态</span><p>{summary}</p>
-    </div>}
-    {showTimeline && <div className="space-activity__timeline" ref={timelineRef}
-      onScroll={event => {
-        const timeline = event.currentTarget;
-        const nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
-        if (!nearBottom && followTimeline.current) setReadingWindow(timelineEvents);
-        followTimeline.current = nearBottom;
-        if (nearBottom) {
-          setHasNewEvents(false); setReadingWindow(null); lastSeenEvent.current = latestEventId;
-        }
-      }}>
-      {timelineEvents.map((event, index) => {
-        const kind = activityEventKind(event);
-        const unitId = event.unit_id || event.agent_id || '';
-        const name = unitId ? getName(unitId) : '空间管家';
-        const target = event.target_unit_id || event.target || '';
-        const previous = timelineEvents[index - 1];
-        const sameDevice = previous && (previous.unit_id || previous.agent_id || '') === unitId;
-        const showSpeaker = !sameDevice || activityEventKind(previous) !== kind
-          || (previous?.target_unit_id || previous?.target || '') !== target;
-        const mediaUrl = activityMediaUrl(event);
-        const text = event.text || '';
-        const receipt = kind === 'message' ? activityMessageReceipt(event, events) : '';
-        const linkedTask = kind === 'message' && activityRelatedEvents(event, events).task.length > 0;
-        const basis = activityDecisionBasis(event);
-        const actionEvent = ['action', 'action_progress', 'action_result'].includes(event.event_type);
-        const change = actionEvent ? activityFeedbackChange(event, events,
-          agents.find(agent => agent.unit_id === unitId)) : '';
-        return <div key={event.event_id}
-          className={`space-activity__item space-activity__item--${kind}`}
-          style={{'--activity-speaker':getAgentBubbleColor(unitId)}}>
-          <span className="space-activity__time">{timeLabel(event.ts)}</span>
-          <div className="space-activity__content">
-            {showSpeaker && <div className="space-activity__speaker">{name}{target ? ` → ${getName(target)}` : ''}
-              {event.reply_to ? ' · 回应' : ''}</div>}
-            {kind === 'message' || kind === 'question' ? <>
-              <div className="space-activity__bubble" data-decision-reason={basis ? true : undefined}>{activityDecisionText(event,
-                text || (kind === 'question' ? '需要你帮忙看一下。' : '发送了一条消息'))}
-              </div>
-              {(receipt || linkedTask || basis) && <div className="space-activity__message-meta">
-                {receipt && <span className="space-activity__receipt">{receipt}</span>}
-                {(linkedTask || basis) && <button type="button" className="space-activity__evidence-link"
-                  onClick={() => setSelectedEvent(event)}>查看进展<Icon name="arrow" size={12}/></button>}
-              </div>}
-              {kind === 'question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>
-                回答{name}
-              </button>}
-            </> : kind === 'observation' ? <div className="space-activity__observation">
-              <span>观察</span><p>{text || '一条新观察'}</p>
-            </div> : <div className={actionEvent ? 'space-activity__action' : 'space-activity__status'}
-              data-outcome={actionEvent ? event.status || 'executing' : undefined}>
-              <p data-decision-reason={basis ? true : undefined}>{activityDecisionText(event, activityStatusText(event, name, true))}</p>
-              {change && <span className="space-activity__feedback-change">{change}</span>}
-              {actionEvent && <button type="button" className="space-activity__evidence-link"
-                onClick={() => setSelectedEvent(event)}>查看变化依据<Icon name="arrow" size={12}/></button>}
-            </div>}
-            {mediaUrl && <a className="space-activity__photo" href={mediaUrl} target="_blank" rel="noopener noreferrer">
-              <img src={mediaUrl} alt="机器狗观察照片" loading="lazy"/>
-            </a>}
+    {!showTimeline && <div className="space-activity__summary"><span>最新动态</span><p>{latestSpeech
+      ? `${getName(latestSpeech.event.unit_id)}：${latestSpeech.event.text}` : isEnded ? '本次活动已结束' : '正在等待设备动态'}</p></div>}
+    {showTimeline && <div className="space-activity__timeline" ref={timelineRef} onScroll={event => {
+      const el=event.currentTarget, near=el.scrollHeight-el.scrollTop-el.clientHeight<80;
+      if (!near && followTimeline.current) setReadingWindow(rows);
+      followTimeline.current=near;
+      if (near) {setHasNewEvents(false);setReadingWindow(null);lastSeen.current=latestId;}
+    }}>
+      {rows.map(row => {
+        const event=row.event, unit=event.unit_id || event.agent_id || 'cloud_orchestrator';
+        const name=getName(unit), receipt=row.kind==='message' ? activityMessageReceipt(event,events) : '';
+        return <div key={row.key} className={`space-activity__item space-activity__item--${row.kind}`}>
+          <time className="space-activity__time">{timeLabel(event.ts)}</time><div className="space-activity__content">
+            {row.kind==='result' ? <>
+              <ActivityGameRound event={event} getName={getName}/>
+              {(row.process.length>0 || activityDecisionBasis(event)) && <RunProcess events={[...row.process,...(activityDecisionBasis(event) ? [event] : [])]}
+                allEvents={events} agents={agents} getName={getName} finished/>}
+            </> : ['message','question'].includes(row.kind) ? <>
+              <AgentSpeech compact agent={unit} name={name} target={event.target_unit_id ? getName(event.target_unit_id) : ''}
+                text={event.text || '需要你补充信息。'}>
+                {receipt && <small className="space-activity__receipt">{receipt}</small>}
+              </AgentSpeech>
+              {row.kind==='question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>回答{name}</button>}
+              {(row.process.length>0 || activityDecisionBasis(event) || activityMediaUrl(event)) && <RunProcess
+                events={[...row.process,...(activityDecisionBasis(event) || activityMediaUrl(event) ? [event] : [])]}
+                allEvents={events} agents={agents} getName={getName} finished/>}
+            </> : row.kind==='process' ? <>
+              {row.process.filter(item => item.game_round).map(item => <ActivityGameRound key={item.event_id} event={item} getName={getName}/>)}
+              <RunProcess events={row.process} allEvents={events} agents={agents} getName={getName} finished={isEnded}/>
+            </> : <div className="space-activity__status"><p>{activityStatusText(event,name)}</p></div>}
           </div>
         </div>;
       })}
     </div>}
-    {hasNewEvents && showTimeline && <button type="button" className="space-activity__new"
-      onClick={() => {
-        followTimeline.current = true; setHasNewEvents(false); setReadingWindow(null);
-        if (timelineRef.current) timelineRef.current.scrollTop = timelineRef.current.scrollHeight;
-      }}>有新动态 · 回到最新 ↓</button>}
-    {visibleEvents.length > 0 && !hasActiveQuestion
-      && (!isActive || compactEvents.length > timelineEvents.length || expanded) && <button type="button"
-      className="space-activity__toggle" aria-expanded={expanded} onClick={() => {
-        setReadingWindow(null); setExpanded(value => !value);
-      }}>
-      {expanded ? '收起旧记录' : '查看全部记录'}
+    {hasNewEvents && showTimeline && <button type="button" className="space-activity__new" onClick={() => {
+      followTimeline.current=true;setHasNewEvents(false);setReadingWindow(null);
+      if (timelineRef.current) timelineRef.current.scrollTop=timelineRef.current.scrollHeight;
+    }}>有新动态 · 回到最新 ↓</button>}
+    {allRows.length>0 && !hasQuestion && (!isActive || allRows.length>rows.length || expanded) && <button type="button"
+      className="space-activity__toggle" aria-label={expanded ? '收起活动记录' : '展开活动记录'} aria-expanded={expanded}
+      onClick={() => {setReadingWindow(null);setExpanded(value => !value);}}>
+      <span>活动记录 · {allRows.length}</span><svg className="process-chevron" data-open={expanded} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
     </button>}
-    {selectedEvent && <ActivityEvidenceDrawer event={selectedEvent} events={events} agents={agents}
-      getName={getName} onClose={() => setSelectedEvent(null)}/>}
   </section>;
+}
+function ActivityGameRound({event,getName}) {
+  const round=event.game_round;
+  const labels={rock:'石头',paper:'布',scissors:'剪刀'};
+  return <div className="activity-game-round" aria-label={`第 ${round.round} 轮揭晓`}><small>第 {round.round} 轮 · 已揭晓</small>
+    <div className="activity-game-round__choices">{Object.entries(round.choices || {}).map(([unit,choice]) =>
+      <div key={unit}>{typeof ShapeFace==='function' && <ShapeFace unitId={unit} shape={choice} size={40} label={labels[choice]}/>}
+        <strong>{getName(unit)} · {labels[choice] || choice}</strong><small>{round.mapping?.[unit]?.label || ''}</small></div>)}</div>
+    <p>{round.winner==='draw' ? '平局' : round.winner ? `${getName(round.winner)}获胜` : '本轮完成'}</p>
+  </div>;
 }
 window.SpaceActivityFeed = SpaceActivityFeed;

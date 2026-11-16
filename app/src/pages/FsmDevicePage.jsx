@@ -95,10 +95,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     return [...rows, row];
   };
   const appendProcess = (requestId, text, eventId, event = {}) => {
-    if (!text) return;
-    const row = { id: `${requestId}:process:${eventId || ++nextProcessId.current}`,
-      type: 'process', agent: unitId, requestId, text, eventId,
-      stage: event.stage, taskId: event.task_id, media_ref: event.media_ref };
+    text = typeof event.text === 'string' && event.text.trim() ? event.text.trim() : text;
+    if (!text && !event.media_ref && !event.tool && !event.action && !event.decision_basis) return;
+    const row = { ...processRecord(event), id: `${requestId}:process:${eventId || ++nextProcessId.current}`,
+      type: 'process', agent: unitId, requestId, text, eventId };
     setMessages(previous => {
       if (eventId && previous.some(message => message.type === 'process'
         && message.requestId === requestId && message.eventId === eventId)) return previous;

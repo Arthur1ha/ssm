@@ -7,17 +7,15 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const sucrase = require('sucrase');
 const compile = name => sucrase.transform(fs.readFileSync(name,'utf8'),{transforms:['jsx'],production:true}).code;
-const files = ['utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/activityView.js',
-  'components/Icon.jsx','components/ActivityDetails.jsx','components/ActivityFeed.jsx'];
+const files = ['utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js',
+  'components/Icon.jsx','avatars/Avatar.jsx','components/RunProcess.jsx','components/ActivityMembers.jsx','components/ActivityFeed.jsx'];
 const context = vm.createContext({window:{}});
 for (const file of files) {
   vm.runInContext(compile('app/src/'+file),context);
   Object.assign(context,context.window);
 }
-const {activityMemberView,activityTaskRows,activityRelatedEvents,activityMessageReceipt,activityFeedbackChange,
+const {activityMemberView,processSteps,activityProcessRows,activityMessageReceipt,
   activityDecisionBasis,activityDecisionText,activityDecisionEvidence,projectActivityEvents} = context;
-const compactEvents=context.compactActiveActivityEvents;
-const replay=process.env.SSM_ACTIVITY_REPLAY ? JSON.parse(fs.readFileSync(process.env.SSM_ACTIVITY_REPLAY,'utf8')) : null;
 const sseReplay=process.env.SSM_ACTIVITY_SSE_REPLAY ? JSON.parse(fs.readFileSync(process.env.SSM_ACTIVITY_SSE_REPLAY,'utf8')) : null;
 const now = Date.now()/1000;
 const go2 = {unit_id:'go2',name:'呆呆狗',agent_type:'robot',_online:true,
@@ -67,8 +65,8 @@ assert.match(activityDecisionEvidence(oldEvidence,groundedInvite,[],now).notice,
 assert.match(activityDecisionEvidence({...decisionBasis.evidence[0],as_of:now-500},
   {...groundedInvite,ts:now-400},[],now+200).notice,/当前情况需要重新确认/);
 assert.match(activityDecisionEvidence({...decisionBasis.evidence[0],as_of:null},groundedInvite,[],now).notice,/记录时间未提供/);
-assert.equal(activityDecisionBasis(activityTaskRows([
-  {...planned,decision_basis:decisionBasis},result])[0]).reason,decisionBasis.reason,
+assert.equal(activityDecisionBasis(processSteps([
+  {...planned,decision_basis:decisionBasis},result])[0].event).reason,decisionBasis.reason,
   'An explicitly linked receipt erased the original selection basis');
 assert.equal(activityMessageReceipt(invite,[invite]),'等待对方决定');
 assert.equal(activityMessageReceipt(invite,events),'对方已接受');
@@ -80,92 +78,41 @@ assert.equal(activityMemberView(lamp,{ism:'OFF'},{status:'joined'},true,now).lab
 assert.equal(activityMemberView(go2,{...states.go2.state,_received_at:now-70},{status:'joined'},true,now).label,'状态待确认');
 assert.equal(activityMemberView(go2,states.go2.state,{status:'joined'},false,now).label,'状态待确认');
 assert.equal(activityMemberView(go2,{...states.go2.state,body_telemetry_fresh:false},{status:'joined'},true,now).label,'玩耍 · 身体待确认');
-assert.equal(activityTaskRows([planned,running,result]).length,1);
-assert.equal(activityTaskRows([result,running])[0].status,'timeout','A progress replay downgraded a receipt');
-assert.equal(activityTaskRows([result,{...result,event_id:'other',action:'go2_observe'}]).length,2,'Different actions in a run were merged');
-assert.equal(activityTaskRows([result,{...result,event_id:'repeated'}]).length,2,'Repeated receipts were erased');
+assert.equal(processSteps([planned,running,result]).length,1);
+assert.equal(processSteps([result,running])[0].event.status,'timeout','A progress replay downgraded a receipt');
+assert.equal(processSteps([result,{...result,event_id:'other',action:'go2_observe'}]).length,2,'Different capabilities were merged');
+assert.equal(processSteps([result,{...result,event_id:'repeated'}]).length,1,'A repeated terminal receipt duplicated one task step');
+const grouped=activityProcessRows(events);
+assert.equal(grouped.length,3,'Explicit steps should collapse once without swallowing personality replies');
+assert.equal(grouped.filter(row=>row.kind==='process').length,1);
+assert.equal(grouped.filter(row=>row.kind==='message').every(row=>!row.process.length),true,
+  'A shared invitation attached every action to every message');
 const searchSteps = ['search_observing','search_observe','search_selected','search_observe'].map((stage,index) =>
   event('search-step-'+index,'search_progress',{stage,task_id:'activity-search',source:'object_search',
     text:stage === 'search_observe' ? '前方有纸箱。' : '搜索步骤 '+stage,
     media_ref:stage === 'search_observe' ? '/api/activity-photo-'+index : null}));
-assert.equal(activityTaskRows(projectActivityEvents([...searchSteps,
+assert.equal(processSteps(projectActivityEvents([...searchSteps,
   {...result,task_id:'activity-search',status:'ok'}])).length,5,
   'Search completion erased its individual observations and steps');
 assert.equal(projectActivityEvents([...searchSteps,event('scene-copy','observation',{
   source:'go2.camera',text:'前方有纸箱。',media_ref:'/api/activity-photo-1'})]).length,4,
   'A shared scene duplicated a search photo');
-assert.equal(activityRelatedEvents(result,events).messages.length,2);
-assert.equal(activityRelatedEvents(invite,events).task.length,3);
-assert.equal(activityRelatedEvents({...result,task_id:'unlinked',trigger_message_id:null},events).messages.length,0,
-  'Nearby conversation was falsely presented as the cause');
-assert.equal(projectActivityEvents([planned,{...result,action:'go2_observe'}]).length,2,
-  'Another action in the same task hid the plan');
 const lampPlan=event('lamp-plan','action',{unit_id:lamp.unit_id,task_id:'light-task',action:'set_led_color',
   state_at_event:{status:'current',as_of:now-10,values:{ism:'ON',r:255,g:200,b:80}}});
 const lampResult=event('lamp-result','action_result',{unit_id:lamp.unit_id,task_id:'light-task',action:'set_led_color',status:'ok',
   state_at_event:{status:'current',as_of:now-9,values:{ism:'ON',r:0,g:0,b:255}}});
-assert.equal(activityFeedbackChange(lampResult,[lampPlan,lampResult],lamp),'设备反馈：常亮 · 暖白 → 常亮 · 蓝色');
-assert.equal(activityFeedbackChange({...lampResult,status:'timeout'},[lampPlan],lamp),'');
-const lightingReceipts=[{...lampResult,trigger_message_id:'msg_reply'},
-  {...lampResult,event_id:'game-confirmation',text:'游戏出题颜色已确认'},
-  {...lampResult,event_id:'peer-ack',event_type:'action_progress',action:undefined,status:'accepted',text:'设备已接收动作请求'},
-  {...lampResult,event_id:'peer-result',action:undefined,text:'ok'}];
-const dedupedLighting=activityTaskRows(projectActivityEvents(lightingReceipts));
-assert.equal(dedupedLighting.length,1,'Graph, game and peer receipts became separate lamp actions');
-assert.equal(dedupedLighting[0].trigger_message_id,'msg_reply','Game confirmation erased the causal link');
-const powerOn={...lampResult,event_id:'power-on',action:'set_led_state',task_id:'power-task',trigger_message_id:'msg_reply'};
-const oneLight=compactEvents(activityTaskRows(projectActivityEvents([powerOn,...lightingReceipts])));
-assert.equal(oneLight.length,1,'Power-on and color for one request were not summarized');
-assert.equal(oneLight[0].related_task_ids.length,2,'The summarized light lost its physical execution history');
-assert.equal(activityRelatedEvents(oneLight[0],[powerOn,...lightingReceipts]).task.length,5);
-if(replay){
-  const visible=compactEvents(activityTaskRows(projectActivityEvents(replay.events)));
-  const lighting=visible.filter(item=>item.event_type==='action_result' && context.isActivityLightingAction(item.action));
-  assert.equal(lighting.length,1,'Latest real activity still repeats the lamp setup');
-  assert.equal(lighting[0].related_task_ids.length,2,'Latest real setup should retain power and color tasks');
-  assert.equal(visible.filter(item=>item.event_type==='action_progress' && !item.action && item.status==='accepted').length,0);
-  assert.equal(visible.filter(item=>item.event_type==='action_result' && !item.action).length,0);
-  console.log(`PASS: latest recorded activity replay (${replay.events.length} raw events, one lamp setup summary).`);
-}
+// Public events are canonical already; stale snapshots cannot supply a color.
+assert.equal(context.activityActionText(lampResult,'皮皮灯',true),'已调为常亮 · 蓝色');
+assert.doesNotMatch(context.activityActionText({...lampResult,state_at_event:{status:'stale'}},'',true),/蓝色/);
+assert.equal(processSteps([lampPlan,lampResult]).length,1);
+assert.equal(processSteps([{...lampPlan,arguments:{r:0,g:0,b:255}},
+  {...lampResult,arguments:{}}])[0].event.arguments.b,255,'A receipt without parameters erased the selected color');
+const explicitRound=event('round','message',{stage:'rps_result',game_id:'rps_siege',game_round:{round:1,
+  choices:{go2:'scissors',esp32_desk_led:'rock'},mapping:{go2:{label:'打招呼'},esp32_desk_led:{label:'橙色'}},winner:'esp32_desk_led'}});
+assert.equal(context.avatarEventPresentation(explicitRound,'go2').shape,'scissors');
+assert.equal(context.avatarEventPresentation({...explicitRound,stage:'throw_announcement'},'go2'),null);
+assert.equal(context.avatarEventPresentation({...explicitRound,game_round:undefined,text:'狗出剪刀'},'go2'),null);
 console.log('PASS: explicit message/task relationships, physical freshness, action grouping and unconfirmed results.');
-
-// New SSE feedback can arrive between the member card's ten-second age ticks.
-// Keep hook state across renders and advance wall time without firing the timer.
-{
-  let wallTime = now, hookValue, ageTick;
-  context.Date = class extends Date { static now() { return wallTime * 1000; } };
-  context.apiClient = {devicesSynced:true};
-  context.setInterval = callback => { ageTick = callback; return 1; };
-  context.clearInterval = () => {};
-  context.React = {
-    useState(initial) {
-      if (hookValue === undefined) hookValue = typeof initial === 'function' ? initial() : initial;
-      return [hookValue, value => { hookValue = typeof value === 'function' ? value(hookValue) : value; }];
-    },
-    useEffect(effect) { if (!ageTick) effect(); },
-    createElement(type, props, ...children) { return {type, props:props || {}, children}; },
-  };
-  const labels = node => Array.isArray(node) ? node.flatMap(labels)
-    : node && typeof node === 'object' ? node.props?.className === 'activity-member__state'
-      ? node.children.filter(value => typeof value === 'string') : labels(node.children) : [];
-  const render = (receivedAt, connected = true) => labels(context.ActivityMembers({
-    activity, agents:[go2], connected,
-    unitData:{go2:{state:{...states.go2.state,_received_at:receivedAt}}},
-    getName:id => id,
-  }))[0];
-  assert.equal(render(now),'玩耍 · 站立');
-  for (const seconds of [6,9,16,19]) {
-    wallTime = now + seconds;
-    if (seconds === 16) ageTick();
-    assert.equal(render(wallTime),'玩耍 · 站立','Fresh feedback flickered to unknown between age ticks');
-  }
-  wallTime = now + 90;
-  ageTick();
-  assert.equal(render(now + 19),'状态待确认','Silent devices must still age out');
-  assert.equal(render(wallTime,false),'状态待确认','A lost SSE connection must remain unconfirmed');
-  assert.equal(render(wallTime + 10),'状态待确认','Actual future timestamps must still be rejected');
-  console.log('PASS: fresh Go2 feedback between age ticks stays visible; stale, disconnected and future feedback stays unconfirmed.');
-}
 
 async function browserChecks() {
   const puppeteer = require('puppeteer');
@@ -213,7 +160,7 @@ async function browserChecks() {
       await streamPage.addScriptTag({path:file});
     for(const file of ['ApiClient.js',...files,'hooks/useActivityTimeline.js'])
       await streamPage.addScriptTag({content:compile('app/src/'+file)});
-    await streamPage.addStyleTag({path:'app/styles/app.css'});
+    for (const style of ['app','process','avatars']) await streamPage.addStyleTag({path:`app/styles/${style}.css`});
     await streamPage.evaluate(({go2,lamp,states,expected})=>{
       window.__received=[];
       apiClient.addEventListener('server-event',message=>{
@@ -239,7 +186,7 @@ async function browserChecks() {
     }
     await streamPage.waitForFunction(()=>document.querySelector('.space-activity__toggle'));
     await streamPage.click('.space-activity__toggle');
-    await streamPage.waitForFunction(texts=>texts.every(text=>[...document.querySelectorAll('.space-activity__bubble')]
+    await streamPage.waitForFunction(texts=>texts.every(text=>[...document.querySelectorAll('.agent-speech__bubble')]
       .some(bubble=>bubble.textContent.trim()===text.trim())),{timeout:5000},mappingRows.map(row=>row.text));
     // Reconnect/snapshot recovery must restore the same bubbles without
     // inventing a different mapping or duplicating records.
@@ -263,7 +210,7 @@ async function browserChecks() {
     });
     await page.goto('http://ssm.test/');
     console.log('Browser: loading real activity components.');
-    await page.addStyleTag({path:'app/styles/app.css'});
+    for (const style of ['app','process','avatars']) await page.addStyleTag({path:`app/styles/${style}.css`});
     await page.addStyleTag({content:'html,body{margin:0;background:var(--color-bg);color:var(--color-text);font-family:var(--font-sans)} .test-shell{max-width:560px;margin:auto;padding:18px 12px}.test-shell>h1{font-size:16px;margin:0 4px 16px}'});
     for(const file of [process.env.SSM_CHECK_REACT,process.env.SSM_CHECK_REACT_DOM]) {
       assert(file,'Set SSM_CHECK_REACT and SSM_CHECK_REACT_DOM');await page.addScriptTag({path:file});
@@ -290,133 +237,54 @@ async function browserChecks() {
     },{activity,events,go2,lamp,states});
     await page.waitForSelector('.activity-member');
     console.log('Browser: activity card mounted.');
-    assert.equal(await page.$$('.space-activity__action').then(rows=>rows.length),1);
-    assert(await page.$eval('.space-activity__action',e=>e.textContent.includes('结果还没有确认')));
-    assert.equal(await page.$eval('.space-activity__action',e=>getComputedStyle(e).borderTopWidth),'0px');
-    assert.equal(await page.$eval('.space-activity__action',e=>getComputedStyle(e).backgroundColor),'rgba(0, 0, 0, 0)');
+    await page.waitForSelector('.run-process-summary');
+    assert.equal(await page.$$eval('.run-process-summary', rows=>rows.every(row=>!row.open)),true);
+    assert.match(await page.$eval('.run-process__attention',el=>el.innerText),/确认/,
+      'An unconfirmed result disappeared into the closed process');
     assert(await page.$eval('.space-activity',e=>e.textContent.includes('对方已接受')));
     for(const width of [320,390,1280]) {
-      console.log('Browser: checking width',width);
       await page.setViewport({width,height:900});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'Horizontal overflow');
-      const open = await page.$('.space-activity__action .space-activity__evidence-link');
-      await open.click();
-      await page.waitForSelector('[role="dialog"]');
-      assert(await page.$eval('.activity-evidence',e=>e.textContent.includes('停止结果尚未确认')));
-      assert.equal(await page.$$('.activity-evidence blockquote').then(nodes=>nodes.length),2);
-      assert.equal(await page.$eval('.activity-evidence',e=>e.scrollWidth<=e.clientWidth),true);
-      assert.equal(await page.evaluate(()=>Boolean(document.activeElement.closest('.activity-evidence'))),true);
-      await page.keyboard.down('Shift');
-      await page.keyboard.press('Tab');
-      await page.keyboard.up('Shift');
-      assert.equal(await page.evaluate(()=>Boolean(document.activeElement.closest('.activity-evidence'))),true);
-      if(process.env.SCREENSHOT_DIR && width===390) {
-        fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
-        await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'activity-evidence-390.png'),fullPage:true});
-      }
-      await page.keyboard.press('Escape');
-      await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
-      assert.equal(await page.evaluate(()=>document.activeElement.classList.contains('space-activity__evidence-link')),true,
-        'Focus was not restored to the evidence button');
-      if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`activity-card-${width}.png`),fullPage:true});
+      await page.click('.run-process-summary summary');
+      assert.equal(await page.$eval('.run-process-summary',el=>el.open),true);
+      assert.match(await page.$eval('.run-process__body',el=>el.innerText),/停止结果尚未确认/);
+      assert.equal(await page.$eval('.run-process__body',el=>el.scrollWidth<=el.clientWidth),true);
+      if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`activity-process-${width}.png`),fullPage:true});
+      await page.click('.run-process-summary summary');
     }
-    // A reasoned invitation has evidence before any task or acceptance exists.
+    // Public rationale belongs inside the same disclosure, never a second bubble.
     await page.evaluate(({invite,basis})=>__render({events:[{...invite,decision_basis:basis}]}),
       {invite:groundedInvite,basis:decisionBasis});
-    await page.waitForSelector('[data-decision-reason]');
-    assert.equal(await page.$eval('[data-decision-reason]',el=>el.textContent),invite.text,
-      'Decision reasoning was appended to the invitation bubble');
-    assert(await page.$eval('[data-decision-reason]',el=>el.classList.contains('space-activity__bubble')),
-      'The main decision was reduced to a caption instead of agent dialogue');
-    assert.equal(await page.$eval('[data-decision-reason]',el=>
-      el.parentElement.querySelector('.space-activity__speaker').textContent.includes('打算')),false,
-      'A new intention heading changed the existing speaker hierarchy');
-    assert.equal(await page.$$('.space-activity__bubble').then(els=>els.length),1,
-      'A separate reason bubble changed the number of dialogue entries');
-    assert.equal(await page.$$('.space-activity__item').then(els=>els.length),1);
-    assert.equal(await page.$$eval('[data-decision-reason]',els=>els.length),1);
-    await page.click('.space-activity__message-meta .space-activity__evidence-link');
-    await page.waitForSelector('[data-decision-evidence]');
-    assert(await page.$eval('.activity-evidence',el=>el.textContent.includes('刚才它看到了白色玩偶')),
-      'The progress drawer lost the stored invitation reason');
-    assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('白色猫头鹰')));
-    assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('来源原记录未保留')));
-    assert(await page.$eval('.activity-evidence',el=>el.textContent.includes('不能据此确认设备已经行动')));
-    if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'decision-evidence.png'),fullPage:true});
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
-    // Color and candidate reasoning stays in the existing action row with its real receipt.
-    const colorBasis={...decisionBasis,reason:'刚才的观察里有白色玩偶，我想用白色出题，让呆呆狗自己挑一个同色目标。'};
-    const candidateBasis={...decisionBasis,reason:'我刚看到了地上的白色猫头鹰，想先检查能不能安全靠近它。'};
-    await page.evaluate(({lampResult,result,colorBasis,candidateBasis})=>__render({events:[
-      {...lampResult,decision_basis:colorBasis},{...result,status:'executing',decision_basis:candidateBasis}]}),
-      {lampResult,result,colorBasis,candidateBasis});
-    await page.waitForFunction(()=>document.querySelectorAll('[data-decision-reason]').length===2);
-    assert(await page.$$eval('[data-decision-reason]',els=>els.every(el=>el.tagName==='P')));
-    assert(await page.$eval('[data-decision-reason]',el=>el.textContent.startsWith('刚才的观察里有白色玩偶')));
-    assert.equal(await page.$$('.space-activity__bubble').then(els=>els.length),0,
-      'Action reasoning added dialogue layers instead of using the original action line');
-    assert.equal(await page.$$('.space-activity__item').then(els=>els.length),2);
-    assert.equal(await page.$$('.space-activity__action').then(els=>els.length),2);
-    assert(await page.$$eval('[data-decision-reason]',els=>els.every(el=>
-      el.parentElement.classList.contains('space-activity__action'))));
-    // A message that already speaks the reason should not duplicate the bubble.
-    await page.evaluate(({invite,basis})=>__render({events:[{...invite,text:basis.reason,decision_basis:basis}]}),
+    await page.waitForSelector('.run-process-summary');
+    assert.equal(await page.$$eval('.agent-speech__bubble',els=>els.length),1);
+    assert.equal(await page.$eval('.agent-speech__bubble',el=>el.textContent),invite.text);
+    assert.equal(await page.$eval('.run-process-summary',el=>el.open),false);
+    await page.click('.run-process-summary summary');
+    assert.match(await page.$eval('[data-decision-reason]',el=>el.innerText),/刚才它看到了白色玩偶/);
+    assert.match(await page.$eval('[data-decision-evidence]',el=>el.innerText),/白色猫头鹰/);
+    assert.match(await page.$eval('[data-decision-evidence]',el=>el.innerText),/原记录未保留/);
+    // A new event must preserve the user's explicit open state.
+    await page.evaluate(()=>__render({events:[...__props.events,{event_id:'unrelated-new',event_type:'message',
+      unit_id:'go2',text:'另一个独立消息',ts:Date.now()/1000}]}));
+    assert.equal(await page.$eval('.run-process-summary',el=>el.open),true);
+    await page.evaluate(({invite,basis})=>__render({events:[{...invite,
+      decision_basis:{...basis,evidence:basis.evidence.map(row=>({...row,as_of:1}))}}]}),
       {invite:groundedInvite,basis:decisionBasis});
-    await page.waitForFunction(()=>document.querySelectorAll('[data-decision-reason]').length===1);
-    assert.equal(await page.$$('.space-activity__bubble').then(els=>els.length),1);
-    // Restored historical records retain their evidence, including stale notices.
-    await page.evaluate(({invite,basis})=>__render({activity:{...__props.activity,status:'ended'},
-      events:[{...invite,decision_basis:{...basis,evidence:basis.evidence.map(row=>({...row,as_of:1}))}}]}),
-      {invite:groundedInvite,basis:decisionBasis});
-    await page.click('.space-activity__toggle');
-    await page.waitForSelector('[data-decision-reason]');
-    await page.click('.space-activity__message-meta .space-activity__evidence-link');
-    await page.waitForSelector('[data-decision-evidence]');
-    assert(await page.$eval('[data-decision-evidence]',el=>el.textContent.includes('决策时已过期')));
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
-    await page.click('.space-activity__toggle');
-    await page.evaluate(({activity,events})=>__render({activity,events}),{activity,events});
-    await page.waitForSelector('.space-activity__action');
-    if(replay){
-      await page.setViewport({width:390,height:900});
-      await page.evaluate(replay=>{
-        window.__beforeReplay=__props;
-        const lampRows=replay.events.filter(item=>item.unit_id==='esp32_desk_led' && item.state_at_event?.values?.ism);
-        const last=lampRows[lampRows.length-1].state_at_event;
-        __render({activity:replay.activity,events:replay.events,connected:true,
-          unitData:{...__props.unitData,esp32_desk_led:{state:{...last.values,_received_at:last.as_of}}}});
-        document.querySelector('.test-shell>h1').textContent='最新活动日志回放';
-      },replay);
-      if(replay.activity.status==='ended'){
-        await page.waitForSelector('.space-activity--ended');
-        await page.click('.space-activity__toggle');
-      }
-      await page.waitForFunction(()=>[...document.querySelectorAll('.space-activity__action p')]
-        .filter(e=>e.textContent.includes('已调为常亮 · 白光')).length===1);
-      assert.equal(await page.$$('.space-activity__task').then(rows=>rows.length),0);
-      assert.equal(await page.$eval('.space-activity',e=>e.textContent.includes('设备已接收动作请求')),false);
-      assert.equal(await page.$$eval('.space-activity__action',rows=>rows.every(e=>
-        getComputedStyle(e).borderTopWidth==='0px' && getComputedStyle(e).backgroundColor==='rgba(0, 0, 0, 0)')),true);
-      assert(await page.$eval('.activity-members',e=>e.textContent.includes('常亮 · 白光')));
-      if(process.env.SCREENSHOT_DIR){
-        await page.$eval('.space-activity__timeline',e=>{e.scrollTop=0;});
-        await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'latest-log-top-390.png'),fullPage:true});
-        await page.evaluate(()=>{
-          const timeline=document.querySelector('.space-activity__timeline');
-          const setup=[...timeline.querySelectorAll('.space-activity__action p')].find(e=>e.textContent.includes('已调为常亮 · 白光'));
-          const position=setup.getBoundingClientRect().top-timeline.getBoundingClientRect().top+timeline.scrollTop;
-          timeline.scrollTop=Math.max(0,position-180);
-        });
-        await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'latest-log-setup-390.png'),fullPage:true});
-        await page.$eval('.space-activity__timeline',e=>{e.scrollTop=e.scrollHeight;});
-        await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'latest-log-results-390.png'),fullPage:true});
-      }
-      await page.evaluate(()=>__render(__beforeReplay));
-      await page.waitForFunction(()=>document.querySelector('.activity-member__state')?.textContent.includes('玩耍'));
-      console.log('Browser: latest real log renders one lamp setup, no transport acknowledgements or action boxes.');
+    await page.waitForFunction(()=>document.querySelector('[data-decision-evidence]')?.textContent.includes('决策时已过期'));
+    await page.evaluate(round=>__render({events:[round]}),explicitRound);
+    await page.waitForSelector('.activity-game-round');
+    assert.equal(await page.$$eval('.activity-game-round .shape-face',rows=>rows.length),2);
+    assert.match(await page.$eval('.activity-game-round',el=>el.innerText),/打招呼/);
+    assert.match(await page.$eval('.activity-game-round',el=>el.innerText),/橙色/);
+    assert.equal(await page.$$eval('.activity-game-round [data-motion]',rows=>rows.every(row=>row.dataset.motion==='none')),true,
+      'History replay animated a revealed result');
+    for (const width of [320,390,1280]) {
+      await page.setViewport({width,height:900});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'Round result overflow');
+      if(process.env.SCREENSHOT_DIR && width===390) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'activity-round-390.png'),fullPage:true});
     }
+    await page.evaluate(({activity,events})=>__render({activity,events}),{activity,events});
+    await page.waitForSelector('.run-process-summary');
     // Append while reading old messages: badge appears and scroll is not forced down.
     await page.evaluate(()=>{
       const lots=Array.from({length:25},(_,i)=>({event_id:'chat'+i,event_type:'message',unit_id:'go2',
@@ -470,7 +338,7 @@ async function browserChecks() {
       else {errors.push('Unexpected home network: '+request.url());request.abort();}
     });
     await home.setViewport({width:390,height:844});await home.goto('http://ssm.test/');
-    await home.addStyleTag({path:'app/styles/app.css'});
+    for (const style of ['app','process','avatars']) await home.addStyleTag({path:`app/styles/${style}.css`});
     await home.addStyleTag({content:'html,body,#root{height:100%;overflow:hidden}'});
     for(const file of [process.env.SSM_CHECK_REACT,process.env.SSM_CHECK_REACT_DOM])await home.addScriptTag({path:file});
     const scripts=[...fs.readFileSync('app/index.html','utf8').matchAll(/<script[^>]+src="(src\/[^\"]+)"/g)]
@@ -518,7 +386,7 @@ async function browserChecks() {
     await home.waitForFunction(()=>document.querySelectorAll('.space-activity img').length === 2);
     await home.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('当前情况已反馈。'));
     assert.equal(await home.$$eval('.run-process-summary',rows=>rows.some(row=>
-      /前方有纸箱|搜索步骤/.test(row.textContent))),false,'Activity steps escaped into the conversation');
+      !row.closest('.space-activity') && /前方有纸箱|搜索步骤/.test(row.textContent))),false,'Activity steps escaped into the conversation');
     assert.equal(await home.$$eval('.chat-messages img',rows=>rows.every(row=>row.closest('.space-activity'))),true,
       'An activity photo escaped its card');
     assert.equal(await home.$$eval('.space-activity__timeline img',rows=>rows.length),2);
@@ -538,7 +406,7 @@ async function browserChecks() {
     assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-activity-390.png')});
     assert.deepEqual(errors,[]);
-    console.log('PASS: real activity card at 320/390/1280px, explicit evidence, focus/escape, reading position, stale feedback and ended metadata.');
+    console.log('PASS: real activity card at 320/390/1280px, shared disclosure/evidence, reading position, stale feedback and ended metadata.');
   } finally {await browser.close();}
 }
 if(process.argv.includes('--browser')) browserChecks().catch(error=>{console.error(error);process.exitCode=1;});
