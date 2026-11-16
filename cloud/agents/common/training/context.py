@@ -3,6 +3,7 @@
 from copy import deepcopy
 import logging
 
+from cloud.agents.common.emotions import EMOTIONS
 from cloud.agents.common.training import service, store
 from cloud.agents.common.training.catalog import catalog_for
 from cloud.agents.common.training.policy import definition_transition_ids
@@ -16,6 +17,10 @@ DECISION_GUIDANCE = (
     "overrides 仅包含用户本次明确修改的参数，不重填或猜测已保存参数。"
     "规则的条件和目标状态不是当前已发生的事实，执行仍须通过工具校验和真实回执。"
     "事件教导只在真实事件授权下执行；不适用的教导不影响其他请求。"
+    "definition.emotion 表示你自己本轮表达的情绪，不代表用户情绪或真实观察。"
+    "普通对话最终回复的 emotion 有唯一匹配且无 situation 的情绪教导时，Graph 会在收尾前应用，"
+    "无需另行调用 apply_training 重复执行；没有映射时只显示虚拟表情。"
+    "带 situation 的情绪教导仍由你结合本轮情绪和情境语义选择 apply_training。"
     "training 不可用或版本变化时，若提供 list_training 就重新查询；"
     "无法查询时说明读取限制，不猜测已保存方案。"
 )
@@ -54,3 +59,33 @@ def decision_context(unit_id: str, *, space_id: str = "main",
         "action", "selector_params", "parent")}
         for edge in catalog["transitions"] if edge["id"] in referenced]
     return result
+
+
+def emotion_training_call(run, *, space_id: str, origin_kind: str) -> dict | None:
+    """Select one current confirmed mapping; the normal executor owns admission.
+
+    Never interpret prose, infer observations, or execute directly from a reply.
+    Contextual teachings remain an explicit choice of the existing role Graph.
+    """
+    if not run.agent_id or run.emotion not in EMOTIONS or run.emotion == 'neutral':
+        return None
+    current = decision_context(run.agent_id, space_id=space_id, origin_kind=origin_kind)
+    emotional = [record for record in current['records']
+                 if record['unit_id'] == run.agent_id
+                 and record['definition'].get('emotion') == run.emotion]
+    references = {record['teaching_id'] for record in emotional}
+    # An explicitly chosen contextual expression takes precedence over a
+    # generic mapping, including failed/uncertain attempts that must not retry.
+    if any(step.get('tool') == 'apply_training'
+           and (step.get('params') or {}).get('unit_id') == run.agent_id
+           and (step.get('params') or {}).get('teaching_id') in references
+           for step in run.steps):
+        return None
+    matches = [record for record in emotional
+               if not record['definition'].get('situation')
+               and not record['definition'].get('trigger')]
+    if len(matches) != 1:
+        return None
+    record = matches[0]
+    return {'unit_id': run.agent_id, 'teaching_id': record['teaching_id'],
+            'revision': record['revision'], 'overrides': {}}

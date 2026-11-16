@@ -19,6 +19,11 @@ LAMP, DOG = "esp32_desk_led", "go2"
 
 @pytest.fixture
 def social_bus(monkeypatch, tmp_path):
+    from cloud.api import activity as activity_api
+    from cloud.api import main as api_main
+    from cloud.space import context as space_context
+    from cloud.peers import social
+
     monkeypatch.setenv("SSM_MQTT_SIGNING_SECRET", "go2-social-evidence-integration-secret")
     monkeypatch.setenv("SSM_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
     monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
@@ -34,7 +39,10 @@ def social_bus(monkeypatch, tmp_path):
     space["decision_evidence"] = decision_evidence(space)
     store = SimpleNamespace(current=lambda: activity, record_event=Mock(return_value={"recorded": True}))
     monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: store)
-    monkeypatch.setattr("cloud.peers.social.get_activity_store", lambda: store)
+    monkeypatch.setattr(activity_api, 'get_activity_store', lambda: store)
+    monkeypatch.setattr(api_main, 'get_activity_store', lambda: store)
+    monkeypatch.setattr(space_context, 'get_activity_store', lambda: store)
+    monkeypatch.setattr(social, 'get_activity_store', lambda: store)
     monkeypatch.setattr("cloud.space.context.get_space_context", lambda *_a, **_kw: space)
     monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready", lambda *_: True)
     monkeypatch.setattr("cloud.peers.games.registry.game_invitation_ready", lambda *_: True)

@@ -50,6 +50,7 @@ class ReactiveState(TypedDict, total=False):
     reply: str
     decision_text: str
     emotion: str
+    emotion_step_id: str
     autonomy_epoch: int
 
 
@@ -65,6 +66,7 @@ def _prompt(agent, state: ReactiveState):
     from cloud.personality.store import render_identity
     from cloud.personality.names import agent_names
     from cloud.space.context import get_space_context
+    from cloud.agents.common.training.context import decision_context
 
     profile = get_profile()
     space = get_space_context(agent._find_led_unit(), state=agent._state)
@@ -114,7 +116,7 @@ def _prompt(agent, state: ReactiveState):
         "但不能承诺已开局、猜测阻塞原因或绕过未确认的物理回执。"
         "当前可玩列表只描述能力，不是发起游戏的理由。可以普通交流或不发消息。邀请不等于游戏完成。"
         "游戏的规则、策略及完成条件从当前可玩列表读取。"
-        "观测中的 training_intent 是本次唯一允许启动的已确认教导；若不执行，应说明原因。"
+        "观测中的 training_intent 是本次唯一允许启动的事件教导；若不执行，应说明原因。"
         "training_intent.situation 若存在，是用户教导的语义适用情境，须结合真实当前上下文理解。"
         "事件出现不代表该情境已成立；当前不适用时说明原因并不执行。"
         "仍须遵守用户让位和真实执行回执。"
@@ -123,10 +125,15 @@ def _prompt(agent, state: ReactiveState):
         "它只影响重新评估机会，不直接映射颜色。\n"
     )
     instructions += ('若本轮不需要调用工具，最终回复输出 JSON：'
-                     '{"text":"要说的话","emotion":"neutral"}。' + EMOTION_INSTRUCTIONS)
+                     '{"text":"要说的话","emotion":"neutral"}。' + EMOTION_INSTRUCTIONS
+                     + '本轮尚未执行灯光动作时，最终 emotion 可自动应用唯一匹配且没有 situation 的已确认情绪教导。'
+                     '情绪教导不需要伪造传感器事件或 lighting_eligible；仍受模式、用户让位和任务占用约束。'
+                     '回复不能预先声称表达动作已经完成。')
     return role_messages(instructions, "根据本次自主机会决定下一步。",
                          context={"observations": state["sense"], "space": space,
                                   "agent_names": agent_names(), "games": games,
+                                  "training": decision_context(agent._find_led_unit(),
+                                                               origin_kind='agent_autonomous'),
                                   "history": history}) + observed_tool_messages(state.get("steps", []))
 
 
@@ -224,8 +231,25 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                 text, emotion = parse_emotional_reply(response.content)
             except (ValueError, TypeError):
                 return {"status": "error", "call": None}
-            return {"status": "ok", "call": None,
-                    "decision_text": text, "emotion": emotion}
+            update = {"status": "ok", "call": None,
+                      "decision_text": text, "emotion": emotion}
+            if (emotion != 'neutral' and not state.get('emotion_step_id')
+                    and not any(step.get('tool') in PHYSICAL | {'apply_training'}
+                                for step in state.get('steps', []))):
+                from cloud.agents.common.training.context import emotion_training_call
+                run = GraphRun(state['run_id'], 'agent_auto', text, time.time() + 90,
+                               agent_id=agent._find_led_unit(), origin_kind='agent_autonomous',
+                               emotion=emotion, steps=state.get('steps', []))
+                try:
+                    args = emotion_training_call(run, space_id='main', origin_kind='agent_autonomous')
+                except Exception as exc:
+                    event(state, 'emotion.skipped', error=type(exc).__name__)
+                else:
+                    if args:
+                        step_id = state['run_id'] + ':emotion'
+                        update.update(emotion_step_id=step_id,
+                                      call={'name': 'apply_training', 'args': args, 'id': step_id})
+            return update
         call = calls[0]
         if call.get("name") not in VISIBLE or not isinstance(call.get("args"), dict):
             return {"status": "rejected", "call": None}
@@ -236,6 +260,21 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
     def route_plan(state):
         return "act" if state.get("call") else "reply"
 
+    def expression_current(state):
+        if (state['autonomy_epoch'] != agent._autonomy_epoch or not agent._device_online()
+                or getattr(agent, '_peer_game_id', None)):
+            return False
+        opportunity = state['sense'].get('social_opportunity') or {}
+        activity_id = opportunity.get('activity_id')
+        if activity_id:
+            from cloud.space.activity import get_activity_store
+            activity = get_activity_store().current()
+            member = ((activity or {}).get('devices') or {}).get(agent._find_led_unit()) or {}
+            return bool(activity and activity.get('activity_id') == activity_id
+                        and activity.get('status') in {'starting', 'active', 'partial'}
+                        and member.get('status') == 'joined' and member.get('owner') == activity_id)
+        return True
+
     def act(state):
         call = state["call"]
         if (state["autonomy_epoch"] != agent._autonomy_epoch
@@ -243,6 +282,38 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                 or getattr(agent, '_peer_game_id', None)):
             return {"status": "blocked", "call": None}
         name, args = call["name"], dict(call["args"])
+        if call['id'] == state.get('emotion_step_id'):
+            from cloud.agents.common.training.tools import prepare_training_application
+            from cloud.agents.lamp.workflows.runtime import run_training_behavior
+            from cloud.space.execution import ExecutionContext
+            context = ExecutionContext('agent_auto', 'agent', False, 'main',
+                                       'agent_autonomous', int(time.time() + 90))
+
+            async def express():
+                if not expression_current(state):
+                    return {'result': 'cancelled', 'error': 'emotion_context_changed'}
+                try:
+                    prepared = await prepare_training_application(args, context)
+                except ValueError as exc:
+                    return {'result': 'rejected', 'error': str(exc)}
+                if prepared['unit_id'] != agent._find_led_unit():
+                    return {'result': 'rejected', 'error': 'training_target_mismatch'}
+                return await run_training_behavior(prepared, context,
+                    run_id=state['run_id'] + ':' + call['id'], agent=agent,
+                    availability=lambda: expression_current(state))
+
+            event(state, 'tool.dispatch', tool=name, params=args, tool_call_id=call['id'])
+            result = asyncio.run(express())
+            agent._last_reactive_tool_result = result
+            step = {'step_id': call['id'], 'tool': name, 'params': args, 'result': result}
+            event(state, 'tool.result', tool=name, step_id=call['id'], result=result,
+                  status=result.get('result', 'unknown'))
+            publish('agent_progress', agent_id=agent._find_led_unit(), scope='space',
+                    space_id='main', source='autonomous', status=result.get('result', 'unknown'),
+                    run_id=state['run_id'], step_id=call['id'], stage='observed', tool=name,
+                    training_ref=args['teaching_id'], training_revision=args['revision'])
+            return {'status': result.get('result', 'unknown'), 'call': None,
+                    'steps': [*state.get('steps', []), step]}
         intent = state['sense'].get('training_intent')
         if intent:
             from cloud.agents.common.training.store import list_records
@@ -326,11 +397,23 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                 "status": status}
 
     def route_act(state):
-        return "plan" if state["status"] == "executing" else "reply"
+        return "plan" if state["status"] == "executing" and not state.get('emotion_step_id') else "reply"
 
     def reply(state):
         opportunity = state['sense'].get('social_opportunity') or {}
         answer = state.get('decision_text', '')
+        if state.get('emotion_step_id'):
+            if not expression_current(state) or not agent._should_act():
+                return {'reply': ''}
+            if state.get('status') != 'ok':
+                run = GraphRun(state['run_id'], 'agent_auto', answer, time.time() + 15,
+                               agent_id=agent._find_led_unit(), status=state['status'],
+                               steps=state.get('steps', []))
+                answer = factual_fallback(run.agent_id, run.status, run)
+            publish('agent_reply', agent_id=agent._find_led_unit(), scope='space',
+                    space_id='main', source='autonomous', status=state['status'],
+                    run_id=state['run_id'], text=answer, emotion=state.get('emotion', 'neutral'))
+            return {'reply': answer}
         if (opportunity.get('kind') == 'activity_request'
                 and not state.get('steps') and state.get('status') == 'ok'
                 and valid_reply_format(answer)):

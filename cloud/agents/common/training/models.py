@@ -2,6 +2,8 @@
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
 
+from cloud.agents.common.emotions import EMOTIONS
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
@@ -33,6 +35,8 @@ class Definition(StrictModel):
     # Interpreted by the role Graph, never used as a global device guard.
     situation: StrictStr | None = Field(default=None, min_length=1, max_length=2000,
         description="自然语言适用情境，由智能体语义理解；不要求传感器事件或固定口令")
+    emotion: Literal[*EMOTIONS] | None = Field(default=None,
+        description="智能体自己本轮表达的情绪，复用回复 emotion；不是用户情绪或传感器观察。neutral 仅显示，不自动执行。无额外情境的唯一映射由 Graph 应用，动作仍受执行权限和真实回执约束")
 
 
 class Draft(StrictModel):

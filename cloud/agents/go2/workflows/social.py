@@ -45,6 +45,7 @@ class SocialState(TypedDict, total=False):
     delivery: dict[str, Any]
     status: str
     response: str
+    expression: dict[str, Any]
 
 
 def build_social_graph(
@@ -55,6 +56,7 @@ def build_social_graph(
     send_message: Callable[..., Awaitable[dict]],
     checkpointer: Any = None,
     effect_ledger: FileEffectLedger | None = None,
+    express_emotion: Callable[[SocialState], Awaitable[dict]] | None = None,
 ):
     """Decide whether to message a peer, then recheck live availability and target."""
     structured_model = model.with_structured_output(SocialDecision, method="function_calling")
@@ -186,12 +188,48 @@ def build_social_graph(
     async def after_decide(state: SocialState) -> str:
         return "dispatch" if state.get("status") == "selected" else END
 
+    async def express(state: SocialState) -> SocialState:
+        # Reserve before selecting/executing a teaching: a restored social
+        # decision must not apply a newly edited rule or repeat an old action.
+        run_id = state["run_id"]
+        decision = state["decision"]
+        identity = ("go2", f"go2:social:{run_id}", run_id, "emotion")
+        try:
+            reservation = ledger.reserve(*identity, "express_emotion", {
+                "emotion": decision["emotion"], "target": decision["target"]})
+            if reservation["reservation"] == "existing":
+                outcome = reservation.get("result") or {
+                    "result": "unknown", "error": "prior_expression_unconfirmed"}
+            else:
+                try:
+                    outcome = await express_emotion(state)
+                except Exception as exc:
+                    outcome = {"result": "unknown", "error": type(exc).__name__}
+                if not isinstance(outcome, dict):
+                    outcome = {"result": "unknown", "error": "invalid_expression_result"}
+                if outcome.get("result") not in {"unknown", "timeout", "executing"}:
+                    ledger.mark_result(*identity, outcome)
+        except ValueError:
+            outcome = {"result": "rejected", "error": "expression_id_conflict"}
+        # Message delivery and physical expression retain separate outcomes.
+        return {"expression": outcome}
+
+    async def after_dispatch(state: SocialState) -> str:
+        decision = state.get("decision") or {}
+        if (express_emotion is not None and state.get("status") in {"accepted", "ok"}
+                and decision.get("interaction_kind", "message") == "message"
+                and decision.get("emotion", "neutral") != "neutral"):
+            return "express"
+        return END
+
     graph = StateGraph(SocialState)
     graph.add_node("gate", gate)
     graph.add_node("decide", decide)
     graph.add_node("dispatch", dispatch)
+    graph.add_node("express", express)
     graph.add_edge(START, "gate")
     graph.add_conditional_edges("gate", after_gate)
     graph.add_conditional_edges("decide", after_decide)
-    graph.add_edge("dispatch", END)
+    graph.add_conditional_edges("dispatch", after_dispatch)
+    graph.add_edge("express", END)
     return graph.compile(checkpointer=checkpointer)

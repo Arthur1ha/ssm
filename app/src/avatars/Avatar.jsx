@@ -1,6 +1,8 @@
 /* Preset expressions share one small SVG rig; animation is presentation only. */
 function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutral', behavior = 'idle',
-  motion, animationKey = null, animated = false, size = 64, label, className = ''}) {
+  motion, animationKey = null, animated = false, online, size = 64, label, className = ''}) {
+  // undefined: decorative/history avatar; null: connection is being synced.
+  animated = animated && online !== false && online !== null;
   const profile = resolveAvatarProfile(agent || unitId);
   const body = AVATAR_SHAPES[shape] || AVATAR_SHAPES.idle;
   const mood = normalizeAvatarEmotion(expression || emotion);
@@ -9,6 +11,19 @@ function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutra
   const [visible, setVisible] = React.useState(true);
   const [awake, setAwake] = React.useState(!document.hidden);
   const [blinkPeriod] = React.useState(() => 3 + Math.random() * 4);
+  const identity = unitId || (typeof agent === 'string' ? agent : agent?.unit_id || agent?.agent_id);
+  const previousPresence = React.useRef({identity, online});
+  React.useEffect(() => {
+    const previous = previousPresence.current;
+    previousPresence.current = {identity, online};
+    if (previous.identity !== identity || previous.online !== false || online !== true
+        || !animated || !visible || document.hidden
+        || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const transition = ref.current?.animate([
+      {transform:'scale(.96)'}, {transform:'translateY(-2px) scale(1.03)', offset:.45}, {transform:'none'},
+    ], {duration:300, easing:'ease-out'});
+    return () => transition?.cancel();
+  }, [online, identity]);
   React.useEffect(() => {
     if (!animated) return;
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -46,6 +61,7 @@ function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutra
   return <svg ref={ref} className={`shape-face ${className}`} viewBox="0 0 100 100" width={size} height={size}
     role={label ? 'img' : undefined} aria-label={label || undefined} aria-hidden={label ? undefined : true}
     focusable="false" data-shape={AVATAR_SHAPES[shape] ? shape : 'idle'} data-emotion={mood}
+    data-online={typeof online === 'boolean' ? String(online) : undefined}
     data-behavior={behavior} data-animated={animated ? 'true' : 'false'} data-paused={playing ? undefined : 'true'}
     style={{'--avatar-color':profile.color, '--avatar-ink':profile.ink, '--avatar-blink-period':`${blinkPeriod}s`}}>
     <g className="shape-face__ambient"><g ref={form} className="shape-face__form" data-motion={entrance?.motion || 'none'}>

@@ -311,6 +311,7 @@ function App({ session, logout, refreshSession }) {
           )}
           <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
+            activity={currentActivity} activityEvents={activityEvents}
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
           </>}

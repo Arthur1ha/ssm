@@ -35,6 +35,8 @@ function ActivityMembers({activity, events = [], agents = [], unitData = {}, con
           <span className="activity-member__portrait">
             <ShapeFace agent={card || id} shape={canAnimate ? liveGesture.shape : present.shape}
               emotion={emotion} behavior={present.behavior} size={72} animated={available && !ended}
+              online={!connected || apiClient.devicesSynced === false ? null
+                : member.disconnected ? false : member.stale ? null : true}
               motion={canAnimate ? liveGesture.motion : undefined}
               animationKey={canAnimate ? liveGesture.eventId : liveEmotion?.eventId}/>
           </span>

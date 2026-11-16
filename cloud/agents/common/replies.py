@@ -44,6 +44,7 @@ async def finalize_reply(run: Run, *, model, instructions,
     fallback = fallback or (lambda current: factual_fallback(current.agent_id, current.status, current))
     fields = dict(agent_id=run.agent_id, run_id=run.run_id,
                   trace_id=run.trace_id or run.run_id, session_id=run.session_id)
+    expression_emotion = normalize_emotion(run.emotion) if run.emotion_step_id else None
     try:
         if run.decision_draft:
             answer, source = run.decision_draft, "decision_model"
@@ -75,6 +76,11 @@ async def finalize_reply(run: Run, *, model, instructions,
                        run.agent_id, run.run_id, type(exc).__name__)
         run.response, run.reply_source = fallback(run), "runtime"
         run.emotion = "neutral"
+    finally:
+        if expression_emotion is not None:
+            # Execution can fail while the original expressive intent remains;
+            # the receipt controls factual wording, not this presentation field.
+            run.emotion = expression_emotion
     return run
 
 

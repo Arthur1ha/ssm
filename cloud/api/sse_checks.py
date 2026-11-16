@@ -27,8 +27,13 @@ async def test_activity_stage_keeps_activity_sse_name_and_matches_history(monkey
     broker, stream = await open_stream(monkeypatch)
     store.configure(emit=lambda event: broker.emit_space(event['space_id'], event))
     try:
+        game_round = {'round': 1, 'choices': {'esp32_desk_led': 'scissors', 'go2': 'rock'},
+            'mapping': {
+                'esp32_desk_led': {'choice': 'scissors', 'color': {'r': 0, 'g': 255, 'b': 0}, 'label': '绿色'},
+                'go2': {'choice': 'rock', 'action': 'go2_sport', 'arguments': {'cmd': 'Hello'}, 'label': '打招呼'}},
+            'winner': 'go2'}
         event = store.record_event(record['activity_id'], 'message', unit_id='go2',
-            game_id='rps_siege', stage=stage, text='石头＝开心；剪刀＝比心；布＝伸展。')
+            game_id='rps_siege', stage=stage, text='石头＝开心；剪刀＝比心；布＝伸展。', game_round=game_round)
         wire = await asyncio.wait_for(anext(stream), timeout=1)
         assert '\nevent: activity\n' in wire
         payload = json.loads(next(line[6:] for line in wire.splitlines() if line.startswith('data: ')))
@@ -36,6 +41,10 @@ async def test_activity_stage_keeps_activity_sse_name_and_matches_history(monkey
         history = await activity_api.get_activity_events(record['activity_id'], {'space_id': 'main'})
         assert history['events'][-1] == payload
         assert payload['stage'] == stage
+        if stage == 'rps_result':
+            assert payload['game_round'] == game_round
+        else:
+            assert 'game_round' not in payload
     finally:
         await stream.aclose()
 

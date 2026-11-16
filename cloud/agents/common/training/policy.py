@@ -58,6 +58,8 @@ def validate_definition(definition: dict, catalog: dict) -> dict:
     if len(set(definition['origins'])) != len(definition['origins']):
         raise ValueError('duplicate origin')
     trigger = definition['trigger']
+    if trigger and definition.get('emotion') is not None:
+        raise ValueError('emotion_cannot_be_observation_trigger')
     if trigger and 'agent_autonomous' not in definition['origins']:
         raise ValueError('event_trigger_requires_agent_autonomous')
     if not trigger and definition.get('situation') and any(
@@ -87,7 +89,7 @@ def validate_definition(definition: dict, catalog: dict) -> dict:
             if set(step['defaults']) & set(edge['fixed_params']):
                 raise ValueError('cannot override fixed transition parameters')
             _partial_params(edge['params_schema'], step['defaults'])
-            if trigger or len(definition['steps']) > 1:
+            if trigger or definition.get('emotion') is not None or len(definition['steps']) > 1:
                 # Autonomous and ordered behaviors cannot ask a later raw
                 # caller to invent missing action parameters.
                 _validate_schema(edge['params_schema'], {**step['defaults'], **edge['selector_params']})
@@ -124,9 +126,13 @@ def conflicts(definition: dict, records: list[dict]) -> list[dict]:
         if record.get('desired_status') != 'enabled':
             continue
         other = record['definition']
-        same_scope = definition.get('situation') == other.get('situation')
+        same_scope = (definition.get('situation'), definition.get('emotion')) == (
+            other.get('situation'), other.get('emotion'))
         a, b = definition['trigger'], other['trigger']
         if not same_scope or not set(definition['origins']) & set(other['origins']):
+            continue
+        if definition.get('emotion') is not None:
+            found.append({'code': 'emotion_overlap', 'teaching_id': record['teaching_id']})
             continue
         if a and b and a['event_id'] == b['event_id'] and set(definition['steps'][0]['transition_ids']) & set(other['steps'][0]['transition_ids']):
             found.append({'code': 'event_overlap', 'teaching_id': record['teaching_id']})
@@ -169,7 +175,7 @@ def evaluate(records: list[dict], request: dict, facts: dict, *, now: float) -> 
         selected = record['teaching_id'] in {request.get('training_ref'), request.get('trigger_ref')}
         if definition['trigger'] and request.get('trigger_ref') != record['teaching_id']:
             continue
-        if definition.get('situation') and not selected:
+        if (definition.get('situation') or definition.get('emotion') is not None) and not selected:
             continue
         step_index = request.get('step_index') if selected else None
         matching = [(index, step) for index, step in enumerate(definition['steps'])

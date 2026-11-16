@@ -59,6 +59,7 @@ class GraphRun:
     initial_context: dict = field(default_factory=dict)
     decision_space: dict = field(default_factory=dict)
     emotion: str = "neutral"
+    emotion_step_id: str = ""
 
 
 class _State(TypedDict):
@@ -133,6 +134,7 @@ async def run_role_graph(
     effect_ledger: FileEffectLedger | None = None,
     reconcile_effect: Callable[[str, dict, str], Any] | None = None,
     finalize: Callable[[GraphRun], Any] | None = None,
+    prepare_emotion: Callable[[GraphRun], Any] | None = None,
     resume: bool = False,
     resume_value: str | None = None,
     initial_tool: tuple[str, dict] | None = None,
@@ -275,6 +277,26 @@ async def run_role_graph(
                 current.response = dialogue.text
                 current.reply_source = "decision_model"
                 emit("reply.draft", turn=turns, reply=current.decision_draft)
+                # Only a current conversational decision may select a saved
+                # expression. Closing replies and replayed events never act.
+                if (prepare_emotion is not None and "apply_training" in tool_schemas
+                        and current.status == "ok" and current.emotion != "neutral"
+                        and not current.emotion_step_id):
+                    try:
+                        expression = await asyncio.wait_for(
+                            _invoke(prepare_emotion, current),
+                            timeout=max(0.1, current.deadline - time.time()))
+                    except Exception as exc:
+                        emit("emotion.skipped", reason="training_unavailable",
+                             error=type(exc).__name__)
+                    else:
+                        if expression is not None:
+                            current.emotion_step_id = current.run_id + ":emotion"
+                            current.status = "executing"
+                            return {"run": asdict(current), "turns": turns,
+                                    "decision": {"kind": "tool"}, "pending_calls": [{
+                                        "name": "apply_training", "args": expression,
+                                        "id": current.emotion_step_id}]}
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         # Persist native call IDs before dispatch, including IDs omitted by a
         # compatible provider. Each tool node consumes exactly one queued call.
@@ -295,9 +317,13 @@ async def run_role_graph(
             pending = [{"name": decision["name"], "args": decision["params"],
                         "id": decision["step_id"]}]
         call, remaining = pending[0], pending[1:]
+        expression = (bool(current.emotion_step_id) and isinstance(call, dict)
+                      and call.get("id") == current.emotion_step_id)
 
         def stop(status: str, text: str) -> dict:
             current.status, current.response = status, text
+            if expression:
+                current.decision_draft = ""
             return {"run": asdict(current), "decision": {"kind": "finish"},
                     "pending_calls": []}
 
@@ -371,8 +397,12 @@ async def run_role_graph(
             result = {"result": "unknown" if is_effect else "error",
                       "error": type(exc).__name__}
         result = task_result(result, final=final)
-        if name in terminal_tools:
+        if name in terminal_tools or expression:
             result["final"] = True
+        if expression and result["result"] != "ok":
+            # A pre-action conversational draft cannot describe an unconfirmed
+            # expression. Finish with receipt-grounded speech, never replan.
+            current.decision_draft = ""
         step.update(dispatch_status="observed", result=result)
         sync_outer(current)
         if record:

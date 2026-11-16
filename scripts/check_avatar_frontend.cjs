@@ -72,7 +72,8 @@ async function main() {
         await delay(90);
       }
     }
-    for (const file of ['components/Icon.jsx', 'components/ActivityMembers.jsx', 'hooks/useActivityTimeline.js'])
+    for (const file of ['components/Icon.jsx', 'components/ActivityMembers.jsx', 'components/DeviceCard.jsx',
+      'pages/DevicesPage.jsx', 'hooks/useActivityTimeline.js'])
       await page.addScriptTag({content:compile(fs.readFileSync('app/src/' + file, 'utf8'))});
     await page.evaluate(() => {
       window.apiClient = new EventTarget(); apiClient.devicesSynced = true;
@@ -81,6 +82,8 @@ async function main() {
         : {events:[{event_id:'history',activity_id:'a',event_type:'message',unit_id:'go2',emotion:'sad',ts:Date.now()/1000}]};
       window.apiErrorText = error => error.message;
       window.navigate = () => {};
+      window.isDeviceOnline = agent => agent._online;
+      window.getStateLabel = () => '在线';
       window.activityMemberView = (card, state, membership, connected) => ({label:'站立', detail:'自主活动中',
         stale:!connected, disconnected:state.connected === false});
       window.emitAvatar = (id, extra = {}) => apiClient.dispatchEvent(new CustomEvent('server-event', {detail:{
@@ -89,11 +92,16 @@ async function main() {
       document.getElementById('root').style.display='none';
       window.memberRoot = ReactDOM.createRoot(container);
       window.connected = true; window.mountKey = 0; window.ended = false; window.resting = false;
+      window.deviceOnline = true;
       window.ActivityHarness = function() {
         const timeline = useActivityTimeline();
-        return React.createElement(ActivityMembers, {key:mountKey,activity:{...timeline.displayActivity,...(ended ? {status:'ended'} : {})},
-          events:timeline.events, agents:[{unit_id:'go2',agent_type:'robot'}],
-          unitData:{go2:{state:{connected:true,life_state:'play',activity_state:resting ? 'rest' : 'active'}}},connected});
+        const activity = {...timeline.displayActivity,...(ended ? {status:'ended'} : {})};
+        const agents = [{unit_id:'go2',agent_type:'robot',_online:deviceOnline},
+          {unit_id:'esp32_desk_led',agent_type:'actuator',tags:['lighting'],_online:deviceOnline}];
+        const unitData = {go2:{state:{connected:deviceOnline,life_state:'play',activity_state:resting ? 'rest' : 'active'}}};
+        return React.createElement(React.Fragment, {key:mountKey},
+          React.createElement(ActivityMembers, {activity, events:timeline.events, agents, unitData, connected}),
+          React.createElement(DevicesScreen, {activity, activityEvents:timeline.events, agents, unitData, connected}));
       };
       window.renderAvatars = () => ReactDOM.flushSync(() => memberRoot.render(React.createElement(ActivityHarness)));
       renderAvatars();
@@ -102,14 +110,24 @@ async function main() {
     await page.waitForSelector(member);
     const mood = () => page.$eval(member, el => el.dataset.emotion);
     const shape = () => page.$eval(member, el => el.dataset.shape);
+    const home = '.home-device-row__icon .shape-face';
+    const homeShapes = () => page.$$eval(home, nodes => nodes.map(node => node.dataset.shape));
     assert.equal(await mood(), 'neutral', 'REST emotion history must not drive a live avatar');
+    assert.deepEqual(await homeShapes(), ['idle', 'idle']);
     await page.evaluate(() => emitAvatar('happy-1', {emotion:'happy'}));
     await page.waitForSelector(`${member}[data-emotion="happy"]`);
-    await page.evaluate(() => emitAvatar('rps-1', {stage:'rps_result',game_round:{round:1,choices:{go2:'rock'}}}));
+    await page.evaluate(() => emitAvatar('announcement', {stage:'throw_announcement', text:'我出石头！'}));
+    assert.deepEqual(await homeShapes(), ['idle', 'idle'], 'Speech alone cannot reveal a throw');
+    await page.evaluate(() => emitAvatar('rps-1', {stage:'rps_result',game_round:{round:1,choices:{go2:'rock',esp32_desk_led:'scissors'}}}));
     await page.waitForSelector(`${member}[data-shape="rock"]`);
+    await page.waitForSelector(`${home}[data-shape="scissors"]`);
+    assert.deepEqual(await homeShapes(), ['rock', 'scissors'], 'Both home companions show their own revealed choice');
     await page.waitForSelector(`${member}[data-shape="idle"][data-emotion="happy"] [data-motion="none"]`);
+    await page.waitForFunction(() => [...document.querySelectorAll('.home-device-row__icon .shape-face')].every(node => node.dataset.shape === 'idle'));
+    assert.equal(await page.$eval(home, node => node.dataset.emotion), 'happy');
     await page.evaluate(() => emitAvatar('rps-1', {stage:'rps_result',game_round:{round:1,choices:{go2:'rock'}}}));
     assert.equal(await shape(), 'idle', 'Duplicate must not replay');
+    assert.deepEqual(await homeShapes(), ['idle', 'idle'], 'Home companions also deduplicate');
     await page.evaluate(() => emitAvatar('private', {activity_id:'other',emotion:'angry',scope:'session'}));
     assert.equal(await mood(), 'happy', 'Other contexts cannot change this activity');
     await page.evaluate(() => emitAvatar('old', {ts:1,emotion:'sad'}));
@@ -139,11 +157,42 @@ async function main() {
     await page.evaluate(() => {ended=true; renderAvatars(); emitAvatar('late-end', {emotion:'angry',stage:'rps_result',game_round:{round:2,choices:{go2:'paper'}}});});
     await delay(50);
     assert.equal(await shape(), 'idle'); assert.equal(await mood(), 'neutral');
+    assert.deepEqual(await homeShapes(), ['idle', 'idle'], 'Ended activities clear home gestures');
     await page.evaluate(() => {ended=false; resting=true; renderAvatars();});
     assert.equal(await page.$eval(member, el => el.dataset.behavior), 'rest');
     assert.equal(await page.$eval(`${member} .shape-face__expression[data-current="true"] .shape-face__eyes`, el => el.dataset.closed), 'true');
+    // Presence is separate from mood/rest and browser connectivity.
+    const hasPresenceBounce = selector => page.$eval(selector, node => node.getAnimations().some(animation =>
+      animation.effect.getKeyframes().some(frame => frame.transform && frame.transform !== 'none')));
+    assert.equal(await hasPresenceBounce(home), false, 'Initial online state never bounces');
+    await page.evaluate(() => {deviceOnline=false; renderAvatars();});
+    await delay(350);
+    for (const selector of [home, member]) {
+      assert.equal(await page.$eval(selector, node => node.dataset.online), 'false');
+      assert.equal(await page.$eval(selector, node => getComputedStyle(node).filter), 'grayscale(1)');
+      assert.equal(await page.$eval(selector, node => node.dataset.animated), 'false');
+    }
+    await page.evaluate(() => {deviceOnline=true; renderAvatars();});
+    assert.equal(await hasPresenceBounce(home), true, 'Confirmed offline to online bounces once');
+    await delay(350);
+    await page.evaluate(() => renderAvatars());
+    assert.equal(await hasPresenceBounce(home), false, 'Repeated online snapshots do not replay');
+    await page.evaluate(() => {mountKey++; renderAvatars();});
+    assert.equal(await hasPresenceBounce(home), false, 'Remount does not replay presence');
+    await page.evaluate(() => {connected=false; renderAvatars();});
+    assert.equal(await page.$eval(home, node => node.dataset.online), undefined, 'Browser disconnect is not device offline');
+    assert.equal(await page.$eval(home, node => node.dataset.animated), 'false');
+    assert((await page.$eval('.home-device-row', node => node.innerText)).includes('状态待同步'));
+    await page.evaluate(() => {connected=true; renderAvatars();});
+    assert.equal(await hasPresenceBounce(home), false, 'SSE recovery is not an offline to online transition');
+    await page.emulateMediaFeatures([{name:'prefers-reduced-motion', value:'reduce'}]);
+    await page.evaluate(() => {deviceOnline=false; renderAvatars();});
+    assert.equal(await page.$eval(home, node => getComputedStyle(node).transitionDuration), '0s');
+    await page.evaluate(() => {deviceOnline=true; renderAvatars();});
+    assert.equal(await hasPresenceBounce(home), false, 'Reduced motion disables the presence bounce');
+    await page.emulateMediaFeatures([{name:'prefers-reduced-motion', value:'no-preference'}]);
     assert.deepEqual(errors, []);
-    console.log('Eight emotions, ambient motion, game restoration, real SSE/history pipeline, expiry, scopes, duplicates, remount, reconnect, rest and reduced motion passed');
+    console.log('Eight emotions, ambient motion, game restoration, SSE/history, expiry, scopes, deduplication, rest, online/offline transitions, browser reconnect, remount and reduced motion passed');
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

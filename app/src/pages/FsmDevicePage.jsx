@@ -397,6 +397,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         }}>←</button>
 
         {typeof ShapeFace === 'function' && <ShapeFace agent={card || unitId} size={30}
+          online={!eventsHealthy || stateHealth === 'reconnecting' ? null : !offline}
           emotion={!offline && connected && eventsHealthy ? portrait?.emotion?.value : 'neutral'}
           animationKey={portrait?.emotion?.eventId} animated={!offline && connected && eventsHealthy}
           behavior={offline || !connected || !eventsHealthy ? 'idle'

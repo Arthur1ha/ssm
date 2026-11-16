@@ -255,7 +255,7 @@ class Drive:
         return scope, completed, material_key, error
 
     async def _evaluate_social(self, local_observation: dict | None = None) -> None:
-        """A separate, non-motion decision at a Drive safety checkpoint."""
+        """A social decision and optional taught expression at a Drive checkpoint."""
         if (self.user_interrupt or self._pending_question_id or self._events or not go2.is_connected
                 or time.time() < self._social_retry_after):
             return
@@ -305,17 +305,20 @@ class Drive:
         from cloud.peers.games import playable_games
         from cloud.go2.tools.tools import send_message
 
-        def can_send(activity_id_to_check: str, target: str, topic: str) -> bool:
+        def available(activity_id_to_check: str, target: str) -> bool:
             latest_activity, latest_peers = activity_peers(
                 "go2", get_space_context("go2", state=_esp32_state)["peers"])
             return bool(current() and latest_activity and latest_activity.get("activity_id") == activity_id_to_check
                         and target in {peer["unit_id"] for peer in latest_peers}
-                        and self._social_state.can_send(target, topic)
                         and self._activity_id() == activity_id_to_check
                         and not self._events
-                        and (messenger is None or not messenger.has_pending_conversation("go2", target))
                         and not self.user_interrupt and not self._pending_question_id
                         and go2.is_connected)
+
+        def can_send(activity_id_to_check: str, target: str, topic: str) -> bool:
+            return (available(activity_id_to_check, target)
+                    and self._social_state.can_send(target, topic)
+                    and (messenger is None or not messenger.has_pending_conversation("go2", target)))
 
         async def deliver(target: str, content: str, *, interaction_kind: str = "message",
                           game_id: str | None = None, decision_reason: str | None = None,
@@ -327,10 +330,64 @@ class Drive:
             return outcome if isinstance(outcome, dict) else {"result": "error"}
 
         run_id = "social_" + uuid.uuid4().hex
+
+        async def express_emotion(social_state: dict) -> dict:
+            from cloud.agents.common.runner import GraphRun, invoke_blocking
+            from cloud.agents.common.training.context import emotion_training_call
+            from cloud.agents.common.training.tools import prepare_training_application
+            from cloud.go2.service import run_training_behavior
+            from cloud.api.intents import publish_agent_event
+
+            decision = social_state["decision"]
+            runtime = runtime_for(go2)
+            epoch = runtime.data.get("epoch") if runtime is not None else None
+
+            def expression_available(_trusted=None):
+                latest = runtime_for(go2)
+                return bool(available(activity_id, decision["target"])
+                            and latest is not None and latest.data.get("epoch") == epoch
+                            and latest.data.get("autonomy_mode") == "free_explore"
+                            and not latest.active_reason())
+
+            if not expression_available():
+                return {"result": "blocked", "error": "autonomy_unavailable"}
+            execution = replace(self._context, session_id=owner, actor="visitor", persist=False,
+                                origin_kind="agent_autonomous", expires_at=int(time.time() + 90))
+            current_run = GraphRun(run_id, owner, decision["content"], time.time() + 60,
+                                   agent_id="go2", origin_kind="agent_autonomous",
+                                   emotion=decision["emotion"])
+            arguments = await invoke_blocking(emotion_training_call, current_run,
+                space_id=execution.space_id, origin_kind="agent_autonomous")
+            if arguments is None:
+                return {"result": "skipped", "reason": "no_emotion_training"}
+            step_id = run_id + ":emotion"
+            trigger_message_id = (social_state.get("delivery") or {}).get("message_id")
+            try:
+                prepared = await prepare_training_application(arguments, execution)
+                self._activity_event("action_progress", "", action="apply_training",
+                                     task_id=step_id, status="executing",
+                                     trigger_message_id=trigger_message_id)
+                outcome = await run_training_behavior(prepared, execution, run_id=step_id,
+                                                       availability=expression_available)
+            except ValueError as exc:
+                outcome = {"result": "rejected", "error": str(exc)}
+            except Exception as exc:
+                outcome = {"result": "unknown", "error": type(exc).__name__}
+            if current():
+                self._activity_event("action_result", self._result_text(outcome), action="apply_training",
+                                     task_id=step_id, status=outcome.get("result", "unknown"),
+                                     trigger_message_id=trigger_message_id)
+                publish_agent_event("agent_progress", agent_id="go2", scope="space",
+                    space_id=execution.space_id, source="autonomous", run_id=run_id,
+                    step_id=step_id, stage="observed", status=outcome.get("result", "unknown"),
+                    tool="apply_training", training_ref=arguments["teaching_id"],
+                    trigger_message_id=trigger_message_id)
+            return outcome
+
         saver = FileCheckpointSaver()
         graph = build_social_graph(
             get_text_llm(), profile_loader=get_profile, can_send=can_send,
-            send_message=deliver, checkpointer=saver)
+            send_message=deliver, checkpointer=saver, express_emotion=express_emotion)
         thread_id = "go2:social:" + run_id
         state = {"run_id": run_id, "activity_id": activity_id,
                  "activity": context["activity"], "opportunity": opportunity,
@@ -358,7 +415,7 @@ class Drive:
         emit_agent_event("model.decision", agent_id="go2", run_id=run_id,
             activity_id=activity_id, stage="social", status=result.get("status"),
             decision=result.get("decision"), game_readiness=readiness,
-            delivery=result.get("delivery"))
+            delivery=result.get("delivery"), expression=result.get("expression"))
         if not current():
             return
         if result.get("decision") and result.get("status") != "error":
@@ -1043,7 +1100,9 @@ class Drive:
         from cloud.agents.go2.graph import run_go2_loop
         from cloud.peers.inbound import _peer_input
         from cloud.peers.turns import peer_turn
-        context = replace(self._context, expires_at=int(min(event["deadline"], time.time() + 90)))
+        context = replace(self._context, actor="visitor", persist=False,
+                          origin_kind="agent_autonomous",
+                          expires_at=int(min(event["deadline"], time.time() + 90)))
         with peer_turn(messenger, message) as turn:
             # create_task copies the correlation context; the caller is reset
             # immediately so unrelated autonomous/user work cannot inherit it.

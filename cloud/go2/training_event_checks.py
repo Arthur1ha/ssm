@@ -63,6 +63,15 @@ def frame(index, detected):
 @pytest.fixture
 def bound_listener(device, monkeypatch, tmp_path):
     from cloud.agents.common.training import service, store
+    from cloud.api import activity as activity_api
+    from cloud.space import activity as activity_module
+
+    activity_store = activity_module.ActivityStore(tmp_path / 'activity.json')
+    # User takeover enters the real API lifecycle even in device simulations.
+    # Patch its imported getter too; never persist to the running space.
+    monkeypatch.setattr(activity_module, 'get_activity_store', lambda: activity_store)
+    monkeypatch.setattr(activity_api, 'get_activity_store', lambda: activity_store)
+    monkeypatch.setattr(activity_api, '_transition_lock', asyncio.Lock())
     robot, lease = device
     f = person_greeting_fixture()
     monkeypatch.setenv('SSM_TRAINING_DIR', str(tmp_path / 'training'))

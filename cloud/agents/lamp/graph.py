@@ -269,6 +269,14 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             messages.insert(1, context_message({"training_selection": selection}))
         return messages
 
+    def prepare_emotion(current: GraphRun):
+        # A fixed lighting/training task must not gain an unrelated expression.
+        if lighting_only or context.training_ref or selection:
+            return None
+        from cloud.agents.common.training.context import emotion_training_call
+        return emotion_training_call(current, space_id=context.space_id,
+                                     origin_kind=context.origin_kind)
+
     @async_model_clients()
     async def invoke_graph():
         nonlocal run_model
@@ -282,6 +290,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             tool_schemas=declarations,
             build_messages=messages_for,
             execute=execute, reconcile_effect=reconcile,
+            prepare_emotion=prepare_emotion,
             finalize=finalize, checkpointer=saver, on_progress=progress,
             effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
             resume=resume, resume_value=text if resume else None,

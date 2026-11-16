@@ -39,6 +39,11 @@ class ProposeTraining(BaseModel):
     未限定请求来源的全入口硬约束，origins 同时包含 user_delegated 和 agent_autonomous。
     参数情境未选中不影响其他请求；条件只限制其绑定转换，不扩散到其他步骤。
     要求观察后主动执行必须绑定真实 trigger 且 origins 含 agent_autonomous；
+    “你开心时做动作”等自身情绪表达设置 definition.emotion，复用回复的情绪枚举，
+    不设置观察 trigger；无额外情境时 situation=null，按用户要求保存完整动作参数。
+    情绪表达未限定来源时 origins 包含 user_delegated 和 agent_autonomous，覆盖对话与活动；
+    用户明确只在聊天或只在自主活动中表达时尊重其范围，仍由用户确认草案后生效。
+    情绪映射与观察触发不可混用；用户开心等他人情绪不得当作自身 emotion。
     观察条件只放 trigger.where，动作参数一律放 steps 中的 defaults。
     同一要求更新原教导；补充草案用 supersedes_proposal_id，保留原 operation。
     create/update 给出完整 name 和 effect_text，文字完整对应条件、顺序及参数。
@@ -89,6 +94,8 @@ def _preserve_event_request(arguments, attempts, catalog):
                    or bool(old_actions & new_actions))
         if not related:
             continue
+        if before.get('emotion') is not None and before['emotion'] != definition.get('emotion'):
+            raise ValueError('training_emotion_changed_on_retry: preserve the requested emotional expression')
         trigger, updated = before.get('trigger'), definition.get('trigger')
         if trigger and (not updated or updated.get('event_id') != trigger.get('event_id')
                 or any((updated.get('where') or {}).get(key) != value
@@ -96,7 +103,8 @@ def _preserve_event_request(arguments, attempts, catalog):
             raise ValueError('event_trigger_changed_on_retry: preserve the requested event and observation conditions')
         if not set(before.get('origins', [])) <= set(definition.get('origins', [])):
             raise ValueError('training_scope_weakened_on_retry')
-        if before.get('situation') is None and definition.get('situation') is not None:
+        if (before.get('situation') is None and before.get('emotion') is None
+                and definition.get('situation') is not None):
             raise ValueError('global_guard_became_optional_situation_on_retry')
         if len(old_steps) != len(new_steps):
             raise ValueError('training_sequence_changed_on_retry: preserve all requested steps and their order')
@@ -224,9 +232,26 @@ async def prepare_training_application(
     the original executor, which rechecks the record under its dispatch lock.
     """
     args = ApplyTraining.model_validate(arguments).model_dump()
+    trusted = context
     context = asdict(context) if is_dataclass(context) else context
-    snapshot = await list_training({'unit_id': args['unit_id']}, context,
-                                   api_call or internal_api_call)
+    if context.get('origin_kind') == 'agent_autonomous':
+        if (not isinstance(trusted, ExecutionContext) or trusted.actor not in {'agent', 'visitor'}
+                or trusted.persist is not False or trusted.space_id != 'main'
+                or not trusted.session_id or (trusted.expires_at and trusted.expires_at <= time.time())):
+            raise ValueError('trusted_autonomous_context_required')
+        from cloud.agents.common.training import service, store
+        from cloud.agents.common.training.catalog import catalog_for
+        from cloud.agents.common.runner import invoke_blocking
+
+        def read_current():
+            card = service._target(args['unit_id'], trusted.space_id)
+            return {'catalog': catalog_for(card),
+                    'records': store.list_records(args['unit_id'], space_id=trusted.space_id)}
+
+        snapshot = await invoke_blocking(read_current)
+    else:
+        snapshot = await list_training({'unit_id': args['unit_id']}, context,
+                                       api_call or internal_api_call)
     record = next((row for row in snapshot['records']
                    if row['teaching_id'] == args['teaching_id']), None)
     if record is None or record.get('desired_status') != 'enabled':

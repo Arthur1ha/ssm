@@ -137,6 +137,13 @@ def _condition_text(condition, catalog):
 def _explain(record, catalog):
     edges = {edge['id']: edge for edge in catalog['transitions']}
     definition = record['definition']
+    scope = '仅此事件触发的行为' if definition['trigger'] else '、'.join(
+        {'user_delegated': '用户委托请求', 'agent_autonomous': '自主请求'}[origin]
+        for origin in definition['origins'])
+    if definition.get('emotion') is not None:
+        labels = {'neutral': '平常', 'happy': '开心', 'curious': '好奇', 'confused': '困惑',
+                  'surprised': '惊讶', 'angry': '生气', 'sad': '难过', 'relaxed': '放松'}
+        scope = '表达' + labels[definition['emotion']] + '时 · ' + scope
     summaries = []
     for index, step in enumerate(definition['steps']):
         selected = [edges[key] for key in step['transition_ids'] if key in edges]
@@ -156,9 +163,7 @@ def _explain(record, catalog):
             'summaryText': record['name'],
             'changeText': ('删除这条规则：' + record['name'] if record['desired_status'] == 'removed'
                            else record.get('effect_text') or record['name']),
-            'scopeText': '仅此事件触发的行为' if definition['trigger'] else '、'.join(
-                {'user_delegated': '用户委托请求', 'agent_autonomous': '自主请求'}[origin]
-                for origin in definition['origins']),
+            'scopeText': scope,
             'transition_ids': definition_transition_ids(definition), 'stepSummaries': summaries}
 
 
@@ -567,7 +572,7 @@ def evaluate_execution(card, current, action, params, context, records, completi
         is_selected = selected is not None and selected['teaching_id'] == record['teaching_id']
         if definition['trigger'] and context.trigger_ref != record['teaching_id']:
             continue
-        if definition.get('situation') and not is_selected:
+        if (definition.get('situation') or definition.get('emotion') is not None) and not is_selected:
             continue
         if action_ids.intersection(definition_transition_ids(definition)):
             applicable.append(record)

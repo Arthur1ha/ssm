@@ -20,7 +20,7 @@ from cloud.agents.steward.tools import STEWARD_TOOL_SCHEMAS
 async def test_native_tools_carry_usage_and_parameters(role, tmp_path, monkeypatch):
     monkeypatch.setattr("cloud.agents.common.runner.emit_agent_event", lambda *a, **k: None)
     declarations = ({**tool_schemas(), **TRAINING_SCHEMAS} if role == "go2" else
-                    visible_schemas(lighting_only=False) if role == "lamp" else
+                    visible_schemas(lighting_only=False, user_delegated=True) if role == "lamp" else
                     {**STEWARD_TOOL_SCHEMAS, **TRAINING_SCHEMAS})
     received = []
 

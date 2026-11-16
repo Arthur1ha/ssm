@@ -1,4 +1,4 @@
-"""Optional avatar metadata; never a business outcome or an action."""
+"""Shared expression metadata; physical expression uses confirmed teachings."""
 
 from typing import Annotated, Literal
 
@@ -10,11 +10,14 @@ EMOTIONS = ("neutral", "happy", "curious", "confused", "surprised", "angry", "sa
 EMOTION_INSTRUCTIONS = (
     "回复可附 emotion，取值 neutral、happy、curious、confused、surprised、angry、sad、relaxed。"
     "结合自己的语气、用户原话和已知真实结果选择，不确定用 neutral；"
-    "情绪只用于头像展示，不代表任务成功，不修改业务决定或权限。"
+    "emotion 表示本轮自己的表达情绪，不代表用户情绪、任务成功或设备观测，不授予权限。"
+    "头像沿用该情绪；已确认的情绪教导可在决策结束前经原执行器表达，"
+    "没有匹配教导时仅展示表情。不要仅为输出情绪编造物理动作或回执。"
     "emotion 只放在回复对象顶层，不放入业务工具参数。"
 )
 REPLY_INSTRUCTIONS = (
     '本步骤仅生成回复，不调用工具。输出 JSON：{"text":"给用户的自然语言回复","emotion":"neutral"}。'
+    "本步骤的 emotion 只用于呈现，不会追加物理动作。"
     + EMOTION_INSTRUCTIONS
 )
 

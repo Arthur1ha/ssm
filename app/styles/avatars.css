@@ -1,5 +1,6 @@
 /* Expressions, entrance gestures and ambient motion use separate SVG groups. */
-.shape-face { display:block; flex:none; overflow:visible; }
+.shape-face { display:block; flex:none; overflow:visible; transform-origin:center; transition:filter 300ms ease, opacity 300ms ease; }
+.shape-face[data-online="false"] { filter:grayscale(1); opacity:.55; }
 .shape-face__body { fill:var(--avatar-color); }
 .shape-face__features { fill:none; stroke:var(--avatar-ink); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
 .shape-face__eye { fill:var(--avatar-ink); stroke:none; transition:ry 200ms ease, cy 200ms ease; }
@@ -44,5 +45,5 @@
 @keyframes avatar-sink { 0%,100% { transform:none; } 50% { transform:translateY(5px) scale(1.03,.93); } }
 @keyframes avatar-stretch { 0%,100% { transform:none; } 50% { transform:scale(.96,1.06); } }
 @media (prefers-reduced-motion:reduce) {
-  .shape-face *, .shape-face[data-animated="true"] * { animation:none !important; transition:none !important; }
+  .shape-face, .shape-face *, .shape-face[data-animated="true"] * { animation:none !important; transition:none !important; }
 }

@@ -185,9 +185,34 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                          prompt_trimmed=False)
         return messages
 
+    def prepare_emotion(current: GraphRun):
+        # Public actions and restricted tasks retain their exact tool scope.
+        if (initial_tool is not None or allowed_tools is not None or tool_guard is not None
+                or skill_id not in (None, 'go2_chat') or selection):
+            return None
+        from cloud.agents.common.training.context import emotion_training_call
+        return emotion_training_call(current, space_id=context.space_id,
+                                     origin_kind=context.origin_kind)
+
     interaction_token = None
     motion_unconfirmed = False
     runtime = runtime_for(go2)
+    training_availability = None
+    if context.origin_kind == "agent_autonomous":
+        from cloud.go2.mode.free_explore import drive
+        generation, owner = drive._generation, drive.owner_session_id
+        activity_id = drive._activity_id()
+        epoch = runtime.data.get("epoch") if runtime is not None else None
+
+        def training_availability(_trusted):
+            latest = runtime_for(go2)
+            return bool(latest is not None and go2.is_connected
+                        and latest.data.get("epoch") == epoch
+                        and latest.data.get("autonomy_mode") == "free_explore"
+                        and not latest.active_reason()
+                        and generation == drive._generation and owner == drive.owner_session_id
+                        and activity_id == drive._activity_id()
+                        and not drive.user_interrupt and not drive._pending_question_id)
     # Explicit read/life skills keep status lookup and wake reachable without
     # claiming an interaction. Other accepted Graph tasks own play until their
     # true terminal or clarification event, including time spent waiting on LLM.
@@ -224,7 +249,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 runtime.finish_life(interaction_token)
                 interaction_token = None
             result = await run_training_behavior(
-                prepared, context, run_id=run.run_id + ':' + step_id)
+                prepared, context, run_id=run.run_id + ':' + step_id,
+                **({"availability": training_availability} if training_availability is not None else {}))
             motion_unconfirmed = result.get('result') in {'accepted', 'executing', 'unknown', 'timeout'}
             return result
         if name in {"list_training", "propose_training"}:
@@ -375,9 +401,11 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             return current
 
         declarations = tool_schemas(context)
-        if allowed_tools is None and context.origin_kind == "user_delegated":
+        if allowed_tools is None:
             from cloud.agents.common.training.tools import SCHEMAS as training_schemas
-            declarations.update(training_schemas)
+            declarations['apply_training'] = training_schemas['apply_training']
+            if context.origin_kind == "user_delegated":
+                declarations.update(training_schemas)
         if allowed_tools is not None:
             declarations = {name: schema for name, schema in declarations.items()
                             if name in allowed_tools}
@@ -385,6 +413,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             await run_role_graph(
                 run, model=get_text_llm(), tool_schemas=declarations,
                 build_messages=build_messages, execute=execute, finalize=finalize,
+                prepare_emotion=prepare_emotion,
                 on_step=on_step, on_progress=progress,
                 effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
                 initial_tool=initial_tool, resume=resume,
