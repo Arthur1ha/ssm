@@ -3,29 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SSM · 伙伴形象预览</title>
+  <title>SSM · 伙伴的日常</title>
   <link rel="stylesheet" href="styles/app.css">
   <link rel="stylesheet" href="styles/avatars.css">
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
   <style>
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }
-    main { max-width: 860px; margin: auto; padding: 40px 20px; }
-    h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
-    p { color: var(--color-text-muted); font-size: 13px; line-height: 1.7; }
-    .preview-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin: 28px 0; }
-    .preview-controls label { display: grid; gap: 6px; font-size: 12px; color: var(--color-text-muted); }
-    select, button { background: var(--color-surface-2); border: 1px solid var(--color-border-strong); color: var(--color-text); font: inherit; padding: 9px 12px; border-radius: 8px; }
-    button { cursor: pointer; font-size: 12px; }
-    .preview-row { margin-top: 16px; padding: 20px; background: var(--color-surface-1); border: 1px solid var(--color-border); border-radius: 12px; }
-    .preview-row h2 { margin: 0 0 8px; font-size: 14px; }
-    .preview-shapes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-    figure { margin: 12px 0 0; display: flex; align-items: center; flex-direction: column; gap: 8px; }
-    figcaption { color: var(--color-text-muted); font-size: 12px; }
-    .preview-note { margin-top: 24px; color: var(--color-text-dim); font-size: 12px; }
-    @media (max-width: 420px) { .preview-shapes { gap: 4px; } .preview-row { padding: 16px 12px; } .shape-face { width: 64px; height: 64px; } }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--color-bg); color:var(--color-text); font-family:var(--font-sans); }
+    main { max-width:800px; margin:auto; padding:36px 20px 48px; }
+    h1 { font-size:28px; letter-spacing:-.04em; margin:8px 0 12px; }
+    h2 { margin:0 0 10px; font-size:15px; }
+    p { color:var(--color-text-muted); font-size:13px; line-height:1.8; margin:6px 0; }
+    .preview-kicker { color:var(--color-text-dim); font-size:11px; letter-spacing:.12em; }
+    .preview-stage { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding:32px 0 22px; }
+    figure { margin:0; display:flex; align-items:center; flex-direction:column; gap:16px; min-width:0; }
+    figcaption { color:var(--color-text-muted); font-size:12px; }
+    .preview-stage figure::after { content:''; width:45px; height:4px; border-radius:50%; background:var(--color-surface-2); }
+    .preview-controls { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; border-top:1px solid var(--color-border); padding-top:16px; }
+    button, select { font:inherit; color:var(--color-text); background:var(--color-surface-2); border:1px solid var(--color-border); border-radius:9px; padding:9px 12px; cursor:pointer; font-size:12px; }
+    button:focus-visible, select:focus-visible { outline:2px solid var(--color-accent); outline-offset:3px; }
+    button[aria-pressed="true"] { border-color:var(--color-accent); background:var(--color-surface-1); }
+    .preview-tabs { display:flex; gap:5px; }
+    .preview-controls label { display:flex; align-items:center; gap:6px; font-size:12px; }
+    .preview-section { margin-top:28px; }
+    .preview-emotions { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:16px; }
+    .preview-emotion { display:flex; flex-direction:column; align-items:center; gap:10px; padding:14px 5px; }
+    .preview-game { margin-top:28px; padding:20px; background:var(--color-surface-1); border:1px solid var(--color-border); border-radius:12px; }
+    .preview-game-actions { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 8px; }
+    .preview-status { min-height:24px; font-size:12px; color:var(--color-text-muted); }
+    .preview-note { margin-top:22px; color:var(--color-text-dim); font-size:11px; }
+    @media(max-width:420px) { main { padding:26px 16px 36px; } .preview-stage .shape-face { width:82px; height:82px; } .preview-emotions { gap:7px; } .preview-game { padding:16px; } }
   </style>
 </head>
 <body>
@@ -35,32 +44,55 @@
   <script type="text/babel" src="src/avatars/Avatar.jsx"></script>
   <script type="text/babel">
     function AvatarPreview() {
-      const [expression, setExpression] = React.useState('neutral');
-      const [motion, setMotion] = React.useState('pop');
+      const [emotion, setEmotion] = React.useState('neutral');
+      const [behavior, setBehavior] = React.useState('idle');
+      const [animated, setAnimated] = React.useState(true);
+      const [gesture, setGesture] = React.useState(null);
       const [play, setPlay] = React.useState(null);
+      const timers = React.useRef({});
+      React.useEffect(() => () => Object.values(timers.current).forEach(clearTimeout), []);
+      const choose = name => {
+        clearTimeout(timers.current.emotion);
+        setEmotion(name); setPlay(Date.now());
+        timers.current.emotion = setTimeout(() => setEmotion('neutral'), AVATAR_TIMING.emotion);
+      };
+      const act = name => {
+        clearTimeout(timers.current.gesture);
+        setGesture({name,id:Date.now()});
+        timers.current.gesture = setTimeout(() => setGesture(null), AVATAR_TIMING.gesture);
+      };
       return <main>
-        <h1>一个轮廓，两眼一嘴</h1>
-        <p>同一张脸，自由变形。颜色和轮廓保留伙伴之间的区别。</p>
-        <div className="preview-controls">
-          <label>表情<select value={expression} onChange={event => setExpression(event.target.value)}>
-            {Object.entries(AVATAR_EXPRESSIONS).map(([id, value]) => <option key={id} value={id}>{value.label}</option>)}
-          </select></label>
-          <label>动效<select value={motion} onChange={event => setMotion(event.target.value)}>
-            {Object.entries(AVATAR_MOTIONS).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-          </select></label>
-          <button onClick={() => setPlay(value => (value || 0) + 1)}>播放一次</button>
+        <small className="preview-kicker">SSM / 伙伴形象</small>
+        <h1>伙伴的日常</h1>
+        <p>安静时会眨眼，开心时轻轻一跳。选一种心情，看看它们怎么表达。</p>
+        <div className="preview-stage">
+          {[['esp32_desk_led','皮皮'],['go2','呆呆'],['unknown','新伙伴']].map(([id,name]) => <figure key={id}>
+            <ShapeFace unitId={id} emotion={emotion} behavior={behavior} animated={animated}
+              shape={gesture?.name || 'idle'} animationKey={gesture?.id || play} motion={gesture ? 'pop' : undefined}
+              size={112} label={`${name} · ${AVATAR_EXPRESSIONS[emotion].label}`}/>
+            <figcaption>{name}</figcaption>
+          </figure>)}
         </div>
-        {[['esp32_desk_led', '皮皮 · 圆润'], ['go2', '呆呆 · 利落'], ['unknown', '新伙伴 · 中性']].map(([id, name]) =>
-          <section className="preview-row" key={id}>
-            <h2>{name}</h2><div className="preview-shapes">
-              {Object.entries(AVATAR_SHAPES).map(([shape, value]) => <figure key={shape}>
-                <ShapeFace unitId={id} shape={shape} expression={expression} motion={motion}
-                  animationKey={play} size={100} label={`${name} · ${value.label}`}/>
-                <figcaption>{shape === 'idle' ? '日常' : value.label}</figcaption>
-              </figure>)}
-            </div>
-          </section>)}
-        <p className="preview-note">本页仅预览形象，不连接设备。活动中的手势来自已公开的真实游戏结果；形象表情不代表设备物理状态。系统开启“减少动态效果”时，动效自动停用。</p>
+        <div className="preview-status" aria-live="polite">{gesture ? `正在出${AVATAR_ACTIONS[gesture.name].label}，随后恢复心情`
+          : emotion === 'neutral' ? '自然待机 · 随时准备回应' : `${AVATAR_EXPRESSIONS[emotion].label} · 稍后自然回到待机`}</div>
+        <div className="preview-controls">
+          <div className="preview-tabs" aria-label="日常表现">{[['idle','待机'],['rest','休息'],['thinking','处理中']].map(([id,label]) =>
+            <button key={id} data-behavior-choice={id} aria-pressed={behavior === id} onClick={() => setBehavior(id)}>{label}</button>)}</div>
+          <label><input type="checkbox" checked={animated} onChange={e => setAnimated(e.target.checked)}/>播放动画</label>
+        </div>
+        <section className="preview-section"><h2>八种心情</h2><p>同一种心情，各有各的模样。</p>
+          <div className="preview-emotions">{Object.entries(AVATAR_EXPRESSIONS).map(([id,view]) =>
+            <button className="preview-emotion" key={id} data-emotion-choice={id} aria-pressed={emotion === id} onClick={() => choose(id)}>
+              <ShapeFace unitId="esp32_desk_led" emotion={id} size={48}/><span>{view.label}</span>
+            </button>)}</div>
+        </section>
+        <section className="preview-game"><h2>游戏里的小动作</h2><p>出拳只在游戏揭晓时出现，展示后恢复日常形象。</p>
+          <div className="preview-game-actions">{Object.entries(AVATAR_ACTIONS).map(([id,view]) =>
+            <button key={id} data-gesture-choice={id} onClick={() => act(id)}>{view.label}</button>)}
+            <button data-sequence onClick={() => {choose('happy'); clearTimeout(timers.current.sequence); timers.current.sequence=setTimeout(() => act('scissors'),800);}}>演示开心 → 出拳 → 恢复</button>
+          </div>
+        </section>
+        <p className="preview-note">此页不连接设备。真实活动中的出拳来自公开游戏结果。系统开启“减少动态效果”时保留表情、停用动画。</p>
       </main>;
     }
     ReactDOM.createRoot(document.getElementById('root')).render(<AvatarPreview/>);

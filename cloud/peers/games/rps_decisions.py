@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
+from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
 from cloud.agents.common.messages import role_messages
 from cloud.agents.common.models import async_model_clients
 from cloud.go2.actions import ACTIONS, TRANSIENT_STATES
@@ -92,7 +93,7 @@ class Go2Mapping(DecisionModel):
         return self
 
 
-class SetupDecision(DecisionModel):
+class SetupDecision(EmotionModel, DecisionModel):
     speech: str = Field(min_length=1, max_length=300)
 
     @field_validator("speech")
@@ -145,7 +146,7 @@ class Go2Setup(SetupDecision):
     mapping: Go2Mapping
 
 
-class PerformanceDecision(DecisionModel):
+class PerformanceDecision(EmotionModel, DecisionModel):
     command: str
     speech: str = Field(min_length=1, max_length=300)
 
@@ -164,7 +165,7 @@ class PerformanceDecision(DecisionModel):
         return value.strip()
 
 
-class Agreement(DecisionModel):
+class Agreement(EmotionModel, DecisionModel):
     accepted: bool
     speech: str = Field(min_length=1, max_length=300)
 
@@ -176,7 +177,7 @@ class Agreement(DecisionModel):
         return value.strip()
 
 
-class ThrowDecision(DecisionModel):
+class ThrowDecision(EmotionModel, DecisionModel):
     choice: Literal["rock", "scissors", "paper"]
     speech: str = Field(default="", max_length=300,
                         description="不透露本轮出拳的简短发言；双方锁定前不对外展示")
@@ -220,7 +221,7 @@ def _role_model(role: str):
 
 
 def _instructions(role: str, phase: str) -> str:
-    common = (
+    common = EMOTION_INSTRUCTIONS + (
         "你正在参与猜拳攻灯，只决定当前阶段，不能调用设备或替同伴决定。"
         "规则与上下文从提供的数据读取，历史记录只用于策略，不当作新鲜观察。"
         "用自己的性格自然表达，不复述内部字段，不声称未获回执的动作已经完成。"

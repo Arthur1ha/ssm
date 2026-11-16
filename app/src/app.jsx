@@ -112,7 +112,7 @@ function App({ session, logout, refreshSession }) {
         { ...processRecord(event), type: 'process', requestId, agent, text, eventId });
     });
   };
-  const finishRequest = (requestId, text, eventId) => {
+  const finishRequest = (requestId, text, eventId, emotion) => {
     if (!text || completedRequests.current.has(requestId)) return;
     completedRequests.current.add(requestId);
     setActivityLog(prev => {
@@ -121,27 +121,28 @@ function App({ session, logout, refreshSession }) {
         if (prev[index].requestId === requestId) { position = index + 1; break; }
       }
       return [...prev.slice(0, position),
-        { type: 'ai', agent: 'cloud_orchestrator', requestId, text, final: true, eventId },
+        { type: 'ai', agent: 'cloud_orchestrator', requestId, text, final: true, eventId, emotion },
         ...prev.slice(position)];
     });
   };
   const appendReply = (item) => {
     if (!item?.text) return;
     const requestId = traceRequests.current.get(item.trace_id);
+    const avatarReceivedAt = (!requestId || requestId === nextRequestId.current) ? avatarReceiveTime(item) : undefined;
     const replyKey = item.event_id ? `${requestId || 'space'}:${item.event_id}` : '';
     if (replyKey && seenReplies.current.has(replyKey)) return;
     if (replyKey) seenReplies.current.add(replyKey);
     if (requestId && ['orchestrator', 'cloud_orchestrator'].includes(item.agent_id)) {
-      finishRequest(requestId, item.text, item.event_id);
+      finishRequest(requestId, item.text, item.event_id, item.emotion);
       return;
     }
     if (requestId) {
       setActivityLog(prev => insertBeforeRequestEnd(prev, requestId,
         { type: 'ai', agent: item.agent_id, requestId, text: item.text,
-          eventId: item.event_id }));
+          eventId: item.event_id, emotion:item.emotion, avatarReceivedAt, avatarEventTs:item.ts }));
     } else {
       appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
-        eventId: item.event_id, traceId: item.trace_id });
+        eventId: item.event_id, traceId: item.trace_id, emotion:item.emotion, avatarReceivedAt, avatarEventTs:item.ts });
     }
   };
   useEffect(() => {
@@ -162,7 +163,7 @@ function App({ session, logout, refreshSession }) {
           seenPeerMessages.current.delete(seenPeerMessages.current.values().next().value);
         }
         appendActivity({ type: 'peer_message', sender: item.sender, target: item.target,
-          replyTo: item.reply_to, text: item.text, eventId: item.event_id });
+          replyTo: item.reply_to, text: item.text, eventId: item.event_id, emotion:item.emotion, avatarReceivedAt:avatarReceiveTime(item), avatarEventTs:item.ts });
         return;
       }
       if (['agent_progress', 'run_stage'].includes(item.type) && item.trace_id
@@ -367,6 +368,7 @@ function App({ session, logout, refreshSession }) {
             onBack={() => handleBack(displayUid)}
             actor={session.actor}
             sessionId={session.session_id}
+            activeActivityId={currentActivity?.activity_id}
             activityQuestion={activityQuestion?.unit_id === displayUid &&
               activityQuestion.activity_id === currentActivity?.activity_id ? activityQuestion : null}
           />

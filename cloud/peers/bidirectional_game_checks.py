@@ -46,7 +46,8 @@ def test_lamp_prepares_real_color_before_accepting_dog_invitation(reverse):
     assert sequence == ["physical_setup", "accepted"]
     args, kwargs = reverse.messenger.send_message.call_args
     assert args == (LAMP, DOG, reverse.decision.return_value["decision_reason"])
-    assert kwargs == {"reply_to": "invite_dog", "reply_kind": "accepted", "deadline": reverse.message["deadline"]}
+    assert kwargs == {"reply_to": "invite_dog", "reply_kind": "accepted", "deadline": reverse.message["deadline"],
+                      "emotion": "neutral"}
     reverse.messenger.send_result.assert_not_called()  # Preparation is not game completion.
 
 

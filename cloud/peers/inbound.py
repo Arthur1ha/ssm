@@ -88,7 +88,8 @@ def _finish(messenger, message: dict, result: dict, *, reply_key: str = "reply",
     if (not already_sent and not message.get("reply_to")
             and message_activity_allows(message)):
         messenger.send_message(message["target"], message["sender"], reply,
-                               reply_to=original_id, reply_kind="reply", expect_reply=False)
+                               reply_to=original_id, reply_kind="reply", expect_reply=False,
+                               emotion=result.get("emotion", "neutral"))
 
 
 def handle_api_peer_message(messenger, message: dict, state) -> None:

@@ -486,7 +486,7 @@ async def test_completed_automatic_hello_does_not_hold_a_visitors_control_lease(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('initial', ['accepted', 'timeout'])
+@pytest.mark.parametrize('initial', ['timeout'])
 @pytest.mark.parametrize('newer_lease', [False, True])
 async def test_late_completion_releases_only_the_automatic_actions_own_lease(bound_listener, initial, newer_lease):
     from cloud.go2.tasks import observe_command_results

@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const sucrase = require('sucrase');
 const puppeteer = require('puppeteer');
 const compile = source => sucrase.transform(source, {transforms:['jsx'], production:true}).code;
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   const browser = await puppeteer.launch({executablePath:process.env.PUPPETEER_EXECUTABLE_PATH,
     headless:true, args:['--no-sandbox']});
@@ -36,77 +37,113 @@ async function main() {
       }, fs.readFileSync(process.env.SSM_CHECK_FONT).toString('base64'));
       await page.addStyleTag({content:'body { font-family: AvatarCJK, sans-serif; }'});
     }
-    await page.waitForSelector('svg');
-    assert.equal(await page.$$eval('svg', elements => elements.length), 12);
+    const stage = '.preview-stage .shape-face';
+    await page.waitForSelector(stage);
+    assert.equal(await page.$$eval(stage, elements => elements.length), 3, 'Every character starts in its daily form');
+    assert.equal(await page.$$eval('[data-emotion-choice]', elements => elements.length), 8);
     assert.equal(await page.$eval('body', element => element.scrollWidth), 390);
+    assert.equal(await page.$eval(`${stage} .shape-face__ambient`, el => getComputedStyle(el).animationName), 'avatar-breathe');
+    assert.equal(await page.$eval('.preview-emotion .shape-face', el => el.dataset.animated), 'false', 'Palette is static');
     if (process.env.SCREENSHOT_DIR) {
       fs.mkdirSync(process.env.SCREENSHOT_DIR, {recursive:true});
       await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR, 'avatar-preview-390.png'), fullPage:true});
     }
-    await page.click('button');
-    assert.equal(await page.$$eval('[data-motion="pop"]', elements => elements.length), 12);
+    await page.click('[data-emotion-choice="happy"]');
+    await page.waitForSelector(`${stage}[data-emotion="happy"] [data-motion="pop"]`);
+    await delay(250);
+    assert.equal(await page.$eval(`${stage} .shape-face__expression[data-current="true"]`, el => getComputedStyle(el).opacity), '1');
+    await page.click('[data-gesture-choice="scissors"]');
+    await page.waitForSelector(`${stage}[data-shape="scissors"]`);
+    await page.waitForSelector(`${stage}[data-shape="idle"][data-emotion="happy"] [data-motion="none"]`);
+    await page.click('[data-behavior-choice="rest"]');
+    assert.equal(await page.$eval(`${stage} .shape-face__expression[data-current="true"] .shape-face__eyes`, el => el.dataset.closed), 'true');
+    await page.click('[data-behavior-choice="idle"]');
     await page.emulateMediaFeatures([{name:'prefers-reduced-motion', value:'reduce'}]);
-    assert.equal(await page.$eval('[data-motion="pop"]', element => getComputedStyle(element).animationName), 'none');
+    assert.equal(await page.$eval(`${stage} .shape-face__ambient`, el => getComputedStyle(el).animationName), 'none');
     await page.emulateMediaFeatures([{name:'prefers-reduced-motion', value:'no-preference'}]);
-    for (const file of ['components/Icon.jsx', 'components/ActivityMembers.jsx']) {
-      await page.addScriptTag({content:compile(fs.readFileSync('app/src/' + file, 'utf8'))});
+    if (process.env.SCREENSHOT_DIR) {
+      await page.click('[data-emotion-choice="curious"]');
+      await delay(300);
+      await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR, 'avatar-curious-390.png'), fullPage:true});
+      // Actual browser frames; stitch as a GIF externally when motion evidence is needed.
+      await page.click('[data-sequence]');
+      for (let frame = 0; frame < 24; frame++) {
+        await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR, `motion-${String(frame).padStart(2,'0')}.png`), clip:{x:0,y:0,width:390,height:430}});
+        await delay(90);
+      }
     }
+    for (const file of ['components/Icon.jsx', 'components/ActivityMembers.jsx', 'hooks/useActivityTimeline.js'])
+      await page.addScriptTag({content:compile(fs.readFileSync('app/src/' + file, 'utf8'))});
     await page.evaluate(() => {
       window.apiClient = new EventTarget(); apiClient.devicesSynced = true;
+      apiClient.request = async path => path === '/api/activity/current'
+        ? {activity:{activity_id:'a',status:'active',devices:{go2:{status:'joined'}}}}
+        : {events:[{event_id:'history',activity_id:'a',event_type:'message',unit_id:'go2',emotion:'sad',ts:Date.now()/1000}]};
+      window.apiErrorText = error => error.message;
       window.navigate = () => {};
-      // Physical state projection is separately covered by check_activity_frontend.
       window.activityMemberView = (card, state, membership, connected) => ({label:'站立', detail:'自主活动中',
         stale:!connected, disconnected:state.connected === false});
-      window.testAvatarEvent = id => ({event_id:id, activity_id:'a', event_type:'message', stage:'rps_result',
-        ts:Date.now()/1000, game_round:{round:1, choices:{go2:'rock'}}});
-      window.avatarProps = {activity:{activity_id:'a', status:'active', devices:{go2:{status:'joined'}}},
-        events:[], agents:[{unit_id:'go2', agent_type:'robot'}],
-        unitData:{go2:{state:{connected:true, life_state:'play'}}}, connected:true};
-      document.getElementById('root').remove();
+      window.emitAvatar = (id, extra = {}) => apiClient.dispatchEvent(new CustomEvent('server-event', {detail:{
+        type:'activity', event_id:id, activity_id:'a', event_type:'message',unit_id:'go2',ts:Date.now()/1000,...extra}}));
       const container = document.createElement('div'); document.body.appendChild(container);
-      const root = ReactDOM.createRoot(container);
-      window.renderAvatars = () => ReactDOM.flushSync(() => root.render(React.createElement(ActivityMembers, avatarProps)));
+      document.getElementById('root').style.display='none';
+      window.memberRoot = ReactDOM.createRoot(container);
+      window.connected = true; window.mountKey = 0; window.ended = false; window.resting = false;
+      window.ActivityHarness = function() {
+        const timeline = useActivityTimeline();
+        return React.createElement(ActivityMembers, {key:mountKey,activity:{...timeline.displayActivity,...(ended ? {status:'ended'} : {})},
+          events:timeline.events, agents:[{unit_id:'go2',agent_type:'robot'}],
+          unitData:{go2:{state:{connected:true,life_state:'play',activity_state:resting ? 'rest' : 'active'}}},connected});
+      };
+      window.renderAvatars = () => ReactDOM.flushSync(() => memberRoot.render(React.createElement(ActivityHarness)));
       renderAvatars();
     });
-    const shape = () => page.$eval('.shape-face', element => element.dataset.shape);
-    assert.equal(await shape(), 'idle', 'An initial card without game data must render');
-    await page.evaluate(() => {
-      avatarProps = {...avatarProps, events:[testAvatarEvent('history')]}; renderAvatars();
-    });
-    assert.equal(await shape(), 'idle', 'REST history must not replay');
-    await page.evaluate(() => {
-      const event = testAvatarEvent('new');
-      apiClient.dispatchEvent(new CustomEvent('server-event', {detail:event}));
-      avatarProps = {...avatarProps, events:[...avatarProps.events, event]}; renderAvatars();
-    });
-    await page.waitForSelector('.shape-face[data-shape="rock"]');
-    assert.equal(await page.$eval('.shape-face__form', element => element.dataset.motion), 'pop');
-    await page.waitForFunction(() => document.querySelector('.shape-face').dataset.shape === 'idle');
-    await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event', {detail:avatarProps.events[1]})));
-    assert.equal(await shape(), 'idle', 'Duplicate SSE must not replay');
-    await page.evaluate(() => {
-      avatarProps = {...avatarProps, connected:false}; renderAvatars();
-      avatarProps = {...avatarProps, connected:true}; renderAvatars();
-      apiClient.dispatchEvent(new Event('events-open'));
-      apiClient.dispatchEvent(new CustomEvent('server-event', {detail:avatarProps.events[1]}));
-    });
-    assert.equal(await shape(), 'idle', 'Reconnect must not replay');
-    await page.evaluate(() => {
-      const event = {...testAvatarEvent('unseen-old'), ts:1};
-      apiClient.dispatchEvent(new CustomEvent('server-event', {detail:event}));
-      avatarProps = {...avatarProps, events:[...avatarProps.events, event]}; renderAvatars();
-    });
-    assert.equal(await shape(), 'idle', 'Previously unseen stale SSE must not replay');
-    const faces = await page.evaluate(() => [
-      avatarStatePresentation({activity_state:'rest'}, {}).expression,
-      avatarStatePresentation({life_state:'explore'}, {}).expression,
-      avatarStatePresentation({activity_state:'rest'}, {disconnected:true}).expression,
-    ]);
-    assert.deepEqual(faces, ['blink', 'curious', 'neutral']);
+    const member = '.activity-member__portrait .shape-face';
+    await page.waitForSelector(member);
+    const mood = () => page.$eval(member, el => el.dataset.emotion);
+    const shape = () => page.$eval(member, el => el.dataset.shape);
+    assert.equal(await mood(), 'neutral', 'REST emotion history must not drive a live avatar');
+    await page.evaluate(() => emitAvatar('happy-1', {emotion:'happy'}));
+    await page.waitForSelector(`${member}[data-emotion="happy"]`);
+    await page.evaluate(() => emitAvatar('rps-1', {stage:'rps_result',game_round:{round:1,choices:{go2:'rock'}}}));
+    await page.waitForSelector(`${member}[data-shape="rock"]`);
+    await page.waitForSelector(`${member}[data-shape="idle"][data-emotion="happy"] [data-motion="none"]`);
+    await page.evaluate(() => emitAvatar('rps-1', {stage:'rps_result',game_round:{round:1,choices:{go2:'rock'}}}));
+    assert.equal(await shape(), 'idle', 'Duplicate must not replay');
+    await page.evaluate(() => emitAvatar('private', {activity_id:'other',emotion:'angry',scope:'session'}));
+    assert.equal(await mood(), 'happy', 'Other contexts cannot change this activity');
+    await page.evaluate(() => emitAvatar('old', {ts:1,emotion:'sad'}));
+    assert.equal(await mood(), 'happy', 'Old events cannot replace current expression');
+    await page.evaluate(() => emitAvatar('rps-new', {stage:'rps_result',game_round:{round:2,choices:{go2:'paper'}}}));
+    await page.waitForSelector(`${member}[data-shape="paper"]`);
+    await page.evaluate(() => emitAvatar('queued-sad', {emotion:'sad'}));
+    await delay(100);
+    assert.equal(await mood(), 'happy', 'An incoming emotion waits until the game gesture finishes');
+    await page.waitForSelector(`${member}[data-shape="idle"][data-emotion="sad"]`);
+    await page.evaluate(() => emitAvatar('bad-emotion', {emotion:{name:'angry'}}));
+    await page.waitForSelector(`${member}[data-emotion="neutral"]`);
+    await page.evaluate(() => emitAvatar('sad-2', {emotion:'sad'}));
+    await page.waitForSelector(`${member}[data-emotion="sad"]`);
+    await page.evaluate(() => {mountKey++; renderAvatars();});
+    await page.waitForSelector(`${member}[data-emotion="neutral"]`);
+    await page.evaluate(() => emitAvatar('happy-3', {emotion:'happy'}));
+    await page.waitForSelector(`${member}[data-emotion="happy"]`);
+    await page.waitForSelector(`${member}[data-emotion="neutral"]`, {timeout:8000});
+    await page.evaluate(() => {connected=false; renderAvatars(); connected=true; apiClient.eventsOpenedAt=Date.now(); renderAvatars(); apiClient.dispatchEvent(new Event('events-open'));});
+    assert.equal(await mood(), 'neutral', 'Reconnect does not restore past emotion');
+    await page.evaluate(() => emitAvatar('unseen-before-reconnect', {ts:(apiClient.eventsOpenedAt-2000)/1000, emotion:'angry',
+      stage:'rps_result',game_round:{round:3,choices:{go2:'paper'}}}));
+    await delay(50);
+    assert.equal(await mood(), 'neutral', 'An unseen event created just before reconnect cannot animate');
+    assert.equal(await shape(), 'idle');
+    await page.evaluate(() => {ended=true; renderAvatars(); emitAvatar('late-end', {emotion:'angry',stage:'rps_result',game_round:{round:2,choices:{go2:'paper'}}});});
+    await delay(50);
+    assert.equal(await shape(), 'idle'); assert.equal(await mood(), 'neutral');
+    await page.evaluate(() => {ended=false; resting=true; renderAvatars();});
+    assert.equal(await page.$eval(member, el => el.dataset.behavior), 'rest');
+    assert.equal(await page.$eval(`${member} .shape-face__expression[data-current="true"] .shape-face__eyes`, el => el.dataset.closed), 'true');
     assert.deepEqual(errors, []);
-    console.log('Avatar preview, mobile layout, reduced motion, history, new SSE, duplicates, reconnect and state expressions passed');
-  } finally {
-    await browser.close();
-  }
+    console.log('Eight emotions, ambient motion, game restoration, real SSE/history pipeline, expiry, scopes, duplicates, remount, reconnect, rest and reduced motion passed');
+  } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -20,13 +20,32 @@ const AVATAR_SHAPES = Object.freeze({
     angular:'M 24 48 L 22 24 L 26 16 L 34 16 L 39 24 L 39 41 L 40 13 L 44 5 L 51 5 L 55 14 L 54 40 L 58 19 L 64 12 L 71 16 L 71 24 L 67 45 L 72 32 L 79 27 L 85 33 L 83 42 L 78 65 L 69 83 L 52 91 L 35 87 L 24 78 L 17 65 L 9 51 L 12 42 L 19 42 L 30 56'},
 });
 
+// Names match the optional emotion field in agent replies. No device capabilities.
 const AVATAR_EXPRESSIONS = Object.freeze({
-  neutral: {label:'平常', eyes:'open', mouth:'M 44 8 Q 50 14 56 8'},
-  happy: {label:'开心', eyes:'smile', mouth:'M 43 8 Q 50 19 57 8 Z'},
-  curious: {label:'好奇', eyes:'curious', mouth:'M 49 10 a 2 3 0 1 0 4 0 a 2 3 0 1 0 -4 0'},
-  blink: {label:'眨眼', eyes:'closed', mouth:'M 44 8 Q 50 14 56 8'},
+  neutral: {label:'平常', eyes:'open', mouth:'M 43 8 Q 50 14 57 8', motion:'none'},
+  happy: {label:'开心', eyes:'smile', mouth:'M 42 7 Q 50 21 58 7 Z', motion:'pop'},
+  curious: {label:'好奇', eyes:'curious', mouth:'M 48 9 Q 52 5 55 10 Q 52 15 48 9', motion:'tilt'},
+  confused: {label:'困惑', eyes:'uneven', brows:'M 31 -13 L 42 -15 M 58 -15 Q 64 -19 70 -12', mouth:'M 43 11 Q 47 6 51 11 Q 55 15 59 10', motion:'glance'},
+  surprised: {label:'惊讶', eyes:'wide', brows:'M 31 -15 Q 37 -20 43 -15 M 57 -15 Q 63 -20 69 -15', mouth:'M 45 11 C 45 2 55 2 55 11 C 55 20 45 20 45 11 Z', motion:'startle'},
+  angry: {label:'生气', eyes:'narrow', brows:'M 30 -14 L 43 -8 M 57 -8 L 70 -14', mouth:'M 42 13 Q 50 6 58 13', motion:'squeeze'},
+  sad: {label:'难过', eyes:'low', brows:'M 30 -10 L 42 -16 M 58 -16 L 70 -10', mouth:'M 43 14 Q 50 4 57 14', motion:'sink'},
+  relaxed: {label:'放松', eyes:'soft', mouth:'M 44 8 Q 50 13 56 8', motion:'stretch'},
 });
-const AVATAR_MOTIONS = Object.freeze({none:'静止', pop:'轻弹', squeeze:'挤压', glance:'轻摆'});
+const AVATAR_MOTIONS = Object.freeze({none:'静止', pop:'轻弹', squeeze:'收紧', glance:'轻摆',
+  tilt:'歪头', startle:'后仰', sink:'下沉', stretch:'舒展'});
+const AVATAR_ACTIONS = Object.freeze(Object.fromEntries(
+  ['rock','scissors','paper'].map(name => [name, AVATAR_SHAPES[name]])));
+const AVATAR_TIMING = Object.freeze({emotion:6000, gesture:1600});
+function normalizeAvatarEmotion(value) {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(AVATAR_EXPRESSIONS, value) ? value : 'neutral';
+}
+function avatarReceiveTime(event) {
+  const now = Date.now();
+  const ts = event?.ts;
+  const connectedAt = typeof apiClient !== 'undefined' ? apiClient.eventsOpenedAt || 0 : 0;
+  return Number.isFinite(ts) && ts * 1000 >= Math.max(now - 10000, connectedAt)
+    && ts * 1000 <= now + 5000 ? now : undefined;
+}
 
 function resolveAvatarProfile(agent) {
   const card = typeof agent === 'object' && agent ? agent : {};
@@ -61,12 +80,13 @@ function latestAvatarPresentation(events, unitId, activityId) {
   }
   return null;
 }
-function avatarStatePresentation(state, member) {
-  if (member.disconnected || member.stale) return {shape:'idle', expression:'neutral', label:''};
-  if (state.activity_state === 'rest') return {shape:'idle', expression:'blink', label:'休息中'};
-  if (state.life_state === 'explore') return {shape:'idle', expression:'curious', label:'探索中'};
-  if (state.life_state === 'play') return {shape:'idle', expression:'curious', label:'互动中'};
-  return {shape:'idle', expression:'neutral', label:''};
+function avatarStatePresentation(state, member = {}) {
+  if (member.disconnected || member.stale) return {shape:'idle', expression:'neutral', behavior:'idle', label:''};
+  if (state.activity_state === 'rest') return {shape:'idle', expression:'relaxed', behavior:'rest', label:'休息中'};
+  if (state.life_state === 'explore') return {shape:'idle', expression:'neutral', behavior:'thinking', label:'探索中'};
+  if (state.life_state === 'play') return {shape:'idle', expression:'neutral', behavior:'idle', label:'互动中'};
+  return {shape:'idle', expression:'neutral', behavior:'idle', label:''};
 }
-Object.assign(window, {AVATAR_PROFILES, AVATAR_SHAPES, AVATAR_EXPRESSIONS, AVATAR_MOTIONS,
-  AVATAR_EVENT_MAPPINGS, resolveAvatarProfile, avatarEventPresentation, latestAvatarPresentation, avatarStatePresentation});
+Object.assign(window, {AVATAR_PROFILES, AVATAR_SHAPES, AVATAR_ACTIONS, AVATAR_EXPRESSIONS, AVATAR_MOTIONS,
+  AVATAR_TIMING, normalizeAvatarEmotion, avatarReceiveTime, AVATAR_EVENT_MAPPINGS, resolveAvatarProfile, avatarEventPresentation,
+  latestAvatarPresentation, avatarStatePresentation});

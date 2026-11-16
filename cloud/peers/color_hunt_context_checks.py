@@ -124,8 +124,9 @@ async def test_current_color_hunt_preserves_real_confirmed_result(hunt, monkeypa
             "result": "ok", "message": "地面有一个红色盒子"}})
         assert kwargs["tool_guard"]("go2_navigate_to_visible_target", {
             "target": "红色盒子", "decision_reason": "刚看见的红盒子与题目颜色一致。"}) is None
-        return {"result": "ok", "tool_results": [{"tool": "go2_navigate_to_visible_target",
-            "result": {"result": "ok", "confirmation": "odom_stopped_and_visual_recheck"}}]}
+        return {"result": "ok", "response": "这局找到了。", "emotion": "happy",
+            "tool_results": [{"tool": "go2_navigate_to_visible_target",
+            "result": {"result": "ok", "target": "红色盒子", "confirmation": "odom_stopped_and_visual_recheck"}}]}
 
     monkeypatch.setattr("cloud.agents.go2.graph.run_go2_loop", graph)
     await color_hunt._run_color_hunt(hunt.drive, hunt.event, "peer_A")

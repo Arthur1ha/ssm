@@ -386,6 +386,9 @@ class ActivityStore:
                                  "question_id", "action", "physical_stop", "reason",
                                  "source", "confidence", "source_event_id", "display", "stage"}})
         event.update(public_process_facts({**facts, "unit_id": unit_id}))
+        if event_type in {"message", "question"}:
+            from cloud.agents.common.emotions import normalize_emotion
+            event["emotion"] = normalize_emotion(facts.get("emotion"))
         game_round = _game_round_snapshot(facts.get("game_round"))
         if event.get("game_id") == "rps_siege" and event.get("stage") == "rps_result" and game_round:
             event["game_round"] = game_round

@@ -177,7 +177,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         await physical("SET_COLOR", answer["color"], "identify:color")
         # The cue is only handed to the dog after both physical receipts.
         confirmed_at = time.monotonic()
-        record("message", answer["speech"], role="lamp", stage="identification")
+        record("message", answer["speech"], emotion=answer.get("emotion"), role="lamp", stage="identification")
         return {"identification": {"shape": "圆球灯", "color": answer["color"],
                 "speech": answer["speech"], "confirmed_at": confirmed_at}}
 
@@ -206,7 +206,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                          "observation": {"text": text[:1600], "source": "go2.camera",
                          "as_of": time.time(), "ref": (observed or {}).get("event_id")}}
         dog = await decision("go2", "identify", observed_state)
-        record("message", dog["speech"], stage="recognition")
+        record("message", dog["speech"], emotion=dog.get("emotion"), stage="recognition")
         if not dog["target_visible"] or not dog.get("target"):
             return {**observed_state, "result": "rejected", "reason": "game_target_not_visible"}
         return {**observed_state, "target_identification": dog}
@@ -227,7 +227,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                       {choice: gestures[command]["label"] for choice, command in dog["mapping"].items()})
             mapping_text = "；".join(f"{label}＝{labels[choice]}" for choice, label in CHOICES.items())
             record("message", f"本局映射提议：{mapping_text}。这是公开规则，待双方确认。\n{answer['speech']}",
-                   role=role, stage="mapping_proposal")
+                   role=role, stage="mapping_proposal", emotion=answer.get("emotion"))
         record("message", "待确认的规则：一把定胜负，平局重来。狗赢就沿安全路径到本局确认的灯附近关灯；"
                "灯赢就由狗表演一次。双方确认映射后先认灯定位，再秘密选拳、同时展示。", stage="terms_proposal")
         return {"proposals": {"lamp": lamp, "go2": dog}, "terms": terms,
@@ -237,7 +237,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", state),
                                          decision("go2", "agree", state))
         for role, answer in (("lamp", lamp), ("go2", dog)):
-            record("message", answer["speech"], role=role, stage="agreement",
+            record("message", answer["speech"], emotion=answer.get("emotion"), role=role, stage="agreement",
                    status="accepted" if answer["accepted"] else "rejected")
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "game_terms_not_agreed"}
@@ -274,7 +274,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
 
         record("message", f"第 {number} 回合：双方已锁定选择，同时开始展示。", stage="reveal")
         for role in ("lamp", "go2"):
-            record("message", choices[role]["speech"], role=role, stage="throw_announcement")
+            record("message", choices[role]["speech"], role=role, stage="throw_announcement", emotion=choices[role].get("emotion"))
         # Dispatch both without waiting for either receipt. Collect both
         # outcomes before scoring; never leave a sibling task unobserved.
         results = await asyncio.gather(
@@ -333,7 +333,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     async def perform(state):
         answer = await decision("go2", "performance", state)
         check()
-        record("message", answer["speech"])
+        record("message", answer["speech"], emotion=answer.get("emotion"))
         record("action", "狗准备兑现本局约定，表演一个动作。", action="go2_sport")
         result = await execute_tool("go2_sport", {"cmd": answer["command"]}, context=context,
             request_id=f"rps_{invitation_id}_performance")

@@ -10,6 +10,7 @@ import uuid
 from dataclasses import replace
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
+from cloud.agents.common.emotions import normalize_emotion
 from cloud.agents.common.models import async_model_clients
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
@@ -38,6 +39,7 @@ def _response(run, *, runtime_reply: bool = False) -> dict:
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status,
             "reply": "" if runtime_reply and run.reply_source == "runtime" else run.response,
+            "emotion": normalize_emotion(run.emotion),
             "event_id": run.reply_event_id or stable_reply_event_id(run, status),
             "question": run.question or None, "steps": run.steps,
             "task_id": next((s.get("result", {}).get("task_id") for s in reversed(run.steps)
@@ -248,7 +250,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                     status=_public_status(current), run_id=current.run_id,
                     trace_id=current.trace_id or current.run_id,
                     parent_run_id=current.parent_run_id, source=event_source,
-                    text=current.response, reply_kind="final",
+                    text=current.response, emotion=current.emotion, reply_kind="final",
                     event_id=current.reply_event_id)
             else:
                 publish_agent_event(
@@ -309,7 +311,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             "agent_reply", agent_id=unit_id, session_id=event_session,
             scope="space" if autonomous else "session", space_id=context.space_id,
             status=status, run_id=run.run_id, trace_id=run.trace_id or run.run_id,
-            parent_run_id=run.parent_run_id, source=event_source, text=reply,
+            parent_run_id=run.parent_run_id, source=event_source, text=reply, emotion=run.emotion,
             reply_kind="clarification", event_id=run.reply_event_id,
         )
     if reply and not run.parent_run_id:
@@ -318,6 +320,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                          reply_kind="final", channel="http", reply=reply)
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status, "reply": reply,
+            "emotion": normalize_emotion(run.emotion),
             "event_id": run.reply_event_id or None,
             "question": run.question or None, "steps": run.steps,
             "task_id": next((s.get("result", {}).get("task_id") for s in reversed(run.steps)

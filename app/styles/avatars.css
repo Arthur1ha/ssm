@@ -1,33 +1,48 @@
-/* Shared shapes; no ambient motion, and no motion required to read a result. */
-.shape-face { display: block; flex: none; overflow: visible; }
-.shape-face__body { fill: var(--avatar-color); }
-.shape-face__features { fill: none; stroke: var(--avatar-ink); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-.shape-face__eye { fill: var(--avatar-ink); stroke: none; }
-.shape-face__form { transform-origin: 50px 82px; }
-.shape-face__form[data-motion="pop"] { animation: avatar-pop 480ms ease-out 1; }
-.shape-face__form[data-motion="squeeze"] { animation: avatar-squeeze 450ms ease-in-out 1; }
-.shape-face__form[data-motion="glance"] { animation: avatar-glance 500ms ease-in-out 1; }
-.activity-member--companion { position: relative; gap: 5px; }
-.activity-member__portrait { display: flex; align-items: center; justify-content: center; min-height: 76px; margin: 1px 0 4px; }
-.activity-member__gesture { display: block; color: var(--color-text-muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
-.activity-member--companion[data-stale="true"] .shape-face { opacity: .55; }
-.activity-member--companion:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
-@keyframes avatar-pop {
-  0% { transform: scale(.84, 1.08); }
-  35% { transform: translateY(-7px) scale(1.04, .98); }
-  70% { transform: scale(1.06, .94); }
-  100% { transform: none; }
-}
-@keyframes avatar-squeeze {
-  0%, 100% { transform: none; }
-  40% { transform: scale(1.12, .86); }
-  72% { transform: scale(.96, 1.04); }
-}
-@keyframes avatar-glance {
-  0%, 100% { transform: none; }
-  35% { transform: rotate(-7deg); }
-  70% { transform: rotate(5deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .shape-face__form[data-motion] { animation: none; }
+/* Expressions, entrance gestures and ambient motion use separate SVG groups. */
+.shape-face { display:block; flex:none; overflow:visible; }
+.shape-face__body { fill:var(--avatar-color); }
+.shape-face__features { fill:none; stroke:var(--avatar-ink); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+.shape-face__eye { fill:var(--avatar-ink); stroke:none; transition:ry 200ms ease, cy 200ms ease; }
+.shape-face__expression { opacity:0; transition:opacity 200ms ease; }
+.shape-face__expression[data-current="true"] { opacity:1; }
+.shape-face__brows { stroke-width:3; }
+.shape-face__cheeks { opacity:.4; stroke-width:3; }
+.shape-face__ambient, .shape-face__form, .shape-face__pose { transform-origin:50px 82px; }
+.shape-face__pose, .shape-face__gaze { transition:transform 200ms ease; }
+.shape-face__eyes { transform-origin:50px -2px; }
+.shape-face[data-emotion="curious"] .shape-face__pose { transform:rotate(-4deg); }
+.shape-face[data-emotion="curious"] .shape-face__gaze { transform:translateX(3px); }
+.shape-face[data-emotion="sad"] .shape-face__pose { transform:translateY(2px) scale(1.01,.96); }
+.shape-face[data-emotion="angry"] .shape-face__pose { transform:scale(1.025,.975); }
+.shape-face[data-behavior="rest"] .shape-face__pose { transform:translateY(3px) scale(1.03,.94); }
+.shape-face[data-animated="true"] .shape-face__ambient { animation:avatar-breathe 4s ease-in-out infinite; }
+.shape-face[data-animated="true"][data-behavior="rest"] .shape-face__ambient { animation-duration:6s; }
+.shape-face[data-animated="true"] .shape-face__expression[data-current="true"] .shape-face__eyes:not([data-closed]) { animation:avatar-blink var(--avatar-blink-period,5s) linear infinite; }
+.shape-face[data-animated="true"][data-behavior="thinking"] .shape-face__expression[data-current="true"] .shape-face__gaze { animation:avatar-look 3.2s ease-in-out infinite; }
+.shape-face[data-animated="true"] [data-motion="pop"] { animation:avatar-pop 600ms ease-out 1; }
+.shape-face[data-animated="true"] [data-motion="squeeze"] { animation:avatar-squeeze 550ms ease-in-out 1; }
+.shape-face[data-animated="true"] [data-motion="glance"] { animation:avatar-glance 700ms ease-in-out 1; }
+.shape-face[data-animated="true"] [data-motion="tilt"] { animation:avatar-tilt 650ms ease-in-out 1; }
+.shape-face[data-animated="true"] [data-motion="startle"] { animation:avatar-startle 600ms ease-out 1; }
+.shape-face[data-animated="true"] [data-motion="sink"] { animation:avatar-sink 750ms ease-in-out 1; }
+.shape-face[data-animated="true"] [data-motion="stretch"] { animation:avatar-stretch 800ms ease-in-out 1; }
+.shape-face[data-paused="true"] * { animation-play-state:paused !important; }
+.activity-member--companion { position:relative; gap:5px; }
+.activity-member__portrait { display:flex; align-items:center; justify-content:center; min-height:76px; margin:1px 0 4px; }
+.activity-member__gesture { display:block; color:var(--color-text-muted); font-size:10px; line-height:1.5; overflow-wrap:anywhere; }
+.activity-member--companion[data-stale="true"] .shape-face { opacity:.55; }
+.activity-member--companion:focus-visible { outline:2px solid var(--color-accent); outline-offset:3px; }
+.agent-speech__name .shape-face { display:inline-block; vertical-align:middle; margin:-5px 7px -3px 0; }
+@keyframes avatar-breathe { 0%,100% { transform:scale(1); } 50% { transform:translateY(-1px) scale(1.012,1.025); } }
+@keyframes avatar-blink { 0%,91%,97%,100% { transform:scaleY(1); } 94% { transform:scaleY(.08); } }
+@keyframes avatar-look { 0%,100% { transform:translateX(0); } 35%,60% { transform:translateX(3px); } }
+@keyframes avatar-pop { 0% { transform:scale(.9,1.06); } 35% { transform:translateY(-7px) scale(1.04,.98); } 70% { transform:scale(1.06,.94); } 100% { transform:none; } }
+@keyframes avatar-squeeze { 0%,100% { transform:none; } 40% { transform:scale(1.1,.89); } 72% { transform:scale(.97,1.03); } }
+@keyframes avatar-glance { 0%,100% { transform:none; } 30% { transform:rotate(-7deg); } 65% { transform:rotate(6deg); } }
+@keyframes avatar-tilt { 0%,100% { transform:none; } 45% { transform:rotate(-9deg) translateY(-2px); } }
+@keyframes avatar-startle { 0%,100% { transform:none; } 30% { transform:translateY(-4px) scale(.94,1.09) rotate(5deg); } }
+@keyframes avatar-sink { 0%,100% { transform:none; } 50% { transform:translateY(5px) scale(1.03,.93); } }
+@keyframes avatar-stretch { 0%,100% { transform:none; } 50% { transform:scale(.96,1.06); } }
+@media (prefers-reduced-motion:reduce) {
+  .shape-face *, .shape-face[data-animated="true"] * { animation:none !important; transition:none !important; }
 }

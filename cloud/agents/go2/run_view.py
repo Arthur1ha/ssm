@@ -26,6 +26,7 @@ class _RecoveryState(TypedDict):
     turns: int
     effects: int
     messages: Annotated[list[AnyMessage], add_messages]
+    pending_calls: list[dict]
 
 
 def stable_reply_event_id(run_id: str, *, session_id: str = "",
@@ -127,6 +128,14 @@ class Go2RunView:
             if decision.get("kind") == "tool":
                 from cloud.agents.go2.tools.declarations import READ_ONLY_TOOLS
 
+                # Current graphs checkpoint native calls separately; only the
+                # head may have started. Later queued calls were not dispatched.
+                pending = state.get("pending_calls") or []
+                if pending:
+                    head = pending[0]
+                    decision = {**decision, "step_id": head["id"], "name": head["name"],
+                                "params": {key: value for key, value in head["args"].items()
+                                           if key != "final"}}
                 step_id = decision["step_id"]
                 step = next((s for s in current.steps if s["step_id"] == step_id), None)
                 receipt = FileEffectLedger().read("go2", thread_id, current.run_id, step_id)
@@ -151,6 +160,7 @@ class Go2RunView:
             current.question = ""
             current.reply_event_id = ""
             current.reply_source = "runtime"
+            current.emotion = "neutral"
             # Use LangGraph's state update API to create a terminal checkpoint;
             # never resume the crashed graph or execute any recovery callback.
             graph = StateGraph(_RecoveryState)
@@ -159,7 +169,8 @@ class Go2RunView:
             graph.add_edge("finalize", END)
             compiled = graph.compile(checkpointer=self.checkpointer)
             await compiled.aupdate_state(config, {"run": asdict(current),
-                                                  "decision": {"kind": "finish"}},
+                                                  "decision": {"kind": "finish"},
+                                                  "pending_calls": []},
                                          as_node="finalize")
             self.pin(current.run_id, session_id)
             return current

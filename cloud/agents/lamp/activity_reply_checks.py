@@ -58,7 +58,22 @@ def test_busy_lamp_activity_final_text_reaches_existing_space_reply(activity_rep
     assert h.calls == 1
     assert h.published == [('agent_reply', {
         'agent_id': 'esp32_desk_led', 'scope': 'space', 'space_id': 'main',
-        'source': 'autonomous', 'status': 'ok', 'run_id': result['run_id'], 'text': answer})]
+        'source': 'autonomous', 'status': 'ok', 'run_id': result['run_id'], 'text': answer,
+        'emotion': 'neutral'})]
+
+
+@pytest.mark.parametrize('emotion,expected', [('curious', 'curious'), (None, 'neutral'),
+                                             ({'name': 'happy'}, 'neutral'), ('invented', 'neutral')])
+def test_activity_reply_emotion_uses_same_model_call_and_never_rejects_text(activity_reply, emotion, expected):
+    import json
+
+    h = activity_reply
+    answer = '我想先观察一下。'
+    result = h.run(AIMessage(content=json.dumps({'text': answer, 'emotion': emotion})))
+    assert result['reply'] == answer and result['status'] == 'ok'
+    assert result['steps'] == [] and h.calls == 1
+    assert len(h.published) == 1
+    assert h.published[0][1]['emotion'] == expected
 
 
 def test_explicit_peer_message_does_not_add_another_activity_reply(activity_reply):

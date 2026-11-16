@@ -343,8 +343,9 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                         session_id: str = "", space_id: str = DEFAULT_SPACE_ID,
                         scope: str = "session", run_id: str = "", trace_id: str = "",
                         parent_run_id: str = "", step_id: str = "", source: str = "device_chat",
-                        text: str = "", event_id: str = "", **facts: Any) -> dict[str, Any]:
-    """Publish a trusted, structured UI event. Model output can fill text only."""
+                        text: str = "", event_id: str = "", emotion: object = "neutral",
+                        **facts: Any) -> dict[str, Any]:
+    """Publish trusted facts; models supply text and normalized avatar emotion only."""
     if event_type not in {"agent_reply", "agent_progress", "run_stage", "reply_error"}:
         raise ValueError("invalid_event_type")
     if agent_id not in {"cloud_orchestrator", "esp32_desk_led", "go2"}:
@@ -362,6 +363,9 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
              "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
              "step_id": step_id or None, "source": source,
              "text": text.strip(), "ts": time.time(), **facts}
+    if event_type == "agent_reply":
+        from cloud.agents.common.emotions import normalize_emotion
+        event["emotion"] = normalize_emotion(emotion)
     from cloud.agents.common.progress_facts import public_process_facts
     process = public_process_facts(event)
     event.update(process)
@@ -393,6 +397,7 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
                 if event_type == "agent_reply":
                     get_activity_store().record_event(activity_id, "message", unit_id=agent_id,
                                                       text=event["text"], status=status,
+                                                      emotion=event["emotion"],
                                                       **process, media_ref=facts.get("media_ref"),
                                                       decision_basis=facts.get("decision_basis"),
                                                       source_event_id=event["event_id"])
@@ -476,7 +481,7 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
             kind = payload["type"]
             trusted = {key: payload.get(key) for key in (
                 "agent_id", "status", "run_id", "trace_id", "parent_run_id",
-                "step_id", "source", "text", "event_id", "stage", "sequence", "reply_kind",
+                "step_id", "source", "text", "emotion", "event_id", "stage", "sequence", "reply_kind",
                 "tool", "target_unit_id", "skill_id", "arguments", "requested_text",
                 "reason", "result_state",
                 "goal", "completed_count", "failed_count", "step_number")}
@@ -487,7 +492,8 @@ def handle_mqtt_message(topic: str, raw: bytes | str) -> bool:
                                 run_id=trusted["run_id"] or "", trace_id=trusted["trace_id"] or "",
                                 parent_run_id=trusted["parent_run_id"] or "",
                                 step_id=trusted["step_id"] or "", source="orchestrator",
-                                text=trusted["text"] or "", event_id=trusted["event_id"] or "",
+                                text=trusted["text"] or "", emotion=trusted["emotion"],
+                                event_id=trusted["event_id"] or "",
                                 stage=trusted["stage"], sequence=trusted["sequence"],
                                 reply_kind=trusted["reply_kind"] or "final",
                                 **{key: trusted[key] for key in ("tool", "target_unit_id", "skill_id",
@@ -933,6 +939,7 @@ async def get_lamp_chat_run(unit_id: str, run_id: str,
         event_id = stable_reply_event_id(run, run.status)
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": run.status, "reply": run.response,
+            "emotion": run.emotion,
             "event_id": event_id,
             "question": run.question or None, "steps": run.steps}
 

@@ -28,6 +28,7 @@ class ReplyState(TypedDict, total=False):
     status: str
     physical: dict
     response: str
+    emotion: str
     event_id: str
     error: str
     persona_error: bool
@@ -72,7 +73,8 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
         await finalize_reply(run, model=model,
                              instructions=lambda value: persona_reply_prompt(value, get_profile()),
                              validate=valid_reply_format)
-        return {"response": run.response, "persona_error": run.reply_source == "runtime"}
+        return {"response": run.response, "emotion": run.emotion,
+                "persona_error": run.reply_source == "runtime"}
 
     async def publish_node(state: ReplyState) -> ReplyState:
         facts = dict(agent_id=state["unit_id"], session_id=state["session_id"],
@@ -82,7 +84,8 @@ def build_physical_reply_graph(*, agent, device_state, registry, publish,
                      step_id=state["task_id"], source="delegated_skill")
         if state.get("persona_error"):
             publish("reply_error", **facts)
-        event = publish("agent_reply", **facts, text=state["response"])
+        event = publish("agent_reply", **facts, text=state["response"],
+                        emotion=state.get("emotion", "neutral"))
         return {"event_id": event["event_id"]}
 
     graph = StateGraph(ReplyState)
@@ -114,6 +117,7 @@ async def run_physical_reply(*, task_id: str, goal: str, action: str,
             values = previous.checkpoint.get("channel_values", {})
             if values.get("event_id") and values.get("task_id") == task_id:
                 return {"result": values["status"], "response": values["response"],
+                        "emotion": values.get("emotion", "neutral"),
                         "event_id": values["event_id"],
                         **({"error": values["error"]} if values.get("error") else {})}
         state = await graph.ainvoke({
@@ -122,5 +126,6 @@ async def run_physical_reply(*, task_id: str, goal: str, action: str,
             "unit_id": unit_id, "session_id": session_id,
         }, config, durability="sync")
     return {"result": state["status"], "response": state["response"],
+            "emotion": state.get("emotion", "neutral"),
             "event_id": state["event_id"],
             **({"error": state["error"]} if state.get("error") else {})}

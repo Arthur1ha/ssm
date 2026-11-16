@@ -62,7 +62,7 @@ def on_invitation(messenger, message: dict, state) -> None:
             messenger.send_result(message["message_id"], "rejected", reason="invitation_declined")
         sent = messenger.send_message(LAMP, DOG, speech,
             reply_to=message["message_id"], reply_kind="accepted" if accepted else "declined",
-            deadline=message["deadline"])
+            deadline=message["deadline"], emotion=decision.get("emotion"))
         if accepted and sent.get("result") != "accepted":
             messenger.send_result(message["message_id"], "unknown",
                                   reason="acceptance_delivery_unconfirmed")

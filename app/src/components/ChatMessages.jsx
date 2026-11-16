@@ -51,7 +51,8 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
         if (e.type === 'ai' || e.type === 'peer_message') {
           const agent = e.sender || e.agent || defaultAgent;
           return <AgentSpeech key={e.id || e.eventId || `${e.type}-${i}`} agent={agent} name={getName(agent)}
-            target={e.type === 'peer_message' && e.target ? getName(e.target) : ''} text={e.text}/>;
+            target={e.type === 'peer_message' && e.target ? getName(e.target) : ''} text={e.text}
+            emotion={e.emotion} eventId={e.eventId || e.id} receivedAt={e.avatarReceivedAt}/>;
         }
         return renderEntry?.(e) || null;
       })}

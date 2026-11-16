@@ -9,10 +9,28 @@ function ObservationPhoto({event}) {
     aria-label="打开观察照片"><img src={url} alt={caption} loading="lazy"/>
     <span>{caption}</span><small>{time ? `观察记录 · ${time}` : '照片记录'} ↗</small></a> : null;
 }
-function AgentSpeech({agent, name, target, text, compact = false, children}) {
+const avatarSpeechPlayed = new Set();
+const avatarPageStarted = Date.now();
+function AgentSpeech({agent, name, target, text, emotion, eventId, receivedAt, compact = false, children}) {
+  const [live, setLive] = React.useState(false);
+  React.useEffect(() => {
+    setLive(false);
+    const key = `${typeof agent === 'string' ? agent : agent?.unit_id}:${eventId}`;
+    const remaining = 6000 - (Date.now() - receivedAt);
+    if (!eventId || !receivedAt || receivedAt < avatarPageStarted || remaining <= 0 || remaining > 6000 || avatarSpeechPlayed.has(key)) return;
+    avatarSpeechPlayed.add(key);
+    if (avatarSpeechPlayed.size > 512) avatarSpeechPlayed.delete(avatarSpeechPlayed.values().next().value);
+    setLive(true);
+    const timer = setTimeout(() => setLive(false), remaining);
+    return () => clearTimeout(timer);
+  }, [agent, eventId, receivedAt]);
+  const id = typeof agent === 'string' ? agent : agent?.unit_id;
+  const companion = !['cloud_orchestrator','orchestrator'].includes(id);
   return <div className={`agent-speech${compact ? ' agent-speech--compact' : ''}`}
     style={{'--speaker-color':getAgentBubbleColor(agent)}}>
-    <div className="agent-speech__name">{name}{target ? ` → ${target}` : ''}</div>
+    <div className="agent-speech__name">{companion && typeof ShapeFace === 'function' &&
+      <ShapeFace agent={agent} emotion={emotion} animated={live} animationKey={live ? eventId : null} size={28}/>}
+      {name}{target ? ` → ${target}` : ''}</div>
     <div className="agent-speech__bubble">{text}</div>{children}
   </div>;
 }

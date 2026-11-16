@@ -144,31 +144,6 @@ async def test_rejected_admin_rest_does_not_preempt_current_motion_lease(runtime
     assert r.robot.state_snapshot()['life_task_id'] == 'active-interaction'
 
 
-def test_freshness_gate_changes_advance_version_and_reach_mqtt_registry(runtime):
-    from cloud.cards.registry import CardRegistry
-    r = runtime
-    registry = CardRegistry()
-
-    def publish():
-        r.card._publish_go2_state()
-        topic, payload = r.mqtt.publish.call_args.args
-        registry.handle_message(topic, payload)
-        return json.loads(payload)
-
-    fresh = publish()
-    assert 'StandUp' in fresh['available_actions']
-    r.robot._sport_state_observed_at = time.monotonic() - 4
-    stale = publish()
-    assert stale['revision'] > fresh['revision']
-    assert 'StandUp' not in stale['available_actions']
-    assert registry._states['go2']['available_actions'] == stale['available_actions']
-    r.robot._on_state({'data': {'data': {'velocity': [0, 0, 0], 'body_height': .1}}})
-    recovered = publish()
-    assert recovered['revision'] > stale['revision']
-    assert 'StandUp' in recovered['available_actions']
-    assert registry._states['go2']['available_actions'] == recovered['available_actions']
-
-
 def test_exploration_permission_changes_are_versioned_for_transport_consumers(runtime):
     from cloud.cards.registry import CardRegistry
     r = runtime

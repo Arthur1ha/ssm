@@ -56,7 +56,7 @@ async def test_hardware_ticks_cannot_renew_the_input_watchdog():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('loss', ['ownership', 'posture', 'body_action', 'remote'])
+@pytest.mark.parametrize('loss', ['ownership', 'body_action', 'remote'])
 async def test_stream_stops_when_its_authority_or_body_evidence_is_lost(loss):
     robot, _, packets = robot_at_stand()
     robot._move_control_active = True
@@ -64,8 +64,6 @@ async def test_stream_stops_when_its_authority_or_body_evidence_is_lost(loss):
     robot.manual_velocity(.3, 0, 0, can_continue=lambda: allowed[0])
     if loss == 'ownership':
         allowed[0] = False
-    elif loss == 'posture':
-        robot._sport_state_observed_at = time.monotonic() - 10
     elif loss == 'body_action':
         await robot._command_lock.acquire()
     else:

@@ -249,10 +249,12 @@ async def lifespan(app):
     get_activity_store().configure(publish=publish_activity,
                                    emit=lambda event: intents_module._events.emit_space(event["space_id"], event))
     def emit_peer_message(message):
+        from cloud.agents.common.emotions import normalize_emotion
         intents_module._events.emit_space(DEFAULT_SPACE_ID, {
             "type": "peer_message", "event_id": "evt_" + message["message_id"],
             "message_id": message["message_id"], "sender": message["sender"],
             "target": message["target"], "text": message["content"],
+            "emotion": normalize_emotion(message.get("emotion")),
             "reply_to": message.get("reply_to"), "ts": time.time(),
             **{key: message[key] for key in
                ("activity_id", "interaction_kind", "game_id", "decision_basis")

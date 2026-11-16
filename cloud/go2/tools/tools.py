@@ -273,7 +273,8 @@ def get_space_context() -> dict:
 
 def send_message(target: str, content: str, reply_to: str | None = None,
                  interaction_kind: str = "message", game_id: str | None = None,
-                 decision_reason: str | None = None, evidence_refs: list[str] | None = None) -> dict:
+                 decision_reason: str | None = None, evidence_refs: list[str] | None = None,
+                 emotion: str = "neutral") -> dict:
     """Send an agent message under this process's fixed Go2 identity."""
     from cloud.api.main import get_agent_messenger
     messenger = get_agent_messenger()
@@ -283,7 +284,7 @@ def send_message(target: str, content: str, reply_to: str | None = None,
     if context.origin_kind == "user_delegated" and context.expires_at <= time.time():
         return {"result": "blocked", "error": "session_expired"}
     return messenger.send_message("go2", target, content, reply_to,
-                                  interaction_kind=interaction_kind, game_id=game_id,
+                                  interaction_kind=interaction_kind, game_id=game_id, emotion=emotion,
                                   **({"decision_reason": decision_reason, "evidence_refs": evidence_refs}
                                      if interaction_kind == "game_invite" else {}))
 

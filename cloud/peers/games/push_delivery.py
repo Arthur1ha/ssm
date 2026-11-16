@@ -169,7 +169,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", {"stage": "roles"}),
                                          decision("go2", "agree", {"stage": "roles"}))
         for role, answer in ((LAMP, lamp), (DOG, dog)):
-            record("message", answer["speech"], role=role)
+            record("message", answer["speech"], emotion=answer.get("emotion"), role=role)
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "delivery_roles_not_agreed"}
         return {"sequence": 0}
@@ -178,7 +178,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         observed = await observe("描述当前可辨认的地面货物及配送区域。请区分可移动物体、地面区域和普通杂物；"
                                  "没有看见就如实说明，不编造货物或站点。")
         answer = await decision("lamp", "cargo", {**state, "stage": "cargo", "observation": observed})
-        record("message", answer["speech"], role=LAMP)
+        record("message", answer["speech"], emotion=answer.get("emotion"), role=LAMP)
         if not answer["accepted"]:
             return {"result": "blocked", "reason": "cargo_not_specified", "observation": observed}
         return {"cargo": answer["cargo"], "observation": observed}
@@ -201,7 +201,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
 
     async def report(state):
         answer = await decision("go2", "next", {**state, "stage": "waiting_destination"})
-        record("message", answer["speech"])
+        record("message", answer["speech"], emotion=answer.get("emotion"))
         if answer["action"] == "stop":
             return {"result": "cancelled", "reason": "courier_declined"}
         # No tool chosen by the courier can run before a real destination.
@@ -212,7 +212,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                                  "（地面标记或区域）的颜色、边界和可辨认特征；不要把同色杂物当配送区域。"
                                  "若区域不可见或有多个相同区域，明确说明。")
         answer = await decision("lamp", "destination", {**state, "stage": "destination", "observation": observed})
-        record("message", answer["speech"], role=LAMP)
+        record("message", answer["speech"], emotion=answer.get("emotion"), role=LAMP)
         if not answer["accepted"]:
             return {"result": "blocked", "reason": "destination_not_specified", "observation": observed}
         if not observed.get("ref") or observed["ref"] not in answer["evidence_refs"]:
@@ -227,7 +227,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", {**state, "stage": "order"}),
                                          decision("go2", "agree", {**state, "stage": "order"}))
         for role, answer in ((LAMP, lamp), (DOG, dog)):
-            record("message", answer["speech"], role=role)
+            record("message", answer["speech"], emotion=answer.get("emotion"), role=role)
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "delivery_order_not_agreed"}
         return {}
@@ -258,7 +258,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         answer = await decision("go2", "next", {**state, "stage": "delivery"})
         if answer.get("speech"):
-            record("message", answer["speech"])
+            record("message", answer["speech"], emotion=answer.get("emotion"))
         action = answer["action"]
         if action == "finish":
             # A model's conclusion cannot create a delivery receipt.
@@ -273,10 +273,10 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         question = state["next_action"]
         if question.get("question"):
-            record("message", question["question"])
+            record("message", question["question"], emotion=question.get("emotion"))
         answer = await decision("lamp", "agree", {
             **state, "stage": "clarification", "courier_report": question})
-        record("message", answer["speech"], role=LAMP)
+        record("message", answer["speech"], emotion=answer.get("emotion"), role=LAMP)
         if not answer["accepted"]:
             return {"result": "blocked", "reason": "courier_question_unresolved"}
         # The answer can explain this order, but cannot replace its cargo,
@@ -326,7 +326,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         # Final wording comes from the courier after observing the real result.
         answer = await decision("go2", "next", {**state, "stage": "delivered"})
-        record("message", answer["speech"])
+        record("message", answer["speech"], emotion=answer.get("emotion"))
         return {"result": "ok", "reason": "cargo_in_zone_confirmed"}
 
     def terminal_or(next_node):

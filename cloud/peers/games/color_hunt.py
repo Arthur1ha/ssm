@@ -351,7 +351,10 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
     messenger.send_result(event["message_id"], status, task_id=task_id,
                           reason=reason)
     messenger.send_message("go2", message["sender"], reply,
-                           reply_to=event["message_id"], reply_kind="reply")
+                           reply_to=event["message_id"], reply_kind="reply",
+                           emotion=(graph_result or {}).get("emotion", "neutral")
+                           if reached_candidate and not stop_reason and (graph_result or {}).get("response")
+                           else "neutral")
 
 
 def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
@@ -447,7 +450,8 @@ def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
             reason = str(decision.get("decision_reason") or "decision_unavailable")[:200]
             messenger.send_result(message["message_id"], "rejected", reason=reason)
             messenger.send_message("esp32_desk_led", "go2", reason,
-                                   reply_to=message["message_id"], reply_kind="declined")
+                                   reply_to=message["message_id"], reply_kind="declined",
+                                   emotion=decision.get("decision_emotion", "neutral"))
             return
         if (time.time() >= message["deadline"]
                 or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
@@ -480,7 +484,8 @@ def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
             return
         sent = messenger.send_message("esp32_desk_led", "go2", response,
                                       reply_to=message["message_id"], reply_kind="accepted",
-                                      deadline=message["deadline"])
+                                      deadline=message["deadline"],
+                                      emotion=decision.get("decision_emotion", "neutral"))
         if sent.get("result") != "accepted":
             messenger.send_result(message["message_id"], "unknown", reason="acceptance_delivery_unconfirmed")
     except Exception as exc:

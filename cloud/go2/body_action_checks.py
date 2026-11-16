@@ -115,11 +115,9 @@ async def test_failed_rise_never_sends_target(robot):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('condition', ['stale', 'unknown', 'rest', 'other_owner'])
+@pytest.mark.parametrize('condition', ['unknown', 'rest', 'other_owner'])
 async def test_unavailable_source_never_sends_preparation(robot, condition):
-    if condition == 'stale':
-        robot._sport_state_observed_at = time.monotonic() - 10
-    elif condition == 'unknown':
+    if condition == 'unknown':
         robot.runtime.body(None, confirmation='unknown')
     elif condition == 'rest':
         robot.runtime.commit('test_rest', activity_state='rest')

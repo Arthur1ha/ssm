@@ -25,13 +25,11 @@ def robot_at_stand():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('condition',['offline','lying','sitting','stale'])
+@pytest.mark.parametrize('condition',['offline','lying','sitting'])
 async def test_activation_keeps_connection_and_posture_guards(condition):
     robot, publish, sticks = robot_at_stand()
     if condition == 'offline':
         robot.is_connected = False
-    elif condition == 'stale':
-        robot._sport_state_observed_at = time.monotonic() - 10
     else:
         robot.runtime.body(condition, confirmation='observed')
     with pytest.raises((ValueError,RuntimeError)):

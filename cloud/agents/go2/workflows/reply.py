@@ -22,11 +22,13 @@ class ReplyState(TypedDict, total=False):
     result: dict[str, Any]
     answer: str
     observation: str
+    emotion: str
 
 
 async def run_autonomous_reply_graph(*, run_id: str, action: str, reason: str,
                                      params: dict, result: dict, model,
-                                     profile_loader, observation: str = "") -> str:
+                                     profile_loader, observation: str = "",
+                                     include_emotion: bool = False) -> str | dict:
     saver = FileCheckpointSaver()
 
     async def reply(state: ReplyState) -> ReplyState:
@@ -54,7 +56,7 @@ async def run_autonomous_reply_graph(*, run_id: str, action: str, reason: str,
         await finalize_reply(run, model=model, instructions=instructions,
                              validate=validate, fallback=fallback,
                              context={"observation": observation} if observation else None)
-        return {"answer": run.response}
+        return {"answer": run.response, "emotion": run.emotion}
 
     graph = StateGraph(ReplyState)
     graph.add_node("reply", reply)
@@ -67,4 +69,6 @@ async def run_autonomous_reply_graph(*, run_id: str, action: str, reason: str,
             {"run_id": run_id, "action": action, "reason": reason,
              "params": params, "result": result, "observation": observation},
             {"configurable": {"thread_id": thread_id}}, durability="sync")
+    if include_emotion:
+        return {"text": output["answer"], "emotion": output.get("emotion", "neutral")}
     return output["answer"]

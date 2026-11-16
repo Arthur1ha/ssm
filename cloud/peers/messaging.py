@@ -177,6 +177,7 @@ class AgentMessenger:
         decision_reason: str | None = None,
         evidence_refs: list[str] | None = None,
         expect_reply: bool = True,
+        emotion: str = "neutral",
     ) -> dict:
         now = self._now()
         if (deadline is not None and (isinstance(deadline, bool)
@@ -252,6 +253,8 @@ class AgentMessenger:
                 "sender": sender, "target": target, "content": content.strip(),
                 "deadline": expires, "round": round_number,
             }
+            from cloud.agents.common.emotions import normalize_emotion
+            payload["emotion"] = normalize_emotion(emotion)
             from cloud.space.activity import get_activity_store
             activity = get_activity_store().current()
             current_activity_id = activity.get("activity_id") if activity else None
@@ -308,7 +311,7 @@ class AgentMessenger:
                 from cloud.space.activity import get_activity_store
                 activity_event = get_activity_store().record_event(
                     payload["activity_id"], "message", unit_id=sender,
-                    text=payload["content"], target_unit_id=target,
+                    text=payload["content"], target_unit_id=target, emotion=payload["emotion"],
                     message_id=message_id, conversation_id=payload["conversation_id"],
                     reply_to=reply_to, reply_kind=reply_kind,
                     interaction_kind=interaction_kind, game_id=game_id,
@@ -429,6 +432,8 @@ class AgentMessenger:
             if deadline > now + self._message_ttl(payload):
                 return True
             if kind == "message":
+                from cloud.agents.common.emotions import normalize_emotion
+                payload["emotion"] = normalize_emotion(payload.get("emotion"))
                 content = payload.get("content")
                 reply_to = payload.get("reply_to")
                 round_number = payload.get("round")
@@ -489,7 +494,7 @@ class AgentMessenger:
                     from cloud.space.activity import get_activity_store
                     activity_event = get_activity_store().record_event(
                         payload["activity_id"], "message", unit_id=sender,
-                        text=content.strip(), target_unit_id=target,
+                        text=content.strip(), target_unit_id=target, emotion=payload["emotion"],
                         message_id=message_id, conversation_id=conversation_id,
                         reply_to=reply_to, reply_kind=payload["reply_kind"],
                         interaction_kind=interaction_kind, game_id=game_id,

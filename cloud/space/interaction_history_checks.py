@@ -82,7 +82,8 @@ async def test_go2_drive_passes_history_to_model_without_social_cooldown(monkeyp
     monkeypatch.setattr(free_explore, "prompt_space_context", lambda: "{}")
     sent, prompts = [], []
     monkeypatch.setattr("cloud.go2.tools.tools.send_message",
-        lambda target, content: sent.append((target, content)) or {"result": "accepted"})
+        lambda target, content, emotion="neutral":
+            sent.append((target, content, emotion)) or {"result": "accepted"})
 
     class Model:
         decision = "send_message"
@@ -92,7 +93,8 @@ async def test_go2_drive_passes_history_to_model_without_social_cooldown(monkeyp
 
         async def ainvoke(self, messages):
             prompts.append(messages[-1].content)
-            return {"decision": self.decision, "target": "lamp", "content": "再玩一局？"}
+            return {"decision": self.decision, "target": "lamp", "content": "再玩一局？",
+                    "emotion": "curious"}
 
     model = Model()
     monkeypatch.setattr(free_explore, "get_text_llm", lambda: model)
@@ -104,7 +106,7 @@ async def test_go2_drive_passes_history_to_model_without_social_cooldown(monkeyp
             "activity_id": activity["activity_id"], "event_type": "observation", "ts": time.time()}]
         await drive._evaluate_social()
         await drive._evaluate_social()  # The same event must not be evaluated twice.
-    assert sent == [("lamp", "再玩一局？")] * 5
+    assert sent == [("lamp", "再玩一局？", "curious")] * 5
     assert len(prompts) == 6
     assert all("现在不玩" in prompt and "declined" in prompt
                and "历史" in prompt for prompt in prompts)

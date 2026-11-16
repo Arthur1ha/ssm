@@ -17,6 +17,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict
 
 from cloud.agents.common.replies import factual_fallback, valid_reply_format
+from cloud.agents.common.emotions import EMOTION_INSTRUCTIONS, REPLY_INSTRUCTIONS, parse_emotional_reply
 from cloud.agents.lamp.prompts import persona_reply_prompt
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.common.messages import observed_tool_messages, reply_messages, role_messages
@@ -48,6 +49,7 @@ class ReactiveState(TypedDict, total=False):
     status: str
     reply: str
     decision_text: str
+    emotion: str
     autonomy_epoch: int
 
 
@@ -120,6 +122,8 @@ def _prompt(agent, state: ReactiveState):
         f"调光敏感度：{profile['traits']['adjustment_sensitivity']}/100，"
         "它只影响重新评估机会，不直接映射颜色。\n"
     )
+    instructions += ('若本轮不需要调用工具，最终回复输出 JSON：'
+                     '{"text":"要说的话","emotion":"neutral"}。' + EMOTION_INSTRUCTIONS)
     return role_messages(instructions, "根据本次自主机会决定下一步。",
                          context={"observations": state["sense"], "space": space,
                                   "agent_names": agent_names(), "games": games,
@@ -216,8 +220,12 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
         if response.invalid_tool_calls or len(calls) > 1:
             return {"status": "blocked", "call": None}
         if not calls:
+            try:
+                text, emotion = parse_emotional_reply(response.content)
+            except (ValueError, TypeError):
+                return {"status": "error", "call": None}
             return {"status": "ok", "call": None,
-                    "decision_text": response.content if isinstance(response.content, str) else ""}
+                    "decision_text": text, "emotion": emotion}
         call = calls[0]
         if call.get("name") not in VISIBLE or not isinstance(call.get("args"), dict):
             return {"status": "rejected", "call": None}
@@ -338,7 +346,8 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
                     and agent._should_act() and agent._device_online()):
                 answer = answer.strip()
                 publish('agent_reply', agent_id=unit_id, scope='space', space_id='main',
-                        source='autonomous', status='ok', run_id=state['run_id'], text=answer)
+                        source='autonomous', status='ok', run_id=state['run_id'], text=answer,
+                        emotion=state.get('emotion', 'neutral'))
                 event(state, 'reply.emitted', reply=answer, channel='space_sse', reply_kind='final')
                 return {'reply': answer}
         physical = [s for s in state.get("steps", []) if s["tool"] in PHYSICAL]
@@ -366,21 +375,23 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             state["sense"], ensure_ascii=False, default=str), time.time() + 15,
             steps=physical, status=validation_status,
             agent_id=agent._find_led_unit(), origin_kind="agent_autonomous")
-        prompt = persona_reply_prompt(run, get_profile())
+        prompt = persona_reply_prompt(run, get_profile()) + "\n" + REPLY_INSTRUCTIONS
+        emotion = "neutral"
         try:
-            answer = model.invoke(reply_messages(prompt, run)).content
+            answer, emotion = parse_emotional_reply(model.invoke(reply_messages(prompt, run)).content)
             if not valid_reply_format(answer, run):
                 raise ValueError("invalid_reply_format")
         except Exception:
             answer = factual_fallback(agent._find_led_unit(), validation_status, run)
+            emotion = "neutral"
         if (state["autonomy_epoch"] == agent._autonomy_epoch
                 and agent._should_act() and agent._device_online()
                 and agent._reply_gate.mark_replied(scope, completed=completed,
                                                    material_key=material_key, error=error)):
             publish("agent_reply", agent_id=agent._find_led_unit(), scope="space",
                     space_id="main", source="autonomous", status=status,
-                    run_id=state["run_id"], text=answer)
-        return {"reply": answer}
+                    run_id=state["run_id"], text=answer, emotion=emotion)
+        return {"reply": answer, "emotion": emotion}
 
     def remember(state):
         if state.get("status") in {"error", "blocked", "rejected"}:

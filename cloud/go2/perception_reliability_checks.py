@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from cloud.go2.identity_threshold_checks import recognition
-from cloud.go2.connection.video import Go2Video, JPEG_QUALITY, ENCODE_INTERVAL_S
+from cloud.go2.connection.video import Go2Video, JPEG_QUALITY, PREVIEW_JPEG_QUALITY, ENCODE_INTERVAL_S
 from cloud.go2.perception import vision
 from cloud.space.people.provider import FaceCandidate, FaceProviderUnavailable, FaceSearchResult
 
@@ -147,23 +147,29 @@ async def test_video_keeps_native_dimensions_and_high_quality_encoding(monkeypat
     robot = Go2Video()
     robot.is_connected = True
     robot._odom_session_id = "camera"
-    image = Image.new("RGB", (640, 360))
+    image = Image.new("RGB", (1280, 720))
     original_save = Image.Image.save
     qualities = []
     def save(img, fp, **kwargs):
         qualities.append(kwargs["quality"])
         return original_save(img, fp, **kwargs)
     monkeypatch.setattr(Image.Image, "save", save)
+    received = False
     async def recv():
-        if qualities:
+        nonlocal received
+        if received:
             raise EOFError("end test")
+        received = True
         return SimpleNamespace(to_image=lambda: image)
     await robot._consume_video(SimpleNamespace(recv=recv))
     jpeg, meta = robot.latest_frame_snapshot()
     decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    assert decoded.shape[:2] == (360, 640)
-    assert qualities == [90] and JPEG_QUALITY == 90 and ENCODE_INTERVAL_S == .1
-    assert (meta["width"], meta["height"]) == (640, 360)
+    preview = cv2.imdecode(np.frombuffer(robot._latest_preview_frame, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape[:2] == (720, 1280)
+    assert preview.shape[:2] == (360, 640)
+    assert qualities == [90, 70] and JPEG_QUALITY == 90 and PREVIEW_JPEG_QUALITY == 70
+    assert ENCODE_INTERVAL_S == .1
+    assert (meta["width"], meta["height"]) == (1280, 720)
 
 
 def test_chat_reads_fresh_identity_projection(recognition, monkeypatch):

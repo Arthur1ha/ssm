@@ -198,7 +198,8 @@ async def test_go2_does_not_generate_speech_for_duplicate_or_routine_failure(mon
 
     async def answer(**kwargs):
         generated.append(kwargs["run_id"])
-        return "我已经做到了。"
+        assert kwargs["include_emotion"] is True
+        return {"text": "我已经做到了。", "emotion": "happy"}
 
     monkeypatch.setattr(go2_reply, "run_autonomous_reply_graph", answer)
     monkeypatch.setattr(intents, "publish_agent_event",
@@ -209,6 +210,7 @@ async def test_go2_does_not_generate_speech_for_duplicate_or_routine_failure(mon
                                       {"result": "blocked", "error": "action_cooldown"})
     assert len(generated) == 1
     assert [kind for kind, _ in events].count("agent_reply") == 1
+    assert next(facts for kind, facts in events if kind == "agent_reply")["emotion"] == "happy"
 
     await drive._publish_motion_reply("go2_navigate_to", {"name": "home"},
                                       {"result": "unknown", "error": "stop_not_confirmed"})

@@ -79,7 +79,7 @@ function useActivityTimeline() {
         refresh();
         return;
       }
-      mergeEvents([item]);
+      mergeEvents([{...item, avatarReceivedAt:Date.now()}]);
       if (['started', 'ended', 'device_joined', 'device_left', 'device_failed',
         'activity_started', 'activity_ended', 'mode_changed'].includes(item.event_type)) {
         refresh();

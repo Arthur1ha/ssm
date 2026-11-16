@@ -42,7 +42,7 @@ def view(tmp_path, monkeypatch):
                       index=FileRunIndex(tmp_path / "index"))
 
 
-async def abandon_motion(view, *, result_before_crash=None):
+async def abandon_motion(view, *, result_before_crash=None, native_calls=False):
     run = GraphRun("old", "session", "find owl", time.time() + 60, agent_id="go2")
     view.register(run.run_id, run.session_id)
     calls = []
@@ -56,15 +56,33 @@ async def abandon_motion(view, *, result_before_crash=None):
         entered.set()
         await asyncio.Event().wait()
 
+    choice = AIMessage(content="", tool_calls=[
+        {"name": "motion", "args": {"final": False}, "id": "native-head"},
+        {"name": "motion", "args": {}, "id": "never-started"},
+    ]) if native_calls else None
     task = asyncio.create_task(run_role_graph(
-        run, model=Model(), tool_schemas={"motion": motion},
+        run, model=Model(choice), tool_schemas={"motion": motion},
         build_messages=lambda _: [], execute=execute,
-        initial_tool=("motion", {}), checkpointer=view.checkpointer))
+        initial_tool=None if native_calls else ("motion", {}), checkpointer=view.checkpointer))
     await asyncio.wait_for(entered.wait(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     return run, calls
+
+
+@pytest.mark.asyncio
+async def test_native_call_queue_recovery_preserves_receipt_and_discards_unstarted_calls(view):
+    receipt = {"result": "ok", "receipt": "observed"}
+    run, calls = await abandon_motion(view, native_calls=True, result_before_crash=receipt)
+    async with view.index.async_session_lock("go2", "session"):
+        recovered = await view.reconcile_interrupted("session", cancelled=run)
+    assert recovered.status == "cancelled" and calls == ["native-head"]
+    assert len(recovered.steps) == 1 and recovered.steps[0]["result"] == receipt
+    assert recovered.steps[0]["params"] == {}
+    state = view.checkpointer.get_tuple({"configurable": {
+        "thread_id": thread_id_for("go2", "session")}}).checkpoint["channel_values"]
+    assert state["pending_calls"] == []
 
 
 @pytest.mark.asyncio

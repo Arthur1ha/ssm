@@ -404,7 +404,7 @@ async def test_measured_move_reply_uses_persona_and_keeps_actual_distance(entry,
     assert result['response'] == '汪，往前走了约0.98米，已经停稳啦！'
     assert result['result'] == 'ok'
     assert len(model.inputs) == 2
-    assert go2_graph.get_store().get('move-reply', 'move-reply').reply_source == 'decision_model'
+    assert go2_graph.get_store().get('move-reply', 'move-reply').reply_source == 'persona_model'
 
 
 @pytest.mark.asyncio

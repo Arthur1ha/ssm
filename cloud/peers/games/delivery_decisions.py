@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
+from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
 from cloud.agents.common.messages import role_messages
 from cloud.agents.common.models import async_model_clients
 from cloud.personality.store import render_identity
@@ -24,7 +25,7 @@ class DecisionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class Agreement(DecisionModel):
+class Agreement(EmotionModel, DecisionModel):
     accepted: bool
     speech: str = Field(min_length=1, max_length=400)
 
@@ -87,7 +88,7 @@ class DestinationDecision(Agreement):
         return self
 
 
-class NextDecision(DecisionModel):
+class NextDecision(EmotionModel, DecisionModel):
     action: Literal["observe", "push", "finish", "stop", "question"]
     speech: str = Field(min_length=1, max_length=400)
     question: str = Field(default="", max_length=500)
@@ -144,7 +145,7 @@ def _role_model(role: str):
 
 
 def _instructions(phase: str) -> str:
-    common = (
+    common = EMOTION_INSTRUCTIONS + (
         "你正在参与指挥官与送货员。灯负责指挥及颜色信号，狗负责找货并实际推送，"
         "邀请方向不改变职责；只决定当前阶段，不替同伴决定或声称设备已执行。"
         "狗可用腿低速接触推送合适的货物，不要求额外推板；"

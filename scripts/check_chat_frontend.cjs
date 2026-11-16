@@ -12,7 +12,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
   try {
     const page = await browser.newPage();
     const errors = [];
-    page.on('pageerror', error => errors.push(error.message));
+    page.on('pageerror', error => {errors.push(error.message); console.error('Chat page error:', error.message);});
     await page.setRequestInterception(true);
     const apiHeaders = [];
     page.on('request', request => {
@@ -70,11 +70,13 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       const run_id = sent[0].run_id;
       event({type:'agent_progress',agent_id:lamp.unit_id,run_id,source:'device_chat',event_id:'p1',
         stage:'observed',text:'已观察灯光',media_ref:'/api/test-photo'});
-      event({type:'agent_reply',agent_id:lamp.unit_id,run_id,source:'device_chat',event_id:'r1',text:'已经调好了'});
+      event({type:'agent_reply',agent_id:lamp.unit_id,run_id,source:'device_chat',event_id:'r1',text:'已经调好了',emotion:'happy',ts:Date.now()/1000});
       // HTTP repeats the same final reply; it must not produce another bubble.
       finishCommand({result:'ok',reply:'已经调好了',event_id:'r1'});
     });
     await page.waitForFunction(() => !document.querySelector('input').disabled);
+    await page.waitForSelector('.device-page__header .shape-face[data-emotion="happy"]');
+    assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.behavior), 'idle');
     assert.equal(await page.$$eval('.chat-messages img', nodes => nodes.length), 1);
     assert.equal(await page.$eval('.chat-messages', node => node.textContent.split('已经调好了').length - 1), 1);
     assert.equal(await page.$$eval('details', nodes => nodes.every(node => !node.open)), true);
@@ -86,11 +88,13 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(() => device(true, 'remount'));
     await page.waitForFunction(() => !document.querySelector('input').disabled);
     assert.match(await page.$eval('.chat-messages', node => node.textContent), /已经调好了/);
+    assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.emotion), 'neutral', 'Remount must not replay a previous reply');
     // Long device tools publish their own source. Keep their in-flight
     // observations, decisions and screenshot in the same request transcript.
     await page.type('.chat-panel input', '去找猫头鹰');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => sent.length === 2);
+    assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.behavior), 'thinking');
     await page.evaluate(() => {
       const run_id = sent[1].run_id;
       const event = (stage, text, more = {}) => apiClient.dispatchEvent(new CustomEvent('server-event', {
@@ -129,6 +133,34 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
       await page.screenshot({path:process.env.SCREENSHOT_DIR+'/device-chat.png'});
     }
+    await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event', {detail:{
+      type:'agent_reply',agent_id:lamp.unit_id,run_id:'expired-auto',source:'autonomous',scope:'space',
+      activity_id:'ended-activity',event_id:'old-activity-emotion',text:'历史活动的迟到回复',emotion:'angry',ts:Date.now()/1000,
+    }})));
+    await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('历史活动的迟到回复'));
+    assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.emotion), 'neutral', 'An ended activity reply must remain static');
+    await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event', {detail:{
+      type:'agent_reply',agent_id:lamp.unit_id,run_id:'stale-auto',source:'autonomous',scope:'space',
+      event_id:'stale-emotion',text:'过期的回复',emotion:'angry',ts:1,
+    }})));
+    await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('过期的回复'));
+    assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.emotion), 'neutral', 'Old server timestamps cannot be converted into fresh animation');
+    await page.type('.chat-panel input', '再来一次');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => sent.length === 3);
+    await page.evaluate(() => {
+      const run_id=sent[2].run_id;
+      apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_reply',agent_id:lamp.unit_id,
+        source:'device_chat',run_id,event_id:'latest-reply',text:'新的请求已经完成',emotion:'relaxed',ts:Date.now()/1000}}));
+      finishCommand({result:'ok',reply:'新的请求已经完成',event_id:'latest-reply',emotion:'relaxed'});
+    });
+    await page.waitForSelector('.device-page__header .shape-face[data-emotion="relaxed"]');
+    await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_reply',
+      agent_id:lamp.unit_id,source:'device_chat',run_id:sent[1].run_id,event_id:'late-prior-run',
+      text:'此前搜索的补充回复',emotion:'angry',ts:Date.now()/1000}})));
+    await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('此前搜索的补充回复'));
+    assert.equal(await page.$eval('.device-page__header .shape-face', el => el.dataset.emotion), 'relaxed',
+      'A retained prior run must not override the latest request expression');
     // Compare home/device presentation using the same messages and both real feed paths.
     const styles = [];
     for (const home of [true, false]) {

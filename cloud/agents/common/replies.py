@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 
 from cloud.agents.common.runner import GraphRun as Run
+from cloud.agents.common.emotions import REPLY_INSTRUCTIONS, normalize_emotion, parse_emotional_reply
 from cloud.agents.common.messages import reply_messages
 from cloud.agents.common.outcomes import effective_steps, outcome_summary
 from cloud.agents.common.tool_results import SUCCESS, UNCERTAIN
@@ -46,9 +47,10 @@ async def finalize_reply(run: Run, *, model, instructions,
     try:
         if run.decision_draft:
             answer, source = run.decision_draft, "decision_model"
+            run.emotion = normalize_emotion(run.emotion)
         elif run.steps and time.time() < run.deadline:
             prompt = instructions(run) if callable(instructions) else instructions
-            messages = reply_messages(prompt + "\n本步骤仅输出给用户的自然语言回复。", run,
+            messages = reply_messages(prompt + "\n" + REPLY_INSTRUCTIONS, run,
                                       context=context)
             emit_agent_event("model.request", **fields, input=messages, goal=run.goal,
                              template_version="factual-reply-v2")
@@ -57,8 +59,10 @@ async def finalize_reply(run: Run, *, model, instructions,
                                               timeout=max(0.1, run.deadline - time.time()))
             answer, source = getattr(response, "content", ""), "persona_model"
             emit_agent_event("model.response", **fields, output=answer)
+            answer, run.emotion = parse_emotional_reply(answer)
         else:
             run.response, run.reply_source = fallback(run), "runtime"
+            run.emotion = "neutral"
             return run
         if not validator(answer, run):
             raise ValueError("invalid_reply_format")
@@ -70,6 +74,7 @@ async def finalize_reply(run: Run, *, model, instructions,
         logger.warning("agent reply unavailable agent=%s run=%s error=%s",
                        run.agent_id, run.run_id, type(exc).__name__)
         run.response, run.reply_source = fallback(run), "runtime"
+        run.emotion = "neutral"
     return run
 
 

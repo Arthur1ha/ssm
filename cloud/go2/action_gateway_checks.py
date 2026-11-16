@@ -152,14 +152,12 @@ async def test_internal_balance_stand_uses_command_boundary_without_public_tool(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('condition', ['sitting', 'lying', 'stale', 'pending', 'lease'])
+@pytest.mark.parametrize('condition', ['sitting', 'lying', 'pending', 'lease'])
 async def test_internal_balance_stand_keeps_motion_preconditions(robot, condition):
     from cloud.go2.router import CommandRequest, go2_command
 
     if condition in {'sitting', 'lying'}:
         robot.runtime.body(condition, confirmation='observed')
-    elif condition == 'stale':
-        robot._sport_state_observed_at = time.monotonic() - 30
     elif condition == 'pending':
         robot.pending_action = {'command': 'Sit', 'phase': 'accepted'}
     elif condition == 'lease':

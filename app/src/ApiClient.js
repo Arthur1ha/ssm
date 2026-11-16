@@ -10,6 +10,7 @@ class ApiClient extends EventTarget {
     this.csrfToken = '';
     this.eventSource = null;
     this.eventsConnected = false;
+    this.eventsOpenedAt = 0;
     this.devicesSynced = false;
   }
 
@@ -62,6 +63,7 @@ class ApiClient extends EventTarget {
     this.eventSource = source;
     source.onopen = () => {
       this.eventsConnected = true;
+      this.eventsOpenedAt = Date.now();
       this.dispatchEvent(new Event('events-open'));
     };
     const forward = event => {

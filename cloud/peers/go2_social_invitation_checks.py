@@ -64,7 +64,8 @@ def social_bus(monkeypatch, tmp_path):
             return {"decision": "send_message", "target": LAMP,
                     "content": "我刚看到红色玩偶，想玩找颜色！你亮颜色，我去找，愿意吗？",
                     "reason": "我刚看到红色玩偶，想请你给我出道颜色题。",
-                    "evidence_refs": refs, "interaction_kind": "game_invite", "game_id": "color_hunt"}
+                    "evidence_refs": refs, "interaction_kind": "game_invite", "game_id": "color_hunt",
+                    "emotion": "curious"}
 
     monkeypatch.setattr(free_explore, "get_text_llm", Model)
     yield SimpleNamespace(drive=drive, bus=messenger, sent=sent, received=received,
@@ -78,6 +79,7 @@ def test_drive_social_invitation_reaches_real_resolver_and_signed_bus(social_bus
     topic, body = social_bus.sent[0]
     payload = verify_message(topic, json.loads(body))
     assert (payload["sender"], payload["target"], payload["game_id"]) == (DOG, LAMP, "color_hunt")
+    assert payload["emotion"] == "curious"
     assert payload["decision_basis"] == {
         "reason": "我刚看到红色玩偶，想请你给我出道颜色题。",
         "evidence": [item for item in decision_evidence(social_bus.space) if item["ref"] == "evt_toy"],
@@ -88,6 +90,7 @@ def test_drive_social_invitation_reaches_real_resolver_and_signed_bus(social_bus
     social_bus.bus.handle_message(topic, body)
     social_bus.bus._workers.submit(lambda: None).result()
     assert social_bus.received[0]["decision_basis"] == payload["decision_basis"]
+    assert social_bus.received[0]["emotion"] == "curious"
 
 
 def test_social_model_cannot_invent_observation_reference(social_bus):

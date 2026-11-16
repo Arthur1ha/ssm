@@ -8,13 +8,14 @@ from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from cloud.agents.common.effects import FileEffectLedger
+from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
 from cloud.personality.store import render_identity
 from cloud.personality.names import agent_names
 
-class SocialDecision(BaseModel):
+class SocialDecision(EmotionModel):
     decision: Literal["send_message", "skip"]
     target: str = ""
     content: str = Field(default="", max_length=1000)
@@ -104,7 +105,7 @@ def build_social_graph(
         )
         try:
             raw = await structured_model.ainvoke([
-                SystemMessage(content=render_identity(profile)), HumanMessage(content=prompt)])
+                SystemMessage(content=render_identity(profile) + "\n" + EMOTION_INSTRUCTIONS), HumanMessage(content=prompt)])
             decision = SocialDecision.model_validate(raw)
         except Exception as exc:
             return {"status": "error", "decision": {"error": type(exc).__name__}}
@@ -162,9 +163,11 @@ def build_social_graph(
             try:
                 if game_id:
                     outcome = await send_message(target, content,
-                        interaction_kind="game_invite", game_id=game_id, **grounding)
+                        interaction_kind="game_invite", game_id=game_id,
+                        emotion=decision.get("emotion", "neutral"), **grounding)
                 else:
-                    outcome = await send_message(target, content)
+                    outcome = await send_message(target, content,
+                                                 emotion=decision.get("emotion", "neutral"))
             except Exception as exc:
                 outcome = {"result": "unknown", "error": type(exc).__name__}
         if not isinstance(outcome, dict):

@@ -1,41 +1,57 @@
 # 伙伴形象
 
-轻量 SVG 轮廓 + 两眼一嘴。形状、表情、CSS 动效独立组合；不依赖 GIF、画布、构建工具或第二套设备状态。
+设备大脑只输出可选 `emotion`，前端选择完整的表情与动作预设。形象不会发送设备命令，也不会参与业务结果判定。沿用 SVG、CSS、React 和现有 SSE，没有额外模型调用或动画引擎。
 
-从 PWA 同源地址打开 `/avatar-preview.html`，可以查看全部形状、选择表情和播放一次动效。该页面不调用设备 API。
+## 情绪与日常表现
 
-## 文件与加载顺序
+八种情绪：`neutral`（平常）、`happy`（开心）、`curious`（好奇）、`confused`（困惑）、`surprised`（惊讶）、`angry`（生气）、`sad`（难过）、`relaxed`（放松）。未知值、非字符串和缺失值回退为 `neutral`。
 
-1. `utils/agentMeta.js`
-2. `avatars/registry.js`（普通脚本）
-3. `avatars/Avatar.jsx`（Babel JSX，依赖 React）
-4. `components/ActivityMembers.jsx`（同时依赖 Icon、activityView、ApiClient）
+每种预设包含眼、眉、嘴和一次入场动作。面部层交叉淡化，身体姿态平滑切换；自然待机包括轻微起伏和眨眼。`behavior=rest` 关闭眼睛并减缓起伏，`thinking` 提供关注表现。这些表现只投影已有运行状态，不能使灯出现新状态或改变 Go2 的模式、姿态。
 
-`styles/avatars.css` 在 `styles/app.css` 后加载。统一组件接口：
+皮皮沿用黄绿色圆润轮廓，呆呆沿用青蓝色利落轮廓，未知设备使用中性外观。管家保留现有头像。
+
+## 组件与加载
+
+加载顺序保持：`utils/agentMeta.js` → `avatars/registry.js` → `avatars/Avatar.jsx` → 使用头像的组件。`styles/avatars.css` 在 `app.css` 后加载。
 
 ```jsx
-<ShapeFace unitId="go2" shape="scissors" expression="happy"
-  motion="pop" animationKey={newEventId} size={72} label="呆呆 · 剪刀" />
+// 实时头像：默认保持日常外观，有新表达时播放一次入场。
+<ShapeFace unitId="go2" emotion="happy" animated
+  animationKey={newEventId} behavior="idle" size={72} />
+
+// 历史记录和预设目录：静帧，无持续动画。
+<ShapeFace unitId="go2" emotion="sad" size={28} />
+
+// 公开游戏动作，结束后由调用方恢复日常形象。
+<ShapeFace unitId="go2" shape="scissors" emotion="happy" animated
+  motion="pop" animationKey={gameEventId} size={72} />
 ```
 
-省略 `animationKey` 时始终静止。动画只执行一次；系统减少动态效果设置优先。省略 `label` 表示装饰图形，外部必须保留可读的动作文字。
+`animated` 缺省为 false。`animationKey` 只控制一次入场，日常微动画由 `animated` 控制。同一组件记住已播事件，游戏结束恢复旧情绪不会重复其入场。休息闭眼覆盖所有情绪的眼部动作。
 
-## 扩展方法
+隐藏页面和离屏头像暂停动画；系统减少动态效果时停用动画和过渡。所有状态与游戏结果仍有文字，图形不承担唯一的信息表达。
 
-- 设备风格：在 `AVATAR_PROFILES` 增加颜色、面部颜色和轮廓类型，通过 `resolveAvatarProfile` 匹配真实 Card 类型或明确设备 ID。未知设备使用中性风格。
-- 形状：在 `AVATAR_SHAPES` 增加一个键、中文 `label`、面部纵坐标 `faceY`、100 × 100 坐标系下的 `round/angular` SVG 路径。整个角色就是这个轮廓，无需添加手脚。尖角和圆角可使用不同路径。
-- 表情：在 `AVATAR_EXPRESSIONS` 增加眼睛样式与嘴巴路径；必要时扩展 `Avatar.jsx` 的眼部渲染。表情只用于表达设计，不能把它当成模型真实心情或硬件事实。
-- 动效：在 `AVATAR_MOTIONS` 增加名称，并在 `avatars.css` 增加一次性的 CSS animation。禁止无限循环或依赖动画才能读懂结果。
-- 事件：在 `AVATAR_EVENT_MAPPINGS` 增加对明确结构化字段的映射。不要从自由文本、相邻消息或旧快照猜测动作、情绪、成功或因果。
+## 实时与历史
 
-## 当前事实与回放边界
+`useActivityTimeline` 在现有 SSE 接收入口为实时事件附加浏览器本地 `avatarReceivedAt`，REST 历史没有该标记。`useAvatarPresentation` 消费已有事件数组，不建立 SSE 连接，不读取硬件 API。
 
-唯一动作映射是公开的 `stage=rps_result` / `game_round.choices[unit_id]`，对应 `rock/scissors/paper`。`game_round.mapping[unit_id].label` 保留实际设备动作解释，供过程展示使用。后端在揭晓且真实执行回执确认后才提供这些字段，未揭晓或失败不预演出拳。
+活动情绪保持 6 秒，出拳展示 1.6 秒。出拳期间冻结当时表情，新情绪在动作结束后应用；未过期的旧情绪可以恢复，但其入场不重播。刷新、组件重新挂载、重复事件和重连不会回放过去的表达。过时事件和其他活动的事件不覆盖当前形象；结束活动清除临时表现。
 
-顶部卡显示“最近出拳 · 第 N 轮 · 石头”，与独立的当前设备状态、灯色和连接状态分开。新结果短暂变形后回到当前状态脸；历史手势在活动记录中显示静帧，不表示现在正在执行该动作。没有结构化记录则保持日常形状，不补猜历史。`avatarStatePresentation` 仅用新鲜的明确 `activity_state=rest` 表示闭眼、`life_state=explore/play` 表示专注，配套文字保留实际状态名；离线和待确认保持中性。
+设备页标题同样使用共享 hook：当前请求处理中提供思考表现，新回复带动情绪，之后恢复待机。真实 SSE 时间及活动归属用于过滤迟到事件，旧聊天运行的回复仍可保留为历史文字。聊天发言的头像只在新回复时短暂播放，随后保持该条消息的静态表情；历史头像不会一起跳动。
 
-只有当前连接期间到达的新 SSE 事件可以播放一次。组件挂载、初次读取历史、重复事件和断线重连不触发回放；事件 ID 去重与连接起点时间共同过滤旧消息。关闭或结束活动、断开连接时不播放。所有信息均有静态文本，形象不更改 Card、动作门禁或任何真实设备状态。
+唯一游戏动作映射仍是公开的 `stage=rps_result` / `game_round.choices[unit_id]`，对应 `rock/scissors/paper`。`throw_announcement`、自由文本和未公开选择都不能触发出拳。游戏历史保留静态手势和实际设备动作说明。
 
-## 回归
+## 扩展
 
-`scripts/check_avatar_frontend.cjs` 只加载本地静态资产并拦截外部请求。按脚本头部配置 React、Chrome 和 Node 依赖路径后运行 `node scripts/check_avatar_frontend.cjs`。覆盖无游戏记录的初始卡、历史静止、新 SSE 一次变形、恢复当前状态、重复与重连不回放、陈旧事件、手机宽度和减少动态效果。`SSM_CHECK_FONT` 和 `SCREENSHOT_DIR` 仅用于本地截图，不是产品依赖。
+- 新设备外观：增加 `AVATAR_PROFILES` 配置与匹配，复用现有情绪和播放器；这里不声明物理能力或在线状态。
+- 新情绪：增加 `AVATAR_EXPRESSIONS` 的面部、入场动作，和必要 CSS；同步后端 `cloud/agents/common/emotions.py` 中的允许值与提示目录。
+- 新游戏动作：在游戏动作目录增加轮廓，仅映射明确的公开结构化事件；不从模型文本猜动作或完成结果。
+- 动画时长：在 `AVATAR_TIMING` 与 CSS 中统一调整，不让模型输出时间轴。
+
+## 预览与验证
+
+从 PWA 同源地址打开 `/avatar-preview.html`。默认展示日常角色，可以选择八种心情、休息/处理中、静态模式和游戏动作，并演示“开心 → 出拳 → 恢复”。此页不调用设备 API。
+
+`scripts/check_avatar_frontend.cjs` 加载本地静态资产并拦截外部请求，覆盖预览、手机宽度、减少动态效果、真实 SSE hook 与历史合并、情绪到期、游戏恢复、重复事件、重连、重新挂载和活动范围。`scripts/check_chat_frontend.cjs` 验证设备聊天入口及旧运行/过期活动的静态处理；`scripts/check_activity_frontend.cjs --browser` 验证真实活动 UI。
+
+按各脚本头部配置 React、Chrome 和 Node 依赖路径后运行。`SSM_CHECK_FONT` 与 `SCREENSHOT_DIR` 仅用于本地截图；截图字体、动画录屏工具不进入产品依赖。

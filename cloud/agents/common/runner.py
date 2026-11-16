@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.effects import FileEffectLedger, use_effect
+from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
 from cloud.agents.common.conversation import dialogue_turn, legacy_dialogue, trim_dialogue
 from cloud.agents.common.messages import context_message, observed_tool_messages
 from cloud.agents.common.outcomes import completed_status, outcome_summary
@@ -57,6 +58,7 @@ class GraphRun:
     supplement: str = ""
     initial_context: dict = field(default_factory=dict)
     decision_space: dict = field(default_factory=dict)
+    emotion: str = "neutral"
 
 
 class _State(TypedDict):
@@ -68,7 +70,7 @@ class _State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
 
 
-class DialogueResponse(BaseModel):
+class DialogueResponse(EmotionModel):
     """A conversational decision; human input is handled by the Graph itself."""
 
     model_config = ConfigDict(extra="forbid")
@@ -166,7 +168,7 @@ async def run_role_graph(
         "缺少必要信息时返回 JSON：{\"kind\":\"question\",\"text\":\"一个具体问题\"}，"
         "运行图将暂停等待回答。已有信息足够时不要反复确认。"
         "无需工具或目标完成时返回 JSON：{\"kind\":\"final\",\"text\":\"以当前人格直接回应\"}。"
-        "闲聊、反问或可选建议不属于必须等待回答的追问。"
+        "闲聊、反问或可选建议不属于必须等待回答的追问。" + EMOTION_INSTRUCTIONS
     ))
     saver = checkpointer or FileCheckpointSaver()
     ledger = effect_ledger or FileEffectLedger()
@@ -264,6 +266,7 @@ async def run_role_graph(
                     # Plain prose can only end this turn. It cannot dispatch
                     # tools, resume an action, or create a human-input interrupt.
                     dialogue = DialogueResponse(kind="final", text=text_parser.invoke(response))
+                current.emotion = dialogue.emotion
                 if dialogue.kind == "question":
                     return {"run": asdict(current),
                             "decision": {"kind": "ask", "question": dialogue.text[:500]}, "turns": turns}

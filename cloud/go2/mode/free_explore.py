@@ -220,7 +220,7 @@ class Drive:
                 reason="到达后观察周围", params={},
                 result={"result": "ok", "message": summary},
                 model=get_text_llm(), profile_loader=get_profile,
-                observation=summary)
+                observation=summary, include_emotion=True)
         except Exception:
             logger.exception("[Drive] 场景人格回复失败")
             return
@@ -230,7 +230,9 @@ class Drive:
             return
         publish_agent_event("agent_reply", agent_id="go2", scope="space",
             space_id=self._context.space_id, source="autonomous", status="ok",
-            run_id="scene_" + observation_event_id, text=answer,
+            run_id="scene_" + observation_event_id,
+            text=answer["text"] if isinstance(answer, dict) else answer,
+            emotion=answer.get("emotion", "neutral") if isinstance(answer, dict) else "neutral",
             observation_event_id=observation_event_id)
 
     def _motion_announcement(self, name: str, params: dict, result: dict) -> tuple:
@@ -317,11 +319,11 @@ class Drive:
 
         async def deliver(target: str, content: str, *, interaction_kind: str = "message",
                           game_id: str | None = None, decision_reason: str | None = None,
-                          evidence_refs: list[str] | None = None) -> dict:
+                          evidence_refs: list[str] | None = None, emotion: str = "neutral") -> dict:
             outcome = (send_message(target, content, interaction_kind=interaction_kind,
                                     game_id=game_id, decision_reason=decision_reason,
-                                    evidence_refs=evidence_refs) if interaction_kind == "game_invite"
-                       else send_message(target, content))
+                                    evidence_refs=evidence_refs, emotion=emotion) if interaction_kind == "game_invite"
+                       else send_message(target, content, emotion=emotion))
             return outcome if isinstance(outcome, dict) else {"result": "error"}
 
         run_id = "social_" + uuid.uuid4().hex
@@ -427,7 +429,7 @@ class Drive:
         answer = await run_autonomous_reply_graph(
             run_id=run_id, action=name, reason="根据环境自主探索与互动",
             params=params, result=result, model=get_text_llm(),
-            profile_loader=get_profile)
+            profile_loader=get_profile, include_emotion=True)
         if (self.user_interrupt or not go2.is_connected or generation != self._generation
                 or owner != self.owner_session_id
                 or not self._reply_gate.mark_replied(scope, completed=completed,
@@ -435,7 +437,9 @@ class Drive:
             return
         publish_agent_event("agent_reply", agent_id="go2", scope="space",
             space_id=self._context.space_id, source="autonomous",
-            status=status, run_id=run_id, text=answer)
+            status=status, run_id=run_id,
+            text=answer["text"] if isinstance(answer, dict) else answer,
+            emotion=answer.get("emotion", "neutral") if isinstance(answer, dict) else "neutral")
 
     async def _navigate(self, name: str | None = None, coordinate: tuple[float, float] | None = None,
                         *, task_id: str | None = None, publish_reply: bool = True) -> dict:
@@ -714,6 +718,7 @@ class Drive:
         self._last_decision = {"event_id": event["event_id"],
                                "choice": result.get("event_decision", "defer"),
                                "reason": result.get("decision_reason", ""),
+                               "emotion": result.get("decision_emotion", "neutral"),
                                "action": result.get("next_action", "none")}
         if event.get("kind") in {"peer_message", "activity_started", "activity_observed", "activity_progress"}:
             from cloud.observability import emit_agent_event
@@ -1001,7 +1006,8 @@ class Drive:
                 # game metadata defines rules, not a fixed conversational line.
                 acceptance = messenger.send_message(
                     "go2", message["sender"], str(decision.get("reason") or "decision_unavailable")[:1000],
-                    reply_to=event["message_id"], reply_kind="accepted", deadline=event["deadline"])
+                    reply_to=event["message_id"], reply_kind="accepted", deadline=event["deadline"],
+                    emotion=decision.get("emotion", "neutral"))
                 if acceptance.get("result") != "accepted":
                     messenger.send_result(event["message_id"], "unknown",
                                           reason="acceptance_delivery_unconfirmed")
@@ -1078,7 +1084,7 @@ class Drive:
         if result.get("response") and not turn.sent and not message.get("reply_to"):
             messenger.send_message(message["target"], message["sender"],
                 str(result["response"])[:1000], reply_to=event["message_id"], reply_kind="reply",
-                expect_reply=False)
+                expect_reply=False, emotion=result.get("emotion", "neutral"))
         if turn.deferred_game and message_activity_allows(message):
             self._social_state.peer_turn_completed(
                 activity_id, event["message_id"], turn.deferred_game)

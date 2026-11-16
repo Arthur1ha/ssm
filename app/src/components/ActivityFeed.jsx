@@ -161,7 +161,7 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
                 allEvents={events} agents={agents} getName={getName} finished/>}
             </> : ['message','question'].includes(row.kind) ? <>
               <AgentSpeech compact agent={unit} name={name} target={event.target_unit_id ? getName(event.target_unit_id) : ''}
-                text={event.text || '需要你补充信息。'}>
+                text={event.text || '需要你补充信息。'} emotion={event.emotion}>
                 {receipt && <small className="space-activity__receipt">{receipt}</small>}
               </AgentSpeech>
               {row.kind==='question' && isActive && <button type="button" className="space-activity__answer" onClick={() => onAnswer?.(event)}>回答{name}</button>}

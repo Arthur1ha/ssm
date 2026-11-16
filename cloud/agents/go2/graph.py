@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import replace
 
 from cloud.agents.common.runner import GraphRun, run_role_graph
+from cloud.agents.common.emotions import normalize_emotion
 from cloud.agents.common.models import async_model_clients
 from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
 from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt
@@ -51,6 +52,7 @@ def _result(run: GraphRun) -> dict:
                        if s["result"]["result"] != "ok"), "error")
     return {"run_id": run.run_id, "trace_id": run.trace_id or run.run_id,
             "result": status, "response": run.response,
+            "emotion": normalize_emotion(run.emotion),
             "event_id": run.reply_event_id or None,
             "actions_taken": [s["tool"] for s in steps if s["result"]["result"] == "ok"],
             "tool_results": steps, "question": run.question or None,
@@ -361,7 +363,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                         status=_result(current)["result"], run_id=current.run_id,
                         trace_id=current.trace_id or current.run_id,
                         parent_run_id=current.parent_run_id, source=event_source,
-                        text=current.response, reply_kind="final",
+                        text=current.response, emotion=current.emotion, reply_kind="final",
                         event_id=current.reply_event_id)
                 else:
                     publish_agent_event(
@@ -413,7 +415,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             scope="space" if autonomous else "session", space_id=context.space_id,
             status=run.status, run_id=run.run_id, trace_id=run.trace_id or run.run_id,
             parent_run_id=run.parent_run_id, source=event_source,
-            text=run.response, reply_kind="clarification",
+            text=run.response, emotion=run.emotion, reply_kind="clarification",
             event_id=run.reply_event_id)
     if run.status != "needs_clarification":
         if run.response and not context.session_id.startswith("peer_"):

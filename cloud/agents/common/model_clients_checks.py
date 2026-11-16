@@ -70,21 +70,27 @@ async def test_scope_closes_client_on_failure_and_cancellation():
     ("go2", "ActivityDecision", {"action": "social", "reason": "先邀请同伴。"}),
     ("go2", "EventDecision", {"choice": "accept", "reason": "来玩吧。", "teaching_id": None}),
     ("go2", "SocialDecision", {"decision": "skip"}),
-    ("lamp", "LampSetup", {"speech": "三种灯色准备好了。", "mapping": {
+    ("lamp", "LampSetup", {"speech": "三种灯色准备好了。", "emotion": "happy", "mapping": {
         "rock": {"r": 255, "g": 0, "b": 0, "brightness": 160},
         "scissors": {"r": 0, "g": 255, "b": 0, "brightness": 160},
-        "paper": {"r": 0, "g": 0, "b": 255, "brightness": 160}}}),
-    ("go2", "Go2Setup", {"speech": "我选好动作了。", "mapping": {
-        "rock": "Hello", "scissors": "Stretch", "paper": "Content"},
+        "paper": {"r": 0, "g": 0, "b": 255, "brightness": 160}},
+        "color_names": {"rock": "红色", "scissors": "绿色", "paper": "蓝色"}}),
+    ("go2", "Go2Setup", {"speech": "我选好动作了。", "emotion": "curious", "mapping": {
+        "rock": "Hello", "scissors": "Stretch", "paper": "Content"}}),
+    ("go2", "Go2Identification", {"speech": "还没看清灯。", "emotion": "sad",
         "target_visible": False, "target": None}),
+    ("go2", "Go2Setup", {"speech": "我选好动作了。", "emotion": {"invalid": True}, "mapping": {
+        "rock": "Hello", "scissors": "Stretch", "paper": "Content"}}),
+    ("go2", "Go2Setup", {"speech": "我选好动作了。", "emotion": "unsupported", "mapping": {
+        "rock": "Hello", "scissors": "Stretch", "paper": "Content"}}),
 ])
 async def test_device_structured_decisions_use_automatic_tools_and_langchain_parser(
         role, schema_name, decision, monkeypatch):
     from cloud.agents.go2.workflows.free_explore import ActivityDecision, EventDecision
     from cloud.agents.go2.workflows.social import SocialDecision
-    from cloud.peers.games.rps_decisions import Go2Setup, LampSetup
+    from cloud.peers.games.rps_decisions import Go2Identification, Go2Setup, LampSetup
     schemas = {schema.__name__: schema for schema in
-               (ActivityDecision, EventDecision, SocialDecision, Go2Setup, LampSetup)}
+               (ActivityDecision, EventDecision, SocialDecision, Go2Identification, Go2Setup, LampSetup)}
     schema = schemas[schema_name]
     monkeypatch.setenv("OPENAI_API_KEY", "local-test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://model.test/v1")
@@ -120,6 +126,10 @@ async def test_device_structured_decisions_use_automatic_tools_and_langchain_par
         result = await structured.ainvoke("请用提供的工具作决定，不执行设备动作。")
     assert isinstance(result, schema)
     assert result == schema.model_validate(decision)
+    if "emotion" in decision:
+        expected = decision["emotion"] if decision["emotion"] in ("happy", "curious", "sad") else "neutral"
+        assert result.emotion == expected
+        assert result.speech == decision["speech"]
     assert len(requests) == 1
 
 

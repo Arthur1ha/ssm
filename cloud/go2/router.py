@@ -610,7 +610,7 @@ async def go2_chat_stream(req: ChatRequest, context: ExecutionContext = Depends(
                     continue
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             result = await task
-            yield f"data: {json.dumps({'type': 'response', 'text': result.get('response', '')}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'response', 'text': result.get('response', ''), 'emotion': result.get('emotion', 'neutral')}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done', **result}, ensure_ascii=False)}\n\n"
         finally:
             if 'task' in locals() and not task.done():

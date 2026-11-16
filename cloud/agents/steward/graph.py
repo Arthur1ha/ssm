@@ -84,6 +84,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
     if previous and not resume:
         return {"run_id": run_id, "result": previous.status,
                 "response": previous.response if previous.reply_source != "runtime" else "",
+                "emotion": previous.emotion,
                 "steps": previous.steps}
     if resume and (not previous or previous.status != "needs_clarification"):
         return {"run_id": run_id, "result": "rejected", "error": "run_not_resumable"}
@@ -208,7 +209,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
     progress_closed.set()
     transport.do_publish_feedback(session_id, stage, run.response, run_id=run_id,
                                   trace_id=run.trace_id or run_id,
-                                  status=run.status, question=run.question or None)
+                                  status=run.status, question=run.question or None, emotion=run.emotion)
     transport.do_publish_ui_event(session_id, "agent_progress", run_id=run_id,
         trace_id=run.trace_id or run_id, status=run.status, stage="finished",
         sequence=run.attempt, goal=run.goal,
@@ -217,7 +218,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
             {"blocked", "rejected", "cancelled", "error"} for s in run.steps))
     transport.do_publish_ui_event(session_id, "agent_reply" if run.response else "reply_error",
         run_id=run_id, trace_id=run.trace_id or run_id, status=run.status,
-        text=run.response,
+        text=run.response, emotion=run.emotion,
         reply_kind="clarification" if run.status == "needs_clarification" else "final")
     if run.response:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,
@@ -225,4 +226,5 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
                          reply_kind="final", channel="mqtt_feedback", reply=run.response)
     return {"run_id": run_id, "trace_id": run.trace_id or run_id,
             "result": run.status, "response": run.response,
+            "emotion": run.emotion,
             "steps": run.steps, "question": run.question or None}
