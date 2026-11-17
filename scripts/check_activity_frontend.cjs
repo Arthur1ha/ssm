@@ -7,8 +7,8 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const sucrase = require('sucrase');
 const compile = name => sucrase.transform(fs.readFileSync(name,'utf8'),{transforms:['jsx'],production:true}).code;
-const files = ['utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js',
-  'components/Icon.jsx','avatars/Avatar.jsx','components/RunProcess.jsx','components/ActivityMembers.jsx','components/ActivityFeed.jsx'];
+const files = ['utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/stateSnapshot.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js','avatars/presentation.js',
+  'components/Icon.jsx','avatars/Avatar.jsx','avatars/CompanionAvatar.jsx','components/RunProcess.jsx','components/ActivityMembers.jsx','components/ActivityFeed.jsx'];
 const context = vm.createContext({window:{}});
 for (const file of files) {
   vm.runInContext(compile('app/src/'+file),context);
@@ -98,9 +98,13 @@ const searchSteps = ['search_observing','search_observe','search_selected','sear
     observation_event_id:stage === 'search_observe' ? 'search-observation-'+index : undefined,
     text:stage === 'search_observe' ? '前方有纸箱。' : '搜索步骤 '+stage,
     media_ref:stage === 'search_observe' ? '/api/activity-photo-'+index : null}));
-assert.equal(processSteps(projectActivityEvents([...searchSteps,
-  {...result,task_id:'activity-search',status:'ok'}])).length,4,
-  'Search completion erased its individual observations and steps');
+const completedSearch = processSteps(projectActivityEvents([...searchSteps,
+  {...result,task_id:'activity-search',status:'ok'}]));
+for (const observation of searchSteps.filter(row => row.observation_event_id))
+  assert(completedSearch.some(step => step.events.some(row => row.event_id === observation.event_id)),
+    'Search completion erased an individual observation');
+assert(completedSearch.some(step => step.event.task_id === 'activity-search' && step.event.status === 'ok'),
+  'Search completion receipt must remain available with its observations');
 assert.equal(projectActivityEvents([...searchSteps,event('scene-copy','observation',{
   source:'go2.camera',text:'前方有纸箱。',media_ref:'/api/activity-photo-1',observation_event_id:'search-observation-1'})]).length,4,
   'A shared scene duplicated a search photo');

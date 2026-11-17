@@ -1,6 +1,8 @@
 /* Preset expressions share one small SVG rig; animation is presentation only. */
 function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutral', behavior = 'idle',
-  motion, animationKey = null, animated = false, online, size = 64, label, className = ''}) {
+  motion, animationKey = null, animationStartedAt, motionDurationMs, motionEpoch,
+  lightingState, lightingColor, lightingBrightness,
+  animated = false, online, size = 64, label, className = ''}) {
   // undefined: decorative/history avatar; null: connection is being synced.
   animated = animated && online !== false && online !== null;
   const profile = resolveAvatarProfile(agent || unitId);
@@ -10,8 +12,41 @@ function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutra
   const ref = React.useRef(null);
   const [visible, setVisible] = React.useState(true);
   const [awake, setAwake] = React.useState(!document.hidden);
-  const [blinkPeriod] = React.useState(() => 3 + Math.random() * 4);
   const identity = unitId || (typeof agent === 'string' ? agent : agent?.unit_id || agent?.agent_id);
+  const blinkPeriod = React.useMemo(() => {
+    const hash = Array.from(identity || 'companion').reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 0);
+    return 3.8 + hash % 25 / 10;
+  }, [identity]);
+  const [renderedSize, setRenderedSize] = React.useState(size);
+  React.useLayoutEffect(() => {
+    const update = () => {
+      const width = ref.current?.getBoundingClientRect().width;
+      if (width > 0) setRenderedSize(previous => Math.abs(previous - width) > .2 ? width : previous);
+    };
+    update();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
+    if (ref.current) observer?.observe(ref.current);
+    return () => observer?.disconnect();
+  }, [size]);
+  const playing = animated && visible && awake;
+  const phase = React.useMemo(() => {
+    const elapsed = Number.isFinite(motionEpoch) ? Math.max(0, Date.now() - motionEpoch) : 0;
+    const ambientPeriod = behavior === 'rest' ? 6000 : 4000;
+    return {ambient:-(elapsed % ambientPeriod), blink:-(elapsed % (blinkPeriod * 1000)), light:-(elapsed % 1200),
+      behavior:-(elapsed % (behavior === 'working' ? 1800 : behavior === 'play' ? 3000 : 4000))};
+  }, [motionEpoch, behavior, blinkPeriod]);
+  React.useLayoutEffect(() => {
+    if (!playing || !Number.isFinite(motionEpoch) || !ref.current) return;
+    // Offscreen/hidden loops pause for efficiency, then rejoin the shared clock.
+    // Only continuous layers seek here; event entrances keep their own timestamp.
+    const loops = new Set(['avatar-breathe','avatar-blink','avatar-look','avatar-scan',
+      'avatar-explore','avatar-work','avatar-engaged','avatar-light']);
+    for (const animation of ref.current.getAnimations({subtree:true})) {
+      if (!loops.has(animation.animationName)) continue;
+      const delay = Number(animation.effect?.getTiming().delay) || 0;
+      animation.currentTime = Math.max(0, Date.now() - motionEpoch + delay);
+    }
+  }, [playing, motionEpoch, behavior, mood]);
   const previousPresence = React.useRef({identity, online});
   React.useEffect(() => {
     const previous = previousPresence.current;
@@ -36,8 +71,9 @@ function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutra
     if (ref.current) observer?.observe(ref.current);
     return () => {observer?.disconnect(); document.removeEventListener('visibilitychange', update); media.removeEventListener('change', update);};
   }, [animated]);
-  const playing = animated && visible && awake;
   const motionName = animationKey != null && AVATAR_MOTIONS[motion || face.motion] ? (motion || face.motion) : 'none';
+  const duration = Number.isFinite(motionDurationMs) && motionDurationMs > 0 ? motionDurationMs
+    : (AVATAR_TIMING.motions[motionName] || 0);
   const resting = behavior === 'rest';
   const played = React.useRef(new Set());
   const form = React.useRef(null);
@@ -48,24 +84,39 @@ function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutra
     }
     played.current.add(animationKey);
     if (played.current.size > 64) played.current.delete(played.current.values().next().value);
-    setEntrance({id:animationKey, motion:motionName});
-  }, [animationKey, animated]);
+    const startedAt = Number.isFinite(animationStartedAt) ? animationStartedAt : Date.now();
+    if (!duration || Date.now() - startedAt >= duration) { setEntrance(null); return; }
+    setEntrance({id:animationKey, motion:motionName, startedAt, duration});
+    const timer = setTimeout(() => setEntrance(current => current?.id === animationKey ? null : current),
+      Math.max(0, duration - (Date.now() - startedAt)));
+    return () => clearTimeout(timer);
+  }, [animationKey, animated, animationStartedAt, duration, motionName]);
   React.useLayoutEffect(() => {
     if (!entrance || !form.current) return;
     // Restart the entrance without remounting the face layers: their opacity
     // transitions must survive a new reply or a game gesture.
     form.current.style.animation = 'none';
+    form.current.style.setProperty('--avatar-motion-delay', `${-Math.max(0, Date.now() - entrance.startedAt)}ms`);
+    form.current.style.setProperty('--avatar-motion-duration', `${entrance.duration}ms`);
     form.current.getBoundingClientRect();
     form.current.style.animation = '';
-  }, [entrance]);
+  }, [entrance, playing]);
   return <svg ref={ref} className={`shape-face ${className}`} viewBox="0 0 100 100" width={size} height={size}
     role={label ? 'img' : undefined} aria-label={label || undefined} aria-hidden={label ? undefined : true}
     focusable="false" data-shape={AVATAR_SHAPES[shape] ? shape : 'idle'} data-emotion={mood}
     data-online={typeof online === 'boolean' ? String(online) : undefined}
+    data-lighting={lightingState || undefined}
     data-behavior={behavior} data-animated={animated ? 'true' : 'false'} data-paused={playing ? undefined : 'true'}
-    style={{'--avatar-color':profile.color, '--avatar-ink':profile.ink, '--avatar-blink-period':`${blinkPeriod}s`}}>
+    style={{'--avatar-color':profile.color, '--avatar-ink':profile.ink, '--avatar-blink-period':`${blinkPeriod}s`,
+      '--avatar-motion-scale':Math.max(.85, Math.min(1.85, 64 / renderedSize)),
+      '--avatar-light-color':lightingColor || 'transparent',
+      '--avatar-light-opacity':Number.isFinite(lightingBrightness) ? Math.max(0, Math.min(255, lightingBrightness)) / 255 * .3 : .22,
+      '--avatar-ambient-delay':`${phase.ambient}ms`, '--avatar-blink-delay':`${phase.blink}ms`,
+      '--avatar-behavior-delay':`${phase.behavior}ms`, '--avatar-light-delay':`${phase.light}ms`}}>
+    {lightingColor && ['ON','BLINKING'].includes(lightingState) && online !== false && online !== null
+      && <ellipse className="shape-face__light" cx="50" cy="85" rx="35" ry="7"/>}
     <g className="shape-face__ambient"><g ref={form} className="shape-face__form" data-motion={entrance?.motion || 'none'}>
-      <g className="shape-face__pose">
+      <g className="shape-face__behavior"><g className="shape-face__pose">
         <path className="shape-face__body" d={body[profile.silhouette]}/>
         {body.detail && <path className="shape-face__features" d={body.detail}/>}
         <g className="shape-face__features" transform={`translate(0 ${body.faceY})`}>
@@ -89,70 +140,9 @@ function ShapeFace({agent, unitId, shape = 'idle', expression, emotion = 'neutra
             </g>;
           })}
         </g>
-      </g>
+      </g></g>
     </g></g>
   </svg>;
 }
 
-/* Activity events have a browser-only receive marker set by the existing SSE
- * handler. REST history never gets it. One hook per activity, no subscriptions. */
-function useAvatarPresentation({events = [], activityId, active, connected}) {
-  const [views, setViews] = React.useState({});
-  const seen = React.useRef(new Set(events.map(event => event.event_id)));
-  const started = React.useRef(Date.now());
-  const latest = React.useRef({});
-  const timers = React.useRef(new Set());
-  const connectionStart = typeof apiClient !== 'undefined' ? apiClient.eventsOpenedAt || 0 : 0;
-  React.useEffect(() => {
-    started.current = Date.now();
-    latest.current = {};
-    seen.current = new Set(events.map(event => event.event_id));
-    setViews({});
-    return () => {timers.current.forEach(clearTimeout); timers.current.clear();};
-  }, [activityId, active, connected, connectionStart]);
-  React.useEffect(() => {
-    if (!active || !connected) return;
-    const now = Date.now();
-    const incoming = [];
-    for (const event of events) {
-      if (!event.event_id || seen.current.has(event.event_id)) continue;
-      seen.current.add(event.event_id);
-      if (seen.current.size > 640) seen.current.delete(seen.current.values().next().value);
-      if (event.activity_id !== activityId || event.avatarReceivedAt < started.current || !event.avatarReceivedAt) continue;
-      if (event.ts * 1000 < Math.max(started.current, connectionStart)) continue;
-      if (!Number.isFinite(event.ts) || event.ts * 1000 < now - 10000 || event.ts * 1000 > now + 5000) continue;
-      incoming.push(event);
-    }
-    if (!incoming.length) return;
-    {
-      const next = {...views};
-      incoming.forEach(event => {
-        const unit = event.unit_id || event.agent_id;
-        const order = event.ts;
-        const update = (id, field, value, duration) => {
-          const key = `${id}:${field}`;
-          if (order < (latest.current[key] || 0)) return;
-          latest.current[key] = order;
-          next[id] = {...next[id], [field]:{...value, eventId:event.event_id, until:now + duration}};
-          const timer = setTimeout(() => {
-            timers.current.delete(timer);
-            setViews(current => current[id]?.[field]?.eventId === event.event_id
-              ? {...current, [id]:{...current[id], [field]:null}} : current);
-          }, duration);
-          timers.current.add(timer);
-        };
-        if (unit && ['message','question'].includes(event.event_type) && 'emotion' in event)
-          update(unit, 'emotion', {value:normalizeAvatarEmotion(event.emotion)}, AVATAR_TIMING.emotion);
-        if (event.stage === 'rps_result') Object.keys(event.game_round?.choices || {}).forEach(id => {
-          const gesture = avatarEventPresentation(event, id);
-          if (gesture) update(id, 'gesture', {...gesture,
-            expression:next[id]?.emotion?.value || 'neutral'}, AVATAR_TIMING.gesture);
-        });
-      });
-      setViews(next);
-    }
-  }, [events, activityId, active, connected, connectionStart]);
-  return active && connected ? views : {};
-}
 window.ShapeFace = ShapeFace;
-window.useAvatarPresentation = useAvatarPresentation;

@@ -12,6 +12,7 @@ from pydantic import Field
 
 from cloud.agents.common.effects import FileEffectLedger
 from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
+from cloud.agents.common.messages import EXPRESSION_GUIDANCE
 from cloud.personality.store import render_identity
 from cloud.personality.names import agent_names
 
@@ -107,7 +108,8 @@ def build_social_graph(
         )
         try:
             raw = await structured_model.ainvoke([
-                SystemMessage(content=render_identity(profile) + "\n" + EMOTION_INSTRUCTIONS), HumanMessage(content=prompt)])
+                SystemMessage(content=render_identity(profile) + "\n" + EXPRESSION_GUIDANCE
+                              + "\n" + EMOTION_INSTRUCTIONS), HumanMessage(content=prompt)])
             decision = SocialDecision.model_validate(raw)
         except Exception as exc:
             return {"status": "error", "decision": {"error": type(exc).__name__}}

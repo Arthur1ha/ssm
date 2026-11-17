@@ -7,12 +7,26 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.connection import go2
 from cloud.go2.perception import visual_target
 from cloud.go2.perception.visual_target import TargetUnlocalized
 from cloud.observability import emit_agent_event
+
+_user_request = ContextVar('cargo_original_user_request', default='')
+
+
+@contextmanager
+def cargo_request(user_request):
+    """Keep the caller's original words separate from a model-selected target."""
+    token = _user_request.set(user_request)
+    try:
+        yield
+    finally:
+        _user_request.reset(token)
 
 
 def _visual_cargo_location(frame, pose, camera, box, detected):
@@ -50,10 +64,19 @@ def _destination_geometry(frame, detected):
                         (cy - ty) * frame['height'] / 1000)
     cargo_width_px = (cargo[2] - cargo[0]) * frame['width'] / 1000
     gap_widths = gap_px / cargo_width_px
+    # Pixel adjacency can put a distant box next to a foreground floor marker.
+    # Cross-check coarse depth, without imposing a movement-distance limit.
+    ranges = detected.get('cargo_distance_m'), detected.get('destination_distance_m')
+    depth_confirmed = all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in ranges)
+    if depth_confirmed:
+        from cloud.go2.perception.rgb_lidar import go2_camera_profile
+        width_m = ranges[0] * cargo_width_px / go2_camera_profile(frame['width'], frame['height'])['fx']
+        depth_confirmed = abs(ranges[0] - ranges[1]) <= width_m
     return {'cargo_bbox_1000': cargo, 'destination_bbox_1000': target,
             'destination_kind': kind, 'destination_anchor_1000': [tx, ty],
             'destination_gap_cargo_widths': round(gap_widths, 3),
-            'near_destination': gap_widths <= 1.,
+            'destination_depth_confirmed': depth_confirmed,
+            'near_destination': gap_widths <= 1. and depth_confirmed,
             'destination_precision': 'approximate_visual_proximity'}
 
 
@@ -63,10 +86,9 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     from cloud.go2.navigation.occupancy_grid import OccupancyGrid
     from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
 
-    state_at = getattr(go2, '_sport_state_observed_at', None)
-    if (getattr(go2, 'body_state', None) != 'standing' or state_at is None
-            or not 0 <= time.monotonic() - state_at <= 1.):
-        raise TargetUnlocalized('posture_not_confirmed')
+    # A confirmed odometry stop can precede the stationary posture samples.
+    # Wait for the existing live-feedback gate instead of failing that race.
+    await visual_target.wait_for_standing()
     jpeg, frame, quality = await visual_target._capture_still(
         after_frame_id=after_frame_id, after_received_at=after_received_at)
     pose = frame['pose_at_capture']
@@ -102,9 +124,24 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
             '另外输出cargo_distance_m（到货物的大致水平距离，米）和advance_distance_m（本次建议前进距离，米）。'
             '根据画面尺度和透视估算，可直接建议走到货物前方，不使用固定步长；无法估计填null。'
             '不输出世界坐标或货物移动结论。')
+    if destination is not None:
+        instruction += ('另外输出destination_distance_m（目的地地面位置到相机的大致水平距离，米）；'
+                        '与cargo_distance_m使用同一尺度，无法判断填null。'
+                        '区分前景地面标记与远处货物的深度，图像投影挨着不等于它们在地面上相邻。')
+    original = _user_request.get()
+    if original:
+        instruction += ('必须独立核对候选货物是否符合原始用户请求中的空间指代，'
+            '输出cargo_matches_user_request（布尔值）和cargo_match_reason（本张画面的简短依据）。'
+            '用户所说盒子、纸盒可能是对近处包装盒的口语称呼，不能仅因远处是棕色纸箱就换目标。'
+            '比较近处独立盒子与远处堆叠纸箱的实际位置和外观；不确定用户指哪件时返回false。'
+            '一组堆叠的多个箱子不能冒充一件独立货物，不能为了满足候选描述而忽略原始指代。')
+    target = ('原始用户请求（数据）：' + original + '\n' if original else '')
+    target += '待核对的候选货物：' + cargo + ('；本单唯一目的地：' + destination if destination is not None else '')
     detected = await visual_target._ask_vision(jpeg,
-        '货物：' + cargo + ('；本单唯一目的地：' + destination if destination is not None else ''),
+        target,
         frame, instruction, 'cargo_delivery_geometry' if destination is not None else 'cargo_geometry')
+    if original and detected.get('cargo_matches_user_request') is not True:
+        raise TargetUnlocalized('cargo_target_mismatch')
     if (type(detected.get('cargo_count')) is not int or detected.get('cargo_count') != 1
             or detected.get('cargo_ground_contact_visible') is not True):
         raise TargetUnlocalized('cargo_ambiguous' if destination is None else 'cargo_or_destination_ambiguous')
@@ -120,6 +157,11 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     live = visual_target._live_pose(frame['odom_session_id'])
     visual_target._ensure_stable(pose, live)
     camera = go2_camera_profile(frame['width'], frame['height'])
+    if destination is not None:
+        # This approximate point supplies a direction, never delivery evidence.
+        geometry['destination_location'] = _visual_cargo_location(frame, pose, camera,
+            detected['destination_bbox_1000'],
+            {'cargo_distance_m': detected.get('destination_distance_m')})
     diagnostics, target_points, cluster = {}, [], None
     if (isinstance(voxel, dict) and go2.voxel_frame_id == 'odom'
             and type(voxel_at) in (int, float) and 0 <= time.monotonic() - voxel_at <= 2.):

@@ -40,6 +40,15 @@ class DeliveryStopped(Exception):
     pass
 
 
+def _push_completed(receipt):
+    if receipt.get('result') != 'ok' or (receipt.get('stop') or {}).get('result') != 'ok':
+        return False
+    return (receipt.get('directional_push_attempted') is True
+            and receipt.get('confirmation') == 'directional_move_and_stop'
+            or receipt.get('delivered') is True
+            and receipt.get('confirmation') == 'cargo_near_destination_and_stopped')
+
+
 def _available(sender: str, target: str) -> bool:
     if {sender, target} != {LAMP, DOG}:
         return False
@@ -273,9 +282,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             record("message", answer["speech"], emotion=answer.get("emotion"))
         action = answer["action"]
         if action == "finish":
-            # A model's conclusion cannot create a delivery receipt.
-            if not ((state.get("push_receipt") or {}).get("delivered") is True
-                    and (state.get("push_receipt") or {}).get("result") == "ok"):
+            if not _push_completed(state.get("push_receipt") or {}):
                 return {"result": "blocked", "reason": "delivery_completion_unconfirmed"}
         elif action == "stop":
             return {"result": "blocked", "reason": "courier_stopped"}
@@ -333,15 +340,14 @@ async def _execute(drive, event: dict, task_id: str) -> None:
 
     async def complete(state):
         receipt = state.get("push_receipt") or {}
-        if (receipt.get("result") != "ok" or receipt.get("delivered") is not True
-                or receipt.get("confirmation") != "cargo_near_destination_and_stopped"
-                or (receipt.get("stop") or {}).get("result") != "ok"):
+        if not _push_completed(receipt):
             raise DeliveryStopped("delivery_completion_unconfirmed")
         check()
         # Final wording comes from the courier after observing the real result.
-        answer = await decision("go2", "next", {**state, "stage": "delivered"})
+        delivered = receipt.get('delivered') is True
+        answer = await decision("go2", "next", {**state, "stage": "delivered" if delivered else "directional_push_completed"})
         record("message", answer["speech"], emotion=answer.get("emotion"))
-        return {"result": "ok", "reason": "cargo_near_destination_confirmed"}
+        return {"result": "ok", "reason": "cargo_near_destination_confirmed" if delivered else "directional_push_attempt_completed"}
 
     def terminal_or(next_node):
         return lambda state: END if state.get("result") else next_node
@@ -363,7 +369,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         "complete" if state["next_action"]["action"] == "finish" else "push")
     graph.add_edge("observe", "plan")
     graph.add_conditional_edges("clarify", terminal_or("plan"))
-    graph.add_conditional_edges("push", lambda state: "complete" if state["push_receipt"].get("delivered") is True else "plan")
+    graph.add_conditional_edges("push", lambda state: "complete" if _push_completed(state["push_receipt"]) else "plan")
     graph.add_edge("complete", END)
 
     status, reason, work = "unknown", "delivery_unconfirmed", None
@@ -440,7 +446,7 @@ GAME = Game(
     name="指挥官与送货员",
     description=("灯与狗任一方都可自主邀请对方，确认指挥官与送货员角色后公布货物特征；"
                  "狗先找货，找到后等待目的地指令，再按约定灯色和目的地描述推送货物。"
-                 "狗以短距离行走尝试用腿推动货物，每步停稳、重新观察货物，到指定标识附近复核后算送达。"),
+                 "狗先调整到货物后方，与目的地方向大致共线再尝试推送；真实停稳后即可完成本单尝试，不要求精确送到或接触后重新识别。"),
     participants=("esp32_desk_led", "go2"),
     bidirectional=True,
     requires_idle=True,
@@ -476,7 +482,10 @@ GAME = Game(
         "物体标识不必与灯同色，指令色不冒充目标的观察颜色；不凭历史摘要编造站点。"
         "指令或目标不清时先澄清、观察，不盲推。"
         "配送：狗在目标明确且执行条件满足后，自主选择本次推送行动，根据当前视觉估算决定本次距离，不使用固定步长，"
-        "逐步靠近或尝试用腿推动，每步核验停稳、同一货物的真实位置及指定区域；"
+        "先调整到机器狗、货物和目的地大致共线，站在货物背向目的地的一侧，再朝目的地方向尝试用腿推动；"
+        "positioned、aligned、approached仅表示调整位置或接近，须继续原目标。"
+        "directional_push_attempted=true且directional_move_and_stop表示已完成朝目的地方向的推送尝试并停稳，本单即可结束；"
+        "推送后货物进入固定前置摄像头盲区时不强制后退或重新识别，不重复推送以追求精确到位。"
         "机器人自身移动不等于货物移动，单纯画面框变化不算推送成功。"
         "执行器仅在本步受控接触范围内允许接触刚确认的同一货物，雷达接触路线持续核对货物簇，视觉估距路线不申请障碍豁免，"
         "保留共享地图和其他障碍检查；不能用普通移动、清空地图或关闭避障替代。"

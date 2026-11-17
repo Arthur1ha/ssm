@@ -31,6 +31,7 @@ function App({ session, logout, refreshSession }) {
   const recentEvents = useSpaceActivity(agents);
   const { activity: currentActivity, displayActivity, events: activityEvents, ending: activityEnding,
     error: activityError, endActivity } = useActivityTimeline();
+  useEffect(() => { companionPresentation.setActivity(currentActivity); }, [currentActivity]);
   const { thinking, send } = useSendIntent();
   const currentHash = useHashLocal();
 
@@ -131,7 +132,6 @@ function App({ session, logout, refreshSession }) {
   const appendReply = (item) => {
     if (!item?.text) return;
     const requestId = traceRequests.current.get(item.trace_id);
-    const avatarReceivedAt = (!requestId || requestId === nextRequestId.current) ? avatarReceiveTime(item) : undefined;
     const replyIdentity = item.source_event_id || item.event_id;
     const replyKey = replyIdentity ? `${item.trace_id || 'space'}:${replyIdentity}` : '';
     if (replyKey && seenReplies.current.has(replyKey)) return;
@@ -143,10 +143,10 @@ function App({ session, logout, refreshSession }) {
     if (requestId) {
       setActivityLog(prev => insertBeforeRequestEnd(prev, requestId,
         { type: 'ai', agent: item.agent_id, requestId, text: item.text,
-          eventId: item.event_id, emotion:item.emotion, avatarReceivedAt, avatarEventTs:item.ts }));
+          eventId: item.event_id, emotion:item.emotion }));
     } else {
       appendActivity({ type: 'ai', agent: item.agent_id, text: item.text,
-        eventId: item.event_id, traceId: item.trace_id, emotion:item.emotion, avatarReceivedAt, avatarEventTs:item.ts });
+        eventId: item.event_id, traceId: item.trace_id, emotion:item.emotion });
     }
   };
   useEffect(() => {
@@ -167,7 +167,7 @@ function App({ session, logout, refreshSession }) {
           seenPeerMessages.current.delete(seenPeerMessages.current.values().next().value);
         }
         appendActivity({ type: 'peer_message', sender: item.sender, target: item.target,
-          replyTo: item.reply_to, text: item.text, eventId: item.event_id, emotion:item.emotion, avatarReceivedAt:avatarReceiveTime(item), avatarEventTs:item.ts });
+          replyTo: item.reply_to, text: item.text, eventId: item.event_id, emotion:item.emotion });
         return;
       }
       if (['agent_progress', 'run_stage'].includes(item.type) && item.trace_id
@@ -314,7 +314,6 @@ function App({ session, logout, refreshSession }) {
           )}
           <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
-            activity={currentActivity} activityEvents={activityEvents}
             isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
 
           </>}
@@ -371,7 +370,6 @@ function App({ session, logout, refreshSession }) {
             onBack={() => handleBack(displayUid)}
             actor={session.actor}
             sessionId={session.session_id}
-            activeActivityId={currentActivity?.activity_id}
             activityQuestion={activityQuestion?.unit_id === displayUid &&
               activityQuestion.activity_id === currentActivity?.activity_id ? activityQuestion : null}
           />

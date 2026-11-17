@@ -2,7 +2,7 @@
  * ChatMessages and ChatInput own all conversation presentation. */
 function ChatPanel({ messages = [], agents, defaultAgent, training, onReviseRule,
   onSend, busy, disabled, placeholder, focusKey, suggestions = [],
-  beforeMessages, messageContent, children }) {
+  beforeMessages, messageContent, inputAvatar, children }) {
   return <div className="chat-panel" aria-busy={Boolean(busy)}>
     <div className="chat-panel__scroll">
       {beforeMessages}
@@ -17,13 +17,13 @@ function ChatPanel({ messages = [], agents, defaultAgent, training, onReviseRule
       </div>}
       {children}
       <ChatInput onSend={onSend} busy={busy} disabled={disabled}
-        placeholder={placeholder} focusKey={focusKey}/>
+        placeholder={placeholder} focusKey={focusKey} avatar={inputAvatar}/>
     </div>
   </div>;
 }
 window.ChatPanel = ChatPanel;
 
-function ChatInput({ onSend, busy, disabled, placeholder, focusKey }) {
+function ChatInput({ onSend, busy, disabled, placeholder, focusKey, avatar }) {
   const inputRef = React.useRef(null);
   React.useEffect(() => { if (focusKey) inputRef.current?.focus(); }, [focusKey]);
   const unavailable = disabled || busy;
@@ -37,12 +37,13 @@ function ChatInput({ onSend, busy, disabled, placeholder, focusKey }) {
   };
 
   return (
-    <div style={{
+    <div className={`chat-input${avatar ? ' chat-input--companion' : ''}`} style={{
       flexShrink: 0, padding: '8px 12px',
       paddingBottom: 'calc(8px + env(safe-area-inset-bottom, 0px))',
       background: 'transparent',
     }}>
-      <div style={{
+      {avatar && <span className="chat-input__avatar">{avatar}</span>}
+      <div className="chat-input__field" style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '6px 6px 6px 16px',
         background: 'rgba(30,29,38,0.95)',

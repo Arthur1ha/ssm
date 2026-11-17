@@ -22,6 +22,15 @@ function useSsmCore() {
   const refreshSeqRef = useRef(0);
   const stateCursors = useRef(new Map());
 
+  useEffect(() => {
+    const detach = companionPresentation.attach(apiClient);
+    return () => { detach(); companionPresentation.reset(); };
+  }, []);
+
+  useEffect(() => {
+    companionPresentation.syncDevices(agents, unitData, connected && apiClient.devicesSynced !== false);
+  }, [agents, unitData, connected]);
+
   const normalizeDevices = useCallback(devices => (Array.isArray(devices) ? devices : [])
     .filter(device => device.agent_type && !_EXCL_TYPES.has(device.agent_type) && !_EXCL_PLAT.has(device.hw_platform))
     .map(device => ({ ...device, _online: device.online ?? device._online ?? false })), []);

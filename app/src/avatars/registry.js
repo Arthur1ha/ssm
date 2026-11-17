@@ -35,18 +35,11 @@ const AVATAR_MOTIONS = Object.freeze({none:'静止', pop:'轻弹', squeeze:'收�
   tilt:'歪头', startle:'后仰', sink:'下沉', stretch:'舒展'});
 const AVATAR_ACTIONS = Object.freeze(Object.fromEntries(
   ['rock','scissors','paper'].map(name => [name, AVATAR_SHAPES[name]])));
-const AVATAR_TIMING = Object.freeze({emotion:6000, gesture:1600});
+const AVATAR_TIMING = Object.freeze({emotion:6000, gesture:1600,
+  motions:Object.freeze({none:0,pop:600,squeeze:550,glance:700,tilt:650,startle:600,sink:750,stretch:800})});
 function normalizeAvatarEmotion(value) {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(AVATAR_EXPRESSIONS, value) ? value : 'neutral';
 }
-function avatarReceiveTime(event) {
-  const now = Date.now();
-  const ts = event?.ts;
-  const connectedAt = typeof apiClient !== 'undefined' ? apiClient.eventsOpenedAt || 0 : 0;
-  return Number.isFinite(ts) && ts * 1000 >= Math.max(now - 10000, connectedAt)
-    && ts * 1000 <= now + 5000 ? now : undefined;
-}
-
 function resolveAvatarProfile(agent) {
   const card = typeof agent === 'object' && agent ? agent : {};
   const id = typeof agent === 'string' ? agent : card.unit_id || card.agent_id || '';
@@ -82,11 +75,11 @@ function latestAvatarPresentation(events, unitId, activityId) {
 }
 function avatarStatePresentation(state, member = {}) {
   if (member.disconnected || member.stale) return {shape:'idle', expression:'neutral', behavior:'idle', label:''};
-  if (state.activity_state === 'rest') return {shape:'idle', expression:'relaxed', behavior:'rest', label:'休息中'};
-  if (state.life_state === 'explore') return {shape:'idle', expression:'neutral', behavior:'thinking', label:'探索中'};
-  if (state.life_state === 'play') return {shape:'idle', expression:'neutral', behavior:'idle', label:'互动中'};
+  if (state.activity_state === 'rest' || state.life_state === 'rest') return {shape:'idle', expression:'relaxed', behavior:'rest', label:'休息中'};
+  if (state.life_state === 'explore') return {shape:'idle', expression:'neutral', behavior:'explore', label:'探索中'};
+  if (state.life_state === 'play') return {shape:'idle', expression:'neutral', behavior:'play', label:'互动中'};
   return {shape:'idle', expression:'neutral', behavior:'idle', label:''};
 }
 Object.assign(window, {AVATAR_PROFILES, AVATAR_SHAPES, AVATAR_ACTIONS, AVATAR_EXPRESSIONS, AVATAR_MOTIONS,
-  AVATAR_TIMING, normalizeAvatarEmotion, avatarReceiveTime, AVATAR_EVENT_MAPPINGS, resolveAvatarProfile, avatarEventPresentation,
+  AVATAR_TIMING, normalizeAvatarEmotion, AVATAR_EVENT_MAPPINGS, resolveAvatarProfile, avatarEventPresentation,
   latestAvatarPresentation, avatarStatePresentation});

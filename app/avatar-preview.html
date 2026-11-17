@@ -40,8 +40,11 @@
 <body>
   <div id="root"></div>
   <script src="src/utils/agentMeta.js"></script>
+  <script src="src/utils/stateSnapshot.js"></script>
   <script src="src/avatars/registry.js"></script>
+  <script src="src/avatars/presentation.js"></script>
   <script type="text/babel" src="src/avatars/Avatar.jsx"></script>
+  <script type="text/babel" src="src/avatars/CompanionAvatar.jsx"></script>
   <script type="text/babel">
     function AvatarPreview() {
       const [emotion, setEmotion] = React.useState('neutral');
@@ -67,9 +70,10 @@
         <p>安静时会眨眼，开心时轻轻一跳。选一种心情，看看它们怎么表达。</p>
         <div className="preview-stage">
           {[['esp32_desk_led','皮皮'],['go2','呆呆'],['unknown','新伙伴']].map(([id,name]) => <figure key={id}>
-            <ShapeFace unitId={id} emotion={emotion} behavior={behavior} animated={animated}
-              shape={gesture?.name || 'idle'} animationKey={gesture?.id || play} motion={gesture ? 'pop' : undefined}
-              size={112} label={`${name} · ${AVATAR_EXPRESSIONS[emotion].label}`}/>
+            <CompanionAvatar unitId={id} size={112} mode="preview"
+              snapshot={{emotion,behavior,animated,shape:gesture?.name || 'idle',
+                animationKey:gesture?.id || play,motion:gesture ? 'pop' : undefined}}
+              label={`${name} · ${AVATAR_EXPRESSIONS[emotion].label}`}/>
             <figcaption>{name}</figcaption>
           </figure>)}
         </div>

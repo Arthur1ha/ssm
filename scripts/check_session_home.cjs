@@ -22,7 +22,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.addScriptTag({path:process.env.SSM_CHECK_REACT_DOM});
     await page.addScriptTag({content:compile('app/src/ApiClient.js')});
     await page.addScriptTag({content:compile('app/src/components/SessionGate.jsx')});
-    for (const file of ['app/src/avatars/registry.js', 'app/src/avatars/Avatar.jsx'])
+    for (const file of ['app/src/avatars/registry.js', 'app/src/avatars/presentation.js', 'app/src/avatars/Avatar.jsx', 'app/src/avatars/CompanionAvatar.jsx'])
       await page.addScriptTag({content:compile(file)});
     await page.addScriptTag({content:compile('app/src/pages/DevicesPage.jsx')});
     await page.addScriptTag({content:`

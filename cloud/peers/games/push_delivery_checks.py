@@ -51,7 +51,7 @@ def test_destination_and_push_decisions_reject_incomplete_or_invalid_parameters(
                     {**valid, "color": {"r": 0, "g": 0, "b": 0, "brightness": 160}}):
         with pytest.raises(ValidationError):
             DestinationDecision.model_validate(invalid)
-    for distance in (0.09, 0.26, None):
+    for distance in (0, -1, float('inf'), float('nan')):
         with pytest.raises(ValidationError):
             NextDecision(action="push", speech="尝试短距推送。", distance_m=distance)
 
@@ -79,7 +79,7 @@ async def delivery_harness(monkeypatch):
     monkeypatch.setattr(loop, "run_in_executor", inline_executor)
     calls, events, trace, search_ids, cargo_contexts = [], [], [], [], []
     search_evidence = {"frame_id": "found_cargo_frame", "target": "地上的小纸盒"}
-    config = SimpleNamespace(push_result="ok", destination="红色地垫")
+    config = SimpleNamespace(push_result="ok", destination="红色地垫", directional=False)
     lamp_color = {"rgb": (40, 80, 120), "brightness": 160}
     agent = SimpleNamespace(
         _autonomy_epoch=1, _command_epoch=1, _peer_game_id=None,
@@ -150,6 +150,11 @@ async def delivery_harness(monkeypatch):
             assert facts["latest_push"]["stop"]["result"] == "ok"
             return {"action": "finish", "question": "", "distance_m": None,
                     "speech": "同一货物已确认在指定标识附近，这单大致送到了。"}
+        if stage == 'directional_push_completed':
+            assert facts['latest_push']['directional_push_attempted'] is True
+            assert facts['latest_push']['delivered'] is False
+            return {'action': 'finish', 'question': '', 'distance_m': None,
+                    'speech': '我已经朝指定标识的方向尝试推了一下并停稳，还没有确认货物送达。'}
         assert stage == "delivery"
         return {"action": "push", "question": "", "distance_m": 0.15,
                 "speech": "我沿已确认的方向短距推送这件货物。"}
@@ -180,6 +185,10 @@ async def delivery_harness(monkeypatch):
                     "target": params["target"], "task_id": search_ids[-1], "stop": {"result": "ok"},
                     "evidence": deepcopy(search_evidence)}
         assert name == "go2_push_cargo"
+        if config.directional:
+            return {'result': config.push_result, 'delivered': False,
+                    'directional_push_attempted': True, 'confirmation': 'directional_move_and_stop',
+                    'stop': {'result': 'ok'}, 'reference': {'cargo': params['cargo'], 'destination': params['destination']}}
         return {"result": config.push_result, "delivered": config.push_result == "ok",
                 "confirmation": "cargo_near_destination_and_stopped",
                 "task_id": search_ids[-1], "stop": {"result": "ok"},
@@ -264,6 +273,31 @@ async def test_delivery_orders_find_report_destination_signal_and_real_push(deli
     h.messenger.send_result.assert_called_once_with(
         "msg_delivery", "ok", task_id="task_delivery", reason="cargo_near_destination_confirmed")
     assert h.agent._peer_game_id is None
+
+
+async def test_game_finishes_a_directional_attempt_without_claiming_delivery(delivery_harness):
+    h = delivery_harness
+    h.config.directional = True
+    await push_delivery.GAME.execute(h.drive, h.event, 'task_delivery')
+    assert ('decision', 'go2', 'next', 'directional_push_completed') in h.trace
+    assert ('decision', 'go2', 'next', 'delivered') not in h.trace
+    assert len([name for name, _ in h.calls if name == 'go2_push_cargo']) == 1
+    h.messenger.send_result.assert_called_once_with(
+        'msg_delivery', 'ok', task_id='task_delivery', reason='directional_push_attempt_completed')
+    assert h.agent._peer_game_id is None
+
+
+@pytest.mark.parametrize('change', ['missing_stop', 'wrong_confirmation', 'unknown'])
+def test_directional_completion_requires_the_actual_stop_receipt(change):
+    receipt = {'result': 'ok', 'directional_push_attempted': True,
+               'confirmation': 'directional_move_and_stop', 'stop': {'result': 'ok'}}
+    if change == 'missing_stop':
+        receipt.pop('stop')
+    elif change == 'wrong_confirmation':
+        receipt['confirmation'] = 'positioning_and_stop'
+    else:
+        receipt['result'] = 'unknown'
+    assert push_delivery._push_completed(receipt) is False
 
 
 @pytest.mark.parametrize("push_result", ["blocked", "unknown"])

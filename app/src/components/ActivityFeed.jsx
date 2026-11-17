@@ -196,7 +196,8 @@ function ActivityGameRound({event,getName}) {
   const labels={rock:'石头',paper:'布',scissors:'剪刀'};
   return <div className="activity-game-round" aria-label={`第 ${round.round} 轮揭晓`}><small>第 {round.round} 轮 · 已揭晓</small>
     <div className="activity-game-round__choices">{Object.entries(round.choices || {}).map(([unit,choice]) =>
-      <div key={unit}>{typeof ShapeFace==='function' && <ShapeFace unitId={unit} shape={choice} size={40} label={labels[choice]}/>}
+      <div key={unit}><CompanionAvatar unitId={unit} size={40} mode="history"
+        snapshot={{shape:choice}} label={labels[choice]}/>
         <strong>{getName(unit)} · {labels[choice] || choice}</strong><small>{round.mapping?.[unit]?.label || ''}</small></div>)}</div>
     {round.winner && <p>{round.winner==='draw' ? '平局' : `${getName(round.winner)}获胜`}</p>}
   </div>;

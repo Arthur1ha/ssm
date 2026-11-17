@@ -286,7 +286,10 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             runtime.finish_life(interaction_token)
             interaction_token = None
         from cloud.agents.go2.workflows.search import search_request
-        with search_request(run.run_id, run.deadline):
+        from cloud.go2.perception.cargo import cargo_request
+        from contextlib import nullcontext
+        original_target = cargo_request(run.goal) if name == 'go2_push_cargo' else nullcontext()
+        with search_request(run.run_id, run.deadline), original_target:
             result = await execute_tool(name, arguments, context=execution_context)
         if TOOL_REGISTRY[name].motion:
             motion_unconfirmed = (result.get("result") in {"accepted", "executing", "unknown", "timeout"}
@@ -333,9 +336,25 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 return factual_fallback("go2", value.status, value)
 
             from cloud.agents.go2.personality.profile import get_profile
-            await finalize_reply(current, model=get_text_llm,
-                                 instructions=lambda value: persona_reply_prompt(value, get_profile()),
-                                 fallback=fallback)
+            last = current.steps[-1] if current.steps else {}
+            receipt = last.get('result') or {}
+            if (last.get('tool') == 'go2_push_cargo' and receipt.get('result') == 'ok'
+                    and receipt.get('progress') == 'already_near_destination'
+                    and receipt.get('motion_performed') is False
+                    and isinstance(receipt.get('message'), str) and receipt['message'].strip()):
+                # Observing an already-satisfied goal cannot become a story
+                # about physical work. Project this explicit receipt directly.
+                current.response = receipt['message'].strip()
+                current.reply_source = 'tool_receipt'
+                current.emotion = 'neutral'
+                emit_agent_event('reply.validated', agent_id='go2', run_id=current.run_id,
+                    session_id=current.session_id, trace_id=current.trace_id or current.run_id,
+                    reply=current.response, validation='receipt', reason='already_near_destination',
+                    reply_kind='final')
+            else:
+                await finalize_reply(current, model=get_text_llm,
+                                     instructions=lambda value: persona_reply_prompt(value, get_profile()),
+                                     fallback=fallback)
             publish_allowed = not current.parent_run_id or time.time() < current.deadline
             if not publish_allowed:
                 current.response = ""

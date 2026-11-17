@@ -13,11 +13,9 @@ function DeviceEmptyState({ isAdmin, onAddDevice }) {
 }
 
 function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceName,
-  loading = false, error = '', isAdmin, onAddDevice, activity, activityEvents = [] }) {
+  loading = false, error = '', isAdmin, onAddDevice }) {
   const { useState } = React;
   const [sensorsOpen, setSensorsOpen] = useState(false);
-  const avatarViews = useAvatarPresentation({events:activityEvents, activityId:activity?.activity_id,
-    active:Boolean(activity && !['ending', 'ended'].includes(activity.status)), connected});
   const devices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
   const sensors = agents.filter(a => a.agent_type !== 'robot' && a.agent_type !== 'actuator');
   const onlineCount = agents.filter(agent => isDeviceOnline(agent, unitData)).length;
@@ -36,7 +34,7 @@ function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceNa
 
     {devices.length > 0 && <div className="home-space__devices">
       {devices.map(agent => <HomeDeviceRow key={agent.unit_id} agent={agent}
-        unitData={unitData} connected={connected} presentation={avatarViews[agent.unit_id]}/>)}
+        unitData={unitData} connected={connected}/>)}
     </div>}
 
     {sensors.length > 0 && <div className="home-space__sensors">

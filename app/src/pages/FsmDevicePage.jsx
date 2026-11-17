@@ -2,7 +2,7 @@
  * 标题显示连接状态，白板统一展示状态与转移，富控件和对话按需呈现。
  * 核心控制由 Agent Card 的 transport / state_machine 驱动。
  */
-function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, activityQuestion, trainingLocation, activeActivityId }) {
+function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, activityQuestion, trainingLocation }) {
   const { useState, useEffect, useRef, useMemo } = React;
 
   /* Card from /api/devices and SSE is authoritative. Fetch only fills a missing snapshot. */
@@ -69,16 +69,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   }, [greeting]);
   const [sending, setSending] = useState(false);
   const [pendingRunId, setPendingRunId] = useState(null);
-  const portraitEvents = useMemo(() => messages.filter(message => message.type === 'ai').map(message => ({
-    event_id:message.eventId, activity_id:`device:${unitId}:${activeActivityId || ""}`, unit_id:unitId, event_type:'message',
-    emotion:message.emotion, avatarReceivedAt:message.avatarReceivedAt, ts:message.avatarEventTs,
-  })), [messages, unitId, activeActivityId]);
-  const portrait = useAvatarPresentation({events:portraitEvents, activityId:`device:${unitId}:${activeActivityId || ""}`,
-    active:true, connected:eventsHealthy})[unitId];
   const [execution, setExecution] = useState('');
   const seenReplies = useRef(new Set());
   const activeRun = useRef(null);
-  const latestChatRun = useRef(null);
   const pendingRuns = useRef(new Map());
   const nextRequestId = useRef(Date.now());
   const nextProcessId = useRef(0);
@@ -118,7 +111,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       return insertAfterRequest(previous, requestId, row);
     });
   };
-  const finishMessage = (requestId, text, eventId, isError = false, emotion, avatarReceivedAt, avatarEventTs) => {
+  const finishMessage = (requestId, text, eventId, isError = false, emotion) => {
     if (!text) return;
     setMessages(previous => {
       const finalIndex = previous.findIndex(message => message.type === 'ai'
@@ -126,11 +119,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       if (finalIndex >= 0) {
         if (isError && !previous[finalIndex].isError) return previous;
         return previous.map((message, index) => index === finalIndex
-          ? { ...message, text, eventId, final: true, isError, emotion, avatarReceivedAt, avatarEventTs } : message);
+          ? { ...message, text, eventId, final: true, isError, emotion } : message);
       }
       return insertAfterRequest(previous, requestId,
         { id: `${requestId}:reply`, type: 'ai', agent: unitId,
-          requestId, text, eventId, final: true, isError, emotion, avatarReceivedAt, avatarEventTs });
+          requestId, text, eventId, final: true, isError, emotion });
     });
   };
   useEffect(() => () => {
@@ -149,11 +142,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         const replyKey = `${item.run_id}:${item.source_event_id || item.event_id}`;
         if (seenReplies.current.has(replyKey)) return;
         seenReplies.current.add(replyKey);
-        const currentRun = autonomous ? !activeRun.current : latestChatRun.current === item.run_id
-          && item.ts >= Math.floor((pending?.startedAt || 0) / 1000);
-        const currentActivity = !item.activity_id || item.activity_id === activeActivityId;
-        finishMessage(requestId, item.text, item.event_id, false, item.emotion,
-          currentRun && currentActivity ? avatarReceiveTime(item) : undefined, item.ts);
+        finishMessage(requestId, item.text, item.event_id, false, item.emotion);
         if (!autonomous) {
           retainRun(item.run_id);
           if (activeRun.current === item.run_id) {
@@ -183,7 +172,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     };
     apiClient.addEventListener('server-event', onEvent);
     return () => apiClient.removeEventListener('server-event', onEvent);
-  }, [unitId, activeActivityId]);
+  }, [unitId]);
   const [go2AssetsOpen, setGo2AssetsOpen] = useState(false);
   const [lampAssetsOpen, setLampAssetsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -262,6 +251,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   const current = runtimeState[primaryRegion?.state_field] || '';
   const connected = connectionField ? runtimeState[connectionField] === true : !!(card?._online ?? card?.online);
   const offline = !(card?._online ?? card?.online) || (connectionField && !connected);
+  useEffect(() => {
+    companionPresentation.updateDevice(unitId, {
+      card, state:runtimeState, connected:eventsHealthy, health:stateHealth,
+    });
+  }, [unitId, card, runtimeState, eventsHealthy, stateHealth]);
   const meta = getAgentMeta(card || { unit_id: unitId, name: unitId });
   const ACCENT = meta.color;
   const hasUserMsg = messages.some(m => m.type === 'user');
@@ -315,8 +309,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     setMessages(prev => [...prev, { id: `${requestId}:user`, type: 'user', text, requestId, runId }]);
     setSending(true);
     activeRun.current = runId;
-    latestChatRun.current = runId;
-    pendingRuns.current.set(runId, { key: requestId, timer: null, startedAt:Date.now() });
+    pendingRuns.current.set(runId, { key: requestId, timer: null });
     const answerText = activityQuestion && unitId === 'go2'
       ? `回答你刚才的问题「${activityQuestion.text}」（${activityQuestion.question_id || activityQuestion.event_id}）：${text}`
       : text;
@@ -333,14 +326,10 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
         if (!pendingRuns.current.has(runId)) return;
         const reply = result?.reply || result?.response;
-        // This callback belongs to the current HTTP request, unlike a delayed
-        // SSE event. Older response formats may not include a timestamp.
-        const replyTs = Number.isFinite(result?.ts) ? result.ts : Date.now() / 1000;
         const replyKey = `${runId}:${result?.source_event_id || result?.event_id}`;
         if (result?.event_id && reply && !seenReplies.current.has(replyKey)) {
           seenReplies.current.add(replyKey);
-          finishMessage(requestId, reply, result.event_id, result.reply_source === 'runtime', result.emotion,
-            latestChatRun.current === runId ? avatarReceiveTime({ts:replyTs}) : undefined, replyTs);
+          finishMessage(requestId, reply, result.event_id, result.reply_source === 'runtime', result.emotion);
           setSending(false);
           activeRun.current = null;
           retainRun(runId);
@@ -352,8 +341,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
               {run_id:runId,agent_id:unitId,tool:'chat',status:result.result,dispatch_only:result.dispatch_only});
           } else {
             finishMessage(requestId, fallback, result?.event_id,
-              result?.reply_source === 'runtime' || !reply && !result?.question, result?.emotion,
-              latestChatRun.current === runId ? avatarReceiveTime({ts:replyTs}) : undefined, replyTs);
+              result?.reply_source === 'runtime' || !reply && !result?.question, result?.emotion);
           }
           setSending(false);
           activeRun.current = null;
@@ -401,12 +389,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           fontFamily: 'inherit', WebkitTapHighlightColor: 'transparent',
         }}>←</button>
 
-        {typeof ShapeFace === 'function' && <ShapeFace agent={card || unitId} size={30}
-          online={!eventsHealthy || stateHealth === 'reconnecting' ? null : !offline}
-          emotion={!offline && connected && eventsHealthy ? portrait?.emotion?.value : 'neutral'}
-          animationKey={portrait?.emotion?.eventId} animated={!offline && connected && eventsHealthy}
-          behavior={offline || !connected || !eventsHealthy ? 'idle'
-            : runtimeState?.activity_state === 'rest' ? 'rest' : sending || controlBusy ? 'thinking' : 'idle'}/>}
         {/* 设备名与右侧实时状态 */}
         <div style={{ minWidth: 0, flex: '0 1 auto' }}>
           <div style={{
@@ -456,6 +438,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         focusKey={trainingSelection}
         defaultAgent={unitId}
         agents={card ? [card] : []}
+        inputAvatar={<CompanionAvatar unitId={unitId} agent={card} size={48}
+          label={`${getAgentDisplayName(card || unitId)}的形象`}/>}
         busy={sending}
         suggestions={!hasUserMsg && !sending && !offline ? suggestions : []}
         onSend={handleSend}

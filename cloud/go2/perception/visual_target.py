@@ -265,7 +265,8 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
                    'estimated_distance_m', 'advance_distance_m') if mode == 'visible_target' else
                   ('cargo_count', 'cargo_ground_contact_visible', 'cargo_bbox_1000',
                    'destination_count', 'destination_ground_contact_visible',
-                   'destination_kind', 'destination_bbox_1000', 'cargo_distance_m', 'advance_distance_m') if mode in {'cargo_geometry', 'cargo_delivery_geometry'} else
+                   'destination_kind', 'destination_bbox_1000', 'cargo_distance_m', 'advance_distance_m',
+                   'destination_distance_m', 'cargo_matches_user_request', 'cargo_match_reason') if mode in {'cargo_geometry', 'cargo_delivery_geometry'} else
                   ('count', 'static', 'confidence', 'bbox',
                    'ground_contact_visible', 'contact_pixel'))
         emit_agent_event('vision.model', phase='parsed', frame_id=frame.get('frame_id'),

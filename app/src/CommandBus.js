@@ -1,6 +1,28 @@
 /* Device controls retain the backend action-result and dispatch-only semantics. */
 const commandBus = {
   async command(unitId, action, params = {}, options = {}) {
+    // The existing transport owns execution; this only projects its lifecycle.
+    // High-rate velocity frames do not start a new character reaction each time.
+    const presentation = typeof companionPresentation !== 'undefined' ? companionPresentation : null;
+    if (!presentation || ['vx', 'vy', 'vyaw'].some(key => Object.hasOwn(params, key)))
+      return this._command(unitId, action, params, options);
+    const chat = action === 'chat';
+    const requestId = chat ? params.resume_run_id || params.task_id || params.run_id ||
+      `${unitId === 'go2' ? 'go2_' : 'lamp_'}${crypto.randomUUID().replaceAll('-', '')}`
+      : `control_${crypto.randomUUID().replaceAll('-', '')}`;
+    const requestParams = chat ? { ...params, [unitId === 'go2' ? 'task_id' : 'run_id']: requestId } : params;
+    presentation.beginRequest(unitId, requestId, {kind:chat ? 'chat' : 'command', behavior:chat ? 'thinking' : 'working'});
+    try {
+      const result = await this._command(unitId, action, requestParams, options);
+      presentation.finishRequest(unitId, requestId, result);
+      return result;
+    } catch (error) {
+      presentation.finishRequest(unitId, requestId, {result:'error'});
+      throw error;
+    }
+  },
+
+  async _command(unitId, action, params = {}, options = {}) {
     const go2Chat = unitId === 'go2' && action === 'chat';
     const deviceChat = action === 'chat' && !go2Chat;
     const taskId = go2Chat ? (params.resume_run_id || params.task_id || `go2_${crypto.randomUUID().replaceAll('-', '')}`) : null;

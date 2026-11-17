@@ -2,13 +2,15 @@
 .shape-face { display:block; flex:none; overflow:visible; transform-origin:center; transition:filter 300ms ease, opacity 300ms ease; }
 .shape-face[data-online="false"] { filter:grayscale(1); opacity:.55; }
 .shape-face__body { fill:var(--avatar-color); }
+.shape-face__light { fill:var(--avatar-light-color); opacity:var(--avatar-light-opacity,.22); transform-origin:50px 85px; }
+.shape-face[data-animated="true"][data-lighting="BLINKING"] .shape-face__light { animation:avatar-light 1.2s ease-in-out infinite; animation-delay:var(--avatar-light-delay,0ms); }
 .shape-face__features { fill:none; stroke:var(--avatar-ink); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
 .shape-face__eye { fill:var(--avatar-ink); stroke:none; transition:ry 200ms ease, cy 200ms ease; }
 .shape-face__expression { opacity:0; transition:opacity 200ms ease; }
 .shape-face__expression[data-current="true"] { opacity:1; }
 .shape-face__brows { stroke-width:3; }
 .shape-face__cheeks { opacity:.4; stroke-width:3; }
-.shape-face__ambient, .shape-face__form, .shape-face__pose { transform-origin:50px 82px; }
+.shape-face__ambient, .shape-face__form, .shape-face__behavior, .shape-face__pose { transform-origin:50px 82px; }
 .shape-face__pose, .shape-face__gaze { transition:transform 200ms ease; }
 .shape-face__eyes { transform-origin:50px -2px; }
 .shape-face[data-emotion="curious"] .shape-face__pose { transform:rotate(-4deg); }
@@ -16,10 +18,16 @@
 .shape-face[data-emotion="sad"] .shape-face__pose { transform:translateY(2px) scale(1.01,.96); }
 .shape-face[data-emotion="angry"] .shape-face__pose { transform:scale(1.025,.975); }
 .shape-face[data-behavior="rest"] .shape-face__pose { transform:translateY(3px) scale(1.03,.94); }
-.shape-face[data-animated="true"] .shape-face__ambient { animation:avatar-breathe 4s ease-in-out infinite; }
+.shape-face[data-animated="true"] .shape-face__ambient { animation:avatar-breathe 4s ease-in-out infinite; animation-delay:var(--avatar-ambient-delay,0ms); }
 .shape-face[data-animated="true"][data-behavior="rest"] .shape-face__ambient { animation-duration:6s; }
-.shape-face[data-animated="true"] .shape-face__expression[data-current="true"] .shape-face__eyes:not([data-closed]) { animation:avatar-blink var(--avatar-blink-period,5s) linear infinite; }
-.shape-face[data-animated="true"][data-behavior="thinking"] .shape-face__expression[data-current="true"] .shape-face__gaze { animation:avatar-look 3.2s ease-in-out infinite; }
+.shape-face[data-animated="true"] .shape-face__expression[data-current="true"] .shape-face__eyes:not([data-closed]) { animation:avatar-blink var(--avatar-blink-period,5s) linear infinite; animation-delay:var(--avatar-blink-delay,0ms); }
+.shape-face[data-behavior="thinking"] .shape-face__behavior { transform:rotate(-5deg); }
+.shape-face[data-animated="true"][data-behavior="thinking"] .shape-face__expression[data-current="true"] .shape-face__gaze,
+.shape-face[data-animated="true"][data-behavior="working"] .shape-face__expression[data-current="true"] .shape-face__gaze { animation:avatar-look 4s ease-in-out infinite; animation-delay:var(--avatar-behavior-delay,0ms); }
+.shape-face[data-animated="true"][data-behavior="explore"] .shape-face__behavior { animation:avatar-explore 4s ease-in-out infinite; animation-delay:var(--avatar-behavior-delay,0ms); }
+.shape-face[data-animated="true"][data-behavior="explore"] .shape-face__expression[data-current="true"] .shape-face__gaze { animation:avatar-scan 4s ease-in-out infinite; animation-delay:var(--avatar-behavior-delay,0ms); }
+.shape-face[data-animated="true"][data-behavior="working"] .shape-face__behavior { animation:avatar-work 1.8s ease-in-out infinite; animation-delay:var(--avatar-behavior-delay,0ms); }
+.shape-face[data-animated="true"][data-behavior="play"] .shape-face__behavior { animation:avatar-engaged 3s ease-in-out infinite; animation-delay:var(--avatar-behavior-delay,0ms); }
 .shape-face[data-animated="true"] [data-motion="pop"] { animation:avatar-pop 600ms ease-out 1; }
 .shape-face[data-animated="true"] [data-motion="squeeze"] { animation:avatar-squeeze 550ms ease-in-out 1; }
 .shape-face[data-animated="true"] [data-motion="glance"] { animation:avatar-glance 700ms ease-in-out 1; }
@@ -27,14 +35,20 @@
 .shape-face[data-animated="true"] [data-motion="startle"] { animation:avatar-startle 600ms ease-out 1; }
 .shape-face[data-animated="true"] [data-motion="sink"] { animation:avatar-sink 750ms ease-in-out 1; }
 .shape-face[data-animated="true"] [data-motion="stretch"] { animation:avatar-stretch 800ms ease-in-out 1; }
+.shape-face[data-animated="true"] .shape-face__form[data-motion]:not([data-motion="none"]) { animation-delay:var(--avatar-motion-delay,0ms); animation-duration:var(--avatar-motion-duration,600ms); }
 .shape-face[data-paused="true"] * { animation-play-state:paused !important; }
 .activity-member--companion { position:relative; gap:5px; }
 .activity-member__portrait { display:flex; align-items:center; justify-content:center; min-height:100px; margin:0 0 6px; }
 .activity-member--companion[data-stale="true"] .shape-face { opacity:.55; }
-@keyframes avatar-breathe { 0%,100% { transform:scale(1); } 50% { transform:translateY(-1px) scale(1.012,1.025); } }
-@keyframes avatar-blink { 0%,91%,97%,100% { transform:scaleY(1); } 94% { transform:scaleY(.08); } }
-@keyframes avatar-look { 0%,100% { transform:translateX(0); } 35%,60% { transform:translateX(3px); } }
-@keyframes avatar-pop { 0% { transform:scale(.9,1.06); } 35% { transform:translateY(-7px) scale(1.04,.98); } 70% { transform:scale(1.06,.94); } 100% { transform:none; } }
+@keyframes avatar-breathe { 0%,100% { transform:scale(1); } 50% { transform:translateY(calc(-3px * var(--avatar-motion-scale,1))) scale(1.025,1.045); } }
+@keyframes avatar-blink { 0%,86%,96%,100% { transform:scaleY(1); } 90%,92% { transform:scaleY(.08); } }
+@keyframes avatar-look { 0%,100% { transform:translateX(0); } 35%,60% { transform:translateX(calc(4px * var(--avatar-motion-scale,1))); } }
+@keyframes avatar-scan { 0%,100% { transform:translateX(calc(-4px * var(--avatar-motion-scale,1))); } 42%,60% { transform:translateX(calc(5px * var(--avatar-motion-scale,1))); } }
+@keyframes avatar-explore { 0%,100% { transform:rotate(-4deg); } 42%,60% { transform:rotate(4deg) translateY(-1px); } }
+@keyframes avatar-work { 0%,100% { transform:rotate(-3deg) scale(1); } 50% { transform:rotate(2deg) scale(1.025,.98); } }
+@keyframes avatar-engaged { 0%,100% { transform:rotate(-2deg); } 50% { transform:rotate(3deg) translateY(calc(-2px * var(--avatar-motion-scale,1))); } }
+@keyframes avatar-light { 0%,100% { opacity:calc(var(--avatar-light-opacity,.22) * .25); transform:scaleX(.85); } 50% { opacity:var(--avatar-light-opacity,.22); transform:scaleX(1.05); } }
+@keyframes avatar-pop { 0% { transform:scale(.9,1.06); } 35% { transform:translateY(calc(-7px * var(--avatar-motion-scale,1))) scale(1.04,.98); } 70% { transform:scale(1.06,.94); } 100% { transform:none; } }
 @keyframes avatar-squeeze { 0%,100% { transform:none; } 40% { transform:scale(1.1,.89); } 72% { transform:scale(.97,1.03); } }
 @keyframes avatar-glance { 0%,100% { transform:none; } 30% { transform:rotate(-7deg); } 65% { transform:rotate(6deg); } }
 @keyframes avatar-tilt { 0%,100% { transform:none; } 45% { transform:rotate(-9deg) translateY(-2px); } }

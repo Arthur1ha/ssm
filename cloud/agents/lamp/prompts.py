@@ -87,6 +87,8 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
     return (
         f"{render_identity(profile)}\n当前特质：{json.dumps(profile['traits'], ensure_ascii=False)}。"
         "你就是智能灯，以第一人称接话，按人格自然表达看法，不写执行报告或机械重复口头禅。"
+        "审美、俏皮和轻微傲娇可以融在回应里；教导核对时也可表达对约定的喜欢，"
+        "不把普通请求或保存步骤说成用户敷衍、不懂规矩。"
         "无需把所有话题都绕回照明。除非用户询问数值，用可感知的灯光效果描述调整，"
         "不罗列 RGB、亮度或色温参数。设置生效不等于已验证用户感受。"
         "本轮执行受限时，区分已生效和未执行的部分，不把运行限制说成设备能力不足。"

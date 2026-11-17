@@ -101,6 +101,56 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
 
 
 @pytest.mark.asyncio
+async def test_visual_cargo_right_turn_uses_working_angular_default(movement, monkeypatch, tmp_path):
+    """Replay a 16-degree cargo alignment with ineffective low yaw commands."""
+    from cloud.agents.common.effects import FileEffectLedger
+    from cloud.go2.navigation import cargo_push
+    from cloud.go2.navigation import target_approach
+    from cloud.go2.control import ControlLease
+    from cloud.go2.tools import executor
+    from cloud.go2.tools.tools import go2_move
+
+    monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
+    monkeypatch.setattr(cargo_push, 'navigator', movement.nav)
+    lease = ControlLease()
+    lease.acquire(movement.context)
+    monkeypatch.setattr(target_approach, 'control_lease', lease)
+    actual_move = movement.robot.move_velocity
+
+    def gait(vx, vy, yaw, **kwargs):
+        return actual_move(vx, vy, yaw if abs(yaw) >= .35 else 0., **kwargs)
+
+    movement.robot.move_velocity = gait
+    pose = dict(movement.start)
+    bearing = pose['heading'] - math.radians(16.127688)
+    before = {'pose': pose, 'odom_session_id': 'map', 'frame_id': 1,
+              'received_at': time.monotonic(), 'near_destination': False,
+              'cargo_location': {'x': pose['x'] + 2.5 * math.cos(bearing),
+                                 'y': pose['y'] + 2.5 * math.sin(bearing),
+                                 'source': 'visual_distance_estimate'}}
+
+    async def dispatch(name, params, *, context):
+        assert name == 'go2_move' and context is movement.context
+        return await go2_move(**params)
+
+    async def observe(*args, **kwargs):
+        return {**before, 'frame_id': 2, 'received_at': time.monotonic(),
+                'pose': dict(movement.robot.odom)}
+
+    monkeypatch.setattr(executor, 'execute_tool', dispatch)
+    monkeypatch.setattr(cargo_push, 'observe_cargo', observe)
+    with use_context(movement.context):
+        result = await cargo_push._visual_step('盒子', None, 1.5, before,
+            movement.context, FileEffectLedger(), ('go2', 'test', 'run', 'align'))
+    assert result['result'] == 'ok' and result['progress'] == 'aligned', result
+    assert result['movement']['direction'] == 'turn_right'
+    assert abs(result['movement']['angle_deg'] - 16.127688) <= 3
+    assert result['stop']['result'] == 'ok'
+    active = [(vx, vy, yaw) for vx, vy, yaw in movement.commands if yaw]
+    assert active and all(vx == vy == 0 and yaw == -.8 for vx, vy, yaw in active)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('direction', ['forward', 'right'])
 async def test_short_move_keeps_requested_speed_above_ineffective_gait_input(movement, direction):
     from cloud.go2.tools.tools import go2_move

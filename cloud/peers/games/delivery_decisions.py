@@ -210,8 +210,12 @@ def _instructions(phase: str) -> str:
         "只有destination_confirmed为true才可push，可根据最新视觉建议填写任意正数米的距离；省略时由推物工具的本次视觉观察估算，不使用固定步长；"
         "不因自己到站或移动过就推断货物送达。货物丢失、身份不明或路径受阻时先观察、询问或停止。"
         "question时question填写实际要问的问题；observe可用question说明需要核对的画面。"
-        "只有latest_push的权威回执已确认delivered=true，即停稳后一张画面复核同一货物已在指定目的地附近，才可finish；"
-        "这是大致到位，不要求完全覆盖标记、精确对位或完整入区。"
+        "先由推送工具调整到货物背向目的地的一侧，再沿机器狗、货物、目的地大致共线的方向推进；"
+        "positioned、aligned、approached仍需继续push。"
+        "latest_push的directional_push_attempted=true且confirmation=directional_move_and_stop、stop.result=ok时，"
+        "本单已完成朝指定方向的推送尝试，应finish，不要求精确到位或接触后仍看见货物，不额外后退复查。"
+        "这不证明货物实际位移或送达，speech说明已朝指定方向尝试推送并停稳，不能说送到了；"
+        "只有delivered=true且cargo_near_destination_and_stopped才可说观察确认货物已在目的地附近。"
         "accepted、executing、unknown、口头报告或历史快照均不满足结束条件。"
     )
 

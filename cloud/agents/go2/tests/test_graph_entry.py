@@ -33,6 +33,36 @@ class ScriptedModel(JsonReplyModel):
 
 
 @pytest.mark.asyncio
+async def test_already_near_receipt_cannot_be_rewritten_as_physical_push(entry, monkeypatch):
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': 'go2_push_cargo', 'id': 'push',
+            'args': {'cargo': '前面的盒子', 'destination': '蓝色点位', 'final': False}}]),
+        AIMessage(content='成了！我走过去推了几步，真的把盒子推过去了。'),
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    monkeypatch.setattr(go2_graph.go2, 'is_connected', True)
+    message = '观察时货物原本就在指定目的地附近；本次推物检查仅原地观察并确认停稳，没有执行靠近或推送。'
+
+    async def execute(name, params, *, context):
+        from cloud.go2.perception.cargo import _user_request
+        assert name == 'go2_push_cargo'
+        assert _user_request.get() == '把前面的盒子推到蓝色点位上'
+        return {'result': 'ok', 'delivered': True, 'progress': 'already_near_destination',
+                'motion_performed': False, 'movement': None, 'message': message}
+
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    context = ExecutionContext('already-near', 'visitor', False, expires_at=time.time() + 60)
+    result = await go2_graph.run_go2_loop('already-near', '把前面的盒子推到蓝色点位上',
+                                        context=context, run_id='already-near')
+    assert result['response'] == message
+    assert len(model.inputs) == 2  # No extra model is used to rewrite the reply.
+    assert any(kind == 'agent_reply' and fields.get('text') == message for kind, fields in entry)
+    stored = go2_graph.get_store().get('already-near', 'already-near')
+    assert stored.reply_source == 'tool_receipt' and stored.response == message
+
+
+@pytest.mark.asyncio
 async def test_delegated_native_skill_returns_facts_without_model_or_device_reply(entry, monkeypatch):
     model = ScriptedModel([])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)

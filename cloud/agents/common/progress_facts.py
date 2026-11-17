@@ -39,7 +39,9 @@ _ID_FIELDS = ("event_id", "source_event_id", "trace_id", "run_id", "parent_run_i
               "observation_event_id", "frame_id", "teaching_id", "training_ref", "activity_id", "question_id")
 _RESULT_FIELDS = {
     "action": {"ism_state", "confirmation", "device_connected", "execution_phase",
-               "completion_basis", "dispatch_only", "skipped", "goal_state"},
+               "completion_basis", "dispatch_only", "skipped", "goal_state",
+               "progress", "motion_performed", "cargo_motion_confirmed", "delivered",
+               "directional_push_attempted", "push_direction_precision", "push_heading_rad"},
     "query": {"source", "ism_state", "connected", "connection_state", "life_state", "body_state",
               "battery_soc", "found", "count", "as_of", "frame_id"},
     "message": {"message_id", "request_id", "delivery_status", "conversation_id", "reply_to"},
