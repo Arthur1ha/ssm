@@ -5,6 +5,20 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 
+GAME_CONTEXT_GUIDANCE = (
+    "game_catalog（games）是已注册游戏目录，保留暂时不能开局的玩法与规则；"
+    "ready=false 或当前可玩列表为空不表示没有这些游戏。"
+    "只邀请 ready=true 的玩法，发送和接受仍须通过实时门禁。"
+    "阻塞原因以 reason 为准：go2_remote_control 表示仍处于遥控模式，"
+    "不能据此断言用户正在操纵或机器狗正在走动；"
+    "go2_action_unconfirmed 表示动作回执未确认，go2_navigation_active 表示导航未结束，"
+    "go2_not_stopped 表示运动请求或移动状态尚未解除，"
+    "go2_task_active 表示任务仍占用，go2_waiting_for_answer 表示等待回答。"
+    "life_state=explore 本身不表示正在移动或没有空参与游戏，轮次间可以邀请。"
+    "只陈述已提供的具体阻碍，其他原因不猜测；不能把暂时受阻说成游戏未注册。"
+)
+
+
 @dataclass(frozen=True)
 class Game:
     game_id: str
@@ -80,17 +94,25 @@ def game_invitation_block_reason(activity_id: str | None, sender: str, target: s
     if not go2.is_connected or getattr(go2, "runtime", None) is None:
         return "go2_disconnected"
     state = go2.runtime.snapshot()
-    if (state.get("connected") is not True or state.get("connection_state") != "online"
-            or state.get("activity_state") != "active"
-            or state.get("life_state") not in {"idle", "explore"}
-            or state.get("life_task_id") is not None
-            or state.get("pending_action") is not None
-            or state.get("navigation_active") is not False
-            or state.get("velocity_requested") is not False
-            or state.get("control_mode") != "normal"
-            or state.get("body_state") == "moving"
-            or drive.user_interrupt or drive._pending_question_id or drive._active_goal):
-        return "go2_busy"
+    if state.get("connected") is not True or state.get("connection_state") != "online":
+        return "go2_disconnected"
+    if state.get("control_mode") != "normal":
+        return "go2_remote_control" if state.get("control_mode") == "remote" else "go2_control_unknown"
+    if state.get("pending_action") is not None:
+        return "go2_action_unconfirmed"
+    if state.get("navigation_active") is not False:
+        return "go2_navigation_active"
+    if state.get("velocity_requested") is not False or state.get("body_state") == "moving":
+        return "go2_not_stopped"
+    if state.get("activity_state") != "active":
+        return "go2_inactive"
+    if drive.user_interrupt:
+        return "go2_interrupted"
+    if drive._pending_question_id:
+        return "go2_waiting_for_answer"
+    if (state.get("life_task_id") is not None or drive._active_goal
+            or state.get("life_state") not in {"idle", "explore"}):
+        return "go2_task_active"
     lease = control_lease.snapshot()
     # A completed autonomous exploration segment may retain its own lease.
     # An outstanding user/other session's lease still reserves control.

@@ -122,11 +122,29 @@ def test_delegated_lighting_keeps_game_instructions_out_of_simple_commands(facts
     agent, _, space = facts
     space["peers"] = [{"unit_id": "go2"}]
     monkeypatch.setattr("cloud.peers.games.playable_games", lambda *_a: pytest.fail("no game lookup"))
+    monkeypatch.setattr("cloud.peers.games.game_catalog", lambda *_a: pytest.fail("no game lookup"))
     run = GraphRun("lighting", "session", "暖白", time.time() + 30)
     messages = prompts.decision_messages(run, agent=agent, unit_id=UNIT, lighting_only=True)
     assert context(messages)["playable_games"] == []
+    assert context(messages)["game_catalog"] == []
     assert "evidence_refs" not in messages[0].content
     assert "执行前" in messages[0].content
+
+
+def test_lamp_keeps_delivery_rules_while_remote_control_blocks_invitation(facts, monkeypatch):
+    agent, _, space = facts
+    space['peers'] = [{'unit_id': 'go2'}]
+    space['activity'] = {'activity_id': 'act_delivery'}
+    monkeypatch.setattr('cloud.peers.games.base.game_invitation_block_reason',
+                        lambda *_: 'go2_remote_control')
+    run = GraphRun('delivery', 'session', '你们两玩送货游戏', time.time() + 30)
+    messages = prompts.decision_messages(run, agent=agent, unit_id=UNIT)
+    data = context(messages)
+    delivery = next(game for game in data['game_catalog'] if game['game_id'] == 'push_delivery')
+    assert delivery['rules'] and delivery['target'] == 'go2'
+    assert delivery['ready'] is False and delivery['reason'] == 'go2_remote_control'
+    assert data['playable_games'] == []
+    assert '不表示没有这些游戏' in messages[0].content
 
 
 def test_delegated_lamp_entry_dispatches_once_and_reuses_completed_run(facts, monkeypatch, tmp_path):

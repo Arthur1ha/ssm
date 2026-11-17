@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from collections.abc import Callable
 
@@ -15,6 +17,58 @@ from cloud.agents.common.tool_results import SUCCESS, UNCERTAIN
 from cloud.observability import emit_agent_event
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_REASONS = {
+    "localization_unavailable": "暂时未取得可用的位置数据",
+    "map_unavailable": "暂时未取得可用的导航地图",
+    "posture_not_confirmed": "暂时还不能确认站立姿态",
+    "motion_not_observed": "本次没有确认到实际移动",
+    "stop_unconfirmed": "暂时还不能确认已经停稳",
+    "run_deadline_exceeded": "本次处理时间已用尽",
+    "activity_already_started_for_intent": "活动已经启动，无需重复启动",
+    "target_unavailable": "目标设备暂时不可用",
+    "disconnected": "设备连接已断开",
+    "InvalidParameterValue.NoFaceInPhoto": "这张照片中暂未识别到人脸",
+}
+_DIAGNOSTIC = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?\s+|Error\s+code:\s*)[1-5]\d\d\b"
+    r"(?:\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error|Service Unavailable))?"
+    r"|\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b"
+    r"|\b[A-Z][A-Za-z0-9]*(?:\.[A-Z][A-Za-z0-9]*)+\b"
+    r"|\b[A-Za-z][A-Za-z0-9]*(?:Error|Exception)\b", re.ASCII
+)
+
+
+def public_reply_text(value: object, *, diagnostic: bool = False) -> str:
+    """Translate diagnostic fragments without changing receipts or retry policy."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if text in _PUBLIC_REASONS:
+        return _PUBLIC_REASONS[text]
+    if diagnostic and not re.search(r"[\u3400-\u9fff]", text) and not _DIAGNOSTIC.fullmatch(text):
+        # Failure messages can be provider prose rather than structured codes.
+        # Ordinary English conversation does not take this diagnostic path.
+        return "这一步暂时未完成" if text else ""
+    cursor = 0
+    decoder = json.JSONDecoder()
+    while (start := text.find("{", cursor)) >= 0:
+        try:
+            payload, length = decoder.raw_decode(text[start:])
+        except ValueError:
+            cursor = start + 1
+            continue
+        if isinstance(payload, dict) and {"error", "error_code", "status_code"}.intersection(payload):
+            replacement = "这一步暂时未完成"
+            text = text[:start] + replacement + text[start + length:]
+            cursor = start + len(replacement)
+        else:
+            cursor = start + length
+    # Hierarchical executor codes describe one feedback, not several failures.
+    text = re.sub(r"\b(?:cargo_search_unconfirmed|cargo_push_unconfirmed):", "", text, flags=re.ASCII)
+    text = _DIAGNOSTIC.sub(
+        lambda match: _PUBLIC_REASONS.get(match.group(), "这一步暂时未完成"), text)
+    return text
 
 
 def step_kind(step: dict) -> str:
@@ -64,19 +118,19 @@ async def finalize_reply(run: Run, *, model, instructions,
             emit_agent_event("model.response", **fields, output=answer)
             answer, run.emotion = parse_emotional_reply(answer)
         else:
-            run.response, run.reply_source = fallback(run), "runtime"
+            run.response, run.reply_source = public_reply_text(fallback(run)), "runtime"
             run.emotion = "neutral"
             return run
         if not validator(answer, run):
             raise ValueError("invalid_reply_format")
-        run.response, run.reply_source = answer.strip(), source
+        run.response, run.reply_source = public_reply_text(answer), source
         emit_agent_event("reply.validated", **fields, reply=run.response, validation="format",
                          reason="decision_final" if source == "decision_model" else "factual_reply",
                          reply_kind="final")
     except Exception as exc:
         logger.warning("agent reply unavailable agent=%s run=%s error=%s",
                        run.agent_id, run.run_id, type(exc).__name__)
-        run.response, run.reply_source = fallback(run), "runtime"
+        run.response, run.reply_source = public_reply_text(fallback(run)), "runtime"
         run.emotion = "neutral"
     finally:
         if expression_emotion is not None:
@@ -105,14 +159,14 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
     if failed:
         reason = failed[-1].get("message") or failed[-1].get("error") or failed[-1].get("reason")
         prefix = "部分操作已有成功回执，其余未完成。" if completed else "本次请求未完成。"
-        return prefix + (f"执行反馈：{reason[:160]}" if isinstance(reason, str) and reason else "")
+        return prefix + (f"执行反馈：{public_reply_text(reason[:160], diagnostic=True)}" if isinstance(reason, str) and reason else "")
     kinds = {step_kind(step) for step, result in results if result.get("result") in SUCCESS}
     if "training_proposal" in kinds:
         return "教导草案已生成，请核对后确认；尚未执行物理动作。"
     if "activity" in kinds:
         return "活动状态已更新。"
     if "message" in kinds:
-        return "消息已提交。"
+        return "消息已发出；对方的处理结果以实际反馈为准。"
     if "configuration" in kinds:
         return "配置已保存。"
     if completed:

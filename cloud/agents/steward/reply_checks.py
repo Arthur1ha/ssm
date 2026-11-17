@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.steward.replies import finalize_steward_reply
+from cloud.agents.steward.prompts import reply_prompt
 
 
 def execution(draft):
@@ -53,6 +54,23 @@ async def test_invalid_recomposition_falls_back_without_another_model_attempt():
     model.ainvoke.assert_awaited_once()
     assert run.response == "活动已启动，后续协作结果尚未确认。"
     assert run.reply_source == "runtime"
+
+
+async def test_activity_only_receipt_supplies_joined_scope_to_original_reply_model():
+    run = execution('')
+    run.steps = [run.steps[0]]
+    run.status = 'ok'
+    profile = {'agent_id': 'cloud_orchestrator', 'name': '管家',
+               'prompt': '简短回应。', 'traits': {'warmth': 70}}
+    model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(
+        content='已把送货游戏交给两位搭档，让它们自己商量分工。')))
+    await finalize_steward_reply(run, model=model,
+                                instructions=lambda current: reply_prompt(current, profile))
+    model.ainvoke.assert_awaited_once()
+    messages = model.ainvoke.call_args.args[0]
+    assert '无需主动讲解启动确认' in messages[0].content
+    assert any('start_activity' in message.content for message in messages)
+    assert run.response == '已把送货游戏交给两位搭档，让它们自己商量分工。'
 
 
 @pytest.mark.parametrize("with_query", [False, True])

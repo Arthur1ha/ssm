@@ -45,22 +45,38 @@ function processStripIds(value) {
     .replace(/[ \t]{2,}/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').trim();
 }
 function processErrorText(value) {
-  if (typeof value !== 'string') return '';
+  if (typeof value !== 'string' || !value.trim()) return '';
   let text = value.trim();
-  // Some old receipts contain serialized errors. Only take diagnostic fields.
+  const known = activityReasonText({reason:text});
+  if (known) return known;
+  // Historical SDK payloads stay in the logs. Only readable prose is public.
   try {
     const parsed = JSON.parse(text);
     const detail = parsed?.error || parsed?.detail || parsed;
-    if (detail && typeof detail === 'object') text = [detail.code, detail.type, detail.message]
-      .filter(item => typeof item === 'string' && item.trim()).join(' · ');
+    text = typeof detail === 'string' ? detail : detail?.message || '';
   } catch (_) {}
-  return processStripIds(text);
+  return /[\u3400-\u9fff]/.test(text) && processUserText(text) || '这一步暂时未完成。';
 }
 function processUserText(value) {
   if (typeof value !== 'string') return '';
-  const text = processStripIds(value.trim());
+  let text = processStripIds(value.trim());
+  let diagnostic = false;
+  text = text.replace(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g, payload => {
+    if (!/["'](?:error|error_code|status_code|error_type)["']\s*:/.test(payload)) return payload;
+    diagnostic = true;
+    return '相关处理暂未完成';
+  });
+  text = text.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/gi, code => {
+    const readable = activityReasonText({reason:code});
+    if (!readable) diagnostic = true;
+    return readable || '相关处理暂未完成';
+  });
+  const hadProse = /[\u3400-\u9fff]/.test(text.replace(/相关处理暂未完成/g,''));
+  text = text.replace(/\b(?:[A-Z][A-Za-z0-9]*\.)+[A-Z][A-Za-z0-9]*\b|\b\w*(?:Error|Exception)\b|\b(?:HTTP(?:\/\d(?:\.\d)?)?\s*)?\d{3}\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error|Bad Gateway|Service Unavailable)\b|\bHTTP(?:\/\d(?:\.\d)?)?\s*\d{3}\b/g,
+    () => {diagnostic=true;return '相关处理暂未完成';});
   // Public facts still contain correlation fields. None are display copy.
-  if (/^[{\[]/.test(text) || /\b(?:task|run|parent_run|step|trace|event|source_event|request|frame|conversation|teaching|tool_call|unit|agent)_id\b/i.test(text)
+  if (diagnostic && !hadProse || /^[{\[]/.test(text) || /Error code:|Traceback|Free quota exhausted|model.*(?:does not exist|not found|unavailable)|provider.*(?:rejected|error)/i.test(text)
+      || /\b(?:task|run|parent_run|step|trace|event|source_event|request|frame|conversation|teaching|tool_call|unit|agent)_id\b/i.test(text)
       || /\b(?:task|run|step|tr|evt|req|frame|chat)_[a-f0-9_-]{8,}\b/i.test(text)
       || /^[a-z]+(?:_[a-z0-9]+)+$/i.test(text)) return '';
   return text;
@@ -121,7 +137,9 @@ function processOutcome(event) {
   if (event.dispatch_only && ['ok','accepted'].includes(event.status)) return '已提交';
   if (event.result_kind === 'message' && event.status === 'accepted')
     return event.public_result?.delivery_status === 'accepted' ? '已接受' : '已发出';
-  return ({ok:'已完成',accepted:'已完成',executing:'执行中',partial:'部分完成',error:'执行失败',failed:'执行失败',blocked:'未执行',rejected:'请求被拒绝',offline:'设备离线',unavailable:'暂不可用',
+  if (event.result_kind === 'message' && event.status === 'ok') return '已处理消息';
+  if (event.result_kind === 'message' && event.status === 'received') return '消息已送达';
+  return ({ok:'已完成',accepted:'已完成',executing:'执行中',partial:'部分完成',error:'本次未完成',failed:'本次未完成',blocked:'本次未执行',rejected:'本次未执行',offline:'设备离线',unavailable:'暂不可用',
     timeout:'结果待确认',unknown:'结果待确认',cancelled:'已取消',needs_clarification:'等待你补充信息'})[event.status] || '';
 }
 function processNeedsAttention(event) {
@@ -262,26 +280,22 @@ function processResultNotes(event) {
     });
   }
   const reason = reasonText(event) || reasonText(result);
-  const diagnostics = failed ? [...new Set([
-    Number.isInteger(result.status_code) ? `HTTP ${result.status_code}` : '',
-    result.error_code, result.error_type || result.error,
-  ].map(processErrorText).filter(Boolean))].join(' · ') : '';
-  if (diagnostics) add(diagnostics,true);
   const message = failed ? processErrorText(result.message) : processUserText(result.message);
   const speech = ['message','question'].includes(activityEventKind(event));
   const text = speech ? '' : processUserText(event.text);
   if (message) add(message,failed);
-  if (reason && !message.startsWith(reason) && reason !== summary && reason !== diagnostics) add(reason,failed);
+  if (reason && !message.startsWith(reason) && reason !== summary) add(reason,failed);
   if (text && !message.startsWith(text) && text !== summary && text !== reason && text !== activityDecisionBasis(event)?.reason) add(text,failed);
   if (['timeout','unknown'].includes(event.status) && !reason && !message)
     add('尚未收到设备的执行确认，目前无法判断是否完成。',true);
   else if (failed && !members.length && !reason && !message && !text)
-    add(event.status === 'needs_clarification' ? '需要你补充信息后才能继续。' : '这次操作未能完成。',true);
+    add(event.status === 'needs_clarification' ? '需要你补充信息后才能继续。' : '这一步暂时未完成。',true);
   const receiptStatus = result.result || result.status;
   if (!members.length && event.result_kind === 'message') {
     if (result.delivery_status === 'received') add('消息已送达，等待对方回应。');
     else if (result.delivery_status === 'accepted') add('对方已接受请求，执行结果仍待反馈。');
-    else if (['accepted','ok'].includes(receiptStatus)) add('消息已发出，等待对方回应。');
+    else if (receiptStatus === 'ok' || event.status === 'ok') add('已处理这条消息。');
+    else if (receiptStatus === 'accepted') add('消息已发出，等待对方回应。');
   } else if (!members.length && !rules && !message && !reason && !failed
       && result.dispatch_only && ['ok','accepted'].includes(receiptStatus)) {
     add('请求已提交，执行结果仍待确认。');

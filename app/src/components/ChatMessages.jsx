@@ -51,7 +51,7 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
             </div>
           );
         }
-        if (e.type === 'system' || e.isError) return <p key={e.id || e.eventId || `status-${i}`} className="chat-system-status" role="status">{e.text}</p>;
+        if (e.type === 'system' || e.isError) return <p key={e.id || e.eventId || `status-${i}`} className="chat-system-status" role="status">{processErrorText(e.text)}</p>;
         if (e.type === 'ai' || e.type === 'peer_message') {
           const agent = e.sender || e.agent || defaultAgent;
           const prior = rows.slice(0,rows.findIndex(row => row.entry === e)).reverse().find(row => row.entry.type !== 'process_group')?.entry;
@@ -62,7 +62,7 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
         return renderEntry?.(e) || null;
       })}
       {busy && !pendingGroup && <div className="chat-messages__waiting"><ProcessWaiting/></div>}
-      {training?.error && <p role="alert">{training.error}</p>}
+      {training?.error && <p className="chat-system-status" role="status">{processErrorText(training.error)}</p>}
       <div ref={bottomRef}/>
     </div>;
 }

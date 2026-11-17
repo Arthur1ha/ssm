@@ -253,7 +253,9 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       assert.equal(await page.$('.run-process-summary__status[data-completed]'),null);
       assert.doesNotMatch(await page.$$eval('.run-process-summary summary',nodes=>nodes.map(node=>node.textContent).join('')),/✓/);
       await page.evaluate(()=>{waitRows[waitRows.length-2].status='unknown';renderWaiting();});
-      assert.match(await page.$eval('.run-process-summary__status[data-attention]',node=>node.textContent),/待确认/);
+      assert.equal(await page.$('.run-process-summary__status'),null,'A prior attempt status must not label the still-running request');
+      assert.equal(await page.$('.run-process__feedback-marker'),null);
+      assert.equal(await page.$eval('.run-process__feedback[data-attention]',node=>getComputedStyle(node).color),'rgb(166, 181, 201)');
       assert.equal(await page.$$('.run-process-summary .run-process__waiting').then(nodes=>nodes.length),1);
     }
     // Compare home/device presentation using the same messages and both real feed paths.

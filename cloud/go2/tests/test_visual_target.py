@@ -51,6 +51,55 @@ def target():
     return project_ground_contact(observation, frame, pose, 0., calibration), pose
 
 
+def test_live_pose_has_no_image_age_ttl_but_still_requires_current_session(monkeypatch):
+    from cloud.go2.perception import visual_target
+
+    pose = {'x': 1., 'y': 2., 'heading': .3, 'session_id': 'current'}
+    robot = SimpleNamespace(is_connected=True, _odom_session_id='current',
+                            odom=pose, odom_received_at=time.monotonic() - 30)
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    assert visual_target._live_pose('current') is pose
+    with pytest.raises(TargetUnlocalized, match='odom_session_mismatch'):
+        visual_target._live_pose('retired')
+    robot.odom_received_at = None
+    with pytest.raises(TargetUnlocalized, match='localization_unavailable'):
+        visual_target._live_pose('current')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('streaming', [True, False])
+async def test_still_capture_uses_new_packets_even_when_odom_ages_above_point_eight(monkeypatch, streaming):
+    from cloud.go2.perception import visual_target
+
+    tick, updates = [100.], [0]
+    pose = {'x': 1., 'y': 2., 'heading': .3, 'session_id': 'current'}
+    robot = SimpleNamespace(is_connected=True, _odom_session_id='current',
+                            odom=pose, odom_received_at=98.)
+    def capture():
+        return b'jpeg', {'frame_id': updates[0], 'received_at': tick[0],
+            'pose_received_at': robot.odom_received_at, 'pose_at_capture': pose,
+            'odom_session_id': 'current'}
+    robot.latest_frame_snapshot = capture
+    robot.odom_frame_id = 'odom'
+    async def advance(_):
+        tick[0] += .1
+        updates[0] += 1
+        if streaming:
+            robot.odom_received_at = tick[0] - 1.1
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    monkeypatch.setattr(visual_target, 'time', SimpleNamespace(monotonic=lambda: tick[0], time=time.time))
+    monkeypatch.setattr(visual_target, 'asyncio', SimpleNamespace(sleep=advance))
+    monkeypatch.setattr(visual_target, 'image_quality', lambda _: 1.)
+    if streaming:
+        jpeg, frame, _ = await visual_target._capture_still()
+        assert jpeg == b'jpeg'
+        assert tick[0] - frame['pose_received_at'] > .8
+        assert updates[0] >= 3
+    else:
+        with pytest.raises(TargetUnlocalized, match='fresh_still_frame_unavailable'):
+            await visual_target._capture_still()
+
+
 def test_projection_and_standoff_distance():
     location, pose = target()
     assert math.isclose(location['x'], 1.)
@@ -178,12 +227,14 @@ async def test_invalid_vision_json_logs_preview_and_blocks(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('feedback', ['standing', 'still_moving', 'stale_standing', 'disconnected', 'new_session', 'expired'])
-async def test_posture_wait_requires_fresh_live_feedback_without_assigning_a_pose(monkeypatch, feedback):
+@pytest.mark.parametrize('feedback', ['standing', 'still_moving', 'stale_standing', 'motor_fault',
+                                    'pending_action', 'disconnected', 'new_session', 'expired'])
+async def test_posture_wait_uses_confirmed_body_contract_without_assigning_a_pose(monkeypatch, feedback):
     from cloud.go2.perception import visual_target
     clock = [100.]
     robot = SimpleNamespace(body_state='moving', is_connected=True,
                             _sport_state_observed_at=100., _odom_session_id='map')
+    robot.body_ready_reason = lambda: 'body_telemetry_unavailable' if feedback == 'motor_fault' else None
     context = SimpleNamespace(expires_at=None)
     monkeypatch.setattr(visual_target, 'go2', robot)
     monkeypatch.setattr(visual_target, 'current_context', lambda: context)
@@ -194,6 +245,10 @@ async def test_posture_wait_requires_fresh_live_feedback_without_assigning_a_pos
             robot.body_state, robot._sport_state_observed_at = 'standing', clock[0]
         elif feedback == 'stale_standing':
             robot.body_state, robot._sport_state_observed_at = 'standing', 90.
+        elif feedback in {'motor_fault', 'pending_action'}:
+            robot.body_state = 'standing'
+            if feedback == 'pending_action':
+                robot.pending_action = {'command': 'Hello'}
         elif feedback == 'disconnected':
             robot.is_connected = False
         elif feedback == 'new_session':
@@ -201,7 +256,7 @@ async def test_posture_wait_requires_fresh_live_feedback_without_assigning_a_pos
         elif feedback == 'expired':
             context.expires_at = time.time() - 1
     monkeypatch.setattr(visual_target.asyncio, 'sleep', feedback_tick)
-    if feedback == 'standing':
+    if feedback in {'standing', 'stale_standing'}:
         await visual_target.wait_for_standing()
     else:
         reason = {'disconnected': 'disconnected', 'new_session': 'odom_session_mismatch',
@@ -210,6 +265,24 @@ async def test_posture_wait_requires_fresh_live_feedback_without_assigning_a_pos
             await visual_target.wait_for_standing()
     if feedback == 'still_moving':
         assert robot.body_state == 'moving'
+
+
+@pytest.mark.asyncio
+async def test_standing_gate_uses_real_body_contract_after_sport_timestamp_ages(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import visual_target
+    from cloud.go2.state_life_checks import robot_at
+
+    robot = robot_at('standing')
+    robot._sport_state_observed_at = time.monotonic() - 60
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    monkeypatch.setattr(visual_target, 'current_context', lambda: SimpleNamespace(expires_at=None))
+    sleep = AsyncMock()
+    monkeypatch.setattr(visual_target.asyncio, 'sleep', sleep)
+    before = robot.state_snapshot()
+    await visual_target.wait_for_standing()
+    sleep.assert_not_awaited()
+    assert robot.state_snapshot() == before
 
 
 @pytest.mark.asyncio
@@ -427,6 +500,7 @@ def lidar_localizer(monkeypatch, tmp_path):
              'pose_received_at': now, 'odom_session_id': 's', 'pose_at_capture': pose}
     voxel = {'data': {'resolution': .05, 'data': {'points': [[2., 0., .2]]}}}
     robot = SimpleNamespace(body_state='standing', _sport_state_observed_at=now,
+                            body_ready_reason=lambda: None,
                             voxel_raw=voxel, voxel_received_at=now,
                             odom_frame_id='odom', voxel_frame_id='odom')
     calls = []

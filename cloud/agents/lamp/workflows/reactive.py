@@ -18,13 +18,14 @@ from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict
 
-from cloud.agents.common.replies import factual_fallback, valid_reply_format
+from cloud.agents.common.replies import factual_fallback, public_reply_text, valid_reply_format
 from cloud.agents.common.emotions import EMOTION_INSTRUCTIONS, REPLY_INSTRUCTIONS, parse_emotional_reply
 from cloud.agents.lamp.prompts import persona_reply_prompt
 from cloud.agents.common.runner import GraphRun
 from cloud.agents.common.messages import observed_tool_messages, reply_messages, role_messages
 from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.observability import emit_agent_event
+from cloud.peers.games.base import GAME_CONTEXT_GUIDANCE
 
 PHYSICAL = {"set_led_state", "set_led_color", "blink_led"}
 VISIBLE = PHYSICAL | {"send_message", "request_peer_skill", "list_peers", "get_space_context"}
@@ -66,12 +67,12 @@ def _prompt(agent, state: ReactiveState):
     state["decision_space"] = deepcopy(space)
     games = []
     if state["sense"].get("social_opportunity"):
-        from cloud.peers.games import playable_games
+        from cloud.peers.games import game_catalog
         from cloud.peers.social import activity_peers
         activity, peers = activity_peers(agent._find_led_unit(), space["peers"])
         for peer in peers:
             games.extend({"target": peer["unit_id"], **item} for item in
-                         playable_games((activity or {}).get("activity_id"),
+                         game_catalog((activity or {}).get("activity_id"),
                                         agent._find_led_unit(), peer["unit_id"]))
     if agent._belief_summary:
         history = f"历史规律摘要：{agent._belief_summary}"
@@ -100,7 +101,7 @@ def _prompt(agent, state: ReactiveState):
         "decision_reason 只作为选择依据保存，供用户按需查看，不写入消息正文。"
         "用第一人称简短记录为什么现在作这个决定，不写执行报告。"
         "事实归属于观察来源，不声称自己看到了同伴的画面，不编造同伴完整任务情况。"
-        "game_id 只填工具参数，不写入消息正文；玩法只从当前可玩列表读取。"
+        "game_id 只填工具参数，不写入消息正文；玩法从游戏目录读取。"
         "邀请正文用自己的口吻简短邀请，只补充对方参与所需的玩法与输赢约定，通常两三句即可；"
         "不逐条复述完整规则、策略、权限、安全校验或回执流程，也不解释邀请原因。"
         "未邀请或未获接受时，不把玩法说成双方已经谈过或正在进行的事情。"
@@ -108,8 +109,9 @@ def _prompt(agent, state: ReactiveState):
         "获接受后的游戏出题由独立任务校验。"
         "observations.game_readiness 是当前真实开局门禁；受阻时可普通交流，"
         "但不能承诺已开局、猜测阻塞原因或绕过未确认的物理回执。"
-        "当前可玩列表只描述能力，不是发起游戏的理由。可以普通交流或不发消息。邀请不等于游戏完成。"
-        "游戏的规则、策略及完成条件从当前可玩列表读取。"
+        + GAME_CONTEXT_GUIDANCE +
+        "游戏目录不是发起游戏的理由。可以普通交流或不发消息。邀请不等于游戏完成。"
+        "游戏的规则、策略及完成条件从游戏目录读取。"
         "观测中的 training_intent 是本次唯一允许启动的事件教导；若不执行，应说明原因。"
         "training_intent.situation 若存在，是用户教导的语义适用情境，须结合真实当前上下文理解。"
         "事件出现不代表该情境已成立；当前不适用时说明原因并不执行。"
@@ -416,7 +418,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
 
     def reply(state):
         opportunity = state['sense'].get('social_opportunity') or {}
-        answer = state.get('decision_text', '')
+        answer = public_reply_text(state.get('decision_text', ''))
         if state.get('emotion_step_id'):
             if not expression_current(state) or not agent._should_act():
                 return {'reply': ''}
@@ -481,6 +483,7 @@ def build_reactive_graph(agent, *, model=None, publish=None, checkpointer=None):
             answer, emotion = parse_emotional_reply(model.invoke(reply_messages(prompt, run)).content)
             if not valid_reply_format(answer, run):
                 raise ValueError("invalid_reply_format")
+            answer = public_reply_text(answer)
         except Exception:
             answer = factual_fallback(agent._find_led_unit(), validation_status, run)
             emotion = "neutral"

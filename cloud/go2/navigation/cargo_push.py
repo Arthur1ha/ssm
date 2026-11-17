@@ -287,12 +287,23 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
                 navigation = await _await_authorized(navigator.go_to_coordinate(
                     plan['x'], plan['y'], owner_session_id=context.session_id,
                     heading=plan['heading'], keepout=plan['keepout'],
-                    speed_limit=.25, arrival_tolerance_m=.1), context,
+                    holonomic=True, face_target=(target['x'], target['y']),
+                    speed_limit=.25, minimum_command_speed=.25, arrival_tolerance_m=.1), context,
                     on_result=navigation_receipts.append)
                 stopped = await _stop_approach(context, bounded=True)
                 movement = {'result': 'ok' if navigation.get('status') == 'succeeded' else 'blocked',
                             'reason': navigation.get('reason'), 'navigation': navigation,
                             'stop': stopped, 'message': navigation.get('message')}
+                last_pose = navigation.get('last_trusted_pose') or {}
+                if (last_pose.get('session_id') == pose.get('session_id')
+                        and all(type(last_pose.get(key)) in (int, float)
+                                and math.isfinite(last_pose[key]) for key in ('x', 'y'))):
+                    travelled = _distance(pose, last_pose)
+                    if travelled > .02 and navigation.get('status') != 'succeeded':
+                        detail = ('后段未再观察到移动' if navigation.get('reason') == 'motion_not_observed'
+                                  else navigation.get('message') or '站位未完成')
+                        movement['message'] = (f'已换位约{travelled:.2f}米，但尚未完成本次站位；'
+                                               f'{detail}，未执行向前推送。')
             elif turning:
                 movement = await execute_tool('go2_move', {
                     'direction': 'turn_left' if bearing > 0 else 'turn_right',

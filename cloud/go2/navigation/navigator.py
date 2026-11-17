@@ -22,7 +22,6 @@ from cloud.observability import emit_agent_event
 logger = logging.getLogger(__name__)
 
 NAV_TIMEOUT          = 60.0   # s
-POSE_STALE_S         = 1.0    # s
 MAP_STALE_S          = 2.0    # s
 STOP_CONFIRMATION_S = 3.0  # same bounded window for fresh stationary feedback
 TELEMETRY_RECOVERY_S = 3.0    # s; hold still while fresh odom/map packets resume
@@ -209,7 +208,8 @@ class Navigator:
                 or getattr(go2, "_odom_session_id", None) != session):
             stop = {"result": "accepted", "reason": "control_or_session_changed"}
         else:
-            stop = await self.stop_and_confirm(owner_session_id=context.session_id)
+            stop = await self.stop_and_confirm(owner_session_id=context.session_id,
+                                               _move_control=loc.get('_move_control'))
         final = self.last_trusted_pose if stop.get("result") == "ok" else receipt.get("last_trusted_pose")
         if not final or final.get("session_id") != session:
             final = None
@@ -334,6 +334,10 @@ class Navigator:
             start_pose = None
             progress = _MotionProgress()
             avoided_points = []
+            # A cached pose can be used to inspect/plan, but never to refresh
+            # movement. Every control iteration needs a subsequent odom packet.
+            last_control_stamp = getattr(go2, 'odom_received_at', None)
+            motion_gap_since = None
 
             async def checked_snapshot():
                 snapshot, reason = self._snapshot()
@@ -372,12 +376,31 @@ class Navigator:
             motion_started = False
             async def send_motion(vx, vy, yaw, pose):
                 """Require progress in the dimension actually being commanded."""
-                nonlocal last_command, motion_started
+                nonlocal last_command, motion_started, last_control_stamp, motion_gap_since
+                stamp = getattr(go2, 'odom_received_at', None)
+                if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+                        or (last_control_stamp is not None and stamp <= last_control_stamp)):
+                    # Never refresh a velocity command using the same cached
+                    # sample. Hold still until the existing recovery window
+                    # supplies another packet, rather than expiring old poses.
+                    go2.move_velocity(0, 0, 0)
+                    progress.reset()
+                    now = time.monotonic()
+                    if motion_gap_since is None:
+                        motion_gap_since = now
+                    if now - motion_gap_since >= TELEMETRY_RECOVERY_S:
+                        return {'reason': 'localization_unavailable'}
+                    return None
+                last_control_stamp, motion_gap_since = stamp, None
                 if loc.get("relative_motion") and not motion_started:
                     from cloud.go2.tools.executor import execute_action
+                    restore_control = getattr(go2, '_move_control_active', None) is False
                     ready = await execute_action("EnterMoveControl", context=context)
                     if ready.get("result") not in {"ok", "accepted"}:
                         return {"reason": ready.get("error") or "motion_start_rejected", "start": ready}
+                    loc['_move_control'] = {
+                        'restore': restore_control, 'lease': control_lease.snapshot(),
+                        'session': loc['session_id']}
                     if loc.get('cargo_contact') is not None:
                         latest, changed = await checked_snapshot()
                         if changed:
@@ -391,6 +414,7 @@ class Navigator:
                             return {'reason': 'cargo_contact_path_blocked'}
                         control_lease.heartbeat_session(self.owner_session_id)
                     started = await execute_action("Move", {"x": vx, "y": vy, "z": yaw}, context=context)
+                    loc['_move_control']['lease'] = control_lease.snapshot()
                     if started.get("result") not in {"ok", "accepted"}:
                         return {"reason": started.get("error") or "motion_start_rejected", "start": started}
                     motion_started = True
@@ -687,6 +711,7 @@ class Navigator:
                 owner = control_lease.snapshot() if loc and loc.get("relative_motion") else None
                 if not loc or not loc.get("relative_motion") or (
                         owner and owner.owner_session_id == self.owner_session_id
+                        and (not loc.get('_move_control') or self._owns_move_control(loc['_move_control']))
                         and loc["session_id"] == getattr(go2, "_odom_session_id", None)):
                     go2.move_velocity(0, 0, 0)
             except (RuntimeError, ValueError):
@@ -711,8 +736,18 @@ class Navigator:
     async def confirm_stopped(self, goal, heading=None):
         return await self._confirm_stopped(goal, heading)
 
-    async def stop_and_confirm(self, owner_session_id=None):
+    @staticmethod
+    def _owns_move_control(scope):
+        expected, current = scope.get('lease'), control_lease.snapshot()
+        return bool(expected and current
+                    and (expected.owner_session_id, expected.generation) ==
+                        (current.owner_session_id, current.generation)
+                    and scope['session'] == getattr(go2, '_odom_session_id', None))
+
+    async def stop_and_confirm(self, owner_session_id=None, *, _move_control=None):
         if owner_session_id is not None and self.owner_session_id not in {None, owner_session_id}:
+            return {"result": "blocked", "status": "blocked", "reason": "control_owner_mismatch"}
+        if _move_control and not self._owns_move_control(_move_control):
             return {"result": "blocked", "status": "blocked", "reason": "control_owner_mismatch"}
         self.stop(owner_session_id=None)
         pose = go2.odom
@@ -722,7 +757,13 @@ class Navigator:
             # Cancellation confirms rest wherever braking finished. Arrival
             # separately supplies its goal and heading below; the request pose
             # is not an arrival target and may change while the robot stops.
-            stopped = await self._confirm_stopped(None, None)
+            stopped = await self._confirm_stopped(None, None, _move_control=_move_control)
+            # Only the relative move that entered control may leave it. A
+            # same-session command, new lease or reconnect invalidates scope.
+            # Pose confirmation above does not manufacture a standing posture.
+            if (stopped and _move_control and _move_control['restore']
+                    and self._owns_move_control(_move_control)):
+                go2.stop_velocity()
         except (RuntimeError, ValueError, KeyError) as exc:
             stopped = False
             self.last_stop_diagnostics = {"reason": "stop_command_or_pose_error",
@@ -748,7 +789,7 @@ class Navigator:
         map_age = getattr(go2, "voxel_received_at", None)
         now = time.monotonic()
         if (type(pose_age) not in (int, float) or not math.isfinite(pose_age)
-                or not 0 <= now - pose_age <= POSE_STALE_S):
+                or pose_age > now):
             return None, "localization_unavailable"
         if (type(map_age) not in (int, float) or not math.isfinite(map_age)
                 or not 0 <= now - map_age <= MAP_STALE_S):
@@ -875,22 +916,38 @@ class Navigator:
                 wx, wy = x, y
         return path, grid_obj, (wx, wy, goal != raw_goal)
 
-    async def _confirm_stopped(self, goal, heading, arrival_tolerance=ARRIVAL_THRESHOLD):
+    async def _confirm_stopped(self, goal, heading, arrival_tolerance=ARRIVAL_THRESHOLD,
+                               *, _move_control=None):
         started = time.monotonic()
         self.last_stop_diagnostics = {"reason": "awaiting_fresh_pose", "samples": 0}
         go2.move_velocity(0, 0, 0)
+        motion_epoch = getattr(go2, '_motion_epoch', None)
         previous_stamp = getattr(go2, "odom_received_at", None)
         previous_pose = go2.odom
         expected_session = getattr(go2, "_odom_session_id", None)
         samples = 0
         deadline = started + STOP_CONFIRMATION_S
+        # Movement starts from observed standing. Reaching an odom goal alone
+        # cannot finish before the body's own feedback has settled as well.
+        require_standing = runtime_for(go2) is not None and (goal is not None or _move_control is not None)
+
+        def standing_confirmed():
+            runtime = runtime_for(go2)
+            return not require_standing or bool(runtime and
+                runtime.data.get('body_state') == 'standing'
+                and runtime.data.get('body_confirmation') == 'observed'
+                and runtime.data.get('pending_action') is None)
 
         def diagnostic(reason, **values):
             self.last_stop_diagnostics = {"reason": reason, "samples": samples,
                 "elapsed_s": round(time.monotonic() - started, 3), **values}
 
-        while time.monotonic() < deadline and samples < 3:
+        while time.monotonic() < deadline and (samples < 3 or not standing_confirmed()):
             await asyncio.sleep(0.1)
+            if _move_control and (not self._owns_move_control(_move_control)
+                    or motion_epoch != getattr(go2, '_motion_epoch', None)):
+                diagnostic('control_owner_changed')
+                return False
             stamp = getattr(go2, "odom_received_at", None)
             if not getattr(go2, "is_connected", False):
                 diagnostic("disconnected")
@@ -902,7 +959,8 @@ class Navigator:
                 diagnostic("odom_frame_mismatch")
                 return False
             age = None if stamp is None else time.monotonic() - stamp
-            if age is None or not 0 <= age <= POSE_STALE_S:
+            if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+                    or age < 0):
                 # Zero velocity is already sent. A receiver scheduling gap may
                 # recover within the original stop window, but earns no proof.
                 samples = 0
@@ -928,13 +986,15 @@ class Navigator:
             still = math.hypot(pose["x"] - previous_pose["x"],
                                pose["y"] - previous_pose["y"]) <= 0.02
             still = still and abs(_normalize_angle(pose["heading"] - previous_pose["heading"])) <= .03
-            samples = samples + 1 if near_goal and heading_ok and still else 0
-            diagnostic("confirmed" if samples == 3 else "awaiting_stable_pose",
+            samples = min(3, samples + 1) if near_goal and heading_ok and still else 0
+            diagnostic(("confirmed" if standing_confirmed() else "standing_unconfirmed")
+                       if samples == 3 else "awaiting_stable_pose",
                        near_goal=near_goal, heading_ok=heading_ok, still=still)
             previous_stamp, previous_pose = stamp, pose
-        if samples != 3:
+        confirmed = samples == 3 and standing_confirmed()
+        if not confirmed:
             logger.warning("[Go2/Nav] stop confirmation unavailable: %s", self.last_stop_diagnostics)
-        return samples == 3
+        return confirmed
 
     def _finish(self, status: str, reason: str | None, message: str, task_id: str | None,
                 diagnostics: dict | None = None) -> dict:

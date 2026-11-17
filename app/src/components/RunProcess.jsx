@@ -13,7 +13,7 @@ function AgentSpeech({agent, name, target, text, compact = false, showName = tru
   return <div className={`agent-speech${compact ? ' agent-speech--compact' : ''}`}
     style={{'--speaker-color':getAgentBubbleColor(agent)}}>
     <div className="agent-speech__name" hidden={!showName}>{name}{target ? ` → ${target}` : ''}</div>
-    <div className="agent-speech__bubble">{text}</div>{children}
+    <div className="agent-speech__bubble">{processUserText(text) || processErrorText(text)}</div>{children}
   </div>;
 }
 function ProcessWaiting({label = '等待回复'}) {
@@ -38,7 +38,8 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
   const titles = [...new Set(steps.map(step => processFactTitle(step.event,agents)).filter(Boolean))];
   const description = titles.slice(0,2).join('、') || '详情';
   const executing = steps.find(step => step.event.status === 'executing' || step.event.stage === 'dispatching' && !processOutcome(step.event));
-  const summaryEvent = attention[0]?.event || executing?.event || steps[steps.length - 1].event;
+  // This label describes a concrete step, never the outcome of the whole run.
+  const summaryEvent = executing?.event || steps[steps.length - 1].event;
   const outcome = processOutcome(summaryEvent);
   const completed = outcome === '已完成';
   const status = completed ? '已完成' : ({'结果待确认':'待确认','等待你补充信息':'待补充','执行失败':'未完成'})[outcome] || outcome;
@@ -48,7 +49,7 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
       <summary onClick={() => {userToggled.current=true;}} aria-label="查看调用与反馈" aria-expanded={open}>
         <span className="run-process-summary__marker" aria-hidden="true"/>
         <span className="run-process-summary__text"><span>{description}</span></span>
-        {status && !completed && (!pending || attention.length>0) && <span className="run-process-summary__status"
+        {status && !completed && !pending && <span className="run-process-summary__status"
           data-attention={Boolean(attention.length) || undefined}>{status}</span>}
         {pending && <ProcessWaiting label={executing ? '执行中' : '等待回复'}/>}
         <svg className="process-chevron" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
@@ -96,7 +97,7 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
               </div>}
               {feedback.length>0 && <div className="run-process__notes">
                 {feedback.map(note => <p key={note.text} className="run-process__feedback" data-attention={note.attention || undefined}>
-                  {note.attention && <span className="run-process__feedback-marker" aria-hidden="true">!</span>}{note.text}
+                  {note.text}
                 </p>)}
               </div>}
               {facts && !facts.includes('待确认') && <p className="run-process__snapshot">{facts}</p>}

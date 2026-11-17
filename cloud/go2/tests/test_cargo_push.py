@@ -350,6 +350,7 @@ async def test_cargo_and_destination_perception_share_measured_localization(monk
     frame = {'pose_at_capture': pose, 'odom_session_id': 'odom-test', 'frame_id': 1,
              'received_at': time.monotonic(), 'width': 640, 'height': 360}
     robot = SimpleNamespace(body_state='standing', _sport_state_observed_at=time.monotonic(),
+        body_ready_reason=lambda: None,
         voxel_raw={'data': {'resolution': .05}}, voxel_received_at=time.monotonic(),
         odom_frame_id='odom', voxel_frame_id='odom')
     monkeypatch.setattr(perception, 'go2', robot)
@@ -421,6 +422,7 @@ async def test_wrong_candidate_is_checked_against_original_request_before_motion
              'odom_session_id': 'odom-test', 'frame_id': 1, 'received_at': time.monotonic(),
              'width': 640, 'height': 360}
     robot = SimpleNamespace(body_state='standing', _sport_state_observed_at=time.monotonic(),
+        body_ready_reason=lambda: None,
         voxel_raw=None, voxel_received_at=None, odom_frame_id='odom', voxel_frame_id=None)
     monkeypatch.setattr(perception, 'go2', robot)
     monkeypatch.setattr(perception.visual_target, 'go2', robot)
@@ -547,6 +549,7 @@ async def test_off_axis_destination_requires_positioning_before_any_push(visual_
     assert result['delivered'] is False and n.observe.await_count == 1
     n.move.assert_not_awaited()
     assert navigation.await_count == 1 and replay['replayed'] is True
+    assert navigation.await_args.kwargs['minimum_command_speed'] == .25
     x, y = navigation.await_args.args
     cargo = n.samples[0]['cargo_location']
     # The dog stages on the opposite side of the cargo from the blue marker.
@@ -564,6 +567,24 @@ async def test_positioning_failure_cannot_fall_through_to_a_wrong_direction_push
         result = await push.push_cargo('盒子', '蓝标')
     assert result['result'] == 'blocked' and result['reason'] == 'no_known_free_path'
     assert result['directional_push_attempted'] is False
+    n.move.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stalled_positioning_preserves_completed_movement_in_report(visual_nudge, monkeypatch):
+    n = visual_nudge
+    n.samples[0]['destination_location']['y'] = 2.
+    pose = n.pose
+    monkeypatch.setattr(push.navigator, 'go_to_coordinate', AsyncMock(return_value={
+        'status': 'blocked', 'reason': 'motion_not_observed',
+        'message': '运动指令未产生可确认的位移，已停止',
+        'last_trusted_pose': {**pose, 'x': pose['x'] + 1.23}}))
+    with use_context(n.context):
+        result = await push.push_cargo('盒子', '蓝标')
+    assert result['result'] == 'blocked' and result['reason'] == 'motion_not_observed'
+    assert '已换位约1.23米' in result['message']
+    assert '未执行向前推送' in result['message']
+    assert result['directional_push_attempted'] is False and result['delivered'] is False
     n.move.assert_not_awaited()
 
 
@@ -604,7 +625,7 @@ async def test_directional_attempt_uses_requested_distance_with_full_map_obstacl
 async def test_cargo_observation_waits_for_delayed_posture_without_skipping_real_feedback(monkeypatch, feedback):
     clock = [100.]
     robot = SimpleNamespace(body_state='moving', is_connected=True,
-        _sport_state_observed_at=100., _odom_session_id='odom-test')
+        _sport_state_observed_at=100., _odom_session_id='odom-test', body_ready_reason=lambda: None)
     monkeypatch.setattr(perception, 'go2', robot)
     monkeypatch.setattr(perception.visual_target, 'go2', robot)
     monkeypatch.setattr(perception.time, 'monotonic', lambda: clock[0])

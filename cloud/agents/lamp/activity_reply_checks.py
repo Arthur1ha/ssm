@@ -13,6 +13,7 @@ def activity_reply(monkeypatch, tmp_path):
     # Import consumers before replacing the source getter so lazy imports do
     # not retain a function closing over this fixture after teardown.
     from cloud.api import activity as activity_api
+    from cloud.peers import social
 
     for key in ('SSM_TRAINING_DIR', 'SSM_CHECKPOINT_DIR', 'SSM_EFFECT_LEDGER_DIR'):
         monkeypatch.setenv(key, str(tmp_path / key))
@@ -29,6 +30,7 @@ def activity_reply(monkeypatch, tmp_path):
     activity_store = SimpleNamespace(current=lambda: state.activity)
     monkeypatch.setattr('cloud.space.activity.get_activity_store', lambda: activity_store)
     monkeypatch.setattr(activity_api, 'get_activity_store', lambda: activity_store)
+    monkeypatch.setattr(social, 'get_activity_store', lambda: activity_store)
     agent = SimpleNamespace(_state=None, _autonomy_epoch=1, _belief_summary='',
         _belief_history=[], _beliefs_since_summary=0, _peer_game_id=None,
         _should_act=lambda: True, _device_online=lambda: True,
@@ -68,6 +70,25 @@ def test_busy_lamp_activity_final_text_reaches_existing_space_reply(activity_rep
         'agent_id': 'esp32_desk_led', 'scope': 'space', 'space_id': 'main',
         'source': 'autonomous', 'status': 'ok', 'run_id': result['run_id'], 'text': answer,
         'emotion': 'neutral'})]
+
+
+def test_reactive_activity_keeps_delivery_rules_when_dog_is_remote(activity_reply, monkeypatch):
+    import json
+    from cloud.agents.lamp.workflows.reactive import _prompt
+
+    h = activity_reply
+    h.activity['devices']['go2'] = {'status': 'joined'}
+    monkeypatch.setattr('cloud.space.context.get_space_context', lambda *_a, **_kw: {
+        'activity': h.activity, 'peers': [{'unit_id': 'go2', 'online': True}]})
+    monkeypatch.setattr('cloud.peers.games.base.game_invitation_block_reason',
+                        lambda *_: 'go2_remote_control')
+    messages = _prompt(h.agent, {'sense': {'social_opportunity': {'kind': 'activity_request'}}})
+    data = json.loads(next(message.content.split('\n', 1)[1]
+                           for message in messages if message.name == 'context'))
+    delivery = next(game for game in data['games'] if game['game_id'] == 'push_delivery')
+    assert delivery['rules'] and delivery['reason'] == 'go2_remote_control'
+    assert delivery['ready'] is False
+    assert 'life_state=explore 本身不表示正在移动' in messages[0].content
 
 
 def test_same_autonomous_event_replays_saved_reply_without_model_or_publication(activity_reply):

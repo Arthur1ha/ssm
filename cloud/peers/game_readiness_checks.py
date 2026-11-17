@@ -9,7 +9,7 @@ import pytest
 
 from cloud.go2.control import ControlLease
 from cloud.go2.state import Go2State
-from cloud.peers.games import get_game, playable_games
+from cloud.peers.games import game_catalog, get_game, playable_games
 from cloud.peers.games.base import game_invitation_ready, game_invitation_block_reason
 from cloud.peers.messaging import AgentMessenger
 from cloud.peers.social import SocialState
@@ -50,26 +50,44 @@ def test_registered_games_accept_either_invitation_direction(idle):
         assert [row["game_id"] for row in playable_games("act_idle", sender, target)] == ["color_hunt", "push_delivery", "rps_siege"]
 
 
-@pytest.mark.parametrize("changes", [
-    {"life_state": "play", "life_task_id": "task"},
-    {"life_state": "explore", "life_task_id": "search"},
-    {"life_state": None}, {"activity_state": "rest"},
-    {"pending_action": {"command": "Hello"}}, {"navigation_active": True},
-    {"velocity_requested": True}, {"control_mode": "remote"},
-    {"body_state": "moving"}, {"connected": False},
+@pytest.mark.parametrize("changes,reason", [
+    ({"life_state": "play", "life_task_id": "task"}, "go2_task_active"),
+    ({"life_state": "explore", "life_task_id": "search"}, "go2_task_active"),
+    ({"life_state": None}, "go2_task_active"),
+    ({"activity_state": "rest"}, "go2_inactive"),
+    ({"pending_action": {"command": "Hello"}}, "go2_action_unconfirmed"),
+    ({"navigation_active": True}, "go2_navigation_active"),
+    ({"velocity_requested": True}, "go2_not_stopped"),
+    ({"control_mode": "remote"}, "go2_remote_control"),
+    ({"body_state": "moving"}, "go2_not_stopped"),
+    ({"connected": False}, "go2_disconnected"),
 ])
-def test_busy_dog_prevents_either_side_from_inviting(idle, changes):
+def test_busy_dog_prevents_either_side_from_inviting(idle, changes, reason):
     idle.runtime.commit("test_busy", **changes)
     for sender, target in ((LAMP, DOG), (DOG, LAMP)):
         assert not game_invitation_ready("act_idle", sender, target)
         assert playable_games("act_idle", sender, target) == []
+        assert game_invitation_block_reason("act_idle", sender, target) == reason
+        catalog = game_catalog("act_idle", sender, target)
+        assert {row['game_id'] for row in catalog} == {'color_hunt', 'push_delivery', 'rps_siege'}
+        assert all(row['ready'] is False and row['reason'] == reason for row in catalog)
+        assert all(row['rules'] for row in catalog)
 
 
 def test_exploration_between_tasks_can_invite_but_live_goal_cannot(idle):
     idle.runtime.commit("exploring", life_state="explore", life_task_id=None)
     assert game_invitation_ready("act_idle", DOG, LAMP)
+    assert all(row['ready'] for row in game_catalog('act_idle', DOG, LAMP))
     idle.drive._active_goal = {"task_id": "looking"}
     assert not game_invitation_ready("act_idle", DOG, LAMP)
+
+
+def test_catalog_retains_rules_without_activity_but_never_authorizes_invitation(idle):
+    catalog = game_catalog('expired', DOG, LAMP)
+    assert len(catalog) == 3
+    assert all(row['ready'] is False and row['reason'] == 'activity_not_joined' for row in catalog)
+    assert not game_invitation_ready('expired', DOG, LAMP)
+    assert game_catalog('act_idle', DOG, 'unrelated') == []
 
 
 @pytest.mark.parametrize("field,value", [

@@ -15,6 +15,7 @@ from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
 from cloud.agents.common.messages import EXPRESSION_GUIDANCE
 from cloud.personality.store import render_identity
 from cloud.personality.names import agent_names
+from cloud.peers.games.base import GAME_CONTEXT_GUIDANCE
 
 class SocialDecision(EmotionModel):
     decision: Literal["send_message", "skip"]
@@ -33,6 +34,7 @@ class SocialState(TypedDict, total=False):
     opportunity: dict[str, Any]
     peers: list[dict[str, Any]]
     playable_games: list[dict[str, Any]]
+    game_catalog: list[dict[str, Any]]
     game_readiness: dict[str, Any]
     space_summary: str
     interaction_history: dict[str, Any]
@@ -98,7 +100,9 @@ def build_social_graph(
             f"活动：{json.dumps(state.get('activity'), ensure_ascii=False)}\n"
             f"机会：{json.dumps(state['opportunity'], ensure_ascii=False)}\n"
             f"在线同伴：{json.dumps(targets, ensure_ascii=False)}\n"
+            f"game_catalog：{json.dumps(state.get('game_catalog', []), ensure_ascii=False)}\n"
             f"当前可玩玩法：{json.dumps(state.get('playable_games', []), ensure_ascii=False)}\n"
+            + GAME_CONTEXT_GUIDANCE +
             "game_readiness 是执行适配的当前门禁事实；未确认的灯命令须等待原回执，不能当作完成。"
             "游戏暂不可开局仍可普通交流；结合用户活动原话简短说明眼前阻碍或询问同伴，不编造游戏进展。\n"
             f"game_readiness：{json.dumps(state.get('game_readiness', {}), ensure_ascii=False)}\n"

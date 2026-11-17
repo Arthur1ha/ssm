@@ -245,14 +245,15 @@ def setup_observation_move(monkeypatch, *, clear=True):
     calls, navigate = setup_approach(monkeypatch)
     use_lidar_without_site_calibration(monkeypatch)
     pose = {'x': .45, 'y': 0., 'heading': 0., 'session_id': 's'}
-    grid = SimpleNamespace(is_body_clear=lambda x, y, h: clear and abs(y) < .01,
+    grid = SimpleNamespace(resolution=.05, is_body_clear=lambda x, y, h: clear and abs(y) < .01,
                            turn_sweep_details=lambda x, y, h, end: {'clear': clear and abs(y) < .01 and abs(end) < .01})
     navigate.return_value = {'status': 'succeeded', 'last_trusted_pose': {**pose, 'x': .75}}
     monkeypatch.setattr(approach.navigator, 'snapshot', lambda: ((pose, grid), None))
     monkeypatch.setattr(vision, 'observe_target', AsyncMock(return_value={
         'found': True, 'frame': {'width': 640, 'height': 360, 'odom_session_id': 's', 'pose_at_capture': pose,
                                 'frame_id': 1, 'received_at': time.monotonic()},
-        'observation': {'found': True, 'bbox_1000': [450, 400, 550, 600]}}))
+        'observation': {'found': True, 'bbox_1000': [450, 400, 550, 600],
+                        'advance_distance_m': .3}}))
     return calls, navigate
 
 
@@ -303,11 +304,12 @@ def test_observation_can_translate_forward_without_unverified_rotation():
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
     observed = {'found': True, 'frame': {'width': 640, 'height': 360, 'pose_at_capture': pose,
                                         'odom_session_id': 's', 'frame_id': 1, 'received_at': time.monotonic()},
-                'observation': {'found': True, 'bbox_1000': [870, 520, 895, 565]}}
-    grid = SimpleNamespace(is_body_clear=lambda x, y, heading: abs(y) < .01,
+                'observation': {'found': True, 'bbox_1000': [870, 520, 895, 565],
+                                'advance_distance_m': .73}}
+    grid = SimpleNamespace(resolution=.05, is_body_clear=lambda x, y, heading: abs(y) < .01,
                            turn_sweep_details=lambda x, y, h, end: {'clear': abs(y) < .01 and abs(end) < .01})
     point = approach.select_target_view(grid, pose, approach.make_target_hint(observed))
-    assert (point['x'], point['y'], point['heading']) == (.30, 0., 0.)
+    assert (point['x'], point['y'], point['heading']) == (.73, 0., 0.)
     grid.is_body_clear = lambda *_: False
     assert approach.select_target_view(grid, pose, approach.make_target_hint(observed)) is None
 

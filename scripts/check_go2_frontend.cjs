@@ -395,6 +395,23 @@ async function checkInteractions() {
       return;
     }
     if (process.argv.includes('--posture-only')) {
+      for (const source of [null, undefined]) {
+        await page.evaluate(source => {
+          const next = {...__state,revision:__state.revision+1,body_state:source,
+            body_confirmation:'unknown',body_telemetry_fresh:true};
+          if (source === null) next.body_state = null;
+          else delete next.body_state;
+          __renderState(next);
+        }, source);
+        await page.waitForFunction(() => document.querySelector('[data-state="body:standing"]').dataset.executable==='false');
+        assert.equal(await page.$$('[data-state="body:standing"]').then(nodes => nodes.length),1);
+        const count = await page.evaluate(() => __calls.length);
+        await page.tap('[data-state="body:standing"]');
+        assert.equal(await page.evaluate(() => __calls.length),count,'Unknown posture guessed a rise command');
+        assert.equal(await page.$('[aria-label="状态说明"] .btn'),null,'Unknown posture offered two rise commands');
+        assert.match(await page.$eval('[data-state="body:standing"]',node => node.getAttribute('aria-label')),
+          /姿态尚未确认，等待设备反馈/);
+      }
       const tap = async (value, action, params = {}) => {
         const selector = `[data-state="body:${value}"]`;
         await page.waitForFunction(selector => document.querySelector(selector)?.dataset.executable === 'true', {}, selector);
@@ -411,7 +428,8 @@ async function checkInteractions() {
       };
       for (const [source,stand] of [['sitting','RiseSit'],['lying','StandUp']]) {
         await page.evaluate(source => __renderState({...__state,revision:__state.revision+1,
-          body_state:source,body_telemetry_fresh:true,available_actions:[source==='sitting'?'RiseSit':'StandUp']}), source);
+          body_state:source,body_confirmation:'observed',body_telemetry_fresh:true,
+          available_actions:[source==='sitting'?'RiseSit':'StandUp']}), source);
         await tap('standing',stand);
         const targets = await page.evaluate(source => __sm.regions.find(r => r.id==='body').transitions
           .filter(t => t.src==='standing' && t.dispatch_only && t.dst!==source).map(t => [t.dst,t.action]), source);
@@ -427,7 +445,7 @@ async function checkInteractions() {
       await page.$eval('[data-state="body:lying"]',node => node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
       assert.equal(await page.evaluate(() => __calls.length),count,'Stale posture started an automatic sequence');
       assert.deepEqual(errors,[]);
-      console.log('PASS: sitting/lying select the correct rise, every standing-based action requests server preparation, duplicate taps/current poses do not replay, stale preparation is blocked.');
+      console.log('PASS: unknown posture waits without rise choices; sitting/lying select the correct rise, every standing-based action requests server preparation, duplicate taps/current poses do not replay, stale preparation is blocked.');
       return;
     }
     if (process.argv.includes('--training-only')) {

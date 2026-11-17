@@ -12,6 +12,7 @@ from cloud.personality.names import agent_names
 from cloud.agents.common.messages import role_messages
 from cloud.agents.common.training.context import DECISION_GUIDANCE, decision_context
 from cloud.space.context import get_space_context, _summarize
+from cloud.peers.games.base import GAME_CONTEXT_GUIDANCE
 
 
 def lamp_observation(agent, unit_id: str) -> dict:
@@ -43,7 +44,7 @@ def planning_prompt(*, include_social: bool = True) -> str:
     if not include_social:
         return instructions
     return instructions + (
-        "同伴互动由自己决定是否参与，玩法以当前可玩列表为准。"
+        GAME_CONTEXT_GUIDANCE + "同伴互动由自己决定是否参与，玩法以游戏目录为准。"
         "是否邀请须依据当前活动、用户要求和同伴状态，不因进入活动或有可玩项就必定邀请。"
         "游戏邀请和出题设色的 decision_reason 只作为选择依据保存，供用户按需查看，不写入消息正文。"
         "用第一人称简短记录为什么现在作这个决定，不写执行报告，"
@@ -57,7 +58,7 @@ def planning_prompt(*, include_social: bool = True) -> str:
 def decision_messages(run, *, agent, unit_id: str, supplement: str = "",
                       space_id: str = "main", lighting_only: bool = False):
     """Build the current Graph runner's per-turn, freshly loaded context."""
-    from cloud.peers.games import playable_games
+    from cloud.peers.games import game_catalog
 
     space = get_space_context(unit_id, state=agent._state, include_self=False)
     run.decision_space = deepcopy(space)
@@ -66,7 +67,7 @@ def decision_messages(run, *, agent, unit_id: str, supplement: str = "",
     include_social = not lighting_only or run.session_id.startswith("peer_game_color_")
     games = [{"target": peer["unit_id"], **game}
              for peer in space["peers"]
-             for game in playable_games((space.get("activity") or {}).get("activity_id"),
+             for game in game_catalog((space.get("activity") or {}).get("activity_id"),
                                         unit_id, peer["unit_id"])] if include_social else []
     profile = get_profile()
     instructions = (planning_prompt(include_social=include_social) + "\n" + DECISION_GUIDANCE
@@ -76,7 +77,8 @@ def decision_messages(run, *, agent, unit_id: str, supplement: str = "",
                                       "state": current.get("values", {}),
                                       **{key: current[key] for key in ("status", "as_of") if key in current}}},
                                   "lamp_before": run.initial_context["lamp_before"], "space": space,
-                                  "agent_names": agent_names(), "playable_games": games,
+                                  "agent_names": agent_names(), "game_catalog": games,
+                                  "playable_games": [game for game in games if game["ready"]],
                                   "training": decision_context(unit_id, space_id=space_id,
                                       origin_kind=run.origin_kind or "user_delegated")})
 

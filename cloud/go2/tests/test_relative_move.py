@@ -55,7 +55,8 @@ def movement(monkeypatch):
         await real_sleep(.001)
         stamp = time.monotonic()
         stale = fault['stale_after'] is not None and len(commands) > fault['stale_after']
-        robot.odom_received_at = stamp-2 if stale else stamp
+        if not stale:
+            robot.odom_received_at = stamp
         robot.voxel_received_at = grid.observed_at = stamp
     monkeypatch.setattr(nav_module.asyncio, 'sleep', tick)
     monkeypatch.setattr(nav_module, 'go2', robot)
@@ -98,6 +99,71 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
     assert result['result'] == 'ok', result
     assert abs(result['angle_deg'] - 90) <= 3
     assert all(vx == vy == 0 for vx, vy, yaw in movement.commands)
+
+
+@pytest.mark.asyncio
+async def test_cargo_positioning_keeps_estimated_box_in_front_while_moving_sideways(movement, monkeypatch, tmp_path):
+    """Replay staging with the real loop and an ineffective low-speed gait."""
+    from cloud.go2.navigation import cargo_push
+    from cloud.go2.navigation import navigator as nav_module
+    monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
+    pose = movement.robot.odom
+    # Translate the recorded odom geometry into the fake map's positive bounds.
+    pose.update(x=1.024342, y=3.017677, heading=.06040686965152552)
+    movement.robot.occupancy_grid.grid = np.zeros((160, 160), dtype=bool)
+    cargo = {'x': 4.382444471060111, 'y': 2.0321784052445094,
+             'source': 'visual_distance_estimate', 'precision': 'approximate'}
+    sample = {'pose': dict(pose), 'odom_session_id': 'map',
+        'cargo_location': cargo, 'cargo_bbox_1000': [672, 612, 758, 662],
+        'destination_location': {'x': 4.809291794668575, 'y': 2.683830000982215},
+        'near_destination': False, 'advance_distance_m': .6}
+    monkeypatch.setattr(cargo_push, 'navigator', movement.nav)
+    monkeypatch.setattr(cargo_push, '_authorize', nav_module.control_lease.acquire)
+    monkeypatch.setattr(cargo_push, 'observe_cargo', AsyncMock(return_value=sample))
+    async def authorized(operation, _context, *, on_result=None):
+        result = await operation
+        if on_result:
+            on_result(result)
+        return result
+    monkeypatch.setattr(cargo_push, '_await_authorized', authorized)
+    async def stop(context, *, bounded):
+        return await movement.nav.stop_and_confirm(owner_session_id=context.session_id)
+    monkeypatch.setattr(cargo_push, '_stop_approach', stop)
+    errors = []
+    movement.fault['minimum_linear_speed'] = .20
+    simulated_move = movement.robot.move_velocity
+    def move(vx, vy, yaw, **kwargs):
+        simulated_move(vx, vy, yaw, **kwargs)
+        bearing = math.atan2(cargo['y']-pose['y'], cargo['x']-pose['x'])
+        errors.append(abs(math.atan2(math.sin(bearing-pose['heading']),
+                                     math.cos(bearing-pose['heading']))))
+    movement.robot.move_velocity = move
+    with use_context(movement.context):
+        result = await cargo_push.push_cargo('近处右侧的深色扁盒子', '左后方蓝色点位')
+    assert result['result'] == 'ok', (result.get('reason'), result.get('movement'))
+    assert result['progress'] == 'positioned' and result['directional_push_attempted'] is False
+    assert result['stop']['result'] == 'ok'
+    # Ordinary path-facing navigation ended about 70 degrees away from cargo.
+    assert max(errors) < math.radians(26)
+    assert any(abs(vy) > .05 for vx, vy, yaw in movement.commands)
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_replay_delivery_positioning_does_not_stall_at_last_18cm(movement):
+    """18:42 real trace stalled at .14 m/s, .18 m short of the waypoint."""
+    # Translate the recorded y coordinates into this fake map's positive grid.
+    movement.robot.odom.update(x=.54, y=2.192, heading=0.)
+    movement.robot.occupancy_grid.grid = np.zeros((160, 160), dtype=bool)
+    movement.fault['minimum_linear_speed'] = .20
+    result = await movement.nav.go_to_coordinate(1.482, 1.183, holonomic=True,
+        speed_limit=.25, minimum_command_speed=.25, arrival_tolerance_m=.1,
+        face_target=(2.2, 2.2))
+    assert result['status'] == 'succeeded', result
+    pose = movement.robot.odom
+    assert math.hypot(pose['x'] - 1.482, pose['y'] - 1.183) < .1
+    assert all(math.hypot(vx, vy) >= .24 for vx, vy, _ in movement.commands if vx or vy)
+    assert movement.commands[-1] == (0, 0, 0)
 
 
 @pytest.mark.asyncio

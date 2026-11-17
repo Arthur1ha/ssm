@@ -422,7 +422,9 @@ def _live_pose(session_id: str) -> dict:
     if (not session_id or getattr(go2, '_odom_session_id', None) != session_id
             or pose.get('session_id') != session_id):
         raise TargetUnlocalized('odom_session_mismatch')
-    if stamp is None or not 0 <= now - stamp <= MAX_FRAME_AGE:
+    # Odometry is not an image and has no image-age TTL. Acquisition and
+    # motion separately require actual subsequent samples before proceeding.
+    if type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp > now:
         raise TargetUnlocalized('localization_unavailable')
     if not all(type(pose.get(k)) in (int, float) and math.isfinite(pose[k]) for k in ('x', 'y', 'heading')):
         raise TargetUnlocalized('pose_invalid')
@@ -447,16 +449,26 @@ def image_quality(jpeg: bytes) -> float:
 
 
 async def _capture_still(*, after_frame_id=None, after_received_at=None):
-    """Wait for a new received image after fresh odom proves a stationary pose."""
+    """Wait for actual same-session odom updates and a stationary image."""
     _check_authorization()
     session_id = getattr(go2, '_odom_session_id', None)
-    pose = _live_pose(session_id)
-    first_at = go2.odom_received_at
     deadline = time.monotonic() + 3.0
+    context = current_context()
+    if context.expires_at:
+        deadline = min(deadline, time.monotonic() + max(0., context.expires_at - time.time()))
+    pose, first_at = None, None
     settled_at = None
     while time.monotonic() < deadline:
         await asyncio.sleep(0.05)
-        current = _live_pose(session_id)
+        try:
+            current = _live_pose(session_id)
+        except TargetUnlocalized as exc:
+            if exc.reason != 'localization_unavailable':
+                raise
+            continue
+        if pose is None:
+            pose, first_at = current.copy(), go2.odom_received_at
+            continue
         _ensure_stable(pose, current)
         stamp = go2.odom_received_at
         if stamp > first_at and stamp - first_at >= 0.15 and settled_at is None:
@@ -482,7 +494,7 @@ async def _capture_still(*, after_frame_id=None, after_received_at=None):
 
 
 async def wait_for_standing() -> None:
-    """Allow live posture feedback to catch up with an odometry-confirmed stop."""
+    """Wait on the body's shared confirmed-posture gate, without an age TTL."""
     deadline = time.monotonic() + 3.0
     session = getattr(go2, '_odom_session_id', None)
     while True:
@@ -492,9 +504,9 @@ async def wait_for_standing() -> None:
         if getattr(go2, '_odom_session_id', None) != session:
             raise TargetUnlocalized('odom_session_mismatch')
         body = getattr(go2, 'body_state', None)
-        state_at = getattr(go2, '_sport_state_observed_at', None)
-        if (body == 'standing' and type(state_at) in (int, float)
-                and 0 <= time.monotonic() - state_at <= 1.0):
+        body_ready = getattr(go2, 'body_ready_reason', None)
+        if (body == 'standing' and callable(body_ready) and body_ready() is None
+                and getattr(go2, 'pending_action', None) is None):
             return
         if body not in {'standing', 'moving', None} or time.monotonic() >= deadline:
             raise TargetUnlocalized('posture_not_confirmed')

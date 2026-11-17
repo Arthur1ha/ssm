@@ -303,7 +303,7 @@ class Drive:
         opportunity = {**opportunity, "identity": identity_skill.context()}
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.go2.workflows.social import build_social_graph
-        from cloud.peers.games import playable_games
+        from cloud.peers.games import game_catalog
         from cloud.go2.tools.tools import send_message
 
         def available(activity_id_to_check: str, target: str) -> bool:
@@ -390,15 +390,16 @@ class Drive:
             get_text_llm(), profile_loader=get_profile, can_send=can_send,
             send_message=deliver, checkpointer=saver, express_emotion=express_emotion)
         thread_id = "go2:social:" + run_id
+        games = [{"target": peer["unit_id"], **game}
+                 for peer in peers for game in game_catalog(activity_id, "go2", peer["unit_id"])]
         state = {"run_id": run_id, "activity_id": activity_id,
                  "activity": context["activity"], "opportunity": opportunity,
                  "game_readiness": readiness,
                  "interaction_history": context.get("interaction_history", {}),
                  "decision_evidence": context.get("decision_evidence", []),
                  "peers": peers, "space_summary": prompt_space_context(),
-                 "playable_games": [{"target": peer["unit_id"], **game}
-                                    for peer in peers for game in playable_games(
-                                        activity_id, "go2", peer["unit_id"])],
+                 "game_catalog": games,
+                 "playable_games": [game for game in games if game["ready"]],
                  "active": bool(activity), "connected": go2.is_connected,
                  "interrupted": self.user_interrupt,
                  "pending_question": bool(self._pending_question_id),

@@ -90,7 +90,7 @@ function activityStatusText(event, name, compact = false) {
       : event.status === 'unknown'
         ? `${compact ? '' : `${name}的`}活动状态还没有确认`
       : `${compact ? '' : name}暂时无法加入${mode}`;
-  return `${event.unit_id && !compact ? `${name} · ` : ''}${event.text || activityReasonText(event) || processOutcome(event)}`;
+  return `${event.unit_id && !compact ? `${name} · ` : ''}${processUserText(event.text) || activityReasonText(event) || processOutcome(event)}`;
 }
 
 /* Speech stays on the surface; actual runs/tasks have one shared disclosure. */
@@ -143,9 +143,9 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     </div>
     {(expanded || isActive || isEnding || hasAttention) && <ActivityMembers activity={activity} events={events} agents={agents}
       unitData={unitData} connected={connected} getName={getName}/>}
-    {error && <div className="space-activity__error" role="alert">{error}</div>}
+    {error && <div className="space-activity__error" role="status">{processErrorText(error)}</div>}
     {!showTimeline && !isEnded && <div className="space-activity__summary"><p>{latestSpeech
-      ? `${getName(latestSpeech.event.unit_id)}：${latestSpeech.event.text}` : '正在等待设备动态'}</p></div>}
+      ? `${getName(latestSpeech.event.unit_id)}：${processUserText(latestSpeech.event.text) || processErrorText(latestSpeech.event.text)}` : '正在等待设备动态'}</p></div>}
     {showTimeline && <div className="space-activity__timeline" ref={timelineRef} onScroll={event => {
       const el=event.currentTarget;
       if (el.scrollHeight-el.scrollTop-el.clientHeight<=1) setHasNewEvents(false);

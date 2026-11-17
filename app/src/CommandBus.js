@@ -147,16 +147,17 @@ const commandBus = {
 
   describe(result) {
     if (result?.dispatch_only && result?.result === 'accepted') return '指令已发送';
-    if (result?.result === 'needs_clarification' && result.question) return result.question;
-    if (result?.error === 'training_blocked' && result.reasons?.length) return result.reasons.map(reason => reason.code === 'cooldown' ? `冷却中，还需等待 ${Math.ceil(reason.remaining_s)} 秒` : ({condition_unsatisfied:'未满足教导条件',condition_unknown:'无法确认教导条件',awaiting_load:'教导等待加载'})[reason.code] || reason.code).join('；');
+    if (result?.result === 'needs_clarification' && result.question) return processUserText(result.question) || '请补充执行所需的信息';
+    if (result?.error === 'training_blocked' && result.reasons?.length) return result.reasons.map(reason => reason.code === 'cooldown' ? `冷却中，还需等待 ${Math.ceil(reason.remaining_s)} 秒` : ({condition_unsatisfied:'未满足教导条件',condition_unknown:'无法确认教导条件',awaiting_load:'教导等待加载'})[reason.code] || '教导暂时无法执行').join('；');
     if (result?.error === 'stop_unconfirmed') return '停止指令尚未确认，请查看机器狗当前状态';
+    if (result?.result_kind === 'message') return processOutcome({status:result.result,result_kind:'message',public_result:result}) || '消息处理结果尚未确认';
     if (result?.result === 'accepted') return result.result_kind === 'message' ? '已接受' : '执行完成';
     if (result?.result === 'executing') return '正在执行';
     if (result?.result === 'timeout') return '等待完成反馈超时，结果尚未确认';
     if (result?.result === 'unknown' && result.error === 'receipt_unavailable'
         && result.execution_active === false) return '设备已不再执行这条任务，但历史结果无法确认；不会自动重发';
     if (result?.result === 'unknown') return '设备动作结果未知；不会自动重发';
-    if (result?.result === 'partial') return result.reply || result.response || '部分步骤未完成';
+    if (result?.result === 'partial') return processUserText(result.reply || result.response) || '部分步骤未完成';
     if (result?.error || result?.message && ['error','blocked','rejected'].includes(result.result)) {
       return processResultNotes({status:result.result,public_result:result})
         .map(note => note.text).join('\n') || '执行失败';

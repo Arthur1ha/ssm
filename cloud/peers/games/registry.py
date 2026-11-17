@@ -1,4 +1,5 @@
 """Explicit game catalogue. Add a module's GAME here to expose its metadata."""
+from . import base
 from .base import Game, activity_allows, game_invitation_ready
 from .color_hunt import GAME as COLOR_HUNT
 from .push_delivery import GAME as PUSH_DELIVERY
@@ -8,6 +9,29 @@ GAMES: dict[str, Game] = {game.game_id: game for game in (COLOR_HUNT, PUSH_DELIV
 
 def get_game(game_id: str) -> Game | None:
     return GAMES.get(game_id) if isinstance(game_id, str) else None
+
+
+def game_catalog(activity_id: str | None, sender: str, target: str) -> list[dict]:
+    """Keep registered rules visible even when this pair cannot start now.
+
+    Readiness is a current execution constraint, not a capability declaration
+    or permission. Sending and accepting still recheck the live gate.
+    """
+    reason = base.game_invitation_block_reason(activity_id, sender, target)
+    entries = []
+    for game in GAMES.values():
+        if not game.allows_pair(sender, target):
+            continue
+        try:
+            available = game.available(sender, target)
+        except Exception:
+            available = False
+        blocked = (reason if game.requires_idle else
+                   None if activity_allows(activity_id, sender, target) else "activity_not_joined")
+        if not available:
+            blocked = "game_capability_unavailable"
+        entries.append({**game.metadata(), "ready": blocked is None, "reason": blocked})
+    return entries
 
 
 def playable_games(activity_id: str | None, sender: str, target: str) -> list[dict]:

@@ -11,7 +11,7 @@ from cloud.agents.common.check_fixtures import JsonReplyModel
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.effects import FileEffectLedger
 from cloud.agents.common.messages import reply_messages, role_messages
-from cloud.agents.common.replies import factual_fallback, finalize_reply, valid_reply_format
+from cloud.agents.common.replies import factual_fallback, finalize_reply, public_reply_text, valid_reply_format
 from cloud.agents.common.runner import GraphRun, run_role_graph
 
 
@@ -239,3 +239,53 @@ async def test_reply_wording_cannot_change_receipt_status_or_dispatch(monkeypatc
     assert current.response == "我这就继续去找。"
     assert current.status == "accepted" and current.steps[0]["result"] == receipt
     assert len(current.steps) == 1
+
+
+@pytest.mark.parametrize("code, explanation", [
+    ("localization_unavailable", "暂时未取得可用的位置数据"),
+    ("posture_not_confirmed", "暂时还不能确认站立姿态"),
+    ("motion_not_observed", "本次没有确认到实际移动"),
+    ("unknown_provider_failure", "这一步暂时未完成"),
+])
+@pytest.mark.asyncio
+async def test_public_reply_translates_codes_without_another_call_or_receipt_changes(code, explanation):
+    receipt = {"result": "blocked", "reason": code, "final": False}
+    current = run(status="partial", decision_draft=f"我看见盒子了。这一步反馈是{code}，先停在这里。",
+                  steps=[{"tool": "go2_push_cargo", "result": receipt}])
+    model = SimpleNamespace(ainvoke=lambda *_: pytest.fail("unexpected rewrite"))
+    await finalize_reply(current, model=model, instructions="按真实回执回复。")
+    assert current.response == f"我看见盒子了。这一步反馈是{explanation}，先停在这里。"
+    assert current.reply_source == "decision_model"
+    assert current.status == "partial" and current.steps[0]["result"] == receipt
+    assert code not in factual_fallback(current.agent_id, current.status, current)
+
+
+def test_public_diagnostics_do_not_leak_http_exception_or_nested_executor_codes():
+    raw = "盒子还在原处。cargo_search_unconfirmed:localization_unavailable。HTTP 400，BadRequestError。"
+    answer = public_reply_text(raw)
+    assert "盒子还在原处" in answer and "暂时未取得可用的位置数据" in answer
+    assert not any(code in answer for code in ("cargo_search", "localization_", "HTTP", "400", "BadRequestError"))
+    assert "400" not in public_reply_text('Error code: 400 - {"error": "invalid_parameter_error"}')
+    assert "Bad Request" not in public_reply_text("HTTP 400 Bad Request")
+    assert "error" not in public_reply_text('HTTP 400 {"error": {"message": "Bad Request"}}')
+    assert public_reply_text("disconnected") == "设备连接已断开"
+    assert public_reply_text("disconnected", diagnostic=True) == "设备连接已断开"
+
+
+def test_public_reply_keeps_links_measured_distance_and_normal_speech():
+    text = '已前进约0.4米。说明在https://example.com，设备页面是http://go2.local。配置为{"亮度":120}，{暖白}。盒子仍在左侧。'
+    assert public_reply_text(text) == text
+
+
+def test_message_fallback_does_not_claim_physical_completion():
+    current = run(status="ok", steps=[{"tool": "send_message", "result": {"result": "accepted"}}])
+    assert factual_fallback(current.agent_id, current.status, current) == "消息已发出；对方的处理结果以实际反馈为准。"
+
+
+@pytest.mark.parametrize("message", ["Free quota exhausted", "The model example does not exist",
+                                   "400 Bad Request: provider could not process the request"])
+def test_fallback_hides_unstructured_provider_diagnostics(message):
+    current = run(status="error", steps=[{"tool": "go2_observe",
+        "result": {"result": "error", "message": message}}])
+    assert factual_fallback(current.agent_id, current.status, current) == "本次请求未完成。执行反馈：这一步暂时未完成"
+    assert public_reply_text("Hello, how are you?") == "Hello, how are you?"

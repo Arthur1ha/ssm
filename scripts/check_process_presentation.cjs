@@ -33,7 +33,7 @@ assert.equal(context.processActionDetail(reading).text,'设为暖白，亮度设
 assert.equal(context.processResultNotes(reading).length,0,'A successful receipt acquired a redundant success paragraph');
 assert.doesNotMatch(JSON.stringify(context.processResultNotes(reading)),/task_hidden|request_hidden|future_field|must-not-render/);
 assert.equal(context.processUserText('task_id=task_hidden'),'');
-// Provider errors remain useful even when old SDK strings include correlation IDs.
+// Provider diagnostics stay in logs, including historical serialized SDK errors.
 for (const [status,code,detail] of [
   [403,'AllocationQuota.FreeTierOnly','Free quota exhausted.'],
   [400,'invalid_parameter_error','The current model only supports text modality and does not support image input.'],
@@ -43,29 +43,59 @@ for (const [status,code,detail] of [
   const receipt={...call,status:'error',fact_kind:'result',result_kind:'query',reason:legacy,
     public_result:{result:'error',error:'APIStatusError',message:legacy}};
   const notes=JSON.stringify(context.processResultNotes(receipt));
-  assert(notes.includes(detail) && notes.includes(code) && notes.includes(String(status)));
+  assert(notes.includes('这一步暂时未完成。'));
+  assert(!notes.includes(detail) && !notes.includes(code) && !notes.includes(String(status)));
   assert.doesNotMatch(notes,/request_id|provider-hidden|chatcmpl-hidden/);
-  assert(!notes.includes('这次操作未能完成。'));
   const structured={...receipt,reason:detail,public_result:{result:'error',status_code:status,error_code:code,
     error_type:'APIStatusError',message:detail,request_id:'provider-hidden',task_id:'physical-hidden'}};
   assert.doesNotMatch(JSON.stringify(context.processResultNotes(structured)),/provider-hidden|physical-hidden|request_id|task_id/);
-  assert(context.processResultNotes(structured).some(note=>note.text.includes(`HTTP ${status}`) && note.text.includes(code)));
+  assert(context.processResultNotes(structured).every(note=>!note.text.includes(code) && !note.text.includes(`HTTP ${status}`)));
 }
 assert.equal(context.processUserText('视觉失败 task_id=task_hidden; 请检查模型。'),'视觉失败 请检查模型。');
-assert.equal(context.processErrorText('HTTP 404\nRequest ID: abc\ntaskId=def; model_not_found'),'HTTP 404\nmodel_not_found');
+assert.equal(context.processErrorText('HTTP 404\nRequest ID: abc\ntaskId=def; model_not_found'),'这一步暂时未完成。');
 assert.equal(context.processErrorText(JSON.stringify({error:{code:'model_not_found',message:'Model unavailable',request_id:'hidden'}})),
-  'model_not_found · Model unavailable');
+  '这一步暂时未完成。');
 assert(context.processResultNotes({...call,status:'error',public_result:{result:'error',error_type:'TypeError'}})
-  .some(note=>note.text==='TypeError'));
+  .some(note=>note.text==='这一步暂时未完成。'));
 const longError='The provider rejected the image input. '.repeat(40);
 const longNotes=context.processResultNotes({...call,status:'error',reason:longError.slice(0,400),text:longError.slice(0,600),
   public_result:{result:'error',message:longError}});
 assert.equal(longNotes.length,1,'Truncated reason/text duplicated the full error message');
-assert.equal(longNotes[0].text,longError.trim());
+assert.equal(longNotes[0].text,'这一步暂时未完成。');
 vm.runInContext(fs.readFileSync('app/src/CommandBus.js','utf8')+'\nthis.bus=commandBus;',context);
 assert(context.bus.describe({result:'error',error:'NotFoundError',message:'Model unavailable',status_code:404,error_code:'model_not_found'})
-  .includes('Model unavailable'));
+  .includes('这一步暂时未完成。'));
 assert.doesNotMatch(context.bus.describe({result:'error',error:'NotFoundError',message:'Model unavailable request_id=hidden'}),/request_id|hidden/);
+for (const [reason,readable] of [
+  ['localization_unavailable','暂时未取得可用的位置数据'],
+  ['posture_not_confirmed','暂时还不能确认站立姿态'],
+  ['motion_not_observed','本次没有确认到实际移动'],
+  ['cargo_search_unconfirmed:localization_unavailable','暂时未取得可用的位置数据'],
+]) {
+  const notes=context.processResultNotes({...call,status:'blocked',reason,public_result:{result:'blocked',reason}});
+  assert(notes.some(note=>note.text===readable));
+  assert.doesNotMatch(JSON.stringify(notes),/localization_unavailable|posture_not_confirmed|motion_not_observed/);
+}
+assert.equal(context.processUserText('定位反馈是 localization_unavailable，先等一下。'),'定位反馈是 暂时未取得可用的位置数据，先等一下。');
+assert.equal(context.processUserText('执行反馈 unknown_internal_code'),'执行反馈 相关处理暂未完成');
+assert.equal(context.processErrorText('{"error":{"message":"服务暂不可用"}}'),'服务暂不可用');
+for (const diagnostic of ['InvalidParameterValue.NoFaceInPhoto','APIStatusError','HTTP/1.1 400 Bad Request','400 Bad Request','{"error":{"code":"unknown_code"}}']) {
+  const text='已移动约 0.4 米，识别暂不可用 '+diagnostic+'，尚未确认送达。';
+  const displayed=context.processUserText(text);
+  assert(displayed.includes('已移动约 0.4 米') && displayed.includes('尚未确认送达。'));
+  assert(!displayed.includes(diagnostic));
+  assert(!context.activityReasonText({reason:text}).includes(diagnostic));
+  assert.equal(context.processErrorText(diagnostic),'这一步暂时未完成。');
+}
+assert.equal(context.processUserText('查看 https://example.com/photos，位置还需确认。'),'查看 https://example.com/photos，位置还需确认。');
+assert.equal(context.processUserText('配置为{"亮度":120}，{暖白}，已移动约 0.4 米。'),'配置为{"亮度":120}，{暖白}，已移动约 0.4 米。');
+assert.equal(context.processOutcome({result_kind:'message',status:'ok'}),'已处理消息');
+assert.equal(context.processOutcome({result_kind:'message',status:'received'}),'消息已送达');
+assert.equal(context.bus.describe({result:'ok',result_kind:'message'}),'已处理消息');
+const failedAttempt={...call,event_id:'failed-attempt',status:'blocked',public_result:{result:'blocked',reason:'posture_not_confirmed'}};
+const retryAttempt={...call,event_id:'retry-attempt',step_id:'retry-step',status:'executing',sequence:3};
+assert.equal(steps([failedAttempt,retryAttempt]).length,2,'A restarted attempt erased the original blocked result');
+assert.equal(steps([failedAttempt,retryAttempt])[0].event.status,'blocked');
 const serial=steps([call,{...call,event_id:'result-1',fact_kind:'result',status:'ok',sequence:2},
   {...call,event_id:'call-2',step_id:'step-2',tool_call_id:'tool-2',sequence:3}]);
 assert.equal(serial.length,2,'Two explicit tool calls collapsed into one');
@@ -92,7 +122,7 @@ assert.equal(context.processOutcome({status:'accepted',result_kind:'action'}),'�
 assert.equal(context.processOutcome({status:'accepted',dispatch_only:true}),'已提交');
 assert.equal(context.processOutcome({status:'accepted',result_kind:'message'}),'已发出');
 assert.equal(context.processOutcome({tool:'send_message',status:'rejected',result_kind:'message'}),'消息未发出');
-assert.equal(context.processOutcome({tool:'start_activity',status:'rejected',result_kind:'activity'}),'请求被拒绝');
+assert.equal(context.processOutcome({tool:'start_activity',status:'rejected',result_kind:'activity'}),'本次未执行');
 const observation={...call,event_id:'obs-event',observation_event_id:'obs-1',fact_kind:'observation',media_ref:'/api/photo',text:'前方有纸箱。'};
 assert.equal(steps([observation,{...observation,event_id:'new-projection',text:'该观察补充'}]).length,1);
 assert.equal(steps([observation,{...observation,event_id:'obs-event-2',observation_event_id:'obs-2'}]).length,2,

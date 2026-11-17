@@ -96,9 +96,29 @@ function activityReasonText(event) {
     question_color_changed_before_arrival:'灯的颜色发生变化，本次目标需要重新确认',
     lighting_not_eligible:'当前条件不允许自主调灯',
     activity_message_denied:'补充消息未通过活动转达校验',
+    localization_unavailable:'暂时未取得可用的位置数据',
+    map_unavailable:'暂时未取得可用的导航地图',
+    posture_not_confirmed:'暂时还不能确认站立姿态',
+    motion_not_observed:'本次没有确认到实际移动',
+    activity_already_started_for_intent:'活动已经启动，无需重复安排',
+    run_deadline_exceeded:'本次处理时间已用尽',
+    cargo_search_unconfirmed:'本次找货尚未完成',
+    cargo_push_unconfirmed:'本次推送尚未确认完成',
+    no_known_free_forward_path:'目标方向暂未确认有可通行的空间',
+    turn_clearance_unavailable:'暂未确认有足够的转身空间',
+    disconnected:'设备当前未连接',
+    control_lease_changed:'设备控制权已交给其他操作',
+    odom_session_mismatch:'位置数据所属的连接已变化，需要重新观察',
+    odom_session_changed:'位置数据所属的连接已变化，需要重新观察',
+    fresh_still_frame_unavailable:'暂未取得停稳后的新画面',
+    pose_changed_during_detection:'观察期间位置发生变化，需要重新观察',
   };
   if (labels[reason]) return labels[reason];
-  return /[\u3400-\u9fff]/.test(reason) ? reason : '';
+  const cause = String(reason).split(':').pop().trim();
+  if (labels[cause]) return labels[cause];
+  return !/[{}\[\]]/.test(reason) && /[\u3400-\u9fff]/.test(reason)
+    && !/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\bHTTP(?:\/\d(?:\.\d)?)?\s*\d{3}\b|\b\d{3}\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error|Bad Gateway|Service Unavailable)\b|\b\w*(?:Error|Exception)\b/i.test(reason)
+    && !/\b(?:[A-Z][A-Za-z0-9]*\.)+[A-Z][A-Za-z0-9]*\b/.test(reason) ? reason : '';
 }
 
 function activityDecisionBasis(event) {

@@ -16,7 +16,7 @@ from cloud.agents.go2.run_view import Go2RunView, stable_reply_event_id
 from cloud.agents.go2.prompts import build_messages as go2_messages, persona_reply_prompt
 from cloud.agents.go2.workflows.search import SEARCH_SERVER_TIMEOUT_S
 from cloud.agents.go2.tools.declarations import READ_ONLY_TOOLS, tool_schemas
-from cloud.agents.common.replies import finalize_reply, factual_fallback
+from cloud.agents.common.replies import finalize_reply, factual_fallback, public_reply_text
 from cloud.agents.common.messages import context_message
 from cloud.observability import bind_context, emit_agent_event
 from cloud.go2.models import get_text_llm
@@ -323,7 +323,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         async def finalize(current: GraphRun) -> GraphRun:
             """Validate facts, speak as Go2 and checkpoint the user-visible reply."""
             if delegated:
-                current.response = current.decision_draft if initial_tool is None else ""
+                current.response = public_reply_text(current.decision_draft) if initial_tool is None else ""
                 current.reply_source = "decision_model" if current.response else "runtime"
                 return current
             def fallback(value):
@@ -344,7 +344,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                     and isinstance(receipt.get('message'), str) and receipt['message'].strip()):
                 # Observing an already-satisfied goal cannot become a story
                 # about physical work. Project this explicit receipt directly.
-                current.response = receipt['message'].strip()
+                current.response = public_reply_text(receipt['message'])
                 current.reply_source = 'tool_receipt'
                 current.emotion = 'neutral'
                 emit_agent_event('reply.validated', agent_id='go2', run_id=current.run_id,

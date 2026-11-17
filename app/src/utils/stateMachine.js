@@ -30,6 +30,12 @@ function stateActionReason(machine, region, transition, state, { offline, busy, 
   if (transition.safety) return '';
   if (stale) return '状态连接正在恢复，等待最新状态';
   if (busy) return '正在等待本次执行结果';
+  // The preparation pose has different entry commands for different source
+  // poses. Missing telemetry cannot choose one or ask the user to guess it.
+  if (state?.[region.state_field] == null && region.prepare_action
+    && transition.dst === region.prepare_action.via) {
+    return '姿态尚未确认，等待设备反馈';
+  }
   if (state?.[region.state_field] != null && state[region.state_field] !== transition.src) {
     return '请先切换到' + (region.views?.[transition.src]?.label || transition.src);
   }

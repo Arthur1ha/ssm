@@ -4,6 +4,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+
+class StreamingRobot(SimpleNamespace):
+    """The synthetic control loop receives new telemetry on each clock tick."""
+    @property
+    def odom_received_at(self):
+        from cloud.go2.navigation import navigator as module
+        return module.time.monotonic()
+
+
 @pytest.mark.asyncio
 async def test_visual_path_translates_sideways_when_turn_disk_has_unknown_floor(monkeypatch):
     from cloud.go2.navigation import navigator as nav_module
@@ -22,7 +31,7 @@ async def test_visual_path_translates_sideways_when_turn_disk_has_unknown_floor(
         is_body_clear=lambda *args: True,
         is_turn_clear=lambda *args: False,
     )
-    monkeypatch.setattr(nav_module, "go2", SimpleNamespace(
+    monkeypatch.setattr(nav_module, "go2", StreamingRobot(
         _odom_session_id="s", move_velocity=move))
     nav = nav_module.Navigator()
     monkeypatch.setattr(nav, "_snapshot", lambda: ((pose.copy(), grid), None))
@@ -103,7 +112,7 @@ async def test_game_stop_cell_tolerance_checks_clearance_and_stillness(
     pose = {"x": 0.45, "y": 4.50, "heading": 1.8, "session_id": "s"}
     commands = []
     grid = SimpleNamespace(is_body_clear=lambda *_: body_clear)
-    monkeypatch.setattr(nav_module, "go2", SimpleNamespace(
+    monkeypatch.setattr(nav_module, "go2", StreamingRobot(
         _odom_session_id="s", move_velocity=lambda *args, **kwargs: commands.append(args)))
     nav = nav_module.Navigator()
     monkeypatch.setattr(nav, "_snapshot", lambda: ((pose.copy(), grid), None))
@@ -132,7 +141,7 @@ async def test_visual_navigation_stops_on_near_side_before_old_goal(monkeypatch)
 
     pose = {"x": 0.31, "y": 0.0, "heading": 0.0, "session_id": "s"}
     commands = []
-    monkeypatch.setattr(nav_module, "go2", SimpleNamespace(
+    monkeypatch.setattr(nav_module, "go2", StreamingRobot(
         _odom_session_id="s", move_velocity=lambda *args, **kwargs: commands.append(args)))
     nav = nav_module.Navigator()
     monkeypatch.setattr(nav, "_snapshot", lambda: ((pose.copy(), object()), None))
@@ -157,7 +166,7 @@ async def test_visual_navigation_accepts_stop_cell_without_last_centimeters(monk
     pose = {"x": 0.0, "y": 0.0, "heading": 0.0, "session_id": "s"}
     commands = []
     grid = object()
-    monkeypatch.setattr(nav_module, "go2", SimpleNamespace(
+    monkeypatch.setattr(nav_module, "go2", StreamingRobot(
         _odom_session_id="s", move_velocity=lambda *args, **kwargs: commands.append(args)))
     nav = nav_module.Navigator()
     monkeypatch.setattr(nav, "_snapshot", lambda: ((pose.copy(), grid), None))
@@ -194,7 +203,7 @@ async def test_navigation_stops_during_short_odom_gap_then_replans(monkeypatch):
         is_body_clear=lambda *args: True,
         is_turn_clear=lambda *args: False,
     )
-    robot = SimpleNamespace(_odom_session_id="s", is_connected=True,
+    robot = StreamingRobot(_odom_session_id="s", is_connected=True,
                             move_velocity=move, sensor_diagnostics={"pose": {"age_s": 1.2}})
     monkeypatch.setattr(nav_module, "go2", robot)
     nav = nav_module.Navigator()
@@ -234,7 +243,7 @@ async def test_short_observation_move_requires_real_progress_before_arrival(monk
             pose['x'] += .06
     grid = SimpleNamespace(grid_to_odom=lambda ix, iy: (ix * .05, 0.),
                            is_body_clear=lambda *_: True)
-    monkeypatch.setattr(nav_module, 'go2', SimpleNamespace(
+    monkeypatch.setattr(nav_module, 'go2', StreamingRobot(
         _odom_session_id='s', move_velocity=move))
     nav = nav_module.Navigator()
     monkeypatch.setattr(nav, '_snapshot', lambda: ((pose.copy(), grid), None))
@@ -265,7 +274,7 @@ async def test_unexecuted_motion_stops_without_waiting_for_navigation_timeout(mo
     commands = []
     grid = SimpleNamespace(grid_to_odom=lambda ix, iy: (ix * .05, 0.),
                            is_body_clear=lambda *_: True)
-    monkeypatch.setattr(nav_module, 'go2', SimpleNamespace(
+    monkeypatch.setattr(nav_module, 'go2', StreamingRobot(
         _odom_session_id='s', move_velocity=lambda *args, **kwargs: commands.append(args)))
     nav = nav_module.Navigator()
     monkeypatch.setattr(nav, '_snapshot', lambda: ((pose.copy(), grid), None))
@@ -300,7 +309,7 @@ def control_simulation(monkeypatch, *, goal=(.4, .4), on_tick=None, effective_mo
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: tick[0], time=time.time))
     monkeypatch.setattr(module, 'asyncio', SimpleNamespace(current_task=lambda: None,
                                                           sleep=sleep, CancelledError=asyncio.CancelledError))
-    monkeypatch.setattr(module, 'go2', SimpleNamespace(_odom_session_id='s', move_velocity=move))
+    monkeypatch.setattr(module, 'go2', StreamingRobot(_odom_session_id='s', move_velocity=move))
     grid = SimpleNamespace(grid_to_odom=lambda ix, iy: (ix * goal[0], iy * goal[1]),
                            is_body_clear=lambda *_: True, turn_sweep_details=lambda *_: {'clear': True})
     nav = module.Navigator()
@@ -322,6 +331,36 @@ async def test_diagonal_floor_moves_effective_axes_without_increasing_norm(monke
     for vx, vy, _ in commands:
         assert math.hypot(vx, vy) <= .300001
         assert all(abs(axis) >= .25 for axis in (vx, vy) if axis)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('freeze_after_first_command', [False, True])
+async def test_motion_requires_new_packets_without_an_odometry_age_ttl(monkeypatch, freeze_after_first_command):
+    from cloud.go2.navigation import navigator as module
+
+    robot = [None]
+    commands = []
+    def receive(_pose, now):
+        if not freeze_after_first_command or not any(any(cmd) for cmd in commands):
+            # Delayed arrival timestamps remain valid; only advancement earns
+            # another command. A frozen stream never earns a second command.
+            robot[0].odom_received_at = now - 1.1
+    nav, _, _, captured = control_simulation(monkeypatch,
+        on_tick=receive, effective_motion=not freeze_after_first_command)
+    commands = captured
+    robot[0] = SimpleNamespace(**vars(module.go2), odom_received_at=98.)
+    monkeypatch.setattr(module, 'go2', robot[0])
+    result = await nav.go_to_coordinate(.4, .4, holonomic=True, arrival_tolerance_m=.08,
+                                        minimum_command_speed=.25, speed_limit=.3)
+    active = [cmd for cmd in commands if any(cmd)]
+    assert commands[0] == (0, 0, 0)
+    assert commands[-1] == (0, 0, 0)
+    if freeze_after_first_command:
+        assert len(active) == 1
+        assert result['reason'] == 'localization_unavailable'
+    else:
+        assert len(active) > 1
+        assert result['status'] == 'succeeded'
 
 
 @pytest.mark.asyncio

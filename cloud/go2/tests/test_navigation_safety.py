@@ -279,10 +279,16 @@ def _synthetic_robot(commands):
 
 def test_navigation_velocity_has_deadman_and_timeout_stops(monkeypatch):
     commands = []
-    robot = _synthetic_robot(commands)
+    class StreamingRobot(SimpleNamespace):
+        @property
+        def odom_received_at(self):
+            return time.monotonic()
+
+    values = vars(_synthetic_robot(commands)).copy()
+    values.pop('odom_received_at')
+    robot = StreamingRobot(**values)
     monkeypatch.setattr(nav_module, "go2", robot)
     monkeypatch.setattr(nav_module, "NAV_TIMEOUT", 0.25)
-    monkeypatch.setattr(nav_module, "POSE_STALE_S", 10.0)
     monkeypatch.setattr(nav_module, "MAP_STALE_S", 10.0)
     result = asyncio.run(nav_module.Navigator().go_to_coordinate(0.8, 0.0))
     assert result["reason"] == "navigation_timeout"
@@ -312,7 +318,6 @@ def test_stop_cancels_navigation_and_sends_zero(monkeypatch):
     commands = []
     robot = _synthetic_robot(commands)
     monkeypatch.setattr(nav_module, "go2", robot)
-    monkeypatch.setattr(nav_module, "POSE_STALE_S", 10.0)
     monkeypatch.setattr(nav_module, "MAP_STALE_S", 10.0)
 
     async def scenario():
@@ -338,7 +343,6 @@ def test_single_pose_frame_cannot_confirm_arrival(monkeypatch):
     commands = []
     robot = _synthetic_robot(commands)
     monkeypatch.setattr(nav_module, "go2", robot)
-    monkeypatch.setattr(nav_module, "POSE_STALE_S", 10.0)
     monkeypatch.setattr(nav_module, "MAP_STALE_S", 10.0)
     result = asyncio.run(nav_module.Navigator().go_to_coordinate(0.0, 0.0))
     assert result["status"] == "failed"
@@ -462,7 +466,7 @@ def test_stop_confirmation_reports_stale_pose_without_claiming_stop(monkeypatch)
     result = asyncio.run(nav_module.Navigator().stop_and_confirm())
     assert result['result'] == 'accepted'
     assert result['reason'] == 'stop_unconfirmed'
-    assert result['diagnostics']['reason'] == 'localization_unavailable'
+    assert result['diagnostics']['reason'] == 'awaiting_new_pose'
     assert result['diagnostics']['samples'] == 0
 
 

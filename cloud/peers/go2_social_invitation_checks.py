@@ -45,6 +45,7 @@ def social_bus(monkeypatch, tmp_path):
     monkeypatch.setattr(social, 'get_activity_store', lambda: store)
     monkeypatch.setattr("cloud.space.context.get_space_context", lambda *_a, **_kw: space)
     monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready", lambda *_: True)
+    monkeypatch.setattr("cloud.peers.games.base.game_invitation_block_reason", lambda *_: None)
     monkeypatch.setattr("cloud.peers.games.registry.game_invitation_ready", lambda *_: True)
     monkeypatch.setattr(free_explore, "go2", SimpleNamespace(is_connected=True))
     monkeypatch.setattr(free_explore, "get_profile", lambda: {"prompt": "我是小狗", "traits": {"extraversion": 75}})
@@ -126,6 +127,8 @@ def test_new_activity_can_discuss_pending_lamp_receipt_without_starting_game(soc
         async def ainvoke(self, messages):
             h.prompts.extend(messages)
             assert "当前可玩玩法：[]" in messages[-1].content
+            assert '"game_id": "push_delivery"' in messages[-1].content
+            assert '"rules":' in messages[-1].content
             assert '"ready": false' in messages[-1].content
             assert "lamp_result_unconfirmed" in messages[-1].content
             return {"decision": "send_message", "target": LAMP,

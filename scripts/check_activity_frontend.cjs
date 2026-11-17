@@ -96,7 +96,8 @@ const searchSteps = ['search_observing','search_observe','search_selected','sear
   event('search-step-'+index,'search_progress',{stage,task_id:'activity-search',source:'object_search',
     fact_kind:stage === 'search_observe' ? 'observation' : stage === 'search_selected' ? 'decision' : undefined,
     observation_event_id:stage === 'search_observe' ? 'search-observation-'+index : undefined,
-    text:stage === 'search_observe' ? '前方有纸箱。' : '搜索步骤 '+stage,
+    text:stage === 'search_observe' ? '前方有纸箱。'
+      : stage === 'search_selected' ? '选择前方纸箱作为目标。' : '',
     media_ref:stage === 'search_observe' ? '/api/activity-photo-'+index : null}));
 const completedSearch = processSteps(projectActivityEvents([...searchSteps,
   {...result,task_id:'activity-search',status:'ok'}]));
@@ -447,11 +448,13 @@ async function browserChecks() {
     await home.waitForFunction(()=>document.querySelectorAll('.space-activity img').length === 2);
     await home.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('当前情况已反馈。'));
     assert.equal(await home.$$eval('.run-process-summary',rows=>rows.some(row=>
-      !row.closest('.space-activity') && /前方有纸箱|搜索步骤/.test(row.textContent))),false,'Activity steps escaped into the conversation');
+      !row.closest('.space-activity') && /前方有纸箱|选择前方纸箱/.test(row.textContent))),false,'Activity steps escaped into the conversation');
     assert.equal(await home.$$eval('.chat-messages img',rows=>rows.every(row=>row.closest('.space-activity'))),true,
       'An activity photo escaped its card');
     assert.equal(await home.$$eval('.space-activity__timeline img',rows=>rows.length),2);
-    assert.match(await home.$eval('.space-activity__timeline',el=>el.textContent),/搜索步骤 search_selected/);
+    const activitySearchText=await home.$eval('.space-activity__timeline',el=>el.textContent);
+    assert.match(activitySearchText,/选择前方纸箱作为目标。/);
+    assert.doesNotMatch(activitySearchText,/search_selected|search_observe/);
     for(const width of [320,390,1280]){
       await home.setViewport({width,height:844});
       assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,

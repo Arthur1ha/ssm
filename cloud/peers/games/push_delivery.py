@@ -437,7 +437,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             # journal; a journal failure must not prevent the original reply.
             logger.warning("delivery task journal unavailable error=%s", type(exc).__name__)
     if status != "ok":
-        record("response", "本单配送已结束，尚未确认货物送达指定区域。", status=status, reason=reason)
+        record("response", "本次配送已结束，尚未确认货物送达指定区域。", status=status, reason=reason)
     messenger.send_result(event["message_id"], status, task_id=task_id, reason=reason)
 
 
