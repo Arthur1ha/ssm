@@ -360,8 +360,7 @@ class Navigator:
                     if (loc['session_id'] != getattr(go2, '_odom_session_id', None)
                             or live.get('session_id') != loc['session_id']):
                         return None, 'map_mismatch'
-                    if (time.monotonic() >= contact.until
-                            or context.expires_at and time.time() >= context.expires_at):
+                    if context.expires_at and time.time() >= context.expires_at:
                         return None, 'cargo_contact_scope_changed'
                     if (time.monotonic() - checked_at > .3
                             or math.hypot(live['x']-pose['x'], live['y']-pose['y']) > .03

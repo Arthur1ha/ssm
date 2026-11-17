@@ -95,7 +95,6 @@ def fsm_transitions() -> dict[str, dict[str, str]]:
 VELOCITY_LIMITS = {"x": 0.5, "y": 0.5, "z": 0.8}
 MOVE_DEFAULT_SPEED = 0.3
 MOVE_MIN_SPEED = 0.1
-MOVE_MAX_DISTANCE_M = 5.0
 MOVE_DISTANCE_TOLERANCE_M = 0.05
 MOVE_ANGLE_TOLERANCE_RAD = 0.05
 MOVE_DIRECTIONS = ("forward", "backward", "left", "right", "turn_left", "turn_right")
@@ -117,7 +116,7 @@ def sport_description() -> str:
 def move_tool_schema() -> dict:
     return {"type": "object", "properties": {
         "direction": {"type": "string", "enum": list(MOVE_DIRECTIONS)},
-        "distance_m": {"type": "number", "minimum": 0.1, "maximum": MOVE_MAX_DISTANCE_M,
+        "distance_m": {"type": "number", "exclusiveMinimum": 0,
                        "description": "前进、后退或侧移的目标距离，单位米；平移必须提供，转向不提供"},
         "angle_deg": {"type": "number", "minimum": 5, "maximum": 180,
                       "description": "原地左转或右转的目标角度，单位度；转向必须提供，平移不提供"},

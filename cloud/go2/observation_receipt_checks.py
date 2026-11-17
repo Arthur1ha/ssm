@@ -54,3 +54,29 @@ async def test_model_cannot_supply_internal_observation_boundary(observer):
         "question": "找灯", "after_received_at": boundary}, context=context)
     assert result["result"] == "rejected" and result["error"] == "invalid_params"
     assert not images
+
+
+async def test_observation_failure_keeps_provider_details_in_public_receipt(observer, monkeypatch):
+    import httpx
+    from openai import NotFoundError
+    from cloud.agents.common.progress_facts import step_progress_facts
+
+    boundary, context, _images = observer
+
+    class UnavailableModel:
+        async def ainvoke(self, _messages):
+            raise NotFoundError('SDK wrapper', response=httpx.Response(404,
+                request=httpx.Request('POST', 'https://example.invalid')), body={
+                    'error': {'code': 'model_not_found', 'message': 'Vision model unavailable.'},
+                    'request_id': 'provider-hidden'})
+
+    monkeypatch.setattr(tools, 'get_vision_llm', UnavailableModel)
+    result = await executor.execute_tool('go2_observe', {'question': '前面是什么'},
+        context=context, observation_after=boundary)
+    assert result['result'] == 'error'
+    assert result['error'] == result['error_type'] == 'NotFoundError'
+    projected = step_progress_facts({'tool': 'go2_observe', 'effectful': False, 'result': result})
+    assert projected['public_result']['status_code'] == 404
+    assert projected['public_result']['error_code'] == 'model_not_found'
+    assert projected['public_result']['message'] == 'Vision model unavailable.'
+    assert 'provider-hidden' not in str(projected)

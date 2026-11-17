@@ -8,6 +8,7 @@ import time
 import uuid
 
 from cloud.agents.common.runner import invoke_blocking
+from cloud.agents.common.tool_results import model_error_details
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
 from cloud.go2.actions import ACTIONS, SPORT_COMMANDS
@@ -424,7 +425,8 @@ async def execute_tool(name: str, params: dict | None = None, *, context: Execut
         result = {"result": "blocked", "error": "device_precondition", "message": str(exc)}
     except Exception as exc:
         logger.exception("Go2 tool %s failed", name)
-        result = {"result": "error", "error": type(exc).__name__, "message": str(exc)}
+        result = {"result": "error", "error": type(exc).__name__, "message": str(exc),
+                  **model_error_details(exc)}
     finally:
         if life_token is not None:
             runtime.finish_life(life_token)

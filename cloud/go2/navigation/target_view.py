@@ -10,9 +10,6 @@ import time
 from cloud.go2.navigation.occupancy_grid import TURN_CLEARANCE_M
 
 HINT_MAX_AGE_S = 60.
-HINT_MAX_TRAVEL_M = 1.
-VIEW_STEP_M = .30
-APPROACH_STEP_M = .80
 
 
 def _number(value):
@@ -53,7 +50,11 @@ def make_target_hint(sample):
     if isinstance(orientation, (list, tuple)) and all(_number(v) for v in orientation):
         capture['orientation'] = [float(v) for v in orientation]
     offset = (box[0] + box[2] - 1000) / 1000
-    return {'kind': 'bearing_only', 'capture_pose': capture,
+    advance = observation.get('advance_distance_m')
+    estimate = observation.get('estimated_distance_m')
+    return {'advance_distance_m': float(advance) if _number(advance) and advance > 0 else None,
+            'estimated_distance_m': float(estimate) if _number(estimate) and estimate > 0 else None,
+            'kind': 'bearing_only', 'capture_pose': capture,
             'odom_session_id': session, 'frame_id': frame['frame_id'],
             'received_at': float(stamp), 'bbox_1000': [float(v) for v in box],
             'width': int(frame['width']), 'height': int(frame['height']),
@@ -73,12 +74,11 @@ def target_hint_valid(hint, pose, *, now=None):
         and _number(hint.get('bearing_odom_rad'))
         and isinstance(hint.get('odom_session_id'), str) and hint['odom_session_id']
         and hint['odom_session_id'] == pose.get('session_id') == capture.get('session_id')
-        and all(_number(p.get(k)) for p in (capture, pose) for k in ('x', 'y', 'heading'))
-        and math.hypot(pose['x']-capture['x'], pose['y']-capture['y']) <= HINT_MAX_TRAVEL_M)
+        and all(_number(p.get(k)) for p in (capture, pose) for k in ('x', 'y', 'heading')))
 
 
 def select_target_view(grid, pose, hint, bounds=None, attempted=(), *, approach=False):
-    """Prefer an 80cm approach on clear paths; shorter views remain a fallback."""
+    """Check the model-proposed distance against geometry without shortening it."""
     if not target_hint_valid(hint, pose):
         return None
     session = getattr(grid, 'map_session', getattr(grid, 'session_id', None))
@@ -113,12 +113,12 @@ def select_target_view(grid, pose, hint, bounds=None, attempted=(), *, approach=
     # move. This is a bounded camera scan, not a triangulated object position.
     glance_back = abs(sideways) >= .10 and any(
         isinstance(old, dict) and old.get('view_kind') == 'lateral' for old in attempted)
-    turns = ([max(-.45, min(.45, delta))] if abs(delta) >= .30 else
+    turns = ([delta] if abs(delta) >= .30 else
              [-math.copysign(.35, sideways)] if glance_back else [side*.35, -side*.35])
     if approach:
         # A coarse direction does not need repeated tiny alignment turns.
         # Do not oscillate left/right when a centred target has a blocked path.
-        turns = ([max(-.75, min(.75, delta))] if abs(delta) > .35 else
+        turns = ([delta] if abs(delta) > .35 else
                  [-math.copysign(.35, sideways)] if glance_back else [])
 
     def turn_candidate():
@@ -138,17 +138,20 @@ def select_target_view(grid, pose, hint, bounds=None, attempted=(), *, approach=
         if turn is not None:
             return turn
     directions = [('lateral', h+side*math.pi/2), ('lateral', h-side*math.pi/2)]
-    if not hint.get('close_in_image') and abs(delta) < math.pi/3:
+    if (approach or not hint.get('close_in_image')) and abs(delta) < math.pi/3:
         directions.insert(0 if approach or abs(delta) < .20 else 1, ('forward', h))
     for kind, direction in directions:
-        lengths = (APPROACH_STEP_M, .40) if approach and kind == 'forward' else (VIEW_STEP_M,)
+        proposed = hint.get('advance_distance_m')
+        lengths = (float(proposed),) if _number(proposed) and proposed > 0 else ()
         for length in lengths:
             x, y = pose['x']+length*math.cos(direction), pose['y']+length*math.sin(direction)
-            if math.hypot(x-capture['x'], y-capture['y']) > HINT_MAX_TRAVEL_M or repeated(x, y, h):
+            if not all(math.isfinite(v) for v in (x, y)) or repeated(x, y, h):
                 continue
             # Check the entire longer segment and its braking margin, not only
             # the endpoint; obstacles can shorten a step before it is dispatched.
-            count = math.ceil((length + .10) / .05)
+            if not clear(x, y, h):
+                continue
+            count = math.ceil((length + .10) / grid.resolution)
             if all(clear(pose['x']+d*math.cos(direction), pose['y']+d*math.sin(direction), h)
                    for d in (i * (length + .10) / count for i in range(count + 1))):
                 return {'x': float(x), 'y': float(y), 'heading': float(h), 'holonomic': True,

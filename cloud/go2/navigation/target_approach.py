@@ -31,8 +31,6 @@ _MESSAGES = {
     'arrival_target_mismatch': '到位后未能重新确认同一目标。',
 }
 
-REOBSERVE_STEP_M = .30
-REOBSERVE_MAX_STEPS = 3
 # Remote transport uses normalized joystick values, not a calibrated m/s API.
 # Site logs show .15 produced no motion, while .242-.30 produced displacement.
 APPROACH_COMMAND_LIMIT = .30
@@ -77,8 +75,7 @@ async def _localize_with_reobservation(target, locate, context, bounds, receipts
     after_move = hint_state.get('after_move')
     attempted = hint_state.setdefault('attempted', [])
     soft = {'object_returns_unavailable', 'target_not_visible'}
-    remaining = max(0, REOBSERVE_MAX_STEPS-len(receipts))
-    for attempt in range(remaining + 1):
+    while True:
         try:
             if initial_reason is not None:
                 reason, initial_reason = initial_reason, None
@@ -86,7 +83,7 @@ async def _localize_with_reobservation(target, locate, context, bounds, receipts
             return await _await_authorized(locate(target, **(
                 {'after_received_at': after_move} if after_move is not None else {})), context)
         except TargetUnlocalized as exc:
-            if exc.reason not in soft or attempt == remaining:
+            if exc.reason not in soft:
                 raise
             last_reason = exc.reason
         observed = await _await_authorized(visual_target.observe_target(
@@ -114,7 +111,7 @@ async def _localize_with_reobservation(target, locate, context, bounds, receipts
             raise TargetUnlocalized('no_known_free_observation_path')
         attempted.append(point)
         emit_agent_event('vision.motion', phase='request', kind='target_reobservation',
-                         waypoint=point, step_m=REOBSERVE_STEP_M,
+                         waypoint=point, step_m=math.hypot(point["x"] - pose["x"], point["y"] - pose["y"]),
                          target_distance_known=False)
         receipt = await _await_authorized(navigator.go_to_coordinate(
             point['x'], point['y'], owner_session_id=context.session_id,
@@ -232,7 +229,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         return {'result': 'blocked', 'reason': 'invalid_target', 'target_hint': target_hint,
                 'observation_moves': []}
     if max_advance_m is not None and (type(max_advance_m) not in (int, float)
-            or not math.isfinite(max_advance_m) or not .15 <= max_advance_m <= 1.0):
+            or not math.isfinite(max_advance_m) or max_advance_m <= 0):
         return {'result': 'blocked', 'reason': 'invalid_advance_budget',
                 'target': target, 'observation_moves': []}
     if not go2.is_connected:
@@ -283,7 +280,6 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                     after_received_at=location['source_received_at']), context)
             except TargetUnlocalized as exc:
                 if (exc.reason not in {'object_returns_unavailable', 'target_not_visible'}
-                        or len(observation_moves) >= REOBSERVE_MAX_STEPS
                         or not allow_reobservation
                         or max_advance_m is not None):
                     raise

@@ -92,7 +92,7 @@ class NextDecision(EmotionModel, DecisionModel):
     action: Literal["observe", "push", "finish", "stop", "question"]
     speech: str = Field(min_length=1, max_length=400)
     question: str = Field(default="", max_length=500)
-    distance_m: float | None = Field(default=None, ge=0.1, le=0.25, allow_inf_nan=False)
+    distance_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def action_arguments(self):
@@ -100,8 +100,6 @@ class NextDecision(EmotionModel, DecisionModel):
         self.question = self.question.strip()
         if not self.speech:
             raise ValueError("nonblank_speech_required")
-        if self.action == "push" and self.distance_m is None:
-            raise ValueError("delivery_push_distance_required")
         if self.action != "push" and self.distance_m is not None:
             raise ValueError("delivery_distance_only_for_push")
         if self.action == "question" and not self.question:
@@ -207,12 +205,12 @@ def _instructions(phase: str) -> str:
         "找货的nearby是粗略位置判断，停稳回执不证明已经走到货物旁或已经贴上货物。"
         "按cargo_receipt中的实际移动距离和测量证据描述进展；没有移动证据不说已经走过去，"
         "没有接触或推送回执不说已经贴上或推过。"
-        "可选observe重新观察、push短距推送、question向同伴询问、stop如实中止、finish结束。"
+        "可选observe重新观察、push按本次视觉距离推送、question向同伴询问、stop如实中止、finish结束。"
         "stage为waiting_destination时先报告发现或向灯提问，不能推送或宣称结束。"
-        "只有destination_confirmed为true才可push，填写0.1到0.25米的单次距离；"
+        "只有destination_confirmed为true才可push，可根据最新视觉建议填写任意正数米的距离；省略时由推物工具的本次视觉观察估算，不使用固定步长；"
         "不因自己到站或移动过就推断货物送达。货物丢失、身份不明或路径受阻时先观察、询问或停止。"
         "question时question填写实际要问的问题；observe可用question说明需要核对的画面。"
-        "只有latest_push的权威回执已确认delivered=true，即停稳后两张画面复核同一货物已在指定目的地附近，才可finish；"
+        "只有latest_push的权威回执已确认delivered=true，即停稳后一张画面复核同一货物已在指定目的地附近，才可finish；"
         "这是大致到位，不要求完全覆盖标记、精确对位或完整入区。"
         "accepted、executing、unknown、口头报告或历史快照均不满足结束条件。"
     )

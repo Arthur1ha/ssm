@@ -55,13 +55,13 @@ class CargoContact:
     def __init__(self, sample, start, advance, context):
         self.context, self.advance = context, advance
         self.start, self.session = dict(start), sample['odom_session_id']
-        self.until = time.monotonic() + 10.
         self.claimed = False
         source = sample.get('contact_observation') or {}
         self.points = np.asarray(source.get('points_odom', []), dtype=float)
         if (self.points.ndim != 2 or self.points.shape[1] != 3
                 or not 6 <= len(self.points) <= 512 or not np.isfinite(self.points).all()
-                or not .1 <= advance <= .25 or start.get('session_id') != self.session):
+                or type(advance) not in (int, float) or not math.isfinite(advance)
+                or advance <= 0 or start.get('session_id') != self.session):
             raise TargetUnlocalized('cargo_contact_geometry_unavailable')
         self.frame, self.capture_pose = source['frame'], source['pose']
         if self.capture_pose.get('session_id') != self.session:
@@ -92,8 +92,7 @@ class CargoContact:
 
     def grid_for(self, grid, pose):
         """Re-associate one compact cargo; all other raw returns stay blocked."""
-        if (time.monotonic() > self.until
-                or self.context.expires_at and time.time() >= self.context.expires_at
+        if (self.context.expires_at and time.time() >= self.context.expires_at
                 or pose.get('session_id') != self.session
                 or not self.in_scope(pose['x'], pose['y'], pose['heading'])):
             raise TargetUnlocalized('cargo_contact_scope_changed')

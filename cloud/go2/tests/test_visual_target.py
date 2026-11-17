@@ -264,8 +264,7 @@ async def test_missing_calibration_uses_lidar_without_claiming_a_target(monkeypa
     monkeypatch.setattr(visual_target, 'load_calibration', missing_calibration)
     locate = AsyncMock(side_effect=TargetUnlocalized('object_returns_unavailable'))
     monkeypatch.setattr(visual_target, 'locate_lidar_target', locate)
-    monkeypatch.setattr(target_approach, 'REOBSERVE_MAX_STEPS', 0)
-    result = await target_approach.navigate_to_visible_target('白色猫头鹰')
+    result = await target_approach.navigate_to_visible_target('白色猫头鹰', allow_reobservation=False)
     assert result['result'] == 'blocked'
     assert result['reason'] == 'object_returns_unavailable'
     locate.assert_awaited_once()
@@ -677,10 +676,10 @@ async def test_visual_target_does_not_retry_success_safety_failures_or_unknown_m
 async def test_visual_target_keeps_explicit_distance_limit(visual_search_fallback):
     h = visual_search_fallback
     result = await h.tools.go2_navigate_to_visible_target('小球', max_advance_m=.5)
-    h.primary.assert_awaited_once_with('小球', max_advance_m=.5)
-    assert result == h.primary.return_value
-    h.search.assert_not_awaited()
-    h.stop.assert_not_awaited()
+    h.primary.assert_awaited_once_with('小球', max_advance_m=.5, allow_reobservation=False)
+    assert result['arrived'] is True and result['max_advance_m'] == .5
+    h.search.assert_awaited_once()
+    h.stop.assert_awaited_once()
 
 
 @pytest.mark.parametrize('change', ['stop_unknown', 'control_changed', 'session_changed'])

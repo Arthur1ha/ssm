@@ -15,6 +15,25 @@ from cloud.agents.lamp.tools.schemas import visible_schemas
 from cloud.agents.steward.tools import STEWARD_TOOL_SCHEMAS
 
 
+@pytest.mark.parametrize('status,code,message', [
+    (403, 'AllocationQuota.FreeTierOnly', 'Free quota exhausted.'),
+    (400, 'invalid_parameter_error', 'This model only supports text modality.'),
+    (404, 'model_not_found', 'The model does not exist or you do not have access to it.'),
+])
+def test_model_errors_keep_provider_diagnostics_without_response_metadata(status, code, message):
+    import httpx
+    from openai import APIStatusError
+    from cloud.agents.common.tool_results import model_error_details
+
+    response = httpx.Response(status, request=httpx.Request('POST', 'https://example.invalid'))
+    exc = APIStatusError('SDK wrapper', response=response, body={
+        'error': {'message': message, 'code': code, 'param': 'private-input'},
+        'id': 'completion-hidden', 'request_id': 'request-hidden', 'prompt': 'private-input'})
+    assert model_error_details(exc) == {'error_type': 'APIStatusError',
+        'status_code': status, 'error_code': code, 'message': message}
+    assert model_error_details(TypeError('private internal arguments')) == {}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["go2", "lamp", "steward"])
 async def test_native_tools_carry_usage_and_parameters(role, tmp_path, monkeypatch):

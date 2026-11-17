@@ -9,6 +9,30 @@ UNCERTAIN = {"executing", "timeout", "unknown"}
 FAILURE = {"blocked", "rejected", "cancelled", "error", "partial", "needs_clarification"}
 
 
+def model_error_details(exc: Exception) -> dict:
+    """Keep provider diagnostics, without copying request bodies or response IDs."""
+    from openai import APIError
+
+    if not isinstance(exc, APIError):
+        return {}
+    details = {"error_type": type(exc).__name__}
+    status = getattr(exc, "status_code", None)
+    if type(status) is int:
+        details["status_code"] = status
+    body = exc.body
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    if isinstance(error, dict):
+        for source, target in (("message", "message"), ("code", "error_code")):
+            value = error.get(source)
+            if isinstance(value, str) and value.strip():
+                details[target] = value.strip()
+    # Connection/timeout errors have no response body. Their SDK message still
+    # describes the failure, without serializing the HTTP request.
+    if "message" not in details:
+        details["message"] = exc.message
+    return details
+
+
 def task_result(receipt: object, *, final: bool) -> dict:
     """Validate an adapter result and make its run-local ending explicit."""
     if (not isinstance(receipt, dict)

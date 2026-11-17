@@ -261,10 +261,11 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
         if not isinstance(observation, dict):
             raise ValueError('non-object vision output')
         fields = (('scene_summary',) if mode == 'scene' else
-                  ('found', 'bbox_1000', 'proximity', 'proximity_reason', 'scene_summary') if mode == 'visible_target' else
+                  ('found', 'bbox_1000', 'proximity', 'proximity_reason', 'scene_summary',
+                   'estimated_distance_m', 'advance_distance_m') if mode == 'visible_target' else
                   ('cargo_count', 'cargo_ground_contact_visible', 'cargo_bbox_1000',
                    'destination_count', 'destination_ground_contact_visible',
-                   'destination_kind', 'destination_bbox_1000') if mode in {'cargo_geometry', 'cargo_delivery_geometry'} else
+                   'destination_kind', 'destination_bbox_1000', 'cargo_distance_m', 'advance_distance_m') if mode in {'cargo_geometry', 'cargo_delivery_geometry'} else
                   ('count', 'static', 'confidence', 'bbox',
                    'ground_contact_visible', 'contact_pixel'))
         emit_agent_event('vision.model', phase='parsed', frame_id=frame.get('frame_id'),
@@ -285,9 +286,10 @@ async def detect_visible_target(jpeg: bytes, target: str, frame: dict) -> dict:
         '在图像中寻找用户描述的物体。'
         '只输出 JSON：{"found":布尔值,"bbox_1000":[左,上,右,下]或null,'
         '"proximity":"nearby"或"far"或"uncertain","proximity_reason":"简短画面依据",'
+        '"estimated_distance_m":到目标的大致水平距离或null,"advance_distance_m":本次建议靠近距离或null,'
         '"scene_summary":"用一句中文描述本张画面实际可见的主要物体和目标位置，不超过80字"}。'
         'scene_summary 无论是否找到目标都必须提供；只写当前画面可见事实，'
-        '不推测画面外的物体，不提供行动建议。'
+        '不推测画面外的物体；scene_summary不包含行动建议。'
         '画面里有任何一个符合描述的物体就设 found=true；若有多个，选画面中最清楚的一个。'
         '看不到符合描述的物体时设 found=false、bbox_1000=null。'
         'bbox_1000 必须用相对于整张图的 0–1000 坐标，左上角为原点，'
@@ -297,7 +299,8 @@ async def detect_visible_target(jpeg: bytes, target: str, frame: dict) -> dict:
         '仍在房间远处或明显需要继续靠近时为 far；遮挡、尺度或透视不足以判断时为 uncertain。'
         '结合地面、家具与整体场景判断，不要仅凭框大或位于画面底部判定 nearby。'
         '看不到目标时必须为 uncertain。此判断不表示可以触碰目标或已经精确到位。'
-        '不要估计距离或世界坐标，不要输出 JSON 之外的文字。'
+        '根据目标、地面和家具尺度及透视估算距离，单位米；给出走到目标附近的建议靠近距离，不使用固定步长。'
+        '没有足够视觉依据时距离填null，不编造距离；这些是视觉估算，不是雷达测量，不输出世界坐标或JSON之外的文字。'
     )
     return await _ask_vision(jpeg, target, frame, instruction, 'visible_target')
 

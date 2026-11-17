@@ -375,6 +375,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         try:
             await run_role_graph(
                 run, model=get_text_llm(), tool_schemas=declarations,
+                max_turns=None, max_effects=None, recursion_limit=10000,
                 build_messages=build_messages, execute=execute, finalize=finalize,
                 prepare_emotion=prepare_emotion,
                 on_step=on_step, on_progress=progress,

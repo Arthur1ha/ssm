@@ -33,6 +33,39 @@ assert.equal(context.processActionDetail(reading).text,'设为暖白，亮度设
 assert.equal(context.processResultNotes(reading).length,0,'A successful receipt acquired a redundant success paragraph');
 assert.doesNotMatch(JSON.stringify(context.processResultNotes(reading)),/task_hidden|request_hidden|future_field|must-not-render/);
 assert.equal(context.processUserText('task_id=task_hidden'),'');
+// Provider errors remain useful even when old SDK strings include correlation IDs.
+for (const [status,code,detail] of [
+  [403,'AllocationQuota.FreeTierOnly','Free quota exhausted.'],
+  [400,'invalid_parameter_error','The current model only supports text modality and does not support image input.'],
+  [404,'model_not_found','The model `Qwen3.8-Omni-Flash` does not exist or you do not have access to it.'],
+]) {
+  const legacy=`Error code: ${status} - {'error': {'message': '${detail}', 'code': '${code}'}, 'request_id': 'provider-hidden', 'id': 'chatcmpl-hidden'}`;
+  const receipt={...call,status:'error',fact_kind:'result',result_kind:'query',reason:legacy,
+    public_result:{result:'error',error:'APIStatusError',message:legacy}};
+  const notes=JSON.stringify(context.processResultNotes(receipt));
+  assert(notes.includes(detail) && notes.includes(code) && notes.includes(String(status)));
+  assert.doesNotMatch(notes,/request_id|provider-hidden|chatcmpl-hidden/);
+  assert(!notes.includes('这次操作未能完成。'));
+  const structured={...receipt,reason:detail,public_result:{result:'error',status_code:status,error_code:code,
+    error_type:'APIStatusError',message:detail,request_id:'provider-hidden',task_id:'physical-hidden'}};
+  assert.doesNotMatch(JSON.stringify(context.processResultNotes(structured)),/provider-hidden|physical-hidden|request_id|task_id/);
+  assert(context.processResultNotes(structured).some(note=>note.text.includes(`HTTP ${status}`) && note.text.includes(code)));
+}
+assert.equal(context.processUserText('视觉失败 task_id=task_hidden; 请检查模型。'),'视觉失败 请检查模型。');
+assert.equal(context.processErrorText('HTTP 404\nRequest ID: abc\ntaskId=def; model_not_found'),'HTTP 404\nmodel_not_found');
+assert.equal(context.processErrorText(JSON.stringify({error:{code:'model_not_found',message:'Model unavailable',request_id:'hidden'}})),
+  'model_not_found · Model unavailable');
+assert(context.processResultNotes({...call,status:'error',public_result:{result:'error',error_type:'TypeError'}})
+  .some(note=>note.text==='TypeError'));
+const longError='The provider rejected the image input. '.repeat(40);
+const longNotes=context.processResultNotes({...call,status:'error',reason:longError.slice(0,400),text:longError.slice(0,600),
+  public_result:{result:'error',message:longError}});
+assert.equal(longNotes.length,1,'Truncated reason/text duplicated the full error message');
+assert.equal(longNotes[0].text,longError.trim());
+vm.runInContext(fs.readFileSync('app/src/CommandBus.js','utf8')+'\nthis.bus=commandBus;',context);
+assert(context.bus.describe({result:'error',error:'NotFoundError',message:'Model unavailable',status_code:404,error_code:'model_not_found'})
+  .includes('Model unavailable'));
+assert.doesNotMatch(context.bus.describe({result:'error',error:'NotFoundError',message:'Model unavailable request_id=hidden'}),/request_id|hidden/);
 const serial=steps([call,{...call,event_id:'result-1',fact_kind:'result',status:'ok',sequence:2},
   {...call,event_id:'call-2',step_id:'step-2',tool_call_id:'tool-2',sequence:3}]);
 assert.equal(serial.length,2,'Two explicit tool calls collapsed into one');

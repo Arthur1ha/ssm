@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from cloud.agents.go2.workflows.search import build_search_graph, SEARCH_MAX_STEPS
+from cloud.agents.go2.workflows.search import build_search_graph
 
 
 @pytest.fixture(autouse=True)
@@ -201,12 +201,6 @@ async def test_guard_never_observes_or_moves_after_invalid_authority(reason):
     assert not adapter.calls
 
 
-@pytest.mark.asyncio
-async def test_budget_is_explicit_not_parent_runner_turn_limit():
-    adapter = Replay([])
-    state = await run(adapter, steps=SEARCH_MAX_STEPS)
-    assert state["result"]["reason"] == "step_budget_exhausted"
-    assert not adapter.calls
 
 
 @pytest.mark.asyncio
@@ -299,7 +293,8 @@ async def test_device_selection_with_numpy_map_coordinates_survives_checkpoint(m
 
 
 @pytest.mark.asyncio
-async def test_failed_node_preserves_completed_coverage_and_logs_safe_diagnostics(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize('provider_error', [False, True])
+async def test_failed_node_preserves_completed_coverage_and_logs_safe_diagnostics(monkeypatch, tmp_path, caplog, provider_error):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from cloud.agents.go2.workflows import search
@@ -314,22 +309,37 @@ async def test_failed_node_preserves_completed_coverage_and_logs_safe_diagnostic
     monkeypatch.setattr(device_state, 'runtime_for', lambda _: runtime)
     stop = AsyncMock(return_value={'result': 'ok'})
     monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
+    failure = TypeError('private credential must not be logged')
+    if provider_error:
+        import httpx
+        from openai import NotFoundError
+        failure = NotFoundError('SDK wrapper', response=httpx.Response(404,
+            request=httpx.Request('POST', 'https://example.invalid')), body={'error': {
+                'code': 'model_not_found', 'message': 'Vision model unavailable.'},
+                'request_id': 'provider-hidden'})
 
     class BrokenSelection(Replay):
         def __init__(self, *args):
             super().__init__([{'found': False, 'frame_id': 1}])
             self.travelled_m = 0.
         async def select(self, state):
-            raise TypeError('private credential must not be logged')
+            raise failure
 
     monkeypatch.setattr(search, 'DeviceSearch', BrokenSelection)
     context = ExecutionContext('test', 'admin', False, expires_at=int(time.time()) + 60)
     result = await search.run_search('owl', context=context, task_id='failed-selection')
     assert result['reason'] == 'search_step_failed'
     assert result['coverage']['unchecked_known_cells'] == 10
-    assert result['error_type'] == 'TypeError'
-    assert 'TypeError' in caplog.text and 'failed-selection' in caplog.text
+    assert result['error_type'] == type(failure).__name__
+    assert type(failure).__name__ in caplog.text and 'failed-selection' in caplog.text
     assert 'private credential' not in caplog.text
+    if provider_error:
+        assert result['status_code'] == 404 and result['error_code'] == 'model_not_found'
+        assert 'Vision model unavailable.' in result['message']
+        assert 'provider-hidden' not in str(result)
+        assert search.describe_search_result(result)['message'] == result['message']
+    else:
+        assert 'private credential' not in str(result)
     stop.assert_awaited_once()
 
 
@@ -668,9 +678,6 @@ async def test_turn_is_not_cut_short_by_translation_segment_limits(monkeypatch):
     from cloud.agents.go2.workflows import search
     from cloud.go2.navigation.navigator import navigator
     adapter, robot = segment_device(monkeypatch)
-    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_S', .02)
-    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_M', .01)
-    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_RAD', .05)
     completed = asyncio.Event()
 
     async def turning(*args, **kwargs):
@@ -710,80 +717,8 @@ async def test_small_turn_cannot_become_success_from_partial_navigation_receipt(
     assert receipt['heading_error_rad'] == pytest.approx(-.29)
 
 
-@pytest.mark.asyncio
-async def test_segment_stops_and_joins_motion_before_waiting_for_model(monkeypatch):
-    from unittest.mock import AsyncMock
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.perception import visual_target
-    adapter, robot = segment_device(monkeypatch)
-    monkeypatch.setattr(navigator, 'snapshot', lambda: pytest.fail('map gating belongs to Navigator'))
-    closed, inference_started, finish_inference = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    async def moving(*args, **kwargs):
-        robot._velocity_command_active = True
-        try:
-            while True:
-                robot.odom = {**robot.odom, 'x': robot.odom['x']+.035}
-                robot.odom_received_at = time.monotonic()
-                await asyncio.sleep(.015)
-        finally:
-            robot._velocity_command_active = False
-            closed.set()
-    stop = AsyncMock(return_value={'result': 'ok'})
-    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
-    detect = AsyncMock()
-    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
-    receipt = await asyncio.wait_for(adapter.navigate(initial(
-        candidate={'x': 2., 'y': 0., 'heading': 0.})), 1)
-    assert receipt['reason'] == 'observation_segment_stopped'
-    assert receipt['result'] == 'ok' and receipt['goal_reached'] is False
-    assert .80 <= receipt['distance_m'] < .95
-    assert closed.is_set() and not robot._velocity_command_active
-    detect.assert_not_awaited()
-    stop.assert_awaited_once()
-    stationary_x = robot.odom['x']
-    async def slow_observation(*args, **kwargs):
-        assert closed.is_set() and not robot._velocity_command_active
-        assert kwargs['after_received_at'] == adapter.after_time
-        inference_started.set()
-        await finish_inference.wait()
-        return {'found': False, 'frame': {'frame_id': 2, 'received_at': time.monotonic()},
-                'pose': robot.odom, 'quality': 1., 'observation': {'found': False}}
-    monkeypatch.setattr(visual_target, 'observe_target', slow_observation)
-    observation = asyncio.create_task(adapter.observe(initial()))
-    await asyncio.wait_for(inference_started.wait(), 1)
-    await asyncio.sleep(.05)
-    assert robot.odom['x'] == stationary_x
-    finish_inference.set()
-    assert not (await observation)['found']
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize('fault', ['localization_unavailable', 'control_lease_changed', 'stop_unconfirmed'])
-async def test_segment_faults_stop_without_starting_vision(monkeypatch, fault):
-    from unittest.mock import AsyncMock
-    from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.perception import visual_target
-    adapter, robot = segment_device(monkeypatch)
-    async def moving(*args, **kwargs):
-        await asyncio.Event().wait()
-    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(
-        return_value={'result': 'accepted' if fault == 'stop_unconfirmed' else 'ok'}))
-    if fault == 'control_lease_changed':
-        adapter.guard = AsyncMock(return_value=fault)
-    elif fault == 'localization_unavailable':
-        robot.odom_received_at = time.monotonic()-2
-    else:
-        async def moving_distance(*args, **kwargs):
-            robot.odom = {**robot.odom, 'x': .85}
-            await asyncio.Event().wait()
-        monkeypatch.setattr(navigator, 'go_to_coordinate', moving_distance)
-    detect = AsyncMock()
-    monkeypatch.setattr(visual_target, 'detect_visible_target', detect)
-    receipt = await asyncio.wait_for(adapter.navigate(initial(candidate={'x': 2., 'y': 0., 'heading': 0.})), 1)
-    assert receipt['result'] == 'blocked' and receipt['reason'] == fault
-    detect.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -882,23 +817,6 @@ async def test_remembered_direction_precedes_unrelated_exploration(monkeypatch):
     assert choice['target']['path_cost_m'] <= .30 + 1e-6
 
 
-@pytest.mark.asyncio
-async def test_stationary_odom_wobble_is_not_a_successful_segment(monkeypatch):
-    from unittest.mock import AsyncMock
-    from cloud.agents.go2.workflows import search
-    from cloud.go2.navigation.navigator import navigator
-    adapter, robot = segment_device(monkeypatch)
-    monkeypatch.setattr(search, 'OBSERVATION_SEGMENT_S', .06)
-    async def moving(*args, **kwargs):
-        while True:
-            robot.odom = {**robot.odom, 'x': .002 if robot.odom['x'] <= 0 else -.002}
-            robot.odom_received_at = time.monotonic()
-            await asyncio.sleep(.01)
-    monkeypatch.setattr(navigator, 'go_to_coordinate', moving)
-    monkeypatch.setattr(navigator, 'stop_and_confirm', AsyncMock(return_value={'result': 'ok'}))
-    receipt = await adapter.navigate(initial(candidate={'x': 2., 'y': 0., 'heading': 0.}))
-    assert receipt['reason'] == 'motion_not_observed'
-    assert receipt['result'] == 'blocked'
 
 
 @pytest.mark.asyncio

@@ -135,13 +135,9 @@ const commandBus = {
         && result.execution_active === false) return '设备已不再执行这条任务，但历史结果无法确认；不会自动重发';
     if (result?.result === 'unknown') return '设备动作结果未知；不会自动重发';
     if (result?.result === 'partial') return result.reply || result.response || '部分步骤未完成';
-    if (result?.error) {
-      try {
-        const detail = JSON.parse(result.error);
-        return detail?.message || detail?.detail?.message || result.error;
-      } catch (_) {
-        return result.error;
-      }
+    if (result?.error || result?.message && ['error','blocked','rejected'].includes(result.result)) {
+      return processResultNotes({status:result.result,public_result:result})
+        .map(note => note.text).join('\n') || '执行失败';
     }
     const messages = {
       ok: '执行完成', accepted: '执行完成', executing: '正在执行',

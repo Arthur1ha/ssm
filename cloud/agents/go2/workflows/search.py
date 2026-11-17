@@ -21,16 +21,11 @@ from langgraph.graph import END, START, StateGraph
 SEARCH_BUDGET_S = 240.0
 SEARCH_TOOL_TIMEOUT_S = 250.0
 SEARCH_SERVER_TIMEOUT_S = 270.0
-SEARCH_MAX_STEPS = 20
-SEARCH_MAX_DISTANCE_M = 20.0
 OBSERVATION_TIMEOUT_S = 35.0
-OBSERVATION_SEGMENT_M = .80
-OBSERVATION_SEGMENT_RAD = .80
-OBSERVATION_SEGMENT_S = 5.0
-TARGET_VIEW_ATTEMPTS = 4
 TELEMETRY_WAIT_S = 3.0
 _request: ContextVar[tuple[str, float] | None] = ContextVar("go2_search_request", default=None)
 _cargo_measurement_required: ContextVar[bool] = ContextVar("go2_search_cargo_measurement", default=False)
+_advance_budget = ContextVar("go2_search_explicit_advance", default=None)
 _exploration_coverage = None
 
 
@@ -40,12 +35,18 @@ def current_search_request() -> tuple[str, float] | None:
 
 
 @contextmanager
-def search_request(task_id: str, deadline: float, *, require_cargo_measurement: bool = False):
+def search_request(task_id: str, deadline: float, *, require_cargo_measurement: bool = False,
+                   max_advance_m: float | None = None):
+    if max_advance_m is not None and (type(max_advance_m) not in (int, float)
+            or not math.isfinite(max_advance_m) or max_advance_m <= 0):
+        raise ValueError("invalid_explicit_advance")
+    advance_token = _advance_budget.set(max_advance_m)
     token = _request.set((task_id, deadline))
     cargo_token = _cargo_measurement_required.set(require_cargo_measurement)
     try:
         yield
     finally:
+        _advance_budget.reset(advance_token)
         _cargo_measurement_required.reset(cargo_token)
         _request.reset(token)
 
@@ -66,6 +67,9 @@ def describe_search_result(result: dict) -> dict:
     elif (result.get("result") == "ok" and
           (result.get("approach") or {}).get("confirmation") == "visual_nearby_and_cargo_localized"):
         outcome, message = "nearby", "已辨认同一货物并取得雷达位置，机身已确认停稳；尚未确认接触、推动或送达。"
+    elif (result.get("result") == "ok" and
+          (result.get("approach") or {}).get("confirmation") == "visual_nearby_and_cargo_estimated"):
+        outcome, message = "nearby", "已辨认同一货物并取得视觉大致位置，机身已停稳；尚未确认接触、推动或精确距离。"
     elif result.get("result") == "ok":
         outcome, message = "nearby", "连续画面判断目标已在附近，机身已确认停稳；尚无精确目标坐标或距离。"
     else:
@@ -78,6 +82,7 @@ def describe_search_result(result: dict) -> dict:
             "map_session_changed": "定位会话已改变，本次搜索已结束。",
             "localization_unavailable": "机器狗自身的定位数据暂不可用，暂时不能移动。",
             "map_unavailable": "导航地图暂不可用，暂时不能移动。",
+            "visual_distance_unavailable": "本次视觉没有给出可用的建议靠近距离，未按固定步长移动。",
             "motion_not_observed": "发出移动指令后，没有观察到足够的实际位移或转动。",
             "no_known_free_observation_path": "当前没有可通行的目标接近路径。",
             "coverage_exhausted": "当前没有新的可达观察点，遮挡区域仍未检查。",
@@ -89,6 +94,9 @@ def describe_search_result(result: dict) -> dict:
             "search_step_failed": "搜索处理发生错误。",
         }
         message = opening + reasons.get(reason, f"本次搜索已结束，原因：{reason}。")
+        if reason == "search_step_failed" and result.get("message"):
+            detail = result["message"]
+            message = detail if detail.startswith(message) else message + "\n" + detail
     result.update(outcome=outcome, message=message)
     return result
 
@@ -133,10 +141,6 @@ def build_search_graph(adapter, *, checkpointer=None):
             return terminal(state, reason)
         if time.time() >= state["deadline"]:
             return terminal(state, "time_budget_exhausted", "timeout")
-        if state.get("steps", 0) >= SEARCH_MAX_STEPS:
-            return terminal(state, "step_budget_exhausted")
-        if state.get("distance_m", 0) >= SEARCH_MAX_DISTANCE_M:
-            return terminal(state, "distance_budget_exhausted")
         return None
 
     async def observe(state):
@@ -214,11 +218,6 @@ def build_search_graph(adapter, *, checkpointer=None):
         if blocked:
             return blocked
         distance = state.get("distance_m", 0.0)
-        proposed = state["candidate"].get("path_cost_m", 0)
-        if state["mode"] == "find_object":
-            proposed = min(proposed, OBSERVATION_SEGMENT_M)
-        if distance + proposed > SEARCH_MAX_DISTANCE_M:
-            return terminal(state, "distance_budget_exhausted")
         await adapter.progress("search_navigate", state)
         receipt = await adapter.navigate(state)
         await adapter.progress("search_move_result", state, receipt=receipt)
@@ -278,8 +277,7 @@ def build_search_graph(adapter, *, checkpointer=None):
             "target_lidar_disagreement", "target_confirmation_mismatch",
             "arrival_target_mismatch", "no_known_free_observation_path"}
         attempts = state.get("approach_attempts", 0) + 1
-        if (status == "blocked" and recoverable and hint and attempts < 3
-                and len(state.get("target_views", [])) < TARGET_VIEW_ATTEMPTS):
+        if (status == "blocked" and recoverable and hint):
             return {"receipt": receipt, "target_hint": hint,
                     "approach_attempts": attempts, "phase": "select"}
         result = terminal(state, reason, status, found=True,
@@ -316,6 +314,7 @@ class DeviceSearch:
         self.progress_sequence = 0
         self.on_observation = None
         self.require_cargo_measurement = _cargo_measurement_required.get()
+        self.advance_budget = _advance_budget.get()
 
     def refresh_map_extent(self, snapshot=None):
         """Follow the current map as it grows, without a configured geofence.
@@ -368,8 +367,8 @@ class DeviceSearch:
             if self.last_pose is not None:
                 self.travelled_m += math.hypot(pose["x"] - self.last_pose["x"], pose["y"] - self.last_pose["y"])
             self.last_pose, self.last_pose_time = pose.copy(), stamp
-        if self.travelled_m >= SEARCH_MAX_DISTANCE_M:
-            return "distance_budget_exhausted"
+        if self.advance_budget is not None and self.travelled_m >= self.advance_budget:
+            return "advance_budget_exceeded"
         return None
 
     async def observe(self, state):
@@ -473,6 +472,9 @@ class DeviceSearch:
                     map_session=self.map_session)
                 return {'target': point, 'reason': 'target_view_selected'}
             if target_hint_valid(hint, snapshot[0]):
+                distance = hint.get('advance_distance_m')
+                if type(distance) not in (int, float) or not math.isfinite(distance) or distance <= 0:
+                    return {'reason': 'visual_distance_unavailable'}
                 return {'reason': 'no_known_free_observation_path'}
         selected = await invoke_blocking(select_observation_target, snapshot[1], snapshot[0],
                                            self.coverage, bounds=self.bounds)
@@ -519,45 +521,34 @@ class DeviceSearch:
             if reposition:
                 options.update(arrival_tolerance_m=.08,
                                holonomic=bool(candidate.get('holonomic')))
+            if self.advance_budget is not None:
+                from cloud.go2.navigation.target_approach import _path_prefix_waypoint
+                remaining = self.advance_budget - self.travelled_m
+                snapshot, reason = navigator.snapshot()
+                if reason or remaining <= 0:
+                    return {'result': 'blocked', 'reason': reason or 'advance_budget_exceeded'}
+                plan = await invoke_blocking(navigator._plan_path,
+                    {**candidate, **options}, snapshot[1], snapshot[0])
+                if not plan:
+                    return {'result': 'blocked', 'reason': 'no_known_free_path'}
+                path, planned_grid, goal = plan
+                x, y, _ = _path_prefix_waypoint(path, planned_grid, start, goal, remaining)
+                move_candidate = {**candidate, 'x': x, 'y': y}
+            else:
+                move_candidate = candidate
             navigation = asyncio.create_task(navigator.go_to_coordinate(
-                candidate["x"], candidate["y"], heading=candidate["heading"],
+                move_candidate["x"], move_candidate["y"], heading=move_candidate["heading"],
                 owner_session_id=self.context.session_id, bounds=self.bounds, **options))
-            # No vision inference runs alongside movement. Odom limits each
-            # leg; the existing Graph observes only after confirmed stopping.
-            watcher = (asyncio.create_task(self._watch_observation_segment(state, navigation, start))
-                       if segmented else None)
-            children = [navigation] + ([watcher] if watcher is not None else [])
+            # Navigator checks live geometry/authority until the selected
+            # goal completes. Distance, turn and elapsed segment quotas do not
+            # replace the visually proposed goal with an arbitrary stop.
             try:
-                async with asyncio.timeout(min(65.0, max(0.01, state["deadline"] - time.time()))):
-                    if watcher is None:
-                        result = await navigation
-                    else:
-                        done, _ = await asyncio.wait(children, return_when=asyncio.FIRST_COMPLETED)
-                        if navigation in done:
-                            result = navigation.result()
-                        else:
-                            segment = watcher.result()
-                            if segment is None:
-                                result = await navigation
-                            else:
-                                stop = await navigator.stop_and_confirm(owner_session_id=self.context.session_id)
-                                if not navigation.done():
-                                    navigation.cancel()
-                                await asyncio.gather(navigation, return_exceptions=True)
-                                reason = segment.get('reason')
-                                stopped = stop.get('result') == 'ok'
-                                result = {'status': 'succeeded' if stopped and not reason else 'blocked',
-                                    'reason': ('observation_segment_stopped' if stopped and not reason
-                                               else reason if stopped else 'stop_unconfirmed'),
-                                    'stop': stop, 'goal_reached': False,
-                                    'planned_observation_goal': candidate,
-                                    'last_trusted_pose': navigator.last_trusted_pose or go2.odom.copy(),
-                                    'segment': segment}
+                async with asyncio.timeout(min(65.0, max(.01, state['deadline'] - time.time()))):
+                    result = await navigation
             finally:
-                for child in children:
-                    if not child.done():
-                        child.cancel()
-                await asyncio.gather(*children, return_exceptions=True)
+                if not navigation.done():
+                    navigation.cancel()
+                await asyncio.gather(navigation, return_exceptions=True)
             status = result.get('status')
             self.after_time = time.monotonic()
             end = result.get('last_trusted_pose') or start
@@ -590,45 +581,6 @@ class DeviceSearch:
                     'distance_m': max(displacement, (result.get('segment') or {}).get('distance_m', 0.))}
         return await self.effect(state, 'navigate', candidate, invoke)
 
-    async def _watch_observation_segment(self, state, navigation, start):
-        from cloud.go2.connection import go2
-        from cloud.go2.navigation.navigator import POSE_STALE_S
-        begun = time.monotonic()
-        previous, distance, rotation = start, 0., 0.
-        turning = state.get('candidate', {}).get('view_kind') == 'turn'
-        while not navigation.done():
-            reason = await self.guard(state)
-            if reason:
-                return {'reason': reason, 'distance_m': distance}
-            # Navigator alone handles map updates/brief map gaps. This watcher
-            # measures movement, and must not add a second map freshness gate.
-            stamp = getattr(go2, 'odom_received_at', None)
-            pose = go2.odom
-            if (type(stamp) not in (int, float) or not 0 <= time.monotonic()-stamp <= POSE_STALE_S
-                    or getattr(go2, 'odom_frame_id', None) != 'odom'
-                    or not pose or not all(type(pose.get(k)) in (int, float) and math.isfinite(pose[k])
-                                           for k in ('x', 'y', 'heading'))):
-                return {'reason': 'localization_unavailable', 'distance_m': distance}
-            if pose.get('session_id') != start.get('session_id'):
-                return {'reason': 'map_session_changed', 'distance_m': distance}
-            distance += math.hypot(pose['x']-previous['x'], pose['y']-previous['y'])
-            rotation += abs(math.atan2(math.sin(pose['heading']-previous['heading']),
-                                      math.cos(pose['heading']-previous['heading'])))
-            previous = pose.copy()
-            # A viewpoint turn is one measured angular goal. Cutting it into
-            # timed observation legs discards the remaining angle and lets the
-            # next visual plan replace it. Navigator owns angular completion,
-            # no-progress detection and timeout; guards above still stop it.
-            if not turning and (distance >= OBSERVATION_SEGMENT_M or rotation >= OBSERVATION_SEGMENT_RAD
-                                or time.monotonic()-begun >= OBSERVATION_SEGMENT_S):
-                net_distance = math.hypot(pose['x']-start['x'], pose['y']-start['y'])
-                net_rotation = abs(math.atan2(math.sin(pose['heading']-start['heading']),
-                                             math.cos(pose['heading']-start['heading'])))
-                return {'distance_m': distance, 'rotation_rad': rotation,
-                        'reason': None if net_distance >= .02 or net_rotation >= .04 else 'motion_not_observed'}
-            await asyncio.sleep(.05)
-        return None
-
     async def approach(self, state):
         from cloud.go2.navigation.navigator import navigator
         observation = state.get('observation', {})
@@ -652,9 +604,8 @@ class DeviceSearch:
                         after_frame_id=self.after_frame, after_received_at=self.after_time)
                     _check_search_reference({'search_evidence': observation}, sample)
                 except TargetUnlocalized as exc:
-                    # Delivery needs measurable cargo before it can attempt
-                    # contact. Reuse this graph's guarded observation moves,
-                    # even when coarse vision says the object is nearby.
+                    # Reuse guarded observation moves when neither measured
+                    # cargo nor a low-object visual estimate is available.
                     return {'result': 'blocked', 'reason': 'object_returns_unavailable'
                             if exc.reason in {'cargo_returns_unavailable', 'cargo_association_unconfirmed'}
                             else exc.reason, 'cargo_reason': exc.reason, 'target_hint': hint}
@@ -664,8 +615,11 @@ class DeviceSearch:
             reason = await self.guard(state)
             if stop.get('result') != 'ok' or reason:
                 return {'result': 'blocked', 'reason': reason or 'stop_unconfirmed', 'stop': stop}
+            confirmation = ('visual_nearby_and_cargo_estimated'
+                            if cargo_location and cargo_location.get('source') in {'visual_ground_estimate', 'visual_distance_estimate'}
+                            else 'visual_nearby_and_cargo_localized' if cargo_location else 'visual_nearby')
             return {'result': 'ok', 'reason': 'target_nearby_visual',
-                    'confirmation': 'visual_nearby_and_cargo_localized' if cargo_location else 'visual_nearby',
+                    'confirmation': confirmation,
                     'precision': 'approximate', 'cargo_location': cargo_location,
                     'target': state['target'], 'target_hint': hint,
                     'target_location': None, 'distance_to_target_m': None,
@@ -727,7 +681,7 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
         return {"result": "rejected", "reason": "invalid_search_request"}
     checkpointer = FileCheckpointSaver()
     config = {"configurable": {"thread_id": f"go2:search:{context.session_id}:{task_id}"},
-              "recursion_limit": SEARCH_MAX_STEPS * 5 + 20}
+              "recursion_limit": 10000}
     # Historical results survive reconnects. Reading one never reacquires the
     # robot or binds its old coordinates to the new localization session.
     existing = await checkpointer.aget_tuple(config)
@@ -843,8 +797,9 @@ async def _run_search(target: str = "", *, mode: str = "find_object", context=No
         logging.getLogger(__name__).error("search step failed task=%s error=%s frames=%s",
             task_id, type(exc).__name__,
             [(frame.name, frame.lineno) for frame in traceback.extract_tb(exc.__traceback__)])
+        from cloud.agents.common.tool_results import model_error_details
         return await finish({"result": "error", "reason": "search_step_failed",
-                             "error_type": type(exc).__name__})
+                             "error_type": type(exc).__name__, **model_error_details(exc)})
     finally:
         pending = [task for task in (graph_task, monitor_task) if task is not None]
         for task in pending:

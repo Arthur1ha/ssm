@@ -38,9 +38,27 @@ function processFactTitle(event, agents = []) {
   if (activityDecisionBasis(event) || event.fact_kind === 'decision') return '';
   return event.fact_kind === 'observation' || event.observation ? '环境观察' : '执行反馈';
 }
+function processStripIds(value) {
+  // Remove correlation fields, not the diagnostic sentence containing them.
+  return value.replace(/["']?\b(?:(?:task|run|parent_run|step|trace|event|source_event|request|frame|conversation|teaching|tool_call|unit|agent|session|message)[_\s-]?id|id)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)\s*[,;]?/gi, '')
+    .replace(/\b(?:task|run|step|tr|evt|req|request|frame|chat|session)_[a-f0-9_-]{8,}\b/gi, '')
+    .replace(/[ \t]{2,}/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').trim();
+}
+function processErrorText(value) {
+  if (typeof value !== 'string') return '';
+  let text = value.trim();
+  // Some old receipts contain serialized errors. Only take diagnostic fields.
+  try {
+    const parsed = JSON.parse(text);
+    const detail = parsed?.error || parsed?.detail || parsed;
+    if (detail && typeof detail === 'object') text = [detail.code, detail.type, detail.message]
+      .filter(item => typeof item === 'string' && item.trim()).join(' · ');
+  } catch (_) {}
+  return processStripIds(text);
+}
 function processUserText(value) {
   if (typeof value !== 'string') return '';
-  const text = value.trim();
+  const text = processStripIds(value.trim());
   // Public facts still contain correlation fields. None are display copy.
   if (/^[{\[]/.test(text) || /\b(?:task|run|parent_run|step|trace|event|source_event|request|frame|conversation|teaching|tool_call|unit|agent)_id\b/i.test(text)
       || /\b(?:task|run|step|tr|evt|req|frame|chat)_[a-f0-9_-]{8,}\b/i.test(text)
@@ -166,11 +184,15 @@ function processSteps(events) {
 function processResultNotes(event) {
   const result = event.public_result || {};
   const notes = [];
+  const failed = processNeedsAttention(event);
   const add = (text, attention = false, kind = 'feedback') => {
-    const clean = processUserText(text);
+    const clean = attention ? processErrorText(text) : processUserText(text);
     if (clean && !notes.some(note => note.text === clean)) notes.push({text:clean,attention,kind});
   };
-  const reasonText = record => activityReasonText({reason:record.reason || record.error || ''});
+  const reasonText = record => {
+    const reason = record.reason || record.error || '';
+    return activityReasonText({reason}) || (failed || processReceiptNeedsAttention(record) ? processErrorText(reason) : '');
+  };
   const members = processMembers(result);
   members.forEach(member => {
     const name = getAgentDisplayName(member.unit_id || member.agent_id);
@@ -240,13 +262,17 @@ function processResultNotes(event) {
     });
   }
   const reason = reasonText(event) || reasonText(result);
-  const failed = processNeedsAttention(event);
-  const message = processUserText(result.message);
+  const diagnostics = failed ? [...new Set([
+    Number.isInteger(result.status_code) ? `HTTP ${result.status_code}` : '',
+    result.error_code, result.error_type || result.error,
+  ].map(processErrorText).filter(Boolean))].join(' · ') : '';
+  if (diagnostics) add(diagnostics,true);
+  const message = failed ? processErrorText(result.message) : processUserText(result.message);
   const speech = ['message','question'].includes(activityEventKind(event));
   const text = speech ? '' : processUserText(event.text);
   if (message) add(message,failed);
-  if (reason && reason !== message && reason !== summary) add(reason,failed);
-  if (text && text !== summary && text !== reason && text !== activityDecisionBasis(event)?.reason) add(text,failed);
+  if (reason && !message.startsWith(reason) && reason !== summary && reason !== diagnostics) add(reason,failed);
+  if (text && !message.startsWith(text) && text !== summary && text !== reason && text !== activityDecisionBasis(event)?.reason) add(text,failed);
   if (['timeout','unknown'].includes(event.status) && !reason && !message)
     add('尚未收到设备的执行确认，目前无法判断是否完成。',true);
   else if (failed && !members.length && !reason && !message && !text)
@@ -292,5 +318,5 @@ function activityProcessRows(events) {
   });
   return rows.filter(row => !row.attached);
 }
-Object.assign(window,{processRecord,processGroupKey,processCapability,processFactTitle,processUserText,processActionDetail,processOutcome,
+Object.assign(window,{processRecord,processGroupKey,processCapability,processFactTitle,processUserText,processErrorText,processActionDetail,processOutcome,
   processNeedsAttention,processHasContent,mergeProcessFact,processResultNotes,processSteps,activityProcessRows});

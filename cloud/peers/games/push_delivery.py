@@ -312,8 +312,10 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             "search_evidence": state["cargo_receipt"].get("evidence")}
         with expect_cargo(reference, request_id=push_id,
                           signal_rgb=expected_color["rgb"]), search_request(push_id, deadline):
-            receipt = await execute_tool("go2_push_cargo", {"cargo": state["cargo"],
-                "destination": order["destination"], "distance_m": answer["distance_m"]}, context=context)
+            params = {"cargo": state["cargo"], "destination": order["destination"]}
+            if answer.get("distance_m") is not None:
+                params["distance_m"] = answer["distance_m"]
+            receipt = await execute_tool("go2_push_cargo", params, context=context)
         record("action_result", receipt.get("message") or "", public_result=receipt,
                action="go2_push_cargo", status=receipt.get("result", "unknown"),
                task_id=receipt.get("task_id") or push_id)
@@ -473,15 +475,15 @@ GAME = Game(
         "灯设置本单约定的指令色并等待物理回执，狗结合真实灯色、目的地描述和当前观察确认站点，"
         "物体标识不必与灯同色，指令色不冒充目标的观察颜色；不凭历史摘要编造站点。"
         "指令或目标不清时先澄清、观察，不盲推。"
-        "配送：狗在目标明确且执行条件满足后，自主选择受控短距推送行动，每次0.1至0.25米，"
+        "配送：狗在目标明确且执行条件满足后，自主选择本次推送行动，根据当前视觉估算决定本次距离，不使用固定步长，"
         "逐步靠近或尝试用腿推动，每步核验停稳、同一货物的真实位置及指定区域；"
         "机器人自身移动不等于货物移动，单纯画面框变化不算推送成功。"
-        "执行器仅在本步受控接触范围内允许接触刚确认的同一货物，持续核对雷达货物簇，"
+        "执行器仅在本步受控接触范围内允许接触刚确认的同一货物，雷达接触路线持续核对货物簇，视觉估距路线不申请障碍豁免，"
         "保留共享地图和其他障碍检查；不能用普通移动、清空地图或关闭避障替代。"
         "货物偏离、卡住、丢失或通路受阻时停止，根据真实情况决定询问、复查或报告受阻，"
         "不凭移动距离猜测货物位置。"
         "送达：只有同一目标货物到达本单指定目的地附近、狗停稳已由真实反馈确认，"
-        "且停稳后用两张新鲜画面复核货物已到指定标识附近，才算大致送达；"
+        "且停稳后用一张新鲜画面复核货物已到指定标识附近，才算大致送达；"
         "不要求货物完全覆盖标记、完整区域边界或精确对位。"
         "狗自身到站、普通导航成功、请求 accepted、模型描述或消息送达都不能替代。"
         "送达不等于签收，取件或签收由人完成并另行确认。"

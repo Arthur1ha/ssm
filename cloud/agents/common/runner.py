@@ -134,8 +134,9 @@ async def run_role_graph(
     on_step: Callable[[dict], None] | None = None,
     on_progress: Callable[[str, dict | None], None] | None = None,
     effectful: Callable[[str], bool] = lambda _name: True,
-    max_turns: int = 12,
-    max_effects: int = 6,
+    max_turns: int | None = 12,
+    max_effects: int | None = 6,
+    recursion_limit: int = 25,
     checkpointer: FileCheckpointSaver | None = None,
     effect_ledger: FileEffectLedger | None = None,
     reconcile_effect: Callable[[str, dict, str], Any] | None = None,
@@ -184,7 +185,8 @@ async def run_role_graph(
     ledger = effect_ledger or FileEffectLedger()
     # Root graphs persist in LangGraph's default namespace. The run ID stays in
     # Graph state and in the API route index; it is not a checkpoint namespace.
-    config = {"configurable": {"thread_id": thread_id_for(run.agent_id, run.session_id)}}
+    config = {"configurable": {"thread_id": thread_id_for(run.agent_id, run.session_id)},
+              "recursion_limit": recursion_limit}
     thread_id = config["configurable"]["thread_id"]
 
     def emit(event: str, **fields: object) -> None:
@@ -205,7 +207,7 @@ async def run_role_graph(
         if time.time() >= current.deadline:
             current.status, current.response = "timeout", "任务已到期；未确认的动作不会自动重发。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
-        if turns > max_turns:
+        if max_turns is not None and turns > max_turns:
             current.status, current.response = "blocked", "模型轮次已达上限；其余步骤未执行。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         if on_progress:
@@ -403,7 +405,7 @@ async def run_role_graph(
                 args = declaration.model_validate(args).model_dump(exclude_none=True)
             except ValidationError:
                 return stop("rejected", "工具参数未通过校验，未执行新动作。")
-        if effectful(name) and state["effects"] >= max_effects:
+        if effectful(name) and max_effects is not None and state["effects"] >= max_effects:
             return stop("blocked", "任务动作次数已达上限；其余步骤未执行。")
         execute_params = args
         params = {key: value for key, value in args.items()

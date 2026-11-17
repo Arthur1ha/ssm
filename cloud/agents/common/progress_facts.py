@@ -85,10 +85,11 @@ def public_tool_result(value: object, *, result_kind="action", depth=0) -> dict:
     """Typed, bounded receipt facts; no arbitrary result/context/memory dictionaries."""
     if not isinstance(value, dict) or depth > 2:
         return {}
-    fields = {"result", "status", "error", "reason", "message", "task_id", "request_id",
+    fields = {"result", "status", "error", "reason", "message", "error_type", "error_code", "status_code", "task_id", "request_id",
               "final", "dispatch_only", "unit_id", "result_kind"}
     fields |= _RESULT_FIELDS.get(result_kind, _RESULT_FIELDS["action"])
-    result = {key: _scalar(value[key]) for key in fields if key in value
+    failed = value.get("result") in {"error", "partial", "blocked", "rejected", "timeout", "unknown"}
+    result = {key: _scalar(value[key], 8192 if key == "message" and failed else 400) for key in fields if key in value
               and isinstance(value[key], (str, bool, int, float))}
     # Activity success is only the outer lifecycle result. Member failures stay visible.
     for key in ("members", "member_results", "join_results", "stop_results"):

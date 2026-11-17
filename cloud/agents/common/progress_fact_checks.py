@@ -74,6 +74,22 @@ def test_malformed_optional_evidence_is_bounded_and_does_not_raise():
         'reason': '选择说明', 'evidence': []}
 
 
+def test_error_diagnostics_survive_live_and_activity_projection():
+    message = 'The model does not support image input. ' * 30
+    projected = step_progress_facts({'tool': 'go2_observe', 'effectful': False,
+        'result': {'result': 'error', 'error_type': 'BadRequestError',
+            'status_code': 400, 'error_code': 'invalid_parameter_error', 'message': message,
+            'request_id': 'correlation', 'private_body': {'prompt': 'never-public'}}})
+    receipt = projected['public_result']
+    assert receipt['message'] == message
+    assert receipt['status_code'] == 400
+    assert receipt['error_code'] == 'invalid_parameter_error'
+    assert receipt['error_type'] == 'BadRequestError'
+    assert receipt['request_id'] == 'correlation'
+    assert 'private_body' not in receipt
+    assert public_process_facts(projected) == projected
+
+
 class Action(BaseModel):
     model_config = ConfigDict(extra='forbid')
     brightness: int

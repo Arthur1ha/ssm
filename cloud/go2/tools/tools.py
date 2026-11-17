@@ -1,4 +1,5 @@
 import asyncio
+import math
 import base64
 import json
 import time
@@ -155,11 +156,11 @@ async def go2_navigate_to_visible_target(target: str, decision_reason: str | Non
 
     started = time.time()
     session = getattr(go2, '_odom_session_id', None)
-    if max_advance_m is not None:
-        # Full search may travel farther than the caller's explicit allowance.
-        return await navigate_to_visible_target(target, max_advance_m=max_advance_m)
     async with asyncio.timeout(VISUAL_NAVIGATION_TIMEOUT_S):
-        result = await navigate_to_visible_target(target, allow_reobservation=False)
+        options = {'allow_reobservation': False}
+        if max_advance_m is not None:
+            options['max_advance_m'] = max_advance_m
+        result = await navigate_to_visible_target(target, **options)
     if not isinstance(result, dict):
         return normalize_result('go2_navigate_to_visible_target', result)
     recoverable = {
@@ -168,7 +169,7 @@ async def go2_navigate_to_visible_target(target: str, decision_reason: str | Non
         'position_uncertainty_excessive', 'ground_ray_unreliable',
         'ground_intersection_unreliable', 'pose_invalid', 'pose_3d_unavailable',
         'sensor_sample_unavailable', 'measured_floor_unavailable',
-        'target_ground_unverified', 'target_outside_local_map',
+        'target_ground_unverified', 'target_outside_local_map', 'calibration_unavailable',
     }
     if result.get('result') not in {'blocked', 'error'} or result.get('reason') not in recoverable:
         return result
@@ -211,8 +212,19 @@ async def go2_navigate_to_visible_target(target: str, decision_reason: str | Non
     emit_agent_event('navigation.fallback', tool='go2_navigate_to_visible_target',
                      fallback_tool='go2_find_object', reason=result['reason'],
                      task_id=search_id, target=target, deadline=deadline)
-    with search_request(search_id, deadline):
+    if max_advance_m is not None and any(
+            type(r.get('distance_m')) not in (int, float)
+            or not math.isfinite(r['distance_m']) or r['distance_m'] < 0 for r in receipts):
+        return result
+    travelled = sum(float(r.get('distance_m') or 0) for r in receipts)
+    remaining = None if max_advance_m is None else max_advance_m - travelled
+    if remaining is not None and remaining <= 0:
+        return result
+    with search_request(search_id, deadline, max_advance_m=remaining):
         searched = await execute_tool('go2_find_object', {'target': target}, context=context)
+    if max_advance_m is not None:
+        searched = {**searched, 'max_advance_m': max_advance_m,
+                    'arrived': searched.get('result') == 'ok' and searched.get('outcome') == 'nearby'}
     return {**searched, 'fallback': {'tool': 'go2_find_object', 'reason': result['reason'],
                                     'task_id': search_id}, 'initial_navigation': result}
 
@@ -223,7 +235,7 @@ async def go2_find_object(target: str) -> dict:
     return await run_search(target)
 
 
-async def go2_push_cargo(cargo: str, destination: str | None = None, distance_m: float = .15) -> dict:
+async def go2_push_cargo(cargo: str, destination: str | None = None, distance_m: float | None = None) -> dict:
     """One guarded gait advance; only actual cargo/zone evidence proves delivery."""
     from cloud.go2.navigation.cargo_push import push_cargo
     return await push_cargo(cargo, destination, distance_m)

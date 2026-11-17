@@ -13,11 +13,12 @@ def sample(box=None):
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'map'}
     return {'found': True, 'frame': {'pose_at_capture': pose, 'odom_session_id': 'map',
             'frame_id': 353, 'received_at': time.monotonic(), 'width': 640, 'height': 360},
-            'observation': {'bbox_1000': box or [795, 520, 825, 580]}}
+            'observation': {'bbox_1000': box or [795, 520, 825, 580],
+                            'estimated_distance_m': 2.8, 'advance_distance_m': 1.37}}
 
 
 def grid(clear=lambda x, y, h: True):
-    return SimpleNamespace(map_session='map', is_body_clear=clear,
+    return SimpleNamespace(map_session='map', resolution=.05, is_body_clear=clear,
         turn_sweep_details=lambda x, y, first, last: {'clear': clear(x, y, last)})
 
 
@@ -32,14 +33,13 @@ def test_hint_retains_capture_and_only_nominal_bearing():
     assert make_target_hint({'found': False}) is None
 
 
-@pytest.mark.parametrize('change', ['expired', 'future', 'session', 'far'])
+@pytest.mark.parametrize('change', ['expired', 'future', 'session'])
 def test_old_or_displaced_hint_never_authorizes_viewpoint(change):
     hint = make_target_hint(sample())
     pose = hint['capture_pose'].copy()
     if change == 'expired': hint['received_at'] -= 61
     if change == 'future': hint['received_at'] += 10
     if change == 'session': pose['session_id'] = 'new'
-    if change == 'far': pose['x'] = 1.01
     assert not target_hint_valid(hint, pose)
     assert select_target_view(grid(), pose, hint) is None
 
@@ -49,7 +49,6 @@ def test_target_side_has_priority_and_attempted_view_is_not_repeated():
     pose = hint['capture_pose']
     first = select_target_view(grid(), pose, hint)
     assert first['view_kind'] == 'lateral' and first['y'] < -.29
-    assert math.hypot(first['x'], first['y']) <= .30
     assert first['heading'] == 0 and first['holonomic']
     second = select_target_view(grid(), pose, hint, attempted=[first])
     assert math.hypot(first['x']-second['x'], first['y']-second['y']) >= .10
@@ -98,11 +97,6 @@ def test_centered_target_uses_safe_forward_view_before_lateral():
     assert point['view_kind'] == 'forward'
 
 
-def test_view_endpoint_stays_within_capture_hint_validity_radius():
-    hint = make_target_hint(sample([450, 500, 550, 600]))
-    point = select_target_view(grid(), {**hint['capture_pose'], 'x': 1.}, hint)
-    assert point['view_kind'] == 'turn'
-    assert math.hypot(point['x'], point['y']) <= 1.
 
 
 def test_approximate_approach_faces_target_then_advances_without_depth():
@@ -111,20 +105,20 @@ def test_approximate_approach_faces_target_then_advances_without_depth():
     assert point['view_kind'] == 'turn' and point['heading'] < 0
     centered = make_target_hint(sample([450, 500, 550, 600]))
     point = select_target_view(grid(), centered['capture_pose'], centered, approach=True)
-    assert point['view_kind'] == 'forward' and point['x'] == pytest.approx(.80)
+    assert point['view_kind'] == 'forward' and point['x'] == pytest.approx(1.37)
     assert point['target_distance_known'] is False
 
 
 def test_approach_uses_long_step_despite_small_direction_error():
     hint = make_target_hint(sample([590, 500, 650, 600]))
     point = select_target_view(grid(), hint['capture_pose'], hint, approach=True)
-    assert point['view_kind'] == 'forward' and point['x'] == pytest.approx(.80)
+    assert point['view_kind'] == 'forward' and point['x'] == pytest.approx(1.37)
 
 
-def test_obstacle_partway_through_long_step_shortens_the_move():
+def test_obstacle_partway_through_model_goal_does_not_silently_shorten_it():
     hint = make_target_hint(sample([450, 500, 550, 600]))
     point = select_target_view(grid(lambda x,y,h: x < .6), hint['capture_pose'], hint, approach=True)
-    assert point['view_kind'] == 'forward' and point['x'] == pytest.approx(.40)
+    assert point is None or point['view_kind'] != 'forward'
 
 
 def test_blocked_centered_target_does_not_trigger_pointless_alignment_turns():
