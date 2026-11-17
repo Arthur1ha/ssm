@@ -6,6 +6,7 @@ stable target posture. Missing joint feedback never becomes RPC-only success.
 """
 
 from dataclasses import dataclass
+import math
 
 
 BODY_STATES = (
@@ -120,11 +121,27 @@ def move_tool_schema() -> dict:
                        "description": "前进、后退或侧移的目标距离，单位米；平移必须提供，转向不提供"},
         "angle_deg": {"type": "number", "minimum": 5, "maximum": 180,
                       "description": "原地左转或右转的目标角度，单位度；转向必须提供，平移不提供"},
-        "speed": {"type": "number", "minimum": MOVE_MIN_SPEED,
-                  "maximum": min(VELOCITY_LIMITS.values()),
-                  "default": min(MOVE_DEFAULT_SPEED, min(VELOCITY_LIMITS.values())),
-                  "description": "平移速度上限为米/秒，原地转向为弧度/秒；实际距离和转角由里程计反馈确认"},
+        "speed": {"type": "number", "exclusiveMinimum": 0,
+                  "maximum": max(VELOCITY_LIMITS.values()),
+                  "description": (f"平移为米/秒，前后上限 {VELOCITY_LIMITS['x']}、左右上限 {VELOCITY_LIMITS['y']}；"
+                                  f"转向为弧度/秒，默认及上限与摇杆一致为 {VELOCITY_LIMITS['z']}。"
+                                  "仅在用户明确要求速度时填写，否则省略；实际距离和转角由里程计反馈确认")},
     }, "required": ["direction"], "additionalProperties": False}
+
+
+def resolve_move_speed(direction: str, speed: float | None = None) -> float:
+    """Use the joystick's axis range; linear defaults never cap angular speed."""
+    axis = {"forward": "x", "backward": "x", "left": "y", "right": "y",
+            "turn_left": "z", "turn_right": "z"}[direction]
+    limit = VELOCITY_LIMITS[axis]
+    if speed is None:
+        return limit if axis == "z" else min(MOVE_DEFAULT_SPEED, limit)
+    if (type(speed) not in (int, float) or not math.isfinite(speed) or speed <= 0
+            or axis != "z" and speed < MOVE_MIN_SPEED):
+        raise ValueError("speed is below minimum or invalid")
+    if speed > limit:
+        raise ValueError("speed exceeds axis maximum")
+    return speed
 
 
 def validate_move_goal(params: dict) -> None:
@@ -133,6 +150,7 @@ def validate_move_goal(params: dict) -> None:
     required, forbidden = ("angle_deg", "distance_m") if turning else ("distance_m", "angle_deg")
     if required not in params or forbidden in params:
         raise ValueError(f"{required} is required for this direction; {forbidden} is not allowed")
+    resolve_move_speed(params["direction"], params.get("speed"))
 
 
 def velocity_schema() -> dict:

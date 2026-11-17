@@ -1,7 +1,6 @@
 /* Space activity placement; conversation rendering lives in ChatMessages. */
 function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
   onEndActivity, onAnswerActivity, training, onReviseRule, busy = false }) {
-  const currentActivityRef = React.useRef(null);
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
   const currentCard = hasActivity ? {
@@ -41,12 +40,11 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     if (index < entries.length) rows.push(entries[index]);
   }
   return <ChatMessages entries={rows} agents={agents} training={training} onReviseRule={onReviseRule} busy={busy}
-    scrollTargetRef={activity?.activity_id ? currentActivityRef : null} scrollKey={activity?.activity_id} scrollTrigger={entries}
-    autoScroll={Boolean(entries.length || activity?.activity_id)}
+    autoScroll={false}
     renderEntry={e => {
       if (e.type === 'space_activity') {
         const card = e.card;
-        return <div key={`activity-${card.id}`} ref={card === currentCard ? currentActivityRef : null}>
+        return <div key={`activity-${card.id}`}>
           <SpaceActivityFeed
             activity={card.activity} events={card.events} ending={card.ending}
             error={card.error} onEnd={onEndActivity} onAnswer={onAnswerActivity}
@@ -100,9 +98,8 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
   getName=getAgentDisplayName}) {
   const [expanded,setExpanded] = React.useState(false);
   const [hasNewEvents,setHasNewEvents] = React.useState(false);
-  const [readingWindow,setReadingWindow] = React.useState(null);
-  const timelineRef = React.useRef(null), followTimeline = React.useRef(true);
-  const lastSeen = React.useRef(null);
+  const [windowStart,setWindowStart] = React.useState(null);
+  const timelineRef = React.useRef(null);
   const activityId = activity?.activity_id || events[0]?.activity_id || '';
   const visibleEvents = projectActivityEvents(events);
   const allRows = activityProcessRows(visibleEvents);
@@ -114,19 +111,30 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     || ['device_left','device_failed'].includes(row.event.event_type) && !['left','ok'].includes(row.event.status)
     || row.event.physical_stop === 'unknown');
   const showTimeline = expanded || isActive || isEnding || hasQuestion || hasAttention;
-  const incomingRows = expanded || hasQuestion || hasAttention ? allRows : allRows.slice(-16);
-  const rows = readingWindow || incomingRows;
+  // Keep the start of the mounted window stable: dropping its first row on
+  // every arrival would move the text under the user's eyes even without scrolling.
+  const startIndex = windowStart?.activityId === activityId
+    ? allRows.findIndex(row => row.key === windowStart.key) : -1;
+  const windowRows = allRows.slice(startIndex >= 0 ? startIndex : -16);
+  const rows = expanded || hasQuestion || hasAttention ? allRows : windowRows;
   const latestId = visibleEvents[visibleEvents.length - 1]?.event_id;
   const context = activity?.context || activity?.user_text || activity?.text || events.find(event => event.event_type === 'started')?.text || '';
   const latestSpeech = [...allRows].reverse().find(row => row.kind === 'message');
   const timeLabel = ts => ts ? new Date(Number(ts) < 1e11 ? Number(ts)*1000 : Number(ts))
     .toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}) : '';
-  React.useEffect(() => {setExpanded(false);setReadingWindow(null);setHasNewEvents(false);followTimeline.current=true;},[activityId]);
+  React.useEffect(() => {setExpanded(false);setHasNewEvents(false);},[activityId]);
+  React.useEffect(() => {
+    if (startIndex < 0 && windowRows.length) setWindowStart({activityId,key:windowRows[0].key});
+  },[activityId,startIndex,windowRows[0]?.key]);
+  // Position the timeline once when opened; incoming messages never move it.
+  React.useLayoutEffect(() => {
+    if (showTimeline && timelineRef.current) timelineRef.current.scrollTop=timelineRef.current.scrollHeight;
+  },[activityId,showTimeline]);
   React.useEffect(() => {
     if (!showTimeline || !timelineRef.current) return;
-    if (followTimeline.current) {timelineRef.current.scrollTop=timelineRef.current.scrollHeight;lastSeen.current=latestId;setHasNewEvents(false);}
-    else setHasNewEvents(lastSeen.current !== latestId);
-  },[activityId,latestId,showTimeline,readingWindow]);
+    const el=timelineRef.current;
+    setHasNewEvents(el.scrollHeight-el.scrollTop-el.clientHeight>1);
+  },[activityId,latestId,showTimeline]);
   if (!activity && !events.length && !error) return null;
   return <section className={`space-activity${isActive || isEnding ? ' space-activity--live' : ' space-activity--ended'}`} aria-label="空间活动">
     <div className="space-activity__heading"><div><small>空间活动</small><h2>{context || '最近的空间活动'}
@@ -139,10 +147,8 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     {!showTimeline && !isEnded && <div className="space-activity__summary"><p>{latestSpeech
       ? `${getName(latestSpeech.event.unit_id)}：${latestSpeech.event.text}` : '正在等待设备动态'}</p></div>}
     {showTimeline && <div className="space-activity__timeline" ref={timelineRef} onScroll={event => {
-      const el=event.currentTarget, near=el.scrollHeight-el.scrollTop-el.clientHeight<80;
-      if (!near && followTimeline.current) setReadingWindow(rows);
-      followTimeline.current=near;
-      if (near) {setHasNewEvents(false);setReadingWindow(null);lastSeen.current=latestId;}
+      const el=event.currentTarget;
+      if (el.scrollHeight-el.scrollTop-el.clientHeight<=1) setHasNewEvents(false);
     }}>
       {rows.map((row,index) => {
         const event=row.event, unit=event.agent_id || event.unit_id || 'cloud_orchestrator';
@@ -175,12 +181,12 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
       })}
     </div>}
     {hasNewEvents && showTimeline && <button type="button" className="space-activity__new" onClick={() => {
-      followTimeline.current=true;setHasNewEvents(false);setReadingWindow(null);
+      setHasNewEvents(false);
       if (timelineRef.current) timelineRef.current.scrollTop=timelineRef.current.scrollHeight;
     }}>有新动态 · 回到最新 ↓</button>}
     {allRows.length>0 && !hasQuestion && (!isActive || allRows.length>rows.length || expanded) && <button type="button"
       className="space-activity__toggle" aria-label={expanded ? '收起活动详情' : '展开活动详情'} aria-expanded={expanded}
-      onClick={() => {setReadingWindow(null);setExpanded(value => !value);}}>
+      onClick={() => setExpanded(value => !value)}>
       <span>{expanded ? '收起详情' : '查看详情'}</span><svg className="process-chevron" data-open={expanded} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
     </button>}
   </section>;

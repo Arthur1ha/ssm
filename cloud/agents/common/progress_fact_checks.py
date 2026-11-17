@@ -56,12 +56,15 @@ def test_search_and_game_facts_keep_only_public_nested_fields():
                         'context': 'private'},
         'public_result': {'candidate': {'source': 'vision', 'x': 1, 'y': 2, 'prompt': 'private'},
             'game_rules': {'rule_id': 'rps', 'status': 'public',
+                           'description': '静态玩法介绍', 'rules': '完整的内部游戏规则和流程',
                            'mapping': [{'choice': 'rock', 'label': '石头', 'secret': 'private'}]},
             'secret_choice': 'scissors'}})
     assert projected['observation']['found'] is None
     assert projected['observation']['as_of'] == 123
     assert projected['public_result']['candidate'] == {'source': 'vision', 'x': 1, 'y': 2}
     assert projected['public_result']['game_rules']['mapping'] == [{'choice': 'rock', 'label': '石头'}]
+    assert 'description' not in projected['public_result']['game_rules']
+    assert 'rules' not in projected['public_result']['game_rules']
     assert 'private' not in json.dumps(projected)
     assert 'secret_choice' not in projected['public_result']
 

@@ -220,10 +220,6 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             return {**observed_state, "result": "rejected", "reason": "game_target_not_visible"}
         return {**observed_state, "target_identification": dog}
 
-    record("action_result", "", stage="game_rules", fact_kind="result", result_kind="query",
-           public_result={"game_rules": {"rule_id": GAME_ID, "name": GAME.name,
-               "description": GAME.description, "rules": GAME.rules, "status": "proposed"}})
-
     async def setup(state):
         lamp, dog = await asyncio.gather(decision("lamp", "setup", state),
                                          decision("go2", "setup", state))
@@ -243,9 +239,6 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                    result_kind="query", fact_kind="result", public_result={"game_rules": {
                        "mapping": [{"choice": choice, "label": labels[choice]} for choice in CHOICES],
                        "rule_id": GAME_ID, "status": "proposed"}})
-        record("action_result", "", stage="terms_proposal", fact_kind="result", result_kind="query",
-               public_result={"game_rules": {"rule_id": GAME_ID, "name": GAME.name,
-                   "rules": GAME.rules, "status": "proposed"}})
         return {"proposals": {"lamp": lamp, "go2": dog}, "terms": terms,
                 "round": 1, "history": [], "arrived": False}
 

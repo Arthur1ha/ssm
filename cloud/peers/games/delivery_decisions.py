@@ -204,6 +204,9 @@ def _instructions(phase: str) -> str:
         )
     return common + (
         "现在由狗依据本单确切货物、灯已确认的配送区、最新真实工具回执选择下一步。"
+        "找货的nearby是粗略位置判断，停稳回执不证明已经走到货物旁或已经贴上货物。"
+        "按cargo_receipt中的实际移动距离和测量证据描述进展；没有移动证据不说已经走过去，"
+        "没有接触或推送回执不说已经贴上或推过。"
         "可选observe重新观察、push短距推送、question向同伴询问、stop如实中止、finish结束。"
         "stage为waiting_destination时先报告发现或向灯提问，不能推送或宣称结束。"
         "只有destination_confirmed为true才可push，填写0.1到0.25米的单次距离；"

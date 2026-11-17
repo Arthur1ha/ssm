@@ -96,6 +96,8 @@ function processReceiptNeedsAttention(result, depth = 0) {
     || (Array.isArray(result.steps) ? result.steps : []).some(item => processReceiptNeedsAttention(item.result,depth+1));
 }
 function processOutcome(event) {
+  if (event.tool === 'send_message' && ['rejected','blocked','error','failed'].includes(event.status))
+    return '消息未发出';
   if (event.result_kind === 'activity' && ['ok','accepted'].includes(event.status)
       && processReceiptNeedsAttention(event.public_result)) return '部分完成';
   if (event.dispatch_only && ['ok','accepted'].includes(event.status)) return '已提交';
@@ -226,11 +228,13 @@ function processResultNotes(event) {
   }
   const rules = result.game_rules;
   if (rules && typeof rules === 'object') {
-    add(rules.description,false,'rule');add(rules.rules,false,'rule');
+    // Historical events may still contain full static game instructions.
+    // Show only actual agreements and public mappings from this game.
+    const mapping = Array.isArray(rules.mapping) ? rules.mapping : [];
     const state = {proposed:'玩法等待双方确认。',confirmed:'双方已确认玩法。',revealing:'正在揭晓本轮选择。'}[rules.status];
-    if (state) add(state,false,'rule');
+    if (state && (rules.status !== 'proposed' || mapping.length)) add(state,false,'rule');
     const choices = {rock:'石头',paper:'布',scissors:'剪刀'};
-    (Array.isArray(rules.mapping) ? rules.mapping : []).slice(0,8).forEach(item => {
+    mapping.slice(0,8).forEach(item => {
       const choice = choices[item.choice], label = processUserText(item.label);
       if (choice && label) add(`${choice}用${label}表示。`,false,'rule');
     });

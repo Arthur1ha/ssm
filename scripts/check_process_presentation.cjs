@@ -58,6 +58,8 @@ assert.equal(context.processRecord({...call,parent_run_id:'parent',model_turn:2,
 assert.equal(context.processOutcome({status:'accepted',result_kind:'action'}),'已完成');
 assert.equal(context.processOutcome({status:'accepted',dispatch_only:true}),'已提交');
 assert.equal(context.processOutcome({status:'accepted',result_kind:'message'}),'已发出');
+assert.equal(context.processOutcome({tool:'send_message',status:'rejected',result_kind:'message'}),'消息未发出');
+assert.equal(context.processOutcome({tool:'start_activity',status:'rejected',result_kind:'activity'}),'请求被拒绝');
 const observation={...call,event_id:'obs-event',observation_event_id:'obs-1',fact_kind:'observation',media_ref:'/api/photo',text:'前方有纸箱。'};
 assert.equal(steps([observation,{...observation,event_id:'new-projection',text:'该观察补充'}]).length,1);
 assert.equal(steps([observation,{...observation,event_id:'obs-event-2',observation_event_id:'obs-2'}]).length,2,
@@ -81,9 +83,16 @@ const publicRules={...message,public_result:{game_rules:{rule_id:'rps_siege',nam
 assert.equal(context.processHasContent({...publicRules,text:undefined}),true);
 assert.equal(context.processFactTitle(publicRules),'猜拳围城');
 const ruleFields=context.processResultNotes(publicRules);
-assert(ruleFields.some(note=>note.text==='一把定胜负，平局重来。'));
+assert(!ruleFields.some(note=>note.text===publicRules.public_result.game_rules.rules
+  || note.text===publicRules.public_result.game_rules.description),'Static game instructions escaped into process feedback');
 assert(ruleFields.some(note=>note.text==='石头用红色表示。'));
+assert(ruleFields.some(note=>note.text==='双方已确认玩法。'));
 assert(!JSON.stringify(ruleFields).includes('rps_siege'),'Internal rule ID escaped into the displayed rule facts');
+const historicalRules={event_type:'action_result',event_id:'old-rules',agent_id:'go2',stage:'game_rules',
+  fact_kind:'result',result_kind:'query',text:'',public_result:{game_rules:{rule_id:'push_delivery',name:'指挥官与送货员',
+    description:'静态玩法介绍',rules:'完整的内部游戏规则和流程'.repeat(200),status:'proposed'}}};
+assert.equal(context.processHasContent(historicalRules),false,'Historical static rules created an empty process entry');
+assert.equal(context.activityProcessRows([historicalRules]).length,0);
 assert.equal(context.activityProcessRows([message,{...message,event_id:'speech-2',message_id:'msg-2'}]).length,2,
   'Independent identical speech was deduplicated by text');
 const game={event_type:'game_result',event_id:'game-1',game_round:{round:1,choices:{go2:'rock'},winner:'go2'}};

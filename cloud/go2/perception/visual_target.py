@@ -253,10 +253,18 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
         if not isinstance(raw, str):
             raise ValueError('non-text vision output')
         observation = json.loads(raw)
+        if (mode in {'cargo_geometry', 'cargo_delivery_geometry'}
+                and isinstance(observation, list) and len(observation) == 1):
+            # Some compatible vision providers wrap their sole JSON record.
+            # Counts, geometry and identity still pass the existing gates.
+            observation = observation[0]
         if not isinstance(observation, dict):
             raise ValueError('non-object vision output')
         fields = (('scene_summary',) if mode == 'scene' else
                   ('found', 'bbox_1000', 'proximity', 'proximity_reason', 'scene_summary') if mode == 'visible_target' else
+                  ('cargo_count', 'cargo_ground_contact_visible', 'cargo_bbox_1000',
+                   'destination_count', 'destination_ground_contact_visible',
+                   'destination_kind', 'destination_bbox_1000') if mode in {'cargo_geometry', 'cargo_delivery_geometry'} else
                   ('count', 'static', 'confidence', 'bbox',
                    'ground_contact_visible', 'contact_pixel'))
         emit_agent_event('vision.model', phase='parsed', frame_id=frame.get('frame_id'),
@@ -469,6 +477,26 @@ async def _capture_still(*, after_frame_id=None, after_received_at=None):
     raise TargetUnlocalized('fresh_still_frame_unavailable')
 
 
+async def wait_for_standing() -> None:
+    """Allow live posture feedback to catch up with an odometry-confirmed stop."""
+    deadline = time.monotonic() + 3.0
+    session = getattr(go2, '_odom_session_id', None)
+    while True:
+        _check_authorization()
+        if not getattr(go2, 'is_connected', True):
+            raise TargetUnlocalized('disconnected')
+        if getattr(go2, '_odom_session_id', None) != session:
+            raise TargetUnlocalized('odom_session_mismatch')
+        body = getattr(go2, 'body_state', None)
+        state_at = getattr(go2, '_sport_state_observed_at', None)
+        if (body == 'standing' and type(state_at) in (int, float)
+                and 0 <= time.monotonic() - state_at <= 1.0):
+            return
+        if body not in {'standing', 'moving', None} or time.monotonic() >= deadline:
+            raise TargetUnlocalized('posture_not_confirmed')
+        await asyncio.sleep(.05)
+
+
 async def _capture_view(*, after_frame_id=None, after_received_at=None):
     """Read a fresh camera view without requiring odometry or authorizing motion."""
     session = getattr(go2, '_odom_session_id', None)
@@ -577,10 +605,7 @@ async def locate_ground_target(target: str, calibration: dict, *,
     from cloud.go2.perception.rgb_lidar import (
         associate_ground_target, quaternion_matrix, save_paired_sample,
     )
-    state_at = getattr(go2, '_sport_state_observed_at', None)
-    if (getattr(go2, 'body_state', None) != 'standing' or state_at is None
-            or not 0 <= time.monotonic() - state_at <= 1.0):
-        raise TargetUnlocalized('posture_not_confirmed')
+    await wait_for_standing()
     jpeg, frame, quality = await _capture_still(after_frame_id=after_frame_id,
                                                after_received_at=after_received_at)
     if (frame['width'], frame['height']) != (calibration['width'], calibration['height']):
@@ -641,10 +666,7 @@ async def locate_lidar_target(target: str, *, after_frame_id=None,
         associate_lidar_target, go2_camera_profile, image_bearing, quaternion_matrix,
         save_paired_sample,
     )
-    state_at = getattr(go2, '_sport_state_observed_at', None)
-    if (getattr(go2, 'body_state', None) != 'standing' or state_at is None
-            or not 0 <= time.monotonic() - state_at <= 1.0):
-        raise TargetUnlocalized('posture_not_confirmed')
+    await wait_for_standing()
     jpeg, frame, quality = await _capture_still(after_frame_id=after_frame_id,
                                                after_received_at=after_received_at)
     pose = frame['pose_at_capture']

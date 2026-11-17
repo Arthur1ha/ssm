@@ -95,6 +95,7 @@ function activityReasonText(event) {
     edge_result_unconfirmed:'尚未收到设备的完成反馈',
     question_color_changed_before_arrival:'灯的颜色发生变化，本次目标需要重新确认',
     lighting_not_eligible:'当前条件不允许自主调灯',
+    activity_message_denied:'补充消息未通过活动转达校验',
   };
   if (labels[reason]) return labels[reason];
   return /[\u3400-\u9fff]/.test(reason) ? reason : '';

@@ -8,7 +8,6 @@ from cloud.go2.card import _build_go2_card, _go2_state_machine
 from cloud.go2.tools.registry import get_card_skill
 from cloud.go2.connection.webrtc import Go2Connection
 from cloud.go2.tools import registry
-from cloud.go2.tools.executor import validate_params
 from cloud.agents.go2.tools.declarations import tool_schemas
 
 
@@ -34,14 +33,26 @@ def test_axis_limit_reaches_card_model_receiver_and_adapter(monkeypatch):
     monkeypatch.setitem(actions.VELOCITY_LIMITS, "x", .2)
     skill = get_card_skill("go2_move")
     assert skill["params_schema"] == tool_schemas()["go2_move"]["parameters"]
-    assert skill["params_schema"]["properties"]["speed"]["maximum"] == .2
-    assert skill["params_schema"]["properties"]["speed"]["default"] == .2
+    assert skill["params_schema"]["properties"]["speed"]["maximum"] == actions.VELOCITY_LIMITS['z']
+    assert actions.resolve_move_speed('forward') == .2
     with pytest.raises(ValueError, match="maximum"):
-        validate_params(skill["params_schema"], {"direction": "forward", "speed": .21})
+        actions.validate_move_goal({"direction": "forward", "distance_m": 1, "speed": .21})
+    actions.validate_move_goal({"direction": "turn_right", "angle_deg": 30, "speed": .8})
     with pytest.raises(ValueError, match="range"):
         Go2Connection._validate_velocity(x=.21)
     widget = next(w for w in _build_go2_card()["widgets"] if w["type"] == "joystick")
     assert widget["params_schema"]["properties"]["x"]["maximum"] == .2
+
+
+def test_angular_limit_reaches_joystick_and_relative_turn_without_linear_cap(monkeypatch):
+    monkeypatch.setitem(actions.VELOCITY_LIMITS, "z", .7)
+    assert actions.resolve_move_speed('turn_right') == .7
+    assert actions.resolve_move_speed('turn_left', .6) == .6
+    assert actions.resolve_move_speed('forward') == .3
+    widget = next(w for w in _build_go2_card()["widgets"] if w["type"] == "joystick")
+    assert widget["params_schema"]["properties"]["z"]["maximum"] == .7
+    with pytest.raises(ValueError, match="maximum"):
+        actions.validate_move_goal({"direction": "turn_left", "angle_deg": 30, "speed": .71})
 
 
 def test_life_guard_change_updates_runtime_and_card(monkeypatch):

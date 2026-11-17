@@ -30,6 +30,7 @@ OBSERVATION_SEGMENT_S = 5.0
 TARGET_VIEW_ATTEMPTS = 4
 TELEMETRY_WAIT_S = 3.0
 _request: ContextVar[tuple[str, float] | None] = ContextVar("go2_search_request", default=None)
+_cargo_measurement_required: ContextVar[bool] = ContextVar("go2_search_cargo_measurement", default=False)
 _exploration_coverage = None
 
 
@@ -39,11 +40,13 @@ def current_search_request() -> tuple[str, float] | None:
 
 
 @contextmanager
-def search_request(task_id: str, deadline: float):
+def search_request(task_id: str, deadline: float, *, require_cargo_measurement: bool = False):
     token = _request.set((task_id, deadline))
+    cargo_token = _cargo_measurement_required.set(require_cargo_measurement)
     try:
         yield
     finally:
+        _cargo_measurement_required.reset(cargo_token)
         _request.reset(token)
 
 
@@ -60,6 +63,9 @@ def describe_search_result(result: dict) -> dict:
     result["found"] = seen
     if reason == "stop_unconfirmed":
         outcome, message = "stop_unconfirmed", "搜索已中止，但还没有确认机身停稳；不能继续移动，也不能算找到并接近了目标。"
+    elif (result.get("result") == "ok" and
+          (result.get("approach") or {}).get("confirmation") == "visual_nearby_and_cargo_localized"):
+        outcome, message = "nearby", "已辨认同一货物并取得雷达位置，机身已确认停稳；尚未确认接触、推动或送达。"
     elif result.get("result") == "ok":
         outcome, message = "nearby", "连续画面判断目标已在附近，机身已确认停稳；尚无精确目标坐标或距离。"
     else:
@@ -309,6 +315,7 @@ class DeviceSearch:
         self.travelled_m = 0.0
         self.progress_sequence = 0
         self.on_observation = None
+        self.require_cargo_measurement = _cargo_measurement_required.get()
 
     def refresh_map_extent(self, snapshot=None):
         """Follow the current map as it grows, without a configured geofence.
@@ -635,12 +642,31 @@ class DeviceSearch:
                     'reason': 'target_nearby_recheck' if observation.get('found') and
                     evidence.get('proximity') == 'nearby' else 'target_view_needed'}
         async def invoke():
+            cargo_location = None
+            if self.require_cargo_measurement:
+                from cloud.go2.perception.cargo import observe_cargo
+                from cloud.go2.perception.visual_target import TargetUnlocalized
+                from cloud.go2.navigation.cargo_push import _check_search_reference
+                try:
+                    sample = await observe_cargo(state['target'],
+                        after_frame_id=self.after_frame, after_received_at=self.after_time)
+                    _check_search_reference({'search_evidence': observation}, sample)
+                except TargetUnlocalized as exc:
+                    # Delivery needs measurable cargo before it can attempt
+                    # contact. Reuse this graph's guarded observation moves,
+                    # even when coarse vision says the object is nearby.
+                    return {'result': 'blocked', 'reason': 'object_returns_unavailable'
+                            if exc.reason in {'cargo_returns_unavailable', 'cargo_association_unconfirmed'}
+                            else exc.reason, 'cargo_reason': exc.reason, 'target_hint': hint}
+                self.after_frame, self.after_time = sample['frame_id'], sample['received_at']
+                cargo_location = sample['cargo_location']
             stop = await navigator.stop_and_confirm(owner_session_id=self.context.session_id)
             reason = await self.guard(state)
             if stop.get('result') != 'ok' or reason:
                 return {'result': 'blocked', 'reason': reason or 'stop_unconfirmed', 'stop': stop}
             return {'result': 'ok', 'reason': 'target_nearby_visual',
-                    'confirmation': 'visual_nearby', 'precision': 'approximate',
+                    'confirmation': 'visual_nearby_and_cargo_localized' if cargo_location else 'visual_nearby',
+                    'precision': 'approximate', 'cargo_location': cargo_location,
                     'target': state['target'], 'target_hint': hint,
                     'target_location': None, 'distance_to_target_m': None,
                     'last_trusted_pose': observation.get('pose'), 'stop': stop,

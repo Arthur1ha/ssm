@@ -12,6 +12,7 @@ from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.connection import go2
 from cloud.go2.perception import visual_target
 from cloud.go2.perception.visual_target import TargetUnlocalized
+from cloud.observability import emit_agent_event
 
 
 def _destination_geometry(frame, detected):
@@ -104,6 +105,10 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     cluster = await invoke_blocking(associate_lidar_target, voxel, pose, camera, frame,
         detected['cargo_bbox_1000'], grid.measured_floor_z, diagnostics=diagnostics,
         target_points=target_points)
+    emit_agent_event('vision.lidar', phase='cargo_foreground_association',
+        frame_id=frame['frame_id'], bbox_1000=detected['cargo_bbox_1000'],
+        camera_model=camera.get('profile'), matched=cluster is not None,
+        association_diagnostics=diagnostics)
     if cluster is None:
         raise TargetUnlocalized('cargo_returns_unavailable')
     live = visual_target._live_pose(frame['odom_session_id'])

@@ -72,6 +72,7 @@ def test_original_observation_candidate_and_rules_survive_sse_history(monkeypatc
         stage='search_selected', sequence=2, ts=1001, fact_kind='decision', result_kind='query',
         public_result={'candidate': {'source': 'frontier', 'x': 1, 'y': 2, 'context': 'private'},
             'game_rules': {'rule_id': 'rps_siege', 'status': 'proposed',
+                          'description': '静态玩法介绍', 'rules': '完整的内部游戏规则和流程',
                           'mapping': [{'choice': 'rock', 'label': '红色'}]}, 'context': 'private'})
     rows = store.events(activity_id)[-2:]
     assert first['ts'] == rows[0]['ts'] == 1000
@@ -82,6 +83,8 @@ def test_original_observation_candidate_and_rules_survive_sse_history(monkeypatc
     assert rows[1]['public_result'] == second['public_result']
     assert rows[1]['public_result']['candidate'] == {'source': 'frontier', 'x': 1, 'y': 2}
     assert rows[1]['public_result']['game_rules']['mapping'] == [{'choice': 'rock', 'label': '红色'}]
+    assert 'description' not in rows[1]['public_result']['game_rules']
+    assert 'rules' not in rows[1]['public_result']['game_rules']
     assert [row['source_event_id'] for row in rows] == [first['event_id'], second['event_id']]
     assert [channel.get_nowait()['event_id'] for _ in range(2)] == [first['event_id'], second['event_id']]
     assert ActivityStore(tmp_path / 'activity.json').events(activity_id)[-2:] == rows

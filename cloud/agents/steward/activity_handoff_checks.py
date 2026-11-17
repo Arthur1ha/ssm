@@ -68,6 +68,30 @@ async def test_first_handoff_passes_after_graph_appends_current_pending_step(han
     assert "还未确认" in h.run.response
 
 
+async def test_signed_user_intent_can_handoff_after_starting_activity(handoff):
+    from cloud.mqtt_signing import sign_message
+    from cloud.orchestrator.trusted_context import parse_trusted_intent
+
+    h = handoff
+    now = time.time()
+    payload = sign_message('ssm/intent/session', {
+        'text': h.run.goal, 'event_id': 'evt_handoff', 'user_revision': 1,
+        'origin_kind': 'untrusted_value',
+        'context': {'session_id': 'session', 'actor': 'admin', 'persist': False,
+                    'space_id': 'main', 'issued_at': now, 'expires_at': now + 60}},
+        signing_secret='handoff-fixture-signing-key', now=now)
+    context = parse_trusted_intent(payload, 'session',
+        signing_secret='handoff-fixture-signing-key', now=now)
+    assert context['origin_kind'] == 'user_delegated'
+    h.run.steps = [
+        {'tool': 'start_activity', 'result': {'result': 'ok', 'activity': h.activity}},
+        {'step_id': 'current', 'tool': 'send_message', 'result': None}]
+    result = await make_executor(h.run, context)('send_message', {
+        'target': 'go2', 'content': h.run.goal}, 'current')
+    assert result['result'] == 'accepted'
+    h.messenger.send_message.assert_called_once()
+
+
 @pytest.mark.parametrize("prior_result,blocked", [
     ("accepted", True), ("unknown", True), ("timeout", True), (None, True),
     ("rejected", False), ("blocked", False), ("error", False), ("cancelled", False),

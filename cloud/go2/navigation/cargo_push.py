@@ -319,6 +319,10 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                   'movement': movement, 'stop': stopped,
                   'reference': _reference_for(after or before, cargo, destination) if after or before else reference,
                   'message': _REASONS.get(reason, '当前观测或设备条件不足，本次推送尚未确认完成。')}
+        if (reason == 'cargo_move_unconfirmed' and not uncertain
+                and movement is not None and (movement.get('stop') or {}).get('result') == 'ok'
+                and movement.get('message')):
+            result['message'] = movement['message'] + '尚未确认货物发生位移。'
     # Raw component points are an in-process allowance, not a public tool
     # parameter, checkpoint capability, or retained observation projection.
     for key in ('cargo_before', 'cargo_after'):

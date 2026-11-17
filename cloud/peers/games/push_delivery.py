@@ -120,10 +120,6 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 "task_id": task_id, "source_event_id": source_id,
                 "fact_kind": fact_kind, "result_kind": "action", **details})
 
-    record("action_result", "", stage="game_rules", fact_kind="result", result_kind="query",
-           public_result={"game_rules": {"rule_id": GAME_ID, "name": GAME.name,
-               "description": GAME.description, "rules": GAME.rules, "status": "proposed"}})
-
     def facts(state, role):
         return {"game": GAME.metadata(), "stage": state.get("stage", ""),
                 "roles": {"lamp": "指挥官", "go2": "送货员"},
@@ -203,7 +199,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         search_id = "delivery_" + invitation_id + "_cargo"
         record("action", "", action="go2_find_object", arguments={"target": state["cargo"]}, task_id=search_id)
-        with search_request(search_id, deadline):
+        with search_request(search_id, deadline, require_cargo_measurement=True):
             receipt = await execute_tool("go2_find_object", {"target": state["cargo"]}, context=context)
         record("action_result", receipt.get("message") or "", public_result=receipt,
                action="go2_find_object", status=receipt.get("result", "unknown"),

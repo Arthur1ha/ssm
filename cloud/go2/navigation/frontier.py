@@ -77,8 +77,9 @@ def _can_start_observation(grid, odom, target, bounds, plans):
     from cloud.go2.navigation.navigator import (
         Navigator, _find_lookahead_on_path, _normalize_angle,
         ARRIVAL_THRESHOLD, HEADING_THRESHOLD, PATH_HEADING_INHIBIT,
-        WALK_SPEED, MIN_LINEAR_VEL, TURN_SPEED, KP_YAW,
+        WALK_SPEED, MIN_LINEAR_VEL, KP_YAW,
     )
+    from cloud.go2.actions import VELOCITY_LIMITS
     key = (target.x, target.y, target.heading)
     if key not in plans:
         plans[key] = Navigator()._plan_path(
@@ -99,7 +100,7 @@ def _can_start_observation(grid, odom, target, bounds, plans):
     if abs(error) > PATH_HEADING_INHIBIT:
         return Navigator._turn_details(grid, odom, odom['heading']+error)['clear']
     speed = min(WALK_SPEED, max(MIN_LINEAR_VEL, distance*.8))
-    yaw = max(-TURN_SPEED, min(TURN_SPEED, KP_YAW*error))
+    yaw = max(-VELOCITY_LIMITS['z'], min(VELOCITY_LIMITS['z'], KP_YAW*error))
     body_clear = getattr(grid, 'is_body_clear', None)
     return bool(callable(body_clear)
                 and body_clear(odom['x'], odom['y'], odom['heading'])

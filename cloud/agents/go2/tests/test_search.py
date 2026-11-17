@@ -983,6 +983,71 @@ async def test_nearby_visual_result_still_requires_confirmed_stop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_delivery_nearby_sighting_repositions_until_same_cargo_is_measurable(monkeypatch):
+    from unittest.mock import AsyncMock
+    from cloud.go2.navigation.navigator import navigator
+    from cloud.go2.perception import cargo
+    from cloud.go2.perception.visual_target import TargetUnlocalized
+    from cloud.agents.go2.workflows.search import describe_search_result
+
+    device, robot = segment_device(monkeypatch)
+    device.require_cargo_measurement = True
+    hint = {'kind': 'bearing_only', 'frame_id': 1}
+    observations = [{'found': True, 'frame_id': n, 'image_time': time.monotonic(),
+                     'pose': dict(robot.odom), 'target_hint': hint,
+                     'observation': {'found': True, 'proximity': 'nearby',
+                                     'bbox_1000': [500, 700, 700, 850]}}
+                    for n in range(1, 5)]
+    sample = {'frame_id': 5, 'received_at': time.monotonic(),
+              'odom_session_id': 'map', 'pose': dict(robot.odom),
+              'cargo_bbox_1000': [505, 705, 695, 850],
+              'cargo_location': {'x': .8, 'y': 0., 'uncertainty_m': .1}}
+    measure = AsyncMock(side_effect=[TargetUnlocalized('cargo_returns_unavailable'), sample])
+    monkeypatch.setattr(cargo, 'observe_cargo', measure)
+    stop = AsyncMock(return_value={'result': 'ok'})
+    monkeypatch.setattr(navigator, 'stop_and_confirm', stop)
+    replay = Replay(observations, choices=[{'target': {
+        'source': 'target_reobservation', 'path_cost_m': .3}}])
+    replay.approach = device.approach
+    state = await run(replay)
+    assert replay.calls == ['observe', 'observe', 'select', 'navigate', 'observe', 'observe']
+    assert state['steps'] == 1 and measure.await_count == 2
+    assert state['result']['approach']['confirmation'] == 'visual_nearby_and_cargo_localized'
+    assert '尚未确认接触' in describe_search_result(state['result'])['message']
+    stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['cargo_ambiguous', 'cargo_search_target_mismatch', 'control_lease_changed'])
+async def test_delivery_cannot_reposition_on_identity_or_authority_failure(monkeypatch, reason):
+    from unittest.mock import AsyncMock
+    from cloud.go2.perception import cargo
+    from cloud.go2.perception.visual_target import TargetUnlocalized
+
+    device, _ = segment_device(monkeypatch)
+    device.require_cargo_measurement = True
+    monkeypatch.setattr(cargo, 'observe_cargo', AsyncMock(side_effect=TargetUnlocalized(reason)))
+    replay = Replay([{'found': True, 'frame_id': n, 'target_hint': {'kind': 'bearing_only'},
+                      'observation': {'proximity': 'nearby'}} for n in (1, 2)])
+    replay.approach = device.approach
+    state = await run(replay)
+    assert state['result']['result'] == 'blocked' and state['result']['reason'] == reason
+    assert 'navigate' not in replay.calls
+
+
+def test_cargo_measurement_requirement_is_scoped_to_parent_search(monkeypatch):
+    from cloud.agents.go2.workflows.search import search_request
+    with search_request('delivery', time.time() + 60, require_cargo_measurement=True):
+        delivery, _ = segment_device(monkeypatch)
+        assert delivery.require_cargo_measurement is True
+        with search_request('ordinary', time.time() + 60):
+            ordinary, _ = segment_device(monkeypatch)
+            assert ordinary.require_cargo_measurement is False
+    ordinary, _ = segment_device(monkeypatch)
+    assert ordinary.require_cargo_measurement is False
+
+
+@pytest.mark.asyncio
 async def test_blocked_target_view_does_not_wander_away_from_known_target(monkeypatch):
     from types import SimpleNamespace
     from cloud.go2.navigation import frontier

@@ -2,7 +2,11 @@
 
 浏览器展示的是原运行的有界公开事实，不是日志或模型提示词。共享 `progress_facts.py` 负责调用、参数、结果与关联字段的公开投影，沿用 `agent_progress`、`agent_reply`、`run_stage` 与现有 MQTT/SSE 通道。`stage` 仍可用于忙碌、追问和终结控制；没有实际内容时不新增聊天记录。原模型的公开决策说明可缺省，不为进展另调解释模型。
 
+游戏过程只展示本局实际产生的公开约定（例如猜拳的颜色／动作映射及确认）、观察、选择和真实结果。静态游戏介绍、完整规则和执行流程不作为查询结果写入时间线，公共投影不输出 `game_rules.description/rules`；PWA 也忽略历史事件中的这些字段，只有静态规则的旧事件不生成过程条目。
+
 排查时先核对 `trace_id/run_id/parent_run_id/step_id/task_id`，再看源事件身份、模型轮次和顺序。`agent_id` 是执行者，`target_unit_id` 是目标；消息送达、活动成员加入和物理动作回执分别判定。工具外层成功可能包含成员失败，不能只看外层 `ok`。历史缺失证据不会重新生成说明；迟到回执只补原任务，不重新派发动作。
+
+配送雷达关联通过 `vision.lidar` 的 `phase=cargo_foreground_association` 记录目标框、匹配结果和点簇筛选诊断；`cargo_geometry/cargo_delivery_geometry` 的 `vision.model` 解析事件保留实际货物／目的地字段。`cargo_returns_unavailable` 只能证明本次无法可靠分离货物，具体原因须核对 `association_diagnostics`，不能仅凭错误码断言过薄、太远或硬件故障。消息发送失败与活动加入结果分别展示。
 
 `make logs` 的最新会话和 `make task-trace` 默认追踪识别浏览器页作用域 `chat_` 和登录作用域 `ses_`，排除命名测试样本及 system 日志。`make trace-task ID=<session_id>`、`ID=<trace_id>` 仍支持明确查询，附加 `FOLLOW=1` 可固定目标并追踪新事件，避免新页切换排查目标。CLI 回归使用临时日志，不连接设备。
 

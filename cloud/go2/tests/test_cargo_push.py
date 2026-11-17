@@ -78,6 +78,27 @@ async def test_basic_nudge_confirms_cargo_displacement_without_delivery_region(n
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('uncertain', [False, True])
+async def test_incomplete_push_preserves_measured_motion_and_stop_certainty(nudge, uncertain):
+    nudge.move.return_value = {
+        'result': 'accepted' if uncertain else 'blocked', 'reason': 'motion_not_observed',
+        'distance_m': .046, 'requested_distance_m': .15,
+        'stop': {'result': 'accepted' if uncertain else 'ok'},
+        'message': '向前移动约0.05米，目标0.15米。未完成本次目标，已确认停稳。'}
+    with use_context(nudge.context):
+        result = await push.push_cargo('盒子')
+    assert result['result'] == ('accepted' if uncertain else 'blocked')
+    assert result['reason'] == 'cargo_move_unconfirmed'
+    assert result['movement']['distance_m'] == .046
+    assert result['delivered'] is False
+    if not uncertain:
+        assert '目标0.15米' in result['message'] and '已确认停稳' in result['message']
+        assert '尚未确认货物发生位移' in result['message']
+    else:
+        assert '前进或停稳结果尚未确认' in result['message']
+
+
+@pytest.mark.asyncio
 async def test_robot_advance_does_not_prove_cargo_movement(nudge):
     for sample in nudge.samples[2:]:
         sample['cargo_location']['x'] = .65
@@ -304,7 +325,8 @@ def test_small_markers_and_object_bases_use_approximate_cargo_proximity(kind, bo
 @pytest.mark.asyncio
 @pytest.mark.parametrize('destination,visible_destination', [
     (None, False), ('蓝色小方标', False), ('蓝色小方标', True)])
-async def test_cargo_and_destination_perception_share_measured_localization(monkeypatch, destination, visible_destination):
+@pytest.mark.parametrize('associated', [True, False])
+async def test_cargo_and_destination_perception_share_measured_localization(monkeypatch, destination, visible_destination, associated):
     from cloud.go2.perception import rgb_lidar
     from cloud.go2.navigation import occupancy_grid
     pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 'odom-test'}
@@ -329,16 +351,28 @@ async def test_cargo_and_destination_perception_share_measured_localization(monk
     geometry = Mock(wraps=perception._destination_geometry)
     monkeypatch.setattr(perception, '_destination_geometry', geometry)
     monkeypatch.setattr(rgb_lidar, 'go2_camera_profile', lambda *_: {})
+    events = []
+    monkeypatch.setattr(perception, 'emit_agent_event', lambda event, **fields: events.append((event, fields)))
     def associate(*_args, diagnostics, target_points):
         diagnostics['components'] = [{'extent_xyz_m': [.15] * 3, 'points': 12}]
-        return {'x': .65, 'y': 0., 'uncertainty_m': .1}
+        diagnostics['reason'] = 'associated' if associated else 'insufficient_foreground_returns'
+        return {'x': .65, 'y': 0., 'uncertainty_m': .1} if associated else None
     monkeypatch.setattr(rgb_lidar, 'associate_lidar_target', associate)
     if destination is not None and not visible_destination:
         with pytest.raises(TargetUnlocalized, match='cargo_or_destination_ambiguous'):
+            await perception.observe_cargo('深色盒子', destination)
+        assert not events
+    elif not associated:
+        with pytest.raises(TargetUnlocalized, match='cargo_returns_unavailable'):
             await perception.observe_cargo('深色盒子', destination)
     else:
         result = await perception.observe_cargo('深色盒子', destination)
         assert result['cargo_location']['source'] == 'lidar_foreground_cluster'
         assert result['near_destination'] is visible_destination
         assert ask.await_args.args[-1] == ('cargo_delivery_geometry' if visible_destination else 'cargo_geometry')
+    if events:
+        assert events[-1][0] == 'vision.lidar'
+        assert events[-1][1]['matched'] is associated
+        assert events[-1][1]['association_diagnostics']['reason'] == (
+            'associated' if associated else 'insufficient_foreground_returns')
     assert geometry.call_count == int(visible_destination)

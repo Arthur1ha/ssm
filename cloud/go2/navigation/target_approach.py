@@ -252,7 +252,9 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
         task_pose = receipt.get('last_trusted_pose') or task_pose
 
     try:
-        if getattr(go2, 'body_state', None) != 'standing':
+        # Localization waits for fresh standing feedback before taking an
+        # image; a transient moving state after a confirmed stop is not final.
+        if getattr(go2, 'body_state', None) not in {'standing', 'moving', None}:
             raise TargetUnlocalized('posture_not_confirmed')
         try:
             calibration = visual_target.load_calibration(serial=getattr(go2, '_connected_serial', None))
@@ -426,8 +428,11 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                     'cause': exc.reason, 'stop': stop_result, 'navigation': navigation,
                     'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                     'target_location': location, 'last_trusted_pose': task_pose}
+        message = _MESSAGES.get(exc.reason, f'尚未确认到达：{exc.reason}。')
+        if navigation is not None and navigation.get('status') == 'succeeded':
+            message = '本次路径移动已完成并停稳，但目标复核未通过：' + message
         return {'result': 'blocked', 'reason': exc.reason, 'target': target,
-                'message': _MESSAGES.get(exc.reason, f'尚未确认到达：{exc.reason}。'),
+                'message': message,
                 'navigation': navigation, 'target_location': location,
                 'observation_moves': observation_moves, 'target_hint': hint_state.get('hint'),
                 'last_trusted_pose': task_pose}

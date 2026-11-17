@@ -145,6 +145,50 @@ async def test_visible_target_request_includes_coarse_proximity_without_metric_d
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['cargo_geometry', 'cargo_delivery_geometry'])
+@pytest.mark.parametrize('wrapped', [False, True])
+async def test_cargo_geometry_logs_actual_fields_instead_of_empty_ground_target_fields(monkeypatch, mode, wrapped):
+    from cloud.go2 import models
+    from cloud.go2.perception import visual_target
+    events = []
+    observation = {'cargo_count': 1, 'cargo_ground_contact_visible': True,
+                   'cargo_bbox_1000': [562, 709, 738, 835]}
+    if mode == 'cargo_delivery_geometry':
+        observation.update(destination_count=1, destination_ground_contact_visible=True,
+                           destination_kind='marker', destination_bbox_1000=[605, 612, 625, 645])
+    class VisionModel:
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            return SimpleNamespace(content=json.dumps([observation] if wrapped else observation))
+
+    monkeypatch.setattr(models, 'get_vision_llm', lambda: VisionModel())
+    monkeypatch.setattr(visual_target, 'emit_agent_event',
+                        lambda event, **fields: events.append((event, fields)))
+    assert await visual_target._ask_vision(b'jpeg', '盒子',
+        {'width': 640, 'height': 360, 'frame_id': 1165}, '定位货物', mode) == observation
+    parsed = next(fields['observation'] for event, fields in events
+                  if event == 'vision.model' and fields.get('phase') == 'parsed')
+    assert {key: parsed[key] for key in observation} == observation
+    assert 'contact_pixel' not in parsed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('records', [[], [{}, {}], ['not an observation']])
+async def test_cargo_geometry_does_not_select_from_ambiguous_or_invalid_records(monkeypatch, records):
+    from unittest.mock import AsyncMock
+    from cloud.go2 import models
+    from cloud.go2.perception import visual_target
+    model = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(content=json.dumps(records))))
+    model.bind = lambda **_: model
+    monkeypatch.setattr(models, 'get_vision_llm', lambda: model)
+    with pytest.raises(TargetUnlocalized, match='vision_result_invalid'):
+        await visual_target._ask_vision(b'jpeg', '盒子',
+            {'width': 640, 'height': 360}, '定位货物', 'cargo_geometry')
+
+
+@pytest.mark.asyncio
 async def test_invalid_vision_json_logs_preview_and_blocks(monkeypatch):
     from cloud.go2 import models
     from cloud.go2.perception import visual_target
@@ -166,6 +210,41 @@ async def test_invalid_vision_json_logs_preview_and_blocks(monkeypatch):
                and '```json' in fields['output'] for event, fields in events)
     assert any(event == 'vision.gate' and fields.get('gate') == 'json_response'
                and fields['passed'] is False for event, fields in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('feedback', ['standing', 'still_moving', 'stale_standing', 'disconnected', 'new_session', 'expired'])
+async def test_posture_wait_requires_fresh_live_feedback_without_assigning_a_pose(monkeypatch, feedback):
+    from cloud.go2.perception import visual_target
+    clock = [100.]
+    robot = SimpleNamespace(body_state='moving', is_connected=True,
+                            _sport_state_observed_at=100., _odom_session_id='map')
+    context = SimpleNamespace(expires_at=None)
+    monkeypatch.setattr(visual_target, 'go2', robot)
+    monkeypatch.setattr(visual_target, 'current_context', lambda: context)
+    monkeypatch.setattr(visual_target.time, 'monotonic', lambda: clock[0])
+    async def feedback_tick(_delay):
+        clock[0] += 1.
+        if feedback == 'standing':
+            robot.body_state, robot._sport_state_observed_at = 'standing', clock[0]
+        elif feedback == 'stale_standing':
+            robot.body_state, robot._sport_state_observed_at = 'standing', 90.
+        elif feedback == 'disconnected':
+            robot.is_connected = False
+        elif feedback == 'new_session':
+            robot._odom_session_id = 'other'
+        elif feedback == 'expired':
+            context.expires_at = time.time() - 1
+    monkeypatch.setattr(visual_target.asyncio, 'sleep', feedback_tick)
+    if feedback == 'standing':
+        await visual_target.wait_for_standing()
+    else:
+        reason = {'disconnected': 'disconnected', 'new_session': 'odom_session_mismatch',
+                  'expired': 'authorization_expired'}.get(feedback, 'posture_not_confirmed')
+        with pytest.raises(TargetUnlocalized, match=reason):
+            await visual_target.wait_for_standing()
+    if feedback == 'still_moving':
+        assert robot.body_state == 'moving'
 
 
 @pytest.mark.asyncio
@@ -390,7 +469,7 @@ def lidar_localizer(monkeypatch, tmp_path):
     monkeypatch.setattr(visual_target, 'go2', robot)
     monkeypatch.setattr(visual_target, '_capture_still', AsyncMock(return_value=(b'jpeg', frame, 1.)))
     monkeypatch.setattr(visual_target, '_live_pose', lambda _: pose)
-    monkeypatch.setattr(visual_target, 'current_context', lambda: SimpleNamespace(persist=True))
+    monkeypatch.setattr(visual_target, 'current_context', lambda: SimpleNamespace(persist=True, expires_at=None))
     def save(*args):
         calls.append('image')
         return tmp_path / 'frame.jpg'

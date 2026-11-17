@@ -24,7 +24,8 @@ def movement(monkeypatch):
         odom_received_at=time.monotonic(), voxel_received_at=time.monotonic(),
         odom_frame_id='odom', voxel_frame_id='odom')
     commands = []
-    fault = {'stall': False, 'block_after': None, 'stale_after': None, 'sideways_only': False}
+    fault = {'stall': False, 'block_after': None, 'stale_after': None, 'sideways_only': False,
+             'minimum_linear_speed': 0.}
     start = pose.copy()
     grid = SimpleNamespace(frame_id='odom', session_id='map', observed_at=time.monotonic(),
         has_free_space_evidence=True, resolution=.05, grid=np.zeros((40, 40), dtype=bool),
@@ -40,6 +41,8 @@ def movement(monkeypatch):
         if not fault['stall']:
             h = pose['heading']
             wx, wy = vx*math.cos(h)-vy*math.sin(h), vx*math.sin(h)+vy*math.cos(h)
+            if math.hypot(vx, vy) < fault['minimum_linear_speed']:
+                wx = wy = 0.
             if fault['sideways_only'] and (vx or vy):
                 wx, wy = -.3*math.sin(start['heading']), .3*math.cos(start['heading'])
             pose['x'] += wx*.1
@@ -98,9 +101,25 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('angle_deg', [-20.5, 20.5, -43., 43.])
-async def test_search_turn_reaches_heading_through_native_packets(movement, angle_deg):
-    """Search uses coordinates without first entering manual move control."""
+@pytest.mark.parametrize('direction', ['forward', 'right'])
+async def test_short_move_keeps_requested_speed_above_ineffective_gait_input(movement, direction):
+    from cloud.go2.tools.tools import go2_move
+    movement.fault['minimum_linear_speed'] = .2
+    with use_context(movement.context):
+        result = await go2_move(direction, distance_m=.15, speed=.25)
+    assert result['result'] == 'ok', result
+    assert .1 <= result['distance_m'] <= .2
+    assert result['stop']['result'] == 'ok'
+    active = [(vx, vy) for vx, vy, _ in movement.commands if vx or vy]
+    assert active and all(math.hypot(vx, vy) == pytest.approx(.25) for vx, vy in active)
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('angle_deg', [-5., 5., -25., 30., -43., 43.])
+@pytest.mark.parametrize('relative', [False, True])
+async def test_turn_reaches_heading_through_native_packets(movement, angle_deg, relative):
+    """Both turn entries must work when low angular commands have no effect."""
     import json
     from cloud.go2.move_control_checks import robot_at_stand
     from unitree_webrtc_connect.constants import RTC_TOPIC
@@ -125,17 +144,49 @@ async def test_search_turn_reaches_heading_through_native_packets(movement, angl
     movement.robot.move_velocity = robot.move_velocity
     goal = movement.start['heading'] + math.radians(angle_deg)
     try:
-        result = await movement.nav.go_to_coordinate(
-            movement.start['x'], movement.start['y'], heading=goal,
-            holonomic=True, speed_limit=.30, minimum_command_speed=.25)
+        if relative:
+            from cloud.go2.tools.tools import go2_move
+            with use_context(movement.context):
+                result = await go2_move('turn_left' if angle_deg > 0 else 'turn_right',
+                                        angle_deg=abs(angle_deg))
+            assert result['result'] == 'ok', result
+        else:
+            result = await movement.nav.go_to_coordinate(
+                movement.start['x'], movement.start['y'], heading=goal,
+                holonomic=True, speed_limit=.30, minimum_command_speed=.25)
+            assert result['status'] == 'succeeded', result
     finally:
         if robot.is_connected:
             robot.move_velocity(0, 0, 0)
-    assert result['status'] == 'succeeded', result
     assert abs(math.degrees(movement.robot.odom['heading'] - goal)) <= 3.
     assert all(vx == vy == 0 for vx, vy, _ in movement.commands)
+    assert max(abs(yaw) for _, _, yaw in movement.commands) == .8
     assert movement.commands[-1] == (0, 0, 0)
     assert robot._move_control_active is False
+
+
+@pytest.mark.asyncio
+async def test_explicit_turn_speed_uses_angular_axis_and_stop_feedback(movement):
+    from cloud.go2.tools.tools import go2_move
+    with use_context(movement.context):
+        result = await go2_move('turn_right', angle_deg=30, speed=.7)
+    assert result['result'] == 'ok', result
+    assert abs(result['angle_deg'] - 30) <= 3
+    assert max(abs(yaw) for _, _, yaw in movement.commands) == .7
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_stalled_turn_still_stops_without_claiming_success(movement):
+    from cloud.go2.tools.tools import go2_move
+    movement.fault['stall'] = True
+    with use_context(movement.context):
+        result = await go2_move('turn_right', angle_deg=30)
+    assert result['result'] == 'blocked'
+    assert result['reason'] == 'motion_not_observed'
+    assert result['angle_deg'] == 0
+    assert result['stop']['result'] == 'ok'
+    assert movement.commands[-1] == (0, 0, 0)
 
 
 @pytest.mark.asyncio

@@ -337,6 +337,23 @@ async function browserChecks() {
       'Incoming messages replaced the text being read');
     await page.click('.space-activity__new');
     await page.waitForFunction(()=>!document.querySelector('.space-activity__new'));
+    // Even at (or just above) the bottom, arrivals must leave the viewport still.
+    for (const offset of [0,35,180]) {
+      const before=await page.$eval('.space-activity__timeline',(el,offset)=>{
+        el.scrollTop=el.scrollHeight-el.clientHeight-offset;
+        el.dispatchEvent(new Event('scroll',{bubbles:true}));
+        return {top:el.scrollTop,first:el.firstElementChild.textContent};
+      },offset);
+      await page.evaluate(offset=>__render({events:[...__props.events,
+        {event_id:'stationary-'+offset,event_type:'message',unit_id:'go2',
+          text:'更新消息时保留阅读位置 '+offset,ts:Date.now()/1000+40+offset}]}),offset);
+      await page.waitForFunction(offset=>document.querySelector('.space-activity__timeline')
+        .textContent.includes('更新消息时保留阅读位置 '+offset),{},offset);
+      assert.equal(await page.$eval('.space-activity__timeline',el=>el.scrollTop),before.top,
+        'A message arrival moved the timeline');
+      assert.equal(await page.$eval('.space-activity__timeline',el=>el.firstElementChild.textContent),before.first,
+        'A message arrival shifted the visible history window');
+    }
     // Unknown feedback must not display old physical facts as current.
     await page.evaluate(()=>__render({connected:false}));
     await page.waitForFunction(()=>document.querySelector('.activity-member__state')?.textContent==='状态待确认');
@@ -443,6 +460,21 @@ async function browserChecks() {
     await home.waitForFunction(()=>[...document.querySelectorAll('.run-process__body')]
       .some(row=>!row.closest('.space-activity') && row.textContent.includes('独立搜索的下一步。')));
     console.log('PASS: activity photos and search steps stay inside their card during a pending chat; standalone search stays in chat.');
+    // Exercise the real outer chat scroller too: its old scrollIntoView effect
+    // could move the entire page even when the nested timeline stayed still.
+    await home.setViewport({width:390,height:480});
+    await home.waitForFunction(()=>{
+      const el=document.querySelector('.chat-panel__scroll');return el.scrollHeight>el.clientHeight+100;
+    });
+    const outerTop=await home.$eval('.chat-panel__scroll',el=>{el.scrollTop=45;return el.scrollTop;});
+    await home.evaluate(()=>apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
+      type:'agent_progress',scope:'space',source:'object_search',agent_id:'go2',
+      run_id:'scroll-check',event_id:'scroll-check',fact_kind:'decision',stage:'search_selected',text:'阅读时的新消息。'}})));
+    await home.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('阅读时的新消息。'));
+    await home.evaluate(()=>new Promise(resolve=>setTimeout(resolve,500)));
+    assert.equal(await home.$eval('.chat-panel__scroll',el=>el.scrollTop),outerTop,
+      'Incoming chat progress pulled the outer page away from its reading position');
+    console.log('PASS: outer page and timeline stay still on arrivals, including at or near the bottom.');
     assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-activity-390.png')});
     assert.deepEqual(errors,[]);

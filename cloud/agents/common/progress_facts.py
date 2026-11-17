@@ -146,10 +146,10 @@ def public_tool_result(value: object, *, result_kind="action", depth=0) -> dict:
             if key in candidate and isinstance(candidate[key], (str, int, float, bool))}
     rules = value.get("game_rules")
     if isinstance(rules, dict):
+        # Only this game's actual agreements belong in progress, not the
+        # static instructions used by the role models and executors.
         result["game_rules"] = {key: _scalar(rules[key], 160) for key in
-            ("rule_id", "status", "game_id", "round", "name", "description") if key in rules}
-        if isinstance(rules.get("rules"), str):
-            result["game_rules"]["rules"] = rules["rules"][:2400]
+            ("rule_id", "status", "game_id", "round", "name") if key in rules}
         if isinstance(rules.get("mapping"), list):
             result["game_rules"]["mapping"] = [{key: _scalar(item[key], 120) for key in
                 ("choice", "label") if key in item} for item in rules["mapping"][:16]

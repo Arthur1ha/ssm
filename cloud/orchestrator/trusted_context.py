@@ -103,6 +103,9 @@ def parse_trusted_intent(
         "actor": actor,
         "persist": persist,
         "space_id": MAIN_SPACE_ID,
+        # This authenticated API intent entry represents a direct user request.
+        # Never take its origin from model/browser supplied fields.
+        "origin_kind": "user_delegated",
         "issued_at": float(issued_at),
         "expires_at": float(expires_at) if expires_at is not None else None,
         "user_msg": text,

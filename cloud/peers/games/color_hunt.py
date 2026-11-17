@@ -133,13 +133,6 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
                               reason="activity_ended")
         return
-    from cloud.space.activity import get_activity_store
-    get_activity_store().record_event(activity_id, "action_result", unit_id="go2", text="",
-        stage="game_rules", game_id=GAME.game_id, trigger_message_id=event["message_id"],
-        source_event_id="game:rules:" + event["message_id"],
-        fact_kind="result", result_kind="query", public_result={"game_rules": {
-            "rule_id": GAME.game_id, "name": GAME.name, "description": GAME.description,
-            "rules": GAME.rules, "status": "proposed"}})
     color, color_error = await _wait_for_lamp_color(event, drive)
     if not current():
         await finish("cancelled", "activity_ended")

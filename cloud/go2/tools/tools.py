@@ -52,8 +52,9 @@ async def go2_move(direction: str, distance_m: float | None = None,
         if value is not None}}
     validate_params(move_tool_schema(), params)
     validate_move_goal(params)
-    speed = move_tool_schema()["properties"]["speed"]["default"] if speed is None else speed
     from cloud.go2.navigation.cargo_contact import claim_contact
+    from cloud.go2.actions import resolve_move_speed
+    speed = resolve_move_speed(direction, speed)
     context = current_context()
     contact = claim_contact(direction, distance_m, speed, context)
     return await navigator.move_relative(direction, distance_m=distance_m,

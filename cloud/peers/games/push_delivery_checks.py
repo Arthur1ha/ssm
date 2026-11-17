@@ -155,7 +155,9 @@ async def delivery_harness(monkeypatch):
                 "speech": "我沿已确认的方向短距推送这件货物。"}
 
     @contextmanager
-    def search_request(request_id, _deadline):
+    def search_request(request_id, _deadline, *, require_cargo_measurement=False):
+        if request_id.endswith('_cargo'):
+            assert require_cargo_measurement is True
         search_ids.append(request_id)
         try:
             yield

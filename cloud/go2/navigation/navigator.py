@@ -15,7 +15,7 @@ from cloud.go2.connection import go2
 from cloud.agents.go2.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
 from cloud.go2.control import control_lease, LeaseConflict
-from cloud.go2.actions import (VELOCITY_LIMITS, MOVE_DEFAULT_SPEED,
+from cloud.go2.actions import (VELOCITY_LIMITS, resolve_move_speed,
     MOVE_DISTANCE_TOLERANCE_M, MOVE_ANGLE_TOLERANCE_RAD)
 from cloud.observability import emit_agent_event
 
@@ -29,8 +29,6 @@ TELEMETRY_RECOVERY_S = 3.0    # s; hold still while fresh odom/map packets resum
 ARRIVAL_THRESHOLD    = 0.3    # m
 HEADING_THRESHOLD    = MOVE_ANGLE_TOLERANCE_RAD  # rad，终点朝向与相对转向使用同一容差
 WALK_SPEED           = 0.3    # m/s
-TURN_SPEED           = 0.5    # rad/s
-MIN_TURN_SPEED       = 0.4    # rad/s，实机在约 .23～.30 指令下转动很弱；保留上限与位姿停车
 KP_YAW               = 0.8
 MAX_RETRIES          = 6
 MIN_LINEAR_VEL       = 0.1    # m/s，路径跟随最低线速度
@@ -165,11 +163,12 @@ class Navigator:
         return await self._run_to(name)
 
     async def move_relative(self, direction: str, *, distance_m: float | None = None,
-                            angle_deg: float | None = None, speed: float = MOVE_DEFAULT_SPEED,
+                            angle_deg: float | None = None, speed: float | None = None,
                             context, cargo_contact=None) -> dict:
         """Reuse navigation's velocity loop and stop proof for an odom goal."""
         from cloud.go2.tools.executor import validate_execution_context
         validate_execution_context(context)
+        speed = resolve_move_speed(direction, speed)
         if cargo_contact is not None and (context != cargo_contact.context
                 or direction != 'forward' or distance_m != cargo_contact.advance or speed > .25):
             return {'result': 'blocked', 'reason': 'cargo_contact_scope_mismatch'}
@@ -193,9 +192,11 @@ class Navigator:
         y = start["y"] if turning else start["y"] + distance_m * math.sin(axis)
         loc = {"name": "相对移动", "x": x, "y": y, "heading": heading,
                "session_id": session, "frame_id": "odom", "relative_motion": True,
-               "speed_limit": speed, "holonomic": True,
+               "speed_limit": None if turning else speed, "holonomic": True,
                "arrival_tolerance_m": MOVE_DISTANCE_TOLERANCE_M,
                "context": context}
+        if turning:
+            loc['turn_speed'] = speed
         if cargo_contact is not None:
             loc['cargo_contact'] = cargo_contact
             loc['minimum_command_speed'] = speed
@@ -299,8 +300,13 @@ class Navigator:
             if speed_limit is not None and (not isinstance(speed_limit, (int, float))
                                             or not math.isfinite(speed_limit)
                                             or not MIN_LINEAR_VEL <= speed_limit <= (
-                                                min(VELOCITY_LIMITS.values()) if loc.get("relative_motion") else WALK_SPEED)):
+                                                max(VELOCITY_LIMITS['x'], VELOCITY_LIMITS['y'])
+                                                if loc.get("relative_motion") else WALK_SPEED)):
                 return self._finish("blocked", "invalid_speed_limit", "导航速度限制无效", task_id)
+            turn_speed = loc.get("turn_speed", VELOCITY_LIMITS['z'])
+            if (type(turn_speed) not in (int, float) or not math.isfinite(turn_speed)
+                    or not 0 < turn_speed <= VELOCITY_LIMITS['z']):
+                return self._finish("blocked", "invalid_speed_limit", "导航角速度无效", task_id)
             precise_tolerance = loc.get("arrival_tolerance_m")
             if precise_tolerance is not None and (type(precise_tolerance) not in (int, float)
                     or not math.isfinite(precise_tolerance) or not .05 <= precise_tolerance <= ARRIVAL_THRESHOLD):
@@ -549,9 +555,7 @@ class Navigator:
                                 return self._finish("blocked", "turn_clearance_unavailable",
                                                     "转向扫掠空间未确认，已停止", task_id,
                                                     diagnostics=details)
-                            turn_limit = min(TURN_SPEED, speed_limit) if loc.get("relative_motion") else TURN_SPEED
-                            yaw = math.copysign(min(turn_limit, max(MIN_TURN_SPEED,
-                                                                   KP_YAW * abs(heading_error))), heading_error)
+                            yaw = math.copysign(turn_speed, heading_error)
                             stalled = await send_motion(0, 0, yaw, odom)
                             if stalled:
                                 return self._finish("blocked", stalled.get("reason") or "motion_not_observed",
@@ -576,7 +580,11 @@ class Navigator:
                     lx, ly = loc["x"], loc["y"]
                 heading_error = _normalize_angle(math.atan2(ly - odom["y"], lx - odom["x"]) - odom["heading"])
                 if loc.get("holonomic"):
-                    speed = min(speed_limit or WALK_SPEED, max(command_floor, dist * 0.8))
+                    # A short measured move still needs the requested velocity:
+                    # distance-proportional slowdown can stay below the robot's
+                    # effective gait input for the entire remaining distance.
+                    speed = (speed_limit if loc.get('relative_motion') else
+                             min(speed_limit or WALK_SPEED, max(command_floor, dist * 0.8)))
                     vx, vy = speed * math.cos(heading_error), speed * math.sin(heading_error)
                     if loc.get('minimum_command_speed') is not None:
                         # A vector norm floor alone leaves small diagonal axes
@@ -589,7 +597,7 @@ class Navigator:
                                 vx, vy = 0., math.copysign(speed, vy)
                     face_target = loc.get("face_target")
                     if face_target is None:
-                        yaw = (max(-TURN_SPEED, min(TURN_SPEED, KP_YAW * _normalize_angle(
+                        yaw = (max(-turn_speed, min(turn_speed, KP_YAW * _normalize_angle(
                             loc["heading"] - odom["heading"]))) if loc.get("relative_motion") else 0.0)
                     else:
                         bias = loc.get("face_target_bias_rad", 0.0)
@@ -599,13 +607,13 @@ class Navigator:
                             face_target[1] - odom["y"],
                             face_target[0] - odom["x"]) + bias
                         yaw_error = _normalize_angle(target_heading - odom["heading"])
-                        yaw = max(-TURN_SPEED, min(TURN_SPEED, KP_YAW * yaw_error))
+                        yaw = max(-turn_speed, min(turn_speed, KP_YAW * yaw_error))
                 elif abs(heading_error) > PATH_HEADING_INHIBIT:
-                    vx, vy, yaw = 0.0, 0.0, math.copysign(TURN_SPEED, heading_error)
+                    vx, vy, yaw = 0.0, 0.0, math.copysign(turn_speed, heading_error)
                 else:
                     vx = min(speed_limit or WALK_SPEED, max(command_floor, dist * 0.8))
                     vy = 0.0
-                    yaw = max(-TURN_SPEED, min(TURN_SPEED, KP_YAW * heading_error))
+                    yaw = max(-turn_speed, min(turn_speed, KP_YAW * heading_error))
                 body_clear = getattr(fresh_grid, "is_body_clear", None)
                 if body_clear is not None:
                     if not body_clear(odom["x"], odom["y"], odom["heading"]):

@@ -141,9 +141,11 @@ async def game_harness(monkeypatch):
                     } if role == "lamp" else {
                         "rock": "Hello", "scissors": "Stretch", "paper": "Content"})}
         if phase == "agree":
-            # The model must see exactly the contract already shown to the user.
+            # Both actual mappings are public before agreement; static game
+            # instructions belong to model context, not the progress timeline.
             assert len([row for row in timeline if row.get("stage") == "mapping_proposal"]) == 2
-            assert any(row.get("stage") == "terms_proposal" for row in timeline)
+            assert not any("rules" in row.get("public_result", {}).get("game_rules", {})
+                           for row in timeline)
             return {"accepted": fixture.agreement, "speech": "同意这局约定。"}
         if phase == "performance":
             return {"command": "Dance2", "speech": "这把你赢了，我来跳个舞。"}
