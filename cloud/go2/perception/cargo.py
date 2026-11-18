@@ -38,8 +38,10 @@ def _visual_cargo_location(frame, pose, camera, box, detected):
     if type(distance) not in (int, float) or not math.isfinite(distance) or distance <= 0:
         raise TargetUnlocalized('visual_distance_unavailable')
     bearing = pose['heading'] + image_bearing(camera, box, frame['width'], frame['height'])
-    return {'x': float(pose['x'] + distance * math.cos(bearing)),
-            'y': float(pose['y'] + distance * math.sin(bearing)),
+    offset = camera['translation_body_from_camera_m']
+    c, s = math.cos(pose['heading']), math.sin(pose['heading'])
+    return {'x': float(pose['x'] + c * offset[0] - s * offset[1] + distance * math.cos(bearing)),
+            'y': float(pose['y'] + s * offset[0] + c * offset[1] + distance * math.sin(bearing)),
             'estimated_distance_m': float(distance),
             'source': 'visual_distance_estimate', 'precision': 'approximate'}
 
@@ -77,7 +79,8 @@ def _destination_geometry(frame, detected):
             'destination_kind': kind, 'destination_anchor_1000': [tx, ty],
             'destination_gap_cargo_widths': round(gap_widths, 3),
             'destination_depth_confirmed': depth_confirmed,
-            'near_destination': gap_widths <= 1. and depth_confirmed,
+            'near_destination': (gap_widths <= 1. and depth_confirmed
+                                 and detected.get('cargo_ground_contact_visible') is not False),
             'destination_precision': 'approximate_visual_proximity'}
 
 
@@ -90,6 +93,30 @@ def _cargo_map(session):
             or type(stamp) not in (int, float) or not 0 <= time.monotonic()-stamp <= 2.):
         return None
     return grid
+
+
+def _lidar_range_agrees(cluster, pose, detected, frame, camera, diagnostics):
+    """A box overlap alone cannot associate background returns to the cargo.
+
+    Compare the cluster's measured uncertainty and the target's apparent size
+    with the independent visual range. Disagreement selects the existing visual
+    estimate; it never becomes permission to chase the farther background.
+    """
+    estimate = detected.get('cargo_distance_m')
+    if type(estimate) not in (int, float) or not math.isfinite(estimate) or estimate <= 0:
+        return True  # Valid LiDAR can still supply range without a visual estimate.
+    measured = math.hypot(cluster['x']-pose['x'], cluster['y']-pose['y'])
+    box = detected['cargo_bbox_1000']
+    apparent_size = estimate * max(
+        (box[2]-box[0]) * frame['width'] / 1000 / camera['fx'],
+        (box[3]-box[1]) * frame['height'] / 1000 / camera['fy'])
+    allowance = cluster.get('uncertainty_m', 0.) + apparent_size
+    agrees = abs(measured-estimate) <= allowance
+    diagnostics.update(visual_range_m=estimate, lidar_range_m=measured,
+                       range_agreement_m=allowance, range_agrees=agrees)
+    if not agrees:
+        diagnostics['reason'] = 'lidar_visual_range_disagreement'
+    return agrees
 
 
 async def _track_confirmed_cargo(reference):
@@ -112,6 +139,13 @@ async def _track_confirmed_cargo(reference):
         go2_camera_profile(frame['width'], frame['height']), frame,
         previous['cargo_bbox_1000'], grid.measured_floor_z,
         diagnostics=diagnostics)
+    prior = reference.get('cargo_location') or {}
+    if target is not None and all(type(item.get('uncertainty_m')) in (int, float)
+                                  for item in (target, prior)):
+        if math.hypot(target['x']-prior['x'], target['y']-prior['y']) > (
+                target['uncertainty_m'] + prior['uncertainty_m']):
+            target = None
+            diagnostics['reason'] = 'reference_region_disagreement'
     emit_agent_event('vision.lidar', phase='cargo_reference_tracking', matched=target is not None,
                      association_diagnostics=diagnostics)
     if target is None:
@@ -143,10 +177,12 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     """Measure cargo and locate a destination patch, marker or object base."""
     from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
 
+    source = ((reference or {}).get('cargo_location') or {}).get('source')
+    visual_source = source in {'visual_ground_estimate', 'visual_distance_estimate'}
     # A confirmed odometry stop can precede the stationary posture samples.
     # Wait for the existing live-feedback gate instead of failing that race.
     await visual_target.wait_for_standing()
-    if reference is not None and after_frame_id is None and after_received_at is None:
+    if reference is not None and not visual_source and after_frame_id is None and after_received_at is None:
         tracked = await _track_confirmed_cargo(reference)
         if tracked is not None:
             return tracked
@@ -168,10 +204,14 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         'destination_ground_contact_visible表示能看到指定区域在地面的位置或物体底部与地面的接触处；'
         '同色但不符合指定描述的杂物不能冒充目的地，货物本身不能冒充目的地。'
         '货物须为有体积的独立物品，地板纹理、色块和标记不能冒充货物。'
-        'cargo_ground_contact_visible仅在货物与地面接触处真实可见时为true。'
+        'cargo_ground_contact_visible仅在货物与地面接触处真实可见时为true；'
+        '货物靠近画面下边缘或底部被裁切仍可辨认，不因此将cargo_count置零，也不要求后退。'
         '另外输出cargo_distance_m（相机到货物的大致水平距离，米）和advance_distance_m（本次建议前进距离，米）。'
         '根据货物、地面、家具尺度和透视估算，不要求精确；无法估计时填null，不编造数值。'
         'advance_distance_m可以是走到货物前方的距离或本次推送距离，不使用固定步长。'
+        '另外输出cargo_nearby（布尔值）：货物已在机身前方近处、可以开始调整站位推送时为true；'
+        '仍需先走过一段地面接近时为false。advance_distance_m是建议机身实际前进的距离，'
+        '由执行器直接执行，不会再扣机身尺寸、货物半径或观察留距。'
         '不输出世界坐标或送达结论。')
     if destination is None:
         instruction = (
@@ -180,7 +220,8 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
             '"cargo_bbox_1000":[左,上,右,下]}。坐标相对整张图归一化0到1000。'
             'cargo_count必须是符合完整描述的目标数量，有歧义或相似多个不能冒充唯一。'
             '货物须为有体积的独立物品，地板纹理、色块和标记不能冒充货物。'
-            'cargo_ground_contact_visible仅在货物与地面接触处真实可见时为true。'
+            'cargo_ground_contact_visible仅在货物与地面接触处真实可见时为true；'
+            '货物靠近画面下边缘或底部被裁切仍可辨认，不因此将cargo_count置零，也不要求后退。'
             '另外输出cargo_distance_m（到货物的大致水平距离，米）和advance_distance_m（本次建议前进距离，米）。'
             '根据画面尺度和透视估算，可直接建议走到货物前方，不使用固定步长；无法估计填null。'
             '不输出世界坐标或货物移动结论。')
@@ -211,8 +252,7 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         frame, instruction, 'cargo_delivery_geometry' if destination is not None else 'cargo_geometry')
     if original and detected.get('cargo_matches_user_request') is not True:
         raise TargetUnlocalized('cargo_target_mismatch')
-    if (type(detected.get('cargo_count')) is not int or detected.get('cargo_count') != 1
-            or detected.get('cargo_ground_contact_visible') is not True):
+    if type(detected.get('cargo_count')) is not int or detected.get('cargo_count') != 1:
         raise TargetUnlocalized('cargo_ambiguous' if destination is None else 'cargo_or_destination_ambiguous')
     if destination is not None:
         if (type(detected.get('destination_count')) is not int or detected.get('destination_count') != 1
@@ -230,7 +270,9 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     # only while its pose and odometry session still agree.
     if getattr(go2, '_odom_session_id', frame['odom_session_id']) != frame['odom_session_id']:
         raise TargetUnlocalized('odom_session_mismatch')
-    grid = _cargo_map(frame['odom_session_id'])
+    # Choose LiDAR first on the initial observation. Once this order falls
+    # back to visual range, later clusters must never replace that source.
+    grid = None if visual_source else _cargo_map(frame['odom_session_id'])
     voxel = grid.voxel_message if grid is not None else None
     camera = go2_camera_profile(frame['width'], frame['height'])
     if destination is not None:
@@ -238,6 +280,10 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         geometry['destination_location'] = _visual_cargo_location(frame, pose, camera,
             detected['destination_bbox_1000'],
             {'cargo_distance_m': detected.get('destination_distance_m')})
+        estimate = detected.get('cargo_distance_m')
+        if type(estimate) in (int, float) and math.isfinite(estimate) and estimate > 0:
+            geometry['cargo_direction_location'] = _visual_cargo_location(
+                frame, pose, camera, detected['cargo_bbox_1000'], detected)
     diagnostics, cluster = {}, None
     if grid is not None:
         try:
@@ -249,15 +295,21 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         except (ValueError, KeyError, TypeError):
             diagnostics['reason'] = 'lidar_sample_invalid'
     else:
-        diagnostics['reason'] = 'sensor_sample_unavailable'
+        diagnostics['reason'] = 'visual_source_locked' if visual_source else 'sensor_sample_unavailable'
+    if cluster is not None and not _lidar_range_agrees(cluster, pose, detected, frame, camera, diagnostics):
+        cluster = None
     geometry['advance_distance_m'] = detected.get('advance_distance_m')
+    geometry['cargo_nearby'] = detected.get('cargo_nearby') is True
     geometry['capture_pose'] = pose
     geometry['image_size'] = {key: frame[key] for key in ('width', 'height')}
     emit_agent_event('vision.lidar', phase='cargo_foreground_association',
         frame_id=frame['frame_id'], bbox_1000=detected['cargo_bbox_1000'],
         camera_model=camera.get('profile'), matched=cluster is not None,
+        localization_source=source,
         association_diagnostics=diagnostics)
     if cluster is None:
+        if source == 'lidar_foreground_cluster':
+            raise TargetUnlocalized('cargo_returns_unavailable')
         location = _visual_cargo_location(frame, pose, camera,
             detected['cargo_bbox_1000'], detected)
         live = visual_target._live_pose(frame['odom_session_id'])

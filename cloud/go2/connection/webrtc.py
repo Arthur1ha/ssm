@@ -33,7 +33,11 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self.is_connected: bool = False
         self._status_task: asyncio.Task | None = None
         self._command_lock = asyncio.Lock()
+        self._avoidance_lock = asyncio.Lock()
+        self._avoidance_restore_expected = None
         self._classic_walk_connection = None
+        self._native_motion_connection = None
+        self._native_motion_mode = None
         self._completion = None
         self._motion_epoch = 0
         self._last_zero_velocity_epoch = None
@@ -53,6 +57,8 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self._stop_manual_velocity()
         self.is_connected = False
         self._classic_walk_connection = None
+        self._native_motion_connection = None
+        self._native_motion_mode = None
         self._motion_observation_enabled = False
         self._velocity_command_active = False
         if self._status_task is not None:
@@ -265,20 +271,115 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
 
     # ── 命令发送 ──────────────────────────────────────────────────────────
 
+    async def read_motion_mode(self) -> dict:
+        """Read the controller name; SportModeState.mode is a separate field."""
+        connection = self._conn
+        if not self.is_connected or connection is None:
+            raise RuntimeError('Go2 not connected')
+        response = await asyncio.wait_for(connection.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC['MOTION_SWITCHER'], {'api_id': 1001}), timeout=_SETUP_TIMEOUT_S)
+        if self._conn is not connection or not self.is_connected:
+            raise ValueError('motion_mode_connection_changed')
+        packet = response.get('data') if isinstance(response, dict) else None
+        header = packet.get('header') if isinstance(packet, dict) else None
+        status = header.get('status') if isinstance(header, dict) else None
+        code = status.get('code') if isinstance(status, dict) else None
+        payload = packet.get('data') if isinstance(packet, dict) else None
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = None
+        name = payload.get('name') if isinstance(payload, dict) else None
+        confirmed = type(code) is int and code == 0 and isinstance(name, str) and bool(name)
+        if confirmed:
+            self._native_motion_mode = name
+        logger.info('[Go2/MotionMode] query code=%s name=%s confirmed=%s', code, name, confirmed)
+        return {'result': 'ok' if confirmed else 'unknown', 'name': name if confirmed else None,
+                'request_status_code': code}
+
+    async def read_motion_settings(self) -> dict:
+        """Read native settings, without preparing a gait or sending motion.
+
+        MCF's LF SportModeState may contain placeholder gait/foot fields. Keep
+        GetState's raw settings separate from measured physical gait evidence.
+        """
+        connection = self._conn
+        if not self.is_connected or connection is None:
+            raise RuntimeError('Go2 not connected')
+        response = await asyncio.wait_for(self._publish_sport_request(connection, {
+            'api_id': 1034, 'id': time.time_ns() & 0x7fffffff or 1,
+            'parameter': ['state', 'bodyHeight', 'speedLevel', 'gait',
+                          'continuousGait', 'economicGait'],
+        }), timeout=_SPORT_RPC_TIMEOUT_S)
+        if self._conn is not connection or not self.is_connected:
+            raise ValueError('motion_settings_connection_changed')
+        packet = response.get('data') if isinstance(response, dict) else None
+        header = packet.get('header') if isinstance(packet, dict) else None
+        status = header.get('status') if isinstance(header, dict) else None
+        code = status.get('code') if isinstance(status, dict) else None
+        payload = packet.get('data') if isinstance(packet, dict) else None
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = None
+        confirmed = type(code) is int and code == 0 and isinstance(payload, dict) and bool(payload)
+        logger.info('[Go2/MotionSettings] code=%s settings=%s', code, payload)
+        return {'result': 'ok' if confirmed else 'unknown',
+                'request_status_code': code, 'settings': payload if confirmed else None,
+                'confirmation_scope': 'settings_only'}
+
+    async def _ensure_native_motion_mode(self, connection, epoch):
+        if self._native_motion_connection is connection:
+            return
+
+        def current():
+            if (self._conn is not connection or not self.is_connected or self._motion_epoch != epoch):
+                raise CommandBlocked('motion_mode_owner_changed')
+
+        current()
+        mode = await self.read_motion_mode()
+        current()
+        if mode.get('result') != 'ok':
+            raise CommandBlocked('原生运动控制模式尚未确认')
+        # MCF firmware reports "mcf" and uses the shared Move/StopMove API
+        # directly. Forcing it through the legacy normal-mode handshake is
+        # unsupported and blocks otherwise valid movement.
+        if mode['name'] not in {'normal', 'mcf'}:
+            if mode['name'] != 'ai':
+                raise CommandBlocked(f"不支持的原生运动模式: {mode['name']}")
+            await self.switch_mode('normal')
+            current()
+            deadline = time.monotonic() + _SETUP_TIMEOUT_S
+            while time.monotonic() < deadline:
+                mode = await self.read_motion_mode()
+                current()
+                if mode.get('result') == 'ok' and mode['name'] == 'normal':
+                    break
+                await asyncio.sleep(.1)
+            else:
+                raise CommandBlocked('原生普通运动模式尚未确认')
+        self._native_motion_connection = connection
+
     async def read_avoidance_switch(self) -> dict:
         """Read the avoidance switch on an existing session; never change mode."""
         if not self.is_connected or self._conn is None:
             raise RuntimeError("Go2 not connected")
+        connection = self._conn
         response = await asyncio.wait_for(
-            self._conn.datachannel.pub_sub.publish_request_new(
+            connection.datachannel.pub_sub.publish_request_new(
                 RTC_TOPIC["OBSTACLES_AVOID"],
                 {"api_id": OBSTACLES_AVOID_API["SWITCH_GET"]}),
             timeout=5.0,
         )
+        if self._conn is not connection or not self.is_connected:
+            raise ValueError('avoidance_connection_changed')
         packet = response.get("data") if isinstance(response, dict) else None
         if not isinstance(packet, dict):
             return {"result": "unknown", "reason": "invalid_switch_response"}
-        status = (packet.get("header") or {}).get("status") or {}
+        header = packet.get('header')
+        status = header.get('status') if isinstance(header, dict) else None
         payload = packet.get("data")
         if isinstance(payload, str):
             try:
@@ -288,10 +389,36 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
                 payload = None
         enabled = payload.get("enable") if isinstance(payload, dict) else None
         code = status.get("code") if isinstance(status, dict) else None
-        return {"result": "ok" if code == 0 and type(enabled) is bool else "unknown",
+        return {"result": "ok" if type(code) is int and code == 0 and type(enabled) is bool else "unknown",
                 "request_status_code": code, "enabled": enabled if type(enabled) is bool else None,
                 "motion_channel": "SPORT_MOD/Move",
                 "connection_method": "Remote"}
+
+    async def set_avoidance_switch(self, enabled: bool, *, connection) -> dict:
+        """Set and read back a switch only on the caller's original connection."""
+        if type(enabled) is not bool:
+            raise ValueError('invalid_avoidance_switch')
+        async with self._avoidance_lock:
+            if self._conn is not connection or not self.is_connected:
+                raise ValueError('avoidance_connection_changed')
+            response = await asyncio.wait_for(
+                connection.datachannel.pub_sub.publish_request_new(
+                    RTC_TOPIC['OBSTACLES_AVOID'],
+                    {'api_id': OBSTACLES_AVOID_API['SWITCH_SET'],
+                     'parameter': {'enable': enabled}}), timeout=5.)
+            if self._conn is not connection or not self.is_connected:
+                raise ValueError('avoidance_connection_changed')
+            packet = response.get('data') if isinstance(response, dict) else None
+            header = packet.get('header') if isinstance(packet, dict) else None
+            status = header.get('status') if isinstance(header, dict) else None
+            code = status.get('code') if isinstance(status, dict) else None
+            if type(code) is not int or code != 0:
+                raise ValueError('avoidance_switch_rejected')
+            actual = await self.read_avoidance_switch()
+            if actual.get('result') != 'ok' or actual.get('enabled') is not enabled:
+                raise ValueError('avoidance_switch_unconfirmed')
+            logger.info('[Go2/Avoidance] enabled=%s confirmed=true', enabled)
+            return actual
 
     def _finish_pending(self, result: str, error: str) -> None:
         pending = self.pending_action
@@ -657,6 +784,16 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
     async def _ensure_classic_walk(self) -> None:
         """Select once when the observed body is ready, shared by all Move users."""
         connection, epoch = self._conn, self._motion_epoch
+        await self._ensure_native_motion_mode(connection, epoch)
+        if self._avoidance_restore_expected is not None:
+            await self.set_avoidance_switch(self._avoidance_restore_expected, connection=connection)
+            self._avoidance_restore_expected = None
+        if self._native_motion_mode == 'normal':
+            # ClassicWalk 2049 is an MCF command, absent from SPORT_CMD's
+            # legacy catalog. Keep that controller's own gait and shared Move
+            # contract instead of treating an unsupported gait RPC as a
+            # universal prerequisite for translation or joystick preparation.
+            return
         if self._classic_walk_connection is connection:
             return
         result = await self._select_classic_walk(connection, can_continue=lambda: (
@@ -670,6 +807,13 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             if not can_continue():
                 raise ValueError('control_owner_changed')
             self._validate_motion('Move', {'x': .3, 'y': 0., 'z': 0.})
+            await self._ensure_native_motion_mode(self._conn, self._motion_epoch)
+            if not can_continue():
+                raise ValueError('control_owner_changed')
+            if self._native_motion_mode != 'mcf':
+                return {'result': 'blocked', 'error': 'classic_walk_requires_mcf',
+                        'native_motion_mode': self._native_motion_mode,
+                        'confirmation_scope': 'request'}
             return await self._select_classic_walk(self._conn, can_continue=can_continue)
 
     async def _select_classic_walk(self, connection, *, can_continue) -> dict:
@@ -684,7 +828,8 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         header = packet.get('header') if isinstance(packet, dict) else None
         status = header.get('status') if isinstance(header, dict) else None
         code = status.get('code') if isinstance(status, dict) else None
-        logger.info('[Go2/Gait] ClassicWalk api=2049 enabled=true code=%s request=%s', code, wire_id)
+        logger.info('[Go2/Gait] ClassicWalk mode=%s api=2049 enabled=true code=%s request=%s',
+                    self._native_motion_mode, code, wire_id)
         if not can_continue() or self._conn is not connection:
             return {'result': 'blocked', 'error': 'control_owner_changed', 'code': code}
         if type(code) is int and code == 0:
@@ -696,21 +841,48 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
-        await self._conn.datachannel.pub_sub.publish_request_new(
+        connection = self._conn
+        response = await asyncio.wait_for(connection.datachannel.pub_sub.publish_request_new(
             RTC_TOPIC["MOTION_SWITCHER"],
             {"api_id": 1002, "parameter": {"name": mode}},
-        )
+        ), timeout=_SETUP_TIMEOUT_S)
+        if self._conn is not connection or not self.is_connected:
+            raise ValueError('motion_mode_connection_changed')
+        packet = response.get('data') if isinstance(response, dict) else None
+        header = packet.get('header') if isinstance(packet, dict) else None
+        status = header.get('status') if isinstance(header, dict) else None
+        code = status.get('code') if isinstance(status, dict) else None
+        logger.info('[Go2/MotionMode] switch target=%s code=%s', mode, code)
+        if type(code) is not int or code != 0:
+            raise CommandBlocked(f'原生运动模式切换未确认: target={mode} code={code}')
+        self._native_motion_connection = self._classic_walk_connection = None
+        self._native_motion_mode = None
 
     def _publish_velocity(self, vx, vy, vyaw):
         active = any((vx, vy, vyaw))
         try:
             self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
+            header = {'identity': {'id': self._velocity_request_id,
+                                  'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}}
+            # Not awaiting a Python callback does not make an RPC no-reply.
+            # Match SportClient.Move / the MCF WebRTC streaming wire format.
+            packet = {'header': header,
+                      'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''}
+            if active:
+                header['policy'] = {'priority': 0, 'noreply': True}
+                packet['binary'] = []
             self._conn.datachannel.pub_sub.publish_without_callback(
                 RTC_TOPIC['SPORT_MOD'],
-                data={'header': {'identity': {'id': self._velocity_request_id,
-                                             'api_id': ACTIONS['Move' if active else 'StopMove'].api_id}},
-                      'parameter': json.dumps({'x': vx, 'y': vy, 'z': vyaw}) if active else ''},
-                msg_type=DATA_CHANNEL_TYPE['REQUEST'])
+                data=packet,
+                msg_type=DATA_CHANNEL_TYPE['MSG' if active else 'REQUEST'])
+            now = time.monotonic()
+            previous = self._last_velocity_packet
+            stats = self._motion_command_stats
+            stats['move_count' if active else 'stop_count'] += 1
+            if active and previous and previous['active']:
+                stats['max_gap_s'] = max(stats['max_gap_s'], round(now-previous['sent_at'], 4))
+            self._last_velocity_packet = {'vx': vx, 'vy': vy, 'yaw': vyaw,
+                                          'sent_at': now, 'active': active}
         except Exception as exc:
             self._cancel_manual_velocity()
             self.is_connected = False

@@ -6,6 +6,7 @@ from cloud.go2.actions import ACTIONS, SPORT_COMMANDS, fsm_transitions
 from cloud.go2.state import Go2State, STABLE_BODY_STATES
 
 logger = logging.getLogger(__name__)
+POSTURE_SETTLE_S = .4
 
 
 class CommandBlocked(ValueError):
@@ -22,6 +23,8 @@ class Go2FSM:
         super().__init__()
         self.runtime = Go2State(self._state_changed)
         self._stationary_samples = 0
+        self._stationary_since = None
+        self._stationary_last_at = None
         self._motion_observation_enabled = False
         self._last_motor_positions = None
         self._last_motor_observed_at = None
@@ -34,6 +37,9 @@ class Go2FSM:
         self._action_observation = None
 
     def _reset_body_observations(self):
+        self._stationary_since = None
+        self._stationary_last_at = None
+        self._stationary_samples = 0
         self._last_motor_positions = None
         self._last_motor_observed_at = None
         self._last_posture_motor_at = None
@@ -185,10 +191,24 @@ class Go2FSM:
         moving = self._planar_moving(velocity, yaw_speed)
         if moving:
             self._stationary_samples = 0
+            self._stationary_since = None
+            self._stationary_last_at = None
             self.runtime.body('moving', confirmation='observed')
         else:
+            now = time.monotonic()
+            if (self._stationary_since is None or self._stationary_last_at is None
+                    or not 0 <= now - self._stationary_last_at <= .5):
+                self._stationary_since = now
+                self._stationary_samples = 0
+            self._stationary_last_at = now
             self._stationary_samples += 1
-            if self._stationary_samples >= 3:
+            # A gait's brief low-speed phase is not a completed stop. Keep
+            # measured moving through those dips; sustained stationary
+            # feedback can still reveal a stalled active command. Explicit
+            # zero commands retain the existing prompt stop confirmation.
+            if (self._stationary_samples >= 3 and (
+                    not self._velocity_command_active
+                    or now - self._stationary_since >= POSTURE_SETTLE_S)):
                 self.runtime.body('standing', confirmation='observed')
 
     @staticmethod
@@ -284,7 +304,7 @@ class Go2FSM:
                 self.pending_action = {**pending, 'phase': 'executing', 'motion_observed': True,
                                        'started_at': time.time()}
                 pending = self.pending_action
-        settle = .8 if pending else .4
+        settle = .8 if pending else POSTURE_SETTLE_S
         if (self._posture_candidate_since is None or now - self._posture_candidate_since < settle
                 or self._posture_candidate_samples < 5):
             return

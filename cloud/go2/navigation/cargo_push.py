@@ -1,7 +1,8 @@
 """Guarded cargo nudges and coarse directional delivery using ordinary Go2 gait.
 
-Movement uses the shared obstacle map and ordinary Navigator. Directional
-attempts require real movement and stopping; measured cargo motion
+Positioning uses the shared obstacle map and Navigator body-axis translation.
+Actual contact pushes temporarily disable avoidance through a scoped adapter.
+Directional attempts require real movement and stopping; measured cargo motion
 and delivery remain distinct facts.
 """
 from __future__ import annotations
@@ -17,7 +18,8 @@ import uuid
 
 from cloud.agents.common.effects import FileEffectLedger, current_effect, use_effect
 from cloud.go2.control import control_lease
-from cloud.go2.navigation.navigator import navigator
+from cloud.go2.navigation.navigator import HEADING_THRESHOLD, navigator
+from cloud.go2.navigation.contact_push import execute_contact_push
 from cloud.go2.navigation.occupancy_grid import ROBOT_HALF_LENGTH_M, SAFETY_MARGIN_M
 from cloud.go2.navigation.target_approach import _authorize, _await_authorized, _stop_approach
 from cloud.go2.perception.cargo import observe_cargo
@@ -101,10 +103,21 @@ def _stable_cluster_shape(first, second):
 
 def _reference_for(sample, cargo, destination):
     return {'cargo': cargo, 'destination': destination,
+            'approach_completed': (_reference.get() or {}).get('approach_completed') is True,
+            'initially_near_destination': _initially_near_destination(sample),
             'odom_session_id': sample['odom_session_id'],
             'cargo_location': sample['cargo_location'],
             'destination_kind': sample.get('destination_kind'),
             'observation': dict(sample)}
+
+
+def _initially_near_destination(sample):
+    previous = _reference.get() or {}
+    if 'initially_near_destination' in previous:
+        return previous['initially_near_destination'] is True
+    observed = previous.get('observation') or {}
+    return (observed.get('near_destination') if 'near_destination' in observed
+            else sample.get('near_destination')) is True
 
 
 def _check_search_reference(reference, sample):
@@ -178,7 +191,9 @@ async def _visual_step(cargo, destination, distance_m, before, context, ledger, 
     # Ordinary movement retains its preflight, live obstacle checks, control
     # lease, teaching validation, odometry and real stop confirmation.
     with use_effect(ledger, identity):
-        movement = await execute_tool('go2_move', params, context=context)
+        operation = lambda: execute_tool('go2_move', params, context=context)
+        movement = (await execute_contact_push(context, operation) if close and not turning
+                    else await operation())
     result = {'delivered': False, 'cargo_before': before, 'cargo_after': None,
               'movement': movement, 'stop': movement.get('stop'),
               'reference': _reference_for(before, cargo, destination),
@@ -192,7 +207,8 @@ async def _visual_step(cargo, destination, distance_m, before, context, ledger, 
     stopped_at = time.monotonic()
     try:
         after = await _await_authorized(observe_cargo(cargo, destination,
-            after_frame_id=before['frame_id'], after_received_at=stopped_at), context)
+            after_frame_id=before['frame_id'], after_received_at=stopped_at,
+            reference=_reference_for(before, cargo, destination)), context)
         _check_after_frame(before, after)
     except (TargetUnlocalized, ValueError) as exc:
         reason = getattr(exc, 'reason', str(exc))
@@ -207,7 +223,8 @@ def _delivery_plan(sample, pose):
     if (not isinstance(target, dict) or any(type(target.get(k)) not in (int, float)
             or not math.isfinite(target[k]) for k in ('x', 'y'))):
         raise TargetUnlocalized('delivery_direction_unavailable')
-    dx, dy = target['x'] - cargo['x'], target['y'] - cargo['y']
+    direction_origin = sample.get('cargo_direction_location') or cargo
+    dx, dy = target['x'] - direction_origin['x'], target['y'] - direction_origin['y']
     if math.hypot(dx, dy) <= .01:
         raise TargetUnlocalized('delivery_direction_unavailable')
     heading = math.atan2(dy, dx)
@@ -215,21 +232,15 @@ def _delivery_plan(sample, pose):
     error = abs(math.atan2(math.sin(bearing-heading), math.cos(bearing-heading)))
     # 0.3 rad (~17 degrees) is coarse directional agreement, not exact docking.
     aligned = error <= .3
-    box = sample['cargo_bbox_1000']
-    from cloud.go2.perception.rgb_lidar import go2_camera_profile
-    camera = go2_camera_profile(640, 360)
+    # Adjust around the cargo at the distance already reached. No synthetic
+    # cargo radius, body-size deduction or extra observation distance.
     distance = math.hypot(cargo['x']-pose['x'], cargo['y']-pose['y'])
-    radius = distance * (box[2]-box[0]) / 1000 * 640 / camera['fx'] / 2
-    keepout = ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M + radius
-    standoff = keepout + .3  # leave room to stop and see the cargo before contact
-    return {'heading': heading, 'aligned': aligned, 'standoff': standoff,
-            'x': cargo['x']-standoff*math.cos(heading),
-            'y': cargo['y']-standoff*math.sin(heading),
-            'keepout': (cargo['x'], cargo['y'], keepout)}
+    x, y = cargo['x']-distance*math.cos(heading), cargo['y']-distance*math.sin(heading)
+    return {'heading': heading, 'aligned': aligned, 'x': x, 'y': y}
 
 
 async def _directional_delivery(cargo, destination, advance, before, context, ledger, identity):
-    """One positioning or push step; contact may end inside the camera blind spot."""
+    """Approach, or finish coarse positioning and push without another camera gate."""
     from cloud.go2.tools.executor import execute_tool
 
     snapshot, reason = navigator.snapshot()
@@ -243,17 +254,13 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
     target = before['cargo_location']
     bearing = math.atan2(target['y']-pose['y'], target['x']-pose['x']) - pose['heading']
     bearing = math.atan2(math.sin(bearing), math.cos(bearing))
-    turning = abs(bearing) > .12
+    turning = abs(bearing) > HEADING_THRESHOLD
     distance = _distance(target, pose)
-    # Reach an observation point before choosing a lateral pushing position
-    # from a distant estimate. The gap also prevents arrival tolerance from
-    # repeatedly scheduling the same approach.
-    approaching = distance > plan['standoff'] + .1
-    close = (math.hypot(target['x']-pose['x'], target['y']-pose['y'])
-             <= ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M + advance + .15
-             or before['cargo_bbox_1000'][3] >= 950)
-    progress = ('approached' if approaching else 'positioned' if not plan['aligned']
-                else 'aligned' if turning else 'push_attempted' if close else 'approached')
+    # A successful approach advances the order. New visual range estimates
+    # must not reset it to another approach and create centimeter-long trips.
+    approaching = (not (_reference.get() or {}).get('approach_completed')
+                   and before.get('cargo_nearby') is not True)
+    progress = 'approached' if approaching else 'push_attempted'
     movement = None
     navigation_receipts = []
     result = {'delivered': False, 'cargo_motion_confirmed': False,
@@ -265,17 +272,18 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
         with use_effect(ledger, identity):
             if approaching or not plan['aligned']:
                 if approaching:
-                    ratio = (distance - plan['standoff']) / distance
+                    ratio = _advance_distance(None, before) / distance
                     x = pose['x'] + (target['x'] - pose['x']) * ratio
                     y = pose['y'] + (target['y'] - pose['y']) * ratio
-                    options = {}  # Face the cargo on arrival, not the push axis.
+                    options = {'strafe': True}  # Keep heading until near the cargo.
                 else:
                     x, y = plan['x'], plan['y']
-                    options = {'heading': plan['heading'], 'route_keepout': plan['keepout']}
+                    options = {'heading': plan['heading'], 'strafe': True}
                 navigation = await _await_authorized(navigator.go_to_coordinate(
                     x, y, owner_session_id=context.session_id, **options,
                     face_target=(target['x'], target['y']),
-                    speed_limit=.25, minimum_command_speed=.25, arrival_tolerance_m=.1), context,
+                    speed_limit=.25, minimum_command_speed=.25, coarse_arrival=True,
+                    arrival_tolerance_m=_grid.resolution), context,
                     on_result=navigation_receipts.append)
                 stopped = await _stop_approach(context, bounded=True)
                 movement = {'result': 'ok' if navigation.get('status') == 'succeeded' else 'blocked',
@@ -296,9 +304,24 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
                 movement = await execute_tool('go2_move', {
                     'direction': 'turn_left' if bearing > 0 else 'turn_right',
                     'angle_deg': math.degrees(abs(bearing))}, context=context)
-            else:
-                movement = await execute_tool('go2_move', {
+            # The same visual geometry has already supplied the station and
+            # push direction. After real positioning/turning and stopping, go
+            # straight into contact; a fresh view would clip the nearby cargo
+            # or move the estimated station and start another positioning trip.
+            if not approaching and (movement is None or (
+                    movement.get('result') == 'ok'
+                    and (movement.get('stop') or {}).get('result') == 'ok')):
+                if movement is not None:
+                    result['preparation'] = movement
+                _authorize(context)
+                current, reason = navigator.snapshot()
+                if reason:
+                    raise TargetUnlocalized(reason)
+                if current[0].get('session_id') != before['odom_session_id']:
+                    raise TargetUnlocalized('odom_session_mismatch')
+                operation = lambda: execute_tool('go2_move', {
                     'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
+                movement = await execute_contact_push(context, operation)
     except asyncio.CancelledError:
         await _stop_approach(context, bounded=True)
         raise
@@ -322,14 +345,12 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
         # Require a new view of both objects after stopping. LiDAR tracking
         # alone would retain the distant destination estimate for positioning.
         result['reference']['reobserve_after'] = time.monotonic()
+        result['reference']['approach_completed'] = True
     return {**result, 'result': 'ok', 'progress': progress, 'motion_performed': True,
             'directional_push_attempted': attempted,
             'confirmation': 'directional_move_and_stop' if attempted else 'positioning_and_stop',
             'message': ('已按货物到指定目的地的大致方向执行前进推送尝试并确认停稳；未复核货物位移或送达。' if attempted else
-                        '已接近同一货物的安全观察位置并停稳，尚未接触或推送；下一步重新观察货物与目的地，再决定是否换位。' if approaching else
-                        '已完成向货物背向指定目的地一侧的位置调整并停稳，下一步重新观察后对齐推送。' if progress == 'positioned' else
-                        '已朝同一货物转身并停稳，下一步重新观察后继续。' if turning else
-                        '已沿指定目的地方向接近同一货物并停稳，尚未确认接触。')}
+                        '已按本轮建议距离接近同一货物并停稳，接近步骤完成；下一步核对原货物与目的地，调整位置和朝向后直接推送，不再重复接近。')}
 
 
 def _visual_result(cargo, destination, before, after, movement, turning, close):
@@ -397,7 +418,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         elif reference is not None:
             if reference.get('odom_session_id') != before['odom_session_id']:
                 raise TargetUnlocalized('odom_session_mismatch')
-        if destination is not None and before['near_destination']:
+        if (destination is not None and before['near_destination']
+                and _initially_near_destination(before)):
             stopped = await _stop_approach(context, bounded=True)
             if stopped.get('result') != 'ok':
                 raise TargetUnlocalized('stop_unconfirmed')
@@ -418,8 +440,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         else:
             distance_m = _advance_distance(distance_m, before)
             forward = _aligned(before)
-            # Proximity describes progress. Ordinary navigation owns all
-            # obstacle checks; cargo has no separate map or contact allowance.
+            # Proximity selects actual contact versus ordinary approach;
+            # neither path constructs or rewrites an obstacle map.
             uncertainty = before['cargo_location'].get('uncertainty_m', 0.)
             clearance = forward - uncertainty - ROBOT_HALF_LENGTH_M - SAFETY_MARGIN_M
             nudge_attempted = clearance <= distance_m + .06
@@ -435,14 +457,17 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
             # The child effect identity keeps native training/action accounting
             # tied to this original step, including cancellation uncertainty.
             with use_effect(ledger, identity):
-                movement = await execute_tool('go2_move',
+                operation = lambda: execute_tool('go2_move',
                     {'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
+                movement = (await execute_contact_push(context, operation) if nudge_attempted
+                            else await operation())
             moving = False
             if movement.get('result') != 'ok' or (movement.get('stop') or {}).get('result') != 'ok':
                 raise TargetUnlocalized('cargo_move_unconfirmed')
             stopped_at = time.monotonic()
             after = await _await_authorized(observe_cargo(cargo, destination,
-                after_frame_id=before['frame_id'], after_received_at=stopped_at), context)
+                after_frame_id=before['frame_id'], after_received_at=stopped_at,
+                reference=_reference_for(before, cargo, destination)), context)
             _check_after_frame(before, after)
             if after['cargo_location'].get('source') in {'visual_ground_estimate', 'visual_distance_estimate'}:
                 result = _visual_result(cargo, destination, before, after, movement, False, nudge_attempted)

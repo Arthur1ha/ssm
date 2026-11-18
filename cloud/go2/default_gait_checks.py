@@ -1,6 +1,7 @@
 """Default gait regressions using simulated transports only."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -104,5 +105,106 @@ async def test_unconfirmed_gait_blocks_move_and_keeps_stop_available(reply):
     assert robot._classic_walk_connection is None
     assert [c.args[1]['api_id'] for c in rpc.await_args_list] == [2049]
     packets.assert_not_called()
+    robot.move_velocity(0, 0, 0)
+    assert packets.call_args.kwargs['data']['header']['identity']['api_id'] == 1003
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('initial', ['mcf', 'normal', 'ai'])
+async def test_native_controller_is_confirmed_before_classic_walk(initial):
+    from unitree_webrtc_connect.constants import RTC_TOPIC
+    robot, rpc, packets = robot_at_stand()
+    del robot.read_motion_mode  # Exercise the real protocol reader.
+    robot._native_motion_connection = robot._classic_walk_connection = None
+    mode = [initial]
+    async def response(topic, options):
+        payload = None
+        if topic == RTC_TOPIC['MOTION_SWITCHER']:
+            if options['api_id'] == 1001:
+                payload = {'name': mode[0]}
+            else:
+                assert options['parameter'] == {'name': 'normal'}
+                mode[0] = 'normal'
+        else:
+            assert mode[0] == 'mcf' and options['api_id'] == 2049
+        return {'data': {'header': {'status': {'code': 0}}, 'data': payload}}
+    rpc.side_effect = response
+    await robot.prepare_motion()
+    assert robot._native_motion_mode == ('mcf' if initial == 'mcf' else 'normal')
+    assert robot._classic_walk_connection is (robot._conn if initial == 'mcf' else None)
+    assert [c.args[1]['api_id'] for c in rpc.await_args_list] == {
+        'mcf': [1001, 2049], 'normal': [1001], 'ai': [1001, 1002, 1001],
+    }[initial]
+    packets.assert_not_called()  # Controller/gait configuration cannot send Move.
+    before = rpc.await_count
+    await robot.prepare_motion()
+    assert rpc.await_count == before
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_controller_is_not_assumed_normal():
+    robot, rpc, packets = robot_at_stand()
+    del robot.read_motion_mode
+    robot._native_motion_connection = robot._classic_walk_connection = None
+    with pytest.raises(ValueError, match='控制模式尚未确认'):
+        await robot.prepare_motion()
+    assert [c.args[1]['api_id'] for c in rpc.await_args_list] == [1001]
+    assert robot._classic_walk_connection is None
+    packets.assert_not_called()
+    robot.move_velocity(0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_mode_query_cannot_prepare_a_replacement_connection():
+    robot, rpc, packets = robot_at_stand()
+    del robot.read_motion_mode
+    robot._native_motion_connection = robot._classic_walk_connection = None
+    async def replacement(*_):
+        robot._conn = object()
+        return {'data': {'header': {'status': {'code': 0}}, 'data': {'name': 'normal'}}}
+    rpc.side_effect = replacement
+    with pytest.raises(ValueError, match='connection_changed'):
+        await robot.prepare_motion()
+    assert robot._native_motion_connection is robot._classic_walk_connection is None
+    packets.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['mcf', 'normal'])
+@pytest.mark.parametrize('entry', ['navigation', 'direct', 'joystick'])
+async def test_real_controller_reply_uses_compatible_motion_calls(mode, entry):
+    """Replay 19:20: MCF is valid and must never be switched to normal."""
+    from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD, SPORT_CMD_MCF
+    robot, rpc, packets = robot_at_stand()
+    del robot.read_motion_mode
+    robot._native_motion_connection = robot._classic_walk_connection = None
+    robot._native_motion_mode = None
+
+    async def response(topic, options):
+        payload = None
+        if topic == RTC_TOPIC['MOTION_SWITCHER']:
+            assert options['api_id'] == 1001, 'Valid native mode must not be switched'
+            payload = json.dumps({'name': mode})
+        elif options['api_id'] == 2049:
+            assert mode == 'mcf', 'ClassicWalk belongs to the MCF catalog'
+            assert SPORT_CMD_MCF['ClassicWalk'] == options['api_id']
+        else:
+            assert options['api_id'] in {SPORT_CMD['Move'], SPORT_CMD['StopMove']}
+        return {'data': {'header': {'status': {'code': 0}}, 'data': payload}}
+
+    rpc.side_effect = response
+    if entry == 'navigation':
+        await robot.prepare_motion()
+        robot.move_velocity(.2, 0, 0)
+    elif entry == 'direct':
+        result = await robot.send_command('Move', {'x': .2})
+        assert result['result'] == 'accepted'
+    else:
+        result = await robot.send_command('EnterMoveControl')
+        assert result['result'] == 'accepted'
+        robot.manual_velocity(.2, 0, 0, can_continue=lambda: True)
+    assert robot._native_motion_mode == mode
+    assert sum(call.args[0] == RTC_TOPIC['MOTION_SWITCHER'] for call in rpc.await_args_list) == 1
+    assert sum(call.args[1]['api_id'] == 2049 for call in rpc.await_args_list) == int(mode == 'mcf')
     robot.move_velocity(0, 0, 0)
     assert packets.call_args.kwargs['data']['header']['identity']['api_id'] == 1003

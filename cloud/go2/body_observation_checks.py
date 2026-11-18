@@ -56,6 +56,22 @@ def test_connected_robot_confirms_standing_from_joint_geometry_without_commands(
     robot._conn.datachannel.pub_sub.publish_request_new.assert_not_called()
 
 
+def test_motion_diagnostics_preserve_real_feet_and_controller_fields(observed):
+    robot, feed, _ = observed
+    feed(count=7)
+    robot._native_motion_mode = 'normal'
+    feet = [0., .1, -.3] * 4
+    robot._on_state({'data': {'body_height': .31, 'velocity': [.2, 0, 0],
+        'yaw_speed': 0, 'mode': 0, 'gait_type': 0, 'error_code': 1002,
+        'foot_position_body': feet, 'foot_speed_body': [0.] * 12}})
+    assert robot._robot_state['native_motion_mode'] == 'normal'
+    assert robot._robot_state['mode'] == robot._robot_state['gait_type'] == 0
+    assert robot._robot_state['error_code'] == 1002
+    assert robot._robot_state['foot_position_body'] == feet
+    robot._on_state({'data': {'body_height': .31, 'velocity': [.2, 0, 0]}})
+    assert robot._robot_state['foot_position_body'] is None
+
+
 def test_sport_updates_do_not_expire_old_accepted_joint_feedback(observed):
     robot, feed, clock = observed
     feed(count=7)
@@ -116,6 +132,33 @@ def test_pause_is_confirmed_by_streaming_feedback_without_rpc_receipt(observed):
     assert clock[0] - stopped_at < .4
     assert robot.body_state == 'standing' and robot.body_confirmation == 'observed'
     robot._conn.datachannel.pub_sub.publish_request_new.assert_not_called()
+
+
+def test_brief_low_speed_gait_packets_do_not_toggle_moving_to_standing(observed):
+    robot, feed, clock = observed
+    feed(count=7)
+    robot._motion_observation_enabled = True
+    robot._velocity_command_active = True
+    feed(velocity=[.2, 0, 0])
+    for _ in range(8):
+        # Three packets can arrive in milliseconds within a physical step.
+        for _ in range(5):
+            clock[0] += .005
+            robot._on_state({'data': {'body_height': .31,
+                'velocity': [.01, .002, -.05], 'yaw_speed': 0}})
+            assert robot.body_state == 'moving'
+        feed(velocity=[.2, 0, 0])
+
+
+def test_sustained_stationary_feedback_can_reveal_stalled_active_move(observed):
+    robot, feed, _ = observed
+    feed(count=7)
+    robot._motion_observation_enabled = True
+    robot._velocity_command_active = True
+    feed(velocity=[.2, 0, 0])
+    feed(count=7, velocity=[0, 0, -.05])
+    assert robot.body_state == 'standing'
+    assert robot.body_confirmation == 'observed'
 
 
 @pytest.mark.asyncio

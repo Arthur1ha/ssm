@@ -173,7 +173,7 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('progress', ['approached', 'positioned'])
-async def test_cargo_approach_and_positioning_use_separate_turning_and_forward_motion(movement, monkeypatch, tmp_path, progress):
+async def test_cargo_approach_and_positioning_use_separate_body_axes(movement, monkeypatch, tmp_path, progress):
     """Replay both delivery stages with the real loop and low-speed gait."""
     from cloud.go2.navigation import cargo_push
     from cloud.go2.navigation import navigator as nav_module
@@ -188,6 +188,7 @@ async def test_cargo_approach_and_positioning_use_separate_turning_and_forward_m
         'cargo_location': cargo, 'cargo_bbox_1000': [672, 612, 758, 662],
         'destination_location': {'x': 4.809291794668575, 'y': 2.683830000982215},
         'near_destination': False, 'advance_distance_m': .6}
+    sample['cargo_nearby'] = progress == 'positioned'
     if progress == 'positioned':
         cargo.update(x=pose['x'] + .65, y=pose['y'])
         sample['destination_location'].update(x=cargo['x'] + .43, y=cargo['y'] + .65)
@@ -203,16 +204,25 @@ async def test_cargo_approach_and_positioning_use_separate_turning_and_forward_m
     async def stop(context, *, bounded):
         return await movement.nav.stop_and_confirm(owner_session_id=context.session_id)
     monkeypatch.setattr(cargo_push, '_stop_approach', stop)
+    contact = AsyncMock(return_value={'result': 'ok', 'stop': {'result': 'ok'}})
+    monkeypatch.setattr(cargo_push, 'execute_contact_push', contact)
     movement.fault['minimum_linear_speed'] = .20
     with use_context(movement.context):
         result = await cargo_push.push_cargo('近处右侧的深色扁盒子', '左后方蓝色点位')
     assert result['result'] == 'ok', (result.get('reason'), result.get('movement'))
-    assert result['progress'] == progress and result['directional_push_attempted'] is False
-    assert result['final'] is False
+    assert result['progress'] == ('approached' if progress == 'approached' else 'push_attempted')
+    assert result['directional_push_attempted'] is (progress == 'positioned')
     assert result['stop']['result'] == 'ok'
-    assert any(vx >= .2 for vx, _, _ in movement.commands)
-    assert all(vy == 0 for _, vy, _ in movement.commands)
-    assert all(not vx or not yaw for vx, _, yaw in movement.commands)
+    if progress == 'approached':
+        assert result['final'] is False
+        contact.assert_not_awaited()
+        assert any(vx >= .2 for vx, _, _ in movement.commands)
+        assert math.hypot(pose['x']-sample['pose']['x'], pose['y']-sample['pose']['y']) >= .5
+    else:
+        contact.assert_awaited_once()
+        assert result['preparation']['navigation']['status'] == 'succeeded'
+        assert any(abs(vy) >= .2 for _, vy, _ in movement.commands)
+    assert all(sum(abs(v) > 1e-9 for v in command) <= 1 for command in movement.commands)
     assert movement.commands[-1] == (0, 0, 0)
 
 
@@ -230,6 +240,38 @@ async def test_replay_delivery_positioning_does_not_stall_at_last_18cm(movement)
     pose = movement.robot.odom
     assert math.hypot(pose['x'] - 1.482, pose['y'] - 1.183) < .1
     assert max(math.hypot(vx, vy) for vx, vy, _ in movement.commands) == pytest.approx(.25)
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('final_heading', [0., math.pi/2])
+async def test_cargo_positioning_uses_body_translation_before_one_final_turn(movement, final_heading):
+    pose = movement.robot.odom
+    pose.update(x=.5, y=.5, heading=0.)
+    result = await movement.nav.go_to_coordinate(.9, 1.1, strafe=True,
+        coarse_arrival=True, heading=final_heading, speed_limit=.25, minimum_command_speed=.25)
+    assert result['status'] == 'succeeded', result
+    assert any(vy > 0 for _, vy, _ in movement.commands)
+    assert all(sum(abs(v) > 1e-9 for v in command) <= 1 for command in movement.commands)
+    yaw_steps = [i for i, command in enumerate(movement.commands) if command[2]]
+    if final_heading:
+        assert yaw_steps
+        assert all(vx == vy == 0 for vx, vy, _ in movement.commands[yaw_steps[0]:])
+    else:
+        assert not yaw_steps
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_cargo_sideways_positioning_keeps_live_obstacle_checks(movement):
+    pose = movement.robot.odom
+    pose.update(x=.5, y=.5, heading=0.)
+    movement.robot.occupancy_grid.is_body_clear = lambda x, y, h: y < .65
+    result = await movement.nav.go_to_coordinate(.5, 1.1, strafe=True,
+        coarse_arrival=True, heading=0., speed_limit=.25, minimum_command_speed=.25)
+    assert result['status'] == 'blocked', result
+    assert any(vy > 0 for _, vy, _ in movement.commands)
+    assert pose['y'] < .65
     assert movement.commands[-1] == (0, 0, 0)
 
 
@@ -405,6 +447,61 @@ async def test_coordinate_arrival_uses_coarse_heading_after_braking(movement, dr
 
 
 @pytest.mark.asyncio
+async def test_arrival_corrects_one_braking_heading_drift_without_restarting_route(movement):
+    """18:33/18:34 stopped inside XY tolerance, but failed heading_ok."""
+    original = movement.robot.move_velocity
+    goal = movement.start['heading'] + .8
+    braking_drift = {'turned': False, 'injected': False}
+
+    def move(vx, vy, yaw, **kwargs):
+        if yaw:
+            braking_drift['turned'] = True
+        elif braking_drift['turned'] and not braking_drift['injected']:
+            movement.robot.odom['heading'] = goal - math.radians(12)
+            braking_drift['injected'] = True
+        return original(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = move
+    result = await movement.nav.go_to_coordinate(
+        movement.start['x'], movement.start['y'], heading=goal)
+    assert braking_drift['injected']
+    assert result['status'] == 'succeeded', result
+    assert abs(movement.robot.odom['heading'] - goal) <= math.radians(10)
+    assert all(vx == vy == 0 for vx, vy, _ in movement.commands)
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('drift', [.04, .12])
+async def test_arrival_turn_never_chases_waypoint_after_position_drift(movement, drift):
+    """Replay the .1 m arrival boundary: rotation must not restart translation."""
+    pose = movement.robot.odom
+    pose.update(x=1.694, y=1.023, heading=-1.06)
+    original = movement.robot.move_velocity
+    drifted = False
+
+    def move(vx, vy, yaw, **kwargs):
+        nonlocal drifted
+        if yaw and not drifted:
+            pose['y'] += drift
+            drifted = True
+        return original(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = move
+    result = await movement.nav.go_to_coordinate(
+        1.694, 1.023, face_target=(2.523, 1.027), arrival_tolerance_m=.1,
+        speed_limit=.25, minimum_command_speed=.25)
+    assert drifted
+    assert all(vx == vy == 0 for vx, vy, _ in movement.commands)
+    assert result['status'] == ('succeeded' if drift < .1 else 'failed'), result
+    if drift > .1:
+        assert result['reason'] == 'arrival_unconfirmed'
+        assert result['diagnostics']['near_goal'] is False
+        assert result['diagnostics']['still'] is True
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_explicit_relative_turn_keeps_precise_heading_after_braking(movement):
     from cloud.go2.tools.tools import go2_move
     original = movement.robot.move_velocity
@@ -427,6 +524,39 @@ async def test_explicit_relative_turn_keeps_precise_heading_after_braking(moveme
     assert result['reason'] == 'arrival_unconfirmed'
     assert result['stop']['result'] == 'ok'
     assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fresh_stop', [True, False])
+async def test_coarse_cargo_arrival_accepts_settled_position_but_requires_real_stop(movement, fresh_stop):
+    """18:44 reached the box, then failed solely on an 11 cm XY residual."""
+    pose = movement.robot.odom
+    pose.update(x=.26, y=1.617, heading=0.)
+    movement.robot.occupancy_grid.grid = np.zeros((160, 160), dtype=bool)
+    goal_x = 2.562
+    original = movement.robot.move_velocity
+    braking = {'moving': False, 'index': None}
+
+    def move(vx, vy, yaw, **kwargs):
+        if vx:
+            braking['moving'] = True
+        elif braking['moving'] and braking['index'] is None:
+            pose.update(x=goal_x-.11, y=1.617)
+            braking['index'] = len(movement.commands)
+            if not fresh_stop:
+                movement.fault['stale_after'] = 0
+        return original(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = move
+    result = await movement.nav.go_to_coordinate(
+        goal_x, 1.617, coarse_arrival=True, face_target=(3.4, 1.617),
+        speed_limit=.25, minimum_command_speed=.25)
+    assert braking['index'] is not None
+    assert result['status'] == ('succeeded' if fresh_stop else 'failed'), result
+    assert all(cmd == (0, 0, 0) for cmd in movement.commands[braking['index']:])
+    if not fresh_stop:
+        assert result['reason'] == 'arrival_unconfirmed'
+        assert result['diagnostics']['samples'] == 0
 
 
 @pytest.mark.asyncio

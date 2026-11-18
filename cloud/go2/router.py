@@ -185,6 +185,24 @@ async def go2_avoidance_switch(context=Depends(require_admin_read)):
         raise HTTPException(status_code=503, detail="avoidance switch status unavailable") from exc
 
 
+@router.get('/diagnostics/motion-mode')
+async def go2_motion_mode(context=Depends(require_admin_read)):
+    """Inspect the native controller without moving or switching it."""
+    try:
+        return await go2.read_motion_mode()
+    except (RuntimeError, ValueError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail='motion mode status unavailable') from exc
+
+
+@router.get('/diagnostics/motion-settings')
+async def go2_motion_settings(context=Depends(require_admin_read)):
+    """Inspect native gait settings without switching modes or moving."""
+    try:
+        return await go2.read_motion_settings()
+    except (RuntimeError, ValueError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail='motion settings unavailable') from exc
+
+
 _classic_walk_test_active = False
 
 

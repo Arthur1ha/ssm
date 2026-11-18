@@ -317,6 +317,8 @@ async function browserChecks() {
     assert.equal(await page.$$eval('.run-process-summary', rows=>rows.every(row=>!row.open)),true,
       'Process details stay collapsed, including unconfirmed outcomes');
     assert.match(await page.$eval('.run-process-summary summary',el=>el.innerText),/确认/);
+    assert.match(await page.$eval('.run-process-summary summary',el=>el.innerText),/呆呆狗/,
+      'A collapsed process must identify its device before showing the action');
     assert(await page.$eval('.space-activity',e=>e.textContent.includes('对方已接受')));
     for(const width of [320,390,1280]) {
       await page.setViewport({width,height:900});
@@ -327,6 +329,7 @@ async function browserChecks() {
         return style.backgroundColor==='rgba(0, 0, 0, 0)' && parseFloat(style.borderTopWidth)===0
           && portrait.bottom<=name.top && member.scrollWidth<=member.clientWidth;
       })),true,'Shared stage avatars, names and states must fit without individual card chrome');
+      if(process.env.SCREENSHOT_DIR && width===390) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'activity-overview-390.png'),fullPage:true});
       await page.$eval('.run-process-summary',el=>{el.open=true;});
       assert.equal(await page.$eval('.run-process-summary',el=>el.open),true);
       assert.match(await page.$eval('.run-process__body',el=>el.innerText),/停止结果尚未确认/);
@@ -334,6 +337,12 @@ async function browserChecks() {
       if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`activity-process-${width}.png`),fullPage:true});
       await page.click('.run-process-summary summary');
     }
+    await page.evaluate(({planned,lamp})=>__render({events:[planned,
+      {...planned,event_id:'other-device-call',task_id:'other-device-task',unit_id:lamp.unit_id}
+    ]}),{planned,lamp});
+    await page.waitForFunction(()=>document.querySelectorAll('.run-process-summary__device').length===2);
+    assert.deepEqual(await page.$$eval('.run-process-summary__device',nodes=>nodes.map(node=>node.innerText)),
+      ['呆呆狗','皮皮灯'],'Identical action titles must keep both devices visible while collapsed');
     // The original game is over while the surrounding space activity remains live.
     await page.evaluate(({events,start,boundary,followup})=>__render({events:[start,...events,boundary,followup]}),
       {events,start:gameStart,boundary:legacyGameEnd,followup});
@@ -381,6 +390,8 @@ async function browserChecks() {
       {...result,unit_id:'cloud_orchestrator',target_unit_id:'go2'},
     ]}),{planned,result, basis:decisionBasis});
     await page.waitForSelector('.run-process__execution');
+    assert.match(await page.$eval('.run-process-summary__device',el=>el.innerText),/→ 呆呆狗/,
+      'A delegated step must expose its target before opening the process');
     assert.equal(await page.$eval('.run-process__actor',el=>el.textContent),
       await page.evaluate(()=>getAgentDisplayName('cloud_orchestrator')));
     assert.match(await page.$eval('.run-process__target',el=>el.textContent),/呆呆狗/);
@@ -629,6 +640,14 @@ async function browserChecks() {
         return t.scrollHeight<=t.clientHeight+1 && document.documentElement.scrollWidth<=innerWidth
           && input.top>=0 && input.bottom<=innerHeight;
       }),true,`Activity content or composer was clipped at ${width}×${height}`);
+      assert.equal(await home.evaluate(()=>{
+        const scroller=document.querySelector('.chat-panel__scroll').getBoundingClientRect();
+        const overview=document.querySelector('.space-activity__overview');
+        const pinned=(getComputedStyle(overview).display==='contents'
+          ? overview.querySelector('.space-activity__heading') : overview).getBoundingClientRect();
+        return pinned.top>=scroller.top-1 && pinned.bottom<=scroller.bottom-32;
+      }),true,`Pinned activity context must leave room for the timeline at ${width}×${height}`);
+      if(process.env.SCREENSHOT_DIR && width===390) await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`activity-pinned-${width}-${height}.png`)});
       await home.waitForSelector('.chat-panel__latest');
       await home.click('.chat-panel__latest');
       await home.waitForFunction(()=>{

@@ -92,6 +92,7 @@ async def delivery_harness(monkeypatch):
     monkeypatch.setattr(loop, "run_in_executor", inline_executor)
     calls, events, trace, search_ids, cargo_contexts = [], [], [], [], []
     search_evidence = {"frame_id": "found_cargo_frame", "target": "地上的小纸盒"}
+    cargo_location = {"x": 1., "y": 0., "source": "visual_distance_estimate"}
     config = SimpleNamespace(push_result="ok", destination="红色地垫", directional=False)
     lamp_color = {"rgb": (40, 80, 120), "brightness": 160}
     agent = SimpleNamespace(
@@ -197,6 +198,7 @@ async def delivery_harness(monkeypatch):
         if name == "go2_find_object":
             return {"result": "ok", "outcome": "nearby", "found": True,
                     "target": params["target"], "task_id": search_ids[-1], "stop": {"result": "ok"},
+                    "cargo_location": deepcopy(cargo_location),
                     "evidence": deepcopy(search_evidence)}
         assert name == "go2_push_cargo"
         if config.directional:
@@ -282,7 +284,8 @@ async def delivery_harness(monkeypatch):
              "acceptance_message_id": "msg_delivery_acceptance"}
     return SimpleNamespace(config=config, event=event, drive=drive, messenger=messenger,
                            agent=agent, navigator=navigator, calls=calls, events=events, trace=trace,
-                           cargo_contexts=cargo_contexts, search_evidence=search_evidence)
+                           cargo_contexts=cargo_contexts, search_evidence=search_evidence,
+                           cargo_location=cargo_location)
 
 
 @pytest.mark.parametrize("reason", ["delivery_service_unavailable", "lamp_busy"])
@@ -312,6 +315,7 @@ async def test_delivery_orders_find_report_destination_signal_and_real_push(deli
         ("go2_push_cargo", {"cargo": "地上的小纸盒", "destination": destination, "distance_m": 0.15})]
     assert h.cargo_contexts == [{
         "reference": {"cargo": "地上的小纸盒", "destination": destination,
+                      "cargo_location": h.cargo_location,
                       "search_evidence": h.search_evidence},
         "request_id": "delivery_msg_delivery_push_0:step", "signal_rgb": (255, 0, 0)}]
     assert not any(row[:3] == ("decision", "go2", "next") and row[-1] in {

@@ -39,6 +39,7 @@ test_*.py
 !cloud/go2/tests/test_navigation_safety.py
 !cloud/go2/tests/test_relative_move.py
 !cloud/go2/tests/test_cargo_push.py
+!cloud/go2/tests/test_contact_push.py
 !cloud/go2/tests/test_recording.py
 !cloud/go2/tests/test_access_control.py
 !cloud/go2/tests/test_task_recovery.py

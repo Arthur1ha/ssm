@@ -454,6 +454,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
                decision_basis=answer.get("decision_basis"))
         reference = state.get("cargo_reference") or {
             "cargo": state["cargo"], "destination": order["destination"],
+            "cargo_location": state["cargo_receipt"].get("cargo_location"),
             "search_evidence": state["cargo_receipt"].get("evidence")}
         current_reference = reference
 

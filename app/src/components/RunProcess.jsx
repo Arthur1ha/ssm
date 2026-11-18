@@ -27,8 +27,17 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
   const attention = steps.filter(step => processNeedsAttention(step.event));
   const [open,setOpen] = React.useState(false);
   if (!steps.length) return null;
-  const titles = [...new Set(steps.map(step => processFactTitle(step.event,agents)).filter(Boolean))];
-  const description = titles.slice(0,2).join('、') || '详情';
+  // Keep every explicit participant visible even when their steps share a title.
+  const participants = new Map();
+  steps.forEach(({event}) => {
+    const actor = event.agent_id || event.agent || event.unit_id || 'cloud_orchestrator';
+    const target = event.target_unit_id && event.target_unit_id !== actor ? event.target_unit_id : '';
+    const key = JSON.stringify([actor,target]);
+    if (!participants.has(key)) participants.set(key,{key,actor,target,titles:[]});
+    const title = processFactTitle(event,agents);
+    const titles = participants.get(key).titles;
+    if (title && !titles.includes(title)) titles.push(title);
+  });
   const executing = steps.find(step => step.event.status === 'executing' || step.event.stage === 'dispatching' && !processOutcome(step.event));
   // This label describes a concrete step, never the outcome of the whole run.
   const summaryEvent = executing?.event || steps[steps.length - 1].event;
@@ -38,9 +47,14 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
   let previousActor = null;
   return <div className="run-process" data-process>
     <details className="run-process-summary" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-      <summary aria-label="查看调用与反馈" aria-expanded={open}>
+      <summary aria-expanded={open}>
         <span className="run-process-summary__marker" aria-hidden="true"/>
-        <span className="run-process-summary__text"><span>{description}</span></span>
+        <span className="run-process-summary__text">{[...participants.values()].map(item =>
+          <span className="run-process-summary__participant" key={item.key}>
+            <strong className="run-process-summary__device">{getName(item.actor)}{item.target ? ` → ${getName(item.target)}` : ''}</strong>
+            <span className="run-process-summary__action">{item.titles.join('、') || '过程详情'}</span>
+          </span>
+        )}</span>
         {status && !completed && !pending && <span className="run-process-summary__status"
           data-attention={Boolean(attention.length) || undefined}>{status}</span>}
         {pending && <ProcessWaiting label={executing ? '执行中' : '等待回复'}/>}

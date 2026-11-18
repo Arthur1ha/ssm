@@ -22,6 +22,9 @@ def robot_at_stand():
     robot._conn = SimpleNamespace(datachannel=SimpleNamespace(pub_sub=SimpleNamespace(
         publish_request_new=publish, publish_without_callback=sticks)))
     robot._classic_walk_connection = robot._conn  # Existing connection already prepared.
+    robot._native_motion_connection = robot._conn
+    robot._native_motion_mode = 'mcf'
+    robot.read_motion_mode = AsyncMock(return_value={'result': 'ok', 'name': 'mcf'})
     return robot, publish, sticks
 
 
@@ -56,10 +59,14 @@ async def test_entry_prepares_sport_channel_without_entering_balance_stand():
     packet = sticks.call_args.kwargs['data']
     assert packet['header']['identity']['api_id'] == 1008
     assert json.loads(packet['parameter']) == {'x':.2,'y':-.1,'z':.3}
-    assert sticks.call_args.kwargs['msg_type'] == DATA_CHANNEL_TYPE['REQUEST']
+    assert sticks.call_args.kwargs['msg_type'] == DATA_CHANNEL_TYPE['MSG']
+    assert packet['header']['policy'] == {'priority': 0, 'noreply': True}
+    assert packet['binary'] == []
     robot.move_velocity(0, 0, 0)
     assert sticks.call_args.kwargs['data']['header']['identity']['api_id'] == 1003
     assert sticks.call_args.kwargs['data']['parameter'] == ''
+    assert sticks.call_args.kwargs['msg_type'] == DATA_CHANNEL_TYPE['REQUEST']
+    assert 'policy' not in sticks.call_args.kwargs['data']['header']
     ids = [call.kwargs['data']['header']['identity']['id'] for call in sticks.call_args_list]
     assert len(set(ids)) == len(ids)
     assert all(call.args[0] != RTC_TOPIC['WIRELESS_CONTROLLER'] for call in sticks.call_args_list)

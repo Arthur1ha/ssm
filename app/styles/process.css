@@ -9,8 +9,10 @@
 .run-process .run-process-summary summary { display:flex; align-items:center; gap:8px; width:100%; min-height:38px; cursor:pointer; padding:7px 4px; list-style:none; color:var(--color-text-muted); }
 .run-process-summary summary::-webkit-details-marker { display:none; }
 .run-process-summary__marker { width:5px; height:5px; flex:0 0 5px; border-radius:50%; background:var(--color-text-dim); opacity:.7; }
-.run-process-summary__text { display:flex; align-items:center; gap:9px; min-width:0; flex:1; }
-.run-process-summary__text > span { color:var(--color-text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px; }
+.run-process-summary__text { display:flex; flex-direction:column; gap:6px; min-width:0; flex:1; }
+.run-process-summary__participant { display:flex; flex-direction:column; gap:2px; min-width:0; max-width:100%; line-height:1.45; overflow-wrap:anywhere; }
+.run-process-summary__device { color:var(--color-text); font-size:12px; font-weight:600; }
+.run-process-summary__action { color:var(--color-text-dim); font-size:11px; }
 .run-process-summary__status { flex-shrink:0; color:var(--color-feedback); font-size:10px; }
 .process-chevron { flex-shrink:0; fill:none; stroke:currentColor; stroke-width:1.6; transition:transform .15s; }
 .run-process-summary[open] > summary .process-chevron,.process-chevron[data-open="true"] { transform:rotate(180deg); }

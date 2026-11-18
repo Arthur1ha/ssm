@@ -25,6 +25,8 @@ class Go2Sensors:
         self._low_state_count = 0
         self._motor_feedback_evidence = None
         self._motion_diagnostic_at = 0.
+        self._motion_command_stats = {'move_count': 0, 'stop_count': 0, 'max_gap_s': 0.}
+        self._last_velocity_packet = None
         self._voxel_raw: dict | None = None
         self._voxel_received_at: float | None = None
         self._voxel_source_ts = None
@@ -67,6 +69,8 @@ class Go2Sensors:
         self._low_state_interval_s = None
         self._low_state_count = 0
         self._motion_diagnostic_at = 0.
+        self._motion_command_stats = {'move_count': 0, 'stop_count': 0, 'max_gap_s': 0.}
+        self._last_velocity_packet = None
 
     # ── 回调 ──────────────────────────────────────────────────────────────
 
@@ -109,6 +113,10 @@ class Go2Sensors:
             "body_height": inner.get("body_height"),
             "velocity":    inner.get("velocity"),
             "yaw_speed":   inner.get("yaw_speed"),
+            "error_code": inner.get('error_code'),
+            "native_motion_mode": getattr(self, '_native_motion_mode', None),
+            "foot_position_body": inner.get('foot_position_body'),
+            "foot_speed_body": inner.get('foot_speed_body'),
             "body_state":   self.body_state,
             "body_confirmation": self.body_confirmation,
             "pending_action": self.pending_action.copy() if self.pending_action else None,
@@ -120,13 +128,20 @@ class Go2Sensors:
             logger.info('[Go2/MotionTelemetry] %s', {
                 'observed_at': time.time(),
                 'mode': inner.get('mode'), 'gait_type': inner.get('gait_type'),
+                'native_motion_mode': getattr(self, '_native_motion_mode', None),
+                'error_code': inner.get('error_code'),
                 'body_height': height, 'foot_raise_height': inner.get('foot_raise_height'),
                 'velocity': velocity, 'yaw_speed': yaw_speed,
                 'imu_rpy': low.get('imu_rpy'), 'foot_force': low.get('foot_force'),
                 'motor': low.get('motor_diagnostics'),
+                'foot_position_body': inner.get('foot_position_body'),
+                'foot_speed_body': inner.get('foot_speed_body'),
+                'command_stream': self._motion_command_stats.copy(),
+                'last_command': self._last_velocity_packet,
                 'low_state_age_s': (None if self._low_state_received_at is None else
                                     round(self._last_state_received_at-self._low_state_received_at, 3)),
             })
+            self._motion_command_stats = {'move_count': 0, 'stop_count': 0, 'max_gap_s': 0.}
         # Sport and LOW_STATE packets arrive independently. Pair in either
         # order, counting each motor sample only once.
         self._fsm_on_joint_observation(self._last_state_received_at)

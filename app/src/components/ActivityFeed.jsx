@@ -168,12 +168,14 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
   },[activityId,latestId,showTimeline]);
   if (!activity && !events.length && !error) return null;
   return <section className={`space-activity${isActive || isEnding ? ' space-activity--live' : ' space-activity--ended'}`} aria-label="空间活动">
+    <div className="space-activity__overview">
     <div className="space-activity__heading"><div><small>空间活动</small><h2>{context || '最近的空间活动'}
       <span className="space-activity__live">{isEnding ? '正在结束' : isActive ? '进行中' : isEnded ? '已结束' : '同步中'}</span></h2></div>
       {isActive && <button type="button" className="space-activity__end" onClick={onEnd} disabled={ending}>{ending ? '正在结束…' : '结束活动'}</button>}
     </div>
     {(expanded || isActive || isEnding || hasAttention) && <ActivityMembers activity={activity} events={events} agents={agents}
       unitData={unitData} connected={connected} getName={getName}/>}
+    </div>
     {error && <div className="space-activity__error" role="status">{processErrorText(error)}</div>}
     {!showTimeline && !isEnded && <div className="space-activity__summary"><p>{latestSpeech
       ? `${getName(latestSpeech.event.unit_id)}：${processUserText(latestSpeech.event.text) || processErrorText(latestSpeech.event.text)}` : '正在等待设备动态'}</p></div>}
