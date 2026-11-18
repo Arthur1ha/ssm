@@ -1,351 +1,74 @@
-# SSM 项目 — Codex 工作指引
-
-## 项目概述
-
-**一句话**：SSM（Smart System Mesh）是一个分布式多智能体 IoT 系统——以 MQTT 为统一**控制总线**（发现、在线状态、能力声明 card），**数据面按设备本性选传输**（ESP32 走 MQTT、Go2 走 HTTP/SSE），让 ESP32 边缘设备、云端管家/灯/Go2 Graph 和手机 PWA 协作；边缘硬件 tick 独立于云端编排器运行。
-
-**目标用户**：探索边缘-云端-移动端三层分布式智能体架构的开发者；核心体验是"新接一个传感器，整个系统自动感知并纳入决策"。
-
-**核心业务逻辑**：
-
-1. ESP32 启动时探测引脚 → 为已接智能体发布 retained manifest；传感器仅发布独立的 state/event，不产生设备卡
-2. 云端 CardRegistry 统一处理 retained manifest/card/status，API 汇集 state/event；管理员把发现的设备加入固定空间 `main` 后，PWA 经 `/api/devices` 与 `/api/events`（SSE）自动展示和同步，无手动订阅步骤
-3. 用户语音/文字 → 已认证 PWA 请求 `/api/intents` → API 生成可信上下文并发布签名 MQTT `ssm/intent/{session_id}` → 管家 Graph 按序执行模型返回的工具调用、逐步等待真实结果、继续规划，最后生成人格回复；设备聊天/按钮走 `/api/commands/{unit_id}`
-4. `reactive` 模式下，传感器事件也可触发云端 ESP32 智能体自主决策；默认 `manual` 不自发控灯
-5. ESP32 独立执行硬件 tick、任务去重与结果回报；当前固件没有离线自动控灯规则，云端离线不触发新的自主决策
-6. 智能体通过 MQTT retained manifest/card 发布能力，`/api/devices/{unit_id}/agent` 返回空间内已发现设备的静态 A2A Agent Card；HTTP 是读取投影，发现真相仍在 MQTT
-7. 统一教导走 `/api/training` 草案→管理员确认→执行器加载，按教导 ID/版本执行单动作、多动作或场景参数；保存、加载、物理完成分别判定
-8. 空间活动通过用户请求启动，灯进入 `reactive`、Go2 进入 `free_explore`；同伴自主消息、观察、动作和结果进入活动时间线。新用户介入结束活动并撤销其模式归属；重启恢复不重发旧物理动作
-
-**事实来源**：启动命令见 [Makefile](Makefile)，依赖见 [pyproject.toml](pyproject.toml) 与 `uv.lock`，配置见 [cloud/.env.example](cloud/.env.example) 和 [edge/config.py](edge/config.py)，协议见 [protocol/topics.md](protocol/topics.md)、[protocol/agent-card.md](protocol/agent-card.md)。README 面向使用与部署，本文件面向后续代码修改；更新行为时同步维护相关文档。`docs/` 的计划、历史证据和 `.superpowers/` 基线副本不是当前运行契约，不把历史验证结果写成当前已通过。
-
----
-
-## 技术栈
-
-| 层 | 技术 | 版本 |
-|----|------|------|
-| 边缘端 | MicroPython on ESP32 | 使用兼容固件，当前目标为 ESP32 DevKit |
-| 边缘库 | `umqtt.simple`、`neopixel`、`machine`、`ujson` | 需确认固件提供或另行安装 `umqtt.simple` |
-| 消息代理 | Mosquitto + paho-mqtt | 模板仅 TCP 1883，无 WS 9001；云端 paho `>=1.6.1,<2.0` |
-| 云端 AI | LangChain 工具调用 + LangGraph 逐步任务图、文件检查点 | langchain≥1、langgraph≥1 |
-| LLM | 兼容 OpenAI 的服务，统一由 `agents/common/models.py` 构造 | 全系统文字推理共用 `TEXT_MODEL`；视觉识别共用 `VISION_MODEL` |
-| Go2 机器狗 | `unitree-webrtc-connect` ≥2.1.2 + OpenCV HOG/Haar + 视觉语言模型、RGB/LiDAR | 数据面 HTTP/SSE/WebRTC，控制面 card/status/state 仍走 MQTT |
-| 人员库 | 腾讯云 IAI 3.0 + 空间人员元数据 | 手机照片登记，见 `cloud/space/people/` |
-| 云端 API | FastAPI + uvicorn | fastapi≥0.136、uvicorn[standard]≥0.46 |
-| 手机 PWA | React 18（无构建，Babel standalone）+ 同源 HTTP/SSE | React 18.3.1 |
-| Python 环境 / 验证 | uv 管理，Python ≥3.13；pytest | `pyproject.toml` + `uv.lock`；前端另有 Node 回归脚本 |
-
----
-
-## 项目结构地图
-
-```
-ssm/
-├── edge/                ← MicroPython 边缘智能体（跑在 ESP32 上）
-│   ├── config.py        ← ★ 引脚、时序、UNIT_CONFIGS 注册表；密钥从 local_config.py 读取
-│   ├── local_config.example.py ← WiFi/MQTT 配置模板，实际 local_config.py 不提交
-│   ├── probe.py         ← 通用引脚探测引擎（读 UNIT_CONFIGS，零硬编码）
-│   ├── agent_manifest.py← 智能体 manifest 发布及旧传感器 manifest 清理（读 UNIT_CONFIGS + PRESENCE）
-│   ├── bsm.py           ← 硬件驱动层（GPIO/ADC/PWM），只抛事件
-│   ├── ism.py           ← 状态机契约层，只做状态转换
-│   ├── trigger_map.py   ← ★ 唯一耦合点：BSM↔ISM↔MQTT 接线
-│   ├── lamp_contract.py← 灯动作、参数与持续闪烁默认值的固件契约
-│   ├── clock.py         ← NTP 校时与 Unix 时间换算
-│   ├── mqtt_client.py   ← MQTT 封装，自动重连 + LWT
-│   ├── boot.py          ← WiFi 连接（先于 main.py 执行）
-│   └── main.py          ← 主循环入口
-├── cloud/               ← 云端服务（跑在服务器上）
-│   ├── .env.example     ← 配置模板；实际 .env 存放模型/MQTT/内部服务/会话凭据，不提交
-│   ├── api/             ← FastAPI 聚合入口（端口 8082），装配下面所有 router
-│   │   ├── main.py      ← app 装配 + ESP32 MQTT 桥（订阅 manifest/state/event/result）
-│   │   ├── auth.py / sessions.py ← Cookie/CSRF、固定 main 空间管理与邀请
-│   │   ├── intents.py   ← 签名意图、统一 commands、会话 SSE、任务查询与清理
-│   │   ├── training.py  ← `/api/training` 教导、草案与确认
-│   │   ├── activity.py  ← 空间活动生命周期与时间线
-│   │   ├── personality.py / people.py ← 人格配置与空间人员库
-│   │   └── devices.py   ← `/api/devices` + `/api/devices/{unit_id}/agent`（★ A2A Agent Card，数据取自 cards/）
-│   ├── cards/           ← ★ A2A 设备卡注册表：registry.py（订阅 card/manifest/status，全局单一真相）、builder.py（manifest→AgentCard）、schema.py
-│   ├── agents/          ← 三角色 Agent Graph 与共享文件检查点、动作账本、回复投影
-│   │   ├── common/      ← 运行图、持久化、模型、事件与回复契约；training/ 统一教导
-│   │   ├── steward/     ← 管家 Graph、人格、工具声明与公开 skill
-│   │   ├── lamp/        ← 灯 Graph、人格、记忆与自主工作流
-│   │   └── go2/         ← Go2 Graph、人格、记忆与自主工作流
-│   ├── orchestrator/    ← 云端编排器（独立进程，MQTT 事件循环 + 逐步任务循环）
-│   │   ├── main.py      ← MQTT 事件循环：`ssm/intent/+` → 管家 Graph
-│   │   ├── tools.py     ← MQTT/HTTP 派发与反馈辅助
-│   │   ├── shared_state.py ← 线程安全 MQTT 传感器/执行器快照与可信会话元数据
-│   │   ├── trusted_context.py ← 签名意图、同伴请求与会话清理校验
-│   │   └── card.py      ← 管家公开能力卡
-│   ├── esp32/           ← 灯的云端服务与设备执行适配
-│   │   ├── service.py   ← 灯实例与自主模式状态、Graph 入口
-│   │   ├── router.py    ← 自主模式、对话、内部语义任务与物理回执接口
-│   │   ├── state.py     ← ESP32 设备/任务状态
-│   │   ├── perception.py / presentation.py ← 传感器事实整理与控制状态投影
-│   │   ├── tool_registry.py / tool_executor.py ← 动作契约、执行校验与回执等待
-│   │   └── tasks.py / physical_tasks.py ← 语义任务与物理派发的持久去重账本
-│   ├── go2/             ← Go2 设备服务（数据面 HTTP；控制面 card/status 走 MQTT）
-│   │   ├── router.py    ← `/api/go2/*` 全部端点（连接/运动/导航/视觉/对话）
-│   │   ├── service.py / state.py / actions.py ← 模式装配、分层状态与动作契约
-│   │   ├── tasks.py / control.py ← 任务生命周期与运动租约
-│   │   ├── mode/、perception/、tools/ ← 自主调度、视觉与执行适配
-│   │   ├── navigation/  ← 路径规划、地图、目标接近与导航执行
-│   │   └── connection/  ← webrtc / video / sensors / fsm
-│   ├── personality/     ← 三角色共用的人格存储、版本与名称管理
-│   ├── peers/           ← 同伴发现、签名通信、技能请求、权限与互动游戏
-│   │   └── games/      ← 按游戏分文件的规则、玩法、策略与执行适配；统一注册表汇总
-│   ├── space/           ← 空间成员、可信执行上下文、用户约束、活动与人员库
-│   │   ├── activity.py / decisions.py ← 活动持久化、历史事实与决策证据校验
-│   │   └── people/     ← 人员元数据与腾讯云提供方
-│   ├── observability/   ← 日志配置、任务关联事件与脱敏
-│   └── storage/         ← 原子 JSON 文件读写与锁
-├── app/                 ← 用户端 PWA（跑在手机/浏览器）
-│   ├── serve.py         ← 本地 127.0.0.1:8081，按文件时间给 JS/CSS URL 加版本
-│   ├── index.html / manifest.json / sw.js / styles/app.css
-│   └── src/
-│       ├── app.jsx      ← ★ 主 React 应用（单屏聊天中心 + hash 子页、聊天状态）
-│       ├── ApiClient.js / CommandBus.js ← 会话 API/SSE 与设备命令入口
-│       ├── hooks/       ← useSendIntent、useSsmCore、useTraining、useSpaceActivity、useActivityTimeline
-│       ├── pages/       ← FsmDevicePage、DevicesPage 与状态机图组件
-│       ├── components/  ← SessionGate、ActivityFeed/ActivityMembers、RunProcess、ChatPanel、TrainingDrawer 等
-│       ├── avatars/     ← 轻量 SVG 形象、表情、动作与事件呈现映射；不定义设备能力或物理状态
-│       └── utils/       ← agentMeta、stateMachine、stateSnapshot、activityView、color、二维码工具
-├── protocol/            ← MQTT 协议契约（单一真实来源）
-│   ├── topics.md        ← MQTT 消息、签名封套、状态与任务语义
-│   ├── agent-card.md    ← 静态技能、regions 拓扑、呈现与动作门禁
-│   └── identifiers.md   ← device_id / unit_id / session_id 标识约定
-├── infra/               ← 运维与部署配置
-│   └── broker/
-│       ├── mosquitto.conf.tmpl ← Broker 配置模板（envsubst 生成）
-│       ├── acl.example  ← 专用账号权限模板，需部署时显式启用
-│       └── passwd       ← 本机 MQTT 认证文件，不随仓库分发
-├── scripts/             ← trace_task、tmux、前端回归和 Go2 诊断/回放工具
-├── Makefile             ← 统一服务管理
-├── OBSERVABILITY.md     ← 日志、会话追踪与排查说明
-├── pyproject.toml       ← Python 依赖（uv 管理）
-└── docs/                ← architecture/、superpowers/（plans + specs）、research/；部分本地资料被忽略
-```
-
-**云端有三个 LLM 智能体**：管家、灯与 Go2 的模型决策分别位于 `cloud/agents/{steward,lamp,go2}/`；`orchestrator/main.py`、`esp32/service.py` 与 `go2/router.py` 接入各自 Graph。编排器经 MQTT 与 ESP32 通信、经 HTTP 调用 Go2。灯的定性照明目标也可通过内部 HTTP 语义任务交给灯 Graph，物理执行仍走 MQTT。`go2/mode/` 负责自主事件调度，决策 Graph 位于 `agents/go2/workflows/`。
-
-**目录边界**：`agents/` 定义角色决策；`esp32/`、`go2/`、`orchestrator/` 保留服务入口和设备适配；`personality/`、`peers/`、`space/`、`observability/` 提供共享能力。设备发现与在线状态以 MQTT retained card/manifest/status 为准，空间成员配置在 `cloud/space/space.json`；不存在文件型设备能力注册表或旧 `/api/rules` 入口。
-
-**运行数据**：共享检查点、运行索引、动作账本和教导默认位于 `cloud/agents/data/{checkpoints,run_index,effects,training}/`；灯与 Go2 的任务/记忆位于各自 `data/`，活动与人员在 `cloud/space/data/`。验证使用临时目录或 fixture，不改写现有运行资产，不读取或输出密钥。`cloud/agents/data/training/` 中已有用户配置也按运行资产处理。
-
-**当前接线**（以 `config.py` 为准）：
-
-| 硬件 | GPIO | 状态 |
-|------|------|------|
-| WS2812 灯环 | GPIO25 | 已接 |
-| 光线传感器 | GPIO34 | 已接（ADC 模拟） |
-| 红外传感器 | GPIO19 | 未接（`UNIT_CONFIGS` 有条目，探测缺席不发 state/event） |
-| 声音传感器 | GPIO32 | 已接，开漏输出，使用 `flag` 显式启用 |
-
-> 接线状态为项目记录，实际存在性看启动 `PRESENCE`。蜂鸣器在 `config.py` 中无条目。光线和红外使用 ADC/数字探测，声音与灯使用 `flag`，不能把所有单元描述成自动电气探测。
-
----
-
-## 编码规范
-
-### 命名规则
-
-| 对象 | 规范 | 示例 |
-|------|------|------|
-| ESP32 agent ID | `{device_id}_{unit}` | `esp32_desk_led` |
-| MQTT topic | `ssm/agents/{unit_id}/{type}` | `ssm/agents/esp32_desk_led/state` |
-| Python 变量/函数 | `snake_case` | `probe_digital`, `ism_light` |
-| MicroPython 常量 | `UPPER_SNAKE` | `WS2812_PIN`, `UNIT_CONFIGS` |
-| 智能体任务循环 | `run_{agent}_loop` | `run_go2_loop`, `run_lamp_loop` |
-
-### MicroPython 特定注意事项
-
-- **不用列表推导式存大集合**：内存有限（~300KB 可用），优先用生成器或原地修改
-- **用 `ujson` 代替 `json`**：ESP32 内置，速度更快，API 相同
-- **不用 `asyncio`**：当前架构用同步主循环（`while True: bsm.tick(); mqtt.check_msg()`），引入 asyncio 会破坏现有 tick 节奏
-- **`time.ticks_ms()` + `time.ticks_diff()`**：ESP32 的 `ticks_ms` 会溢出，必须用 `ticks_diff` 做差值，不能直接相减
-- **引脚释放**：probe.py 探测后必须 `Pin(n, Pin.IN)` 释放引脚，否则 BSM 初始化时引脚模式冲突
-- **ESP32 的 JSON 状态/事件消息用 `unit_id` 自标识，并携带 `ts`**：使用 `clock.unix_time()` 统一处理 MicroPython 纪元，非 `ticks_ms`；NTP 重试与校时后快照沿用 `clock.py` / `main.py` 的入口
-
-### 云端 / PWA
-
-- 灯状态机固定只有 `OFF`（熄灭）、`ON`（常亮）、`BLINKING`（闪烁）三个状态；执行失败通过任务错误回执报告，不得新增 `ERROR` / “灯光异常”等状态。
-- 点击“闪烁”默认持续闪烁，直到收到开灯、关灯或调色命令；不得默认设置停止时间或有限次数。只有明确指定次数时才有限闪烁。
-- Python 脚本与测试使用 `uv run python` / `uv run python -m pytest`，API 沿用 Makefile 的 `uv run uvicorn`；不手动激活 venv
-- PWA 无构建步骤，直接编辑 `.jsx`，浏览器刷新即生效
-- PWA 经 `ApiClient` 和 `CommandBus` 访问同源 API；MQTT 发布与订阅由云端服务负责
-- 新增浏览器脚本时维护 `app/index.html` 加载顺序；当前使用全局脚本和 Babel standalone，不引入未经设计的第二套构建链
-- API 入口负责认证和执行上下文：Cookie 会话、写请求 CSRF；`actor/persist/space_id/requester` 只由可信服务构造，模型和浏览器不能声明权限
-- 人员库写入由管理员和 `SPACE_FACE_ENROLLMENT_ENABLED` 控制，兼容旧 `GO2_FACE_ENROLLMENT_ENABLED`，缺省为开启；实际凭据只放本机 `.env`，照片经腾讯云登记，本地只存人员元数据
-
----
-
-## 架构决策
-
-### 1. 分布式多智能体总线：控制面 MQTT / 数据面按设备本性（核心）
-
-**决策**：分两个面——**控制面**（发现、在线状态、能力声明 card）所有智能体统一走 MQTT（retained + LWT，单一真相）；**数据面**（实际调用）按设备本性选传输：ESP32 走 MQTT `task`/`result`，Go2 走 HTTP/SSE（视频流、地图、流式对话天然需要 HTTP）。
-
-**原因**：天然解耦——新加一个智能体只需发布 manifest/card，其余节点自动感知；编排器宕机不影响 ESP32 硬件 tick。控制面统一保证"谁在线"只有一套真相；数据面分离让重设备（Go2）保留流式能力。
-
-**避免**：ESP32 直接调用 HTTP API、编排器直接操作 GPIO、PWA 轮询 REST 状态；把控制面（card/在线状态）做成文件或 HTTP（必须在 MQTT retained）；让 Go2 这类 HTTP 调用**同步阻塞**编排器事件循环（须线程池+超时）。
-
-### 2. ESP32 三层解耦（BSM / ISM / TriggerMap）
-
-**决策**：BSM 驱动硬件只抛事件；ISM 只做状态转换契约；TriggerMap 是两者与 MQTT 的唯一接线点。
-
-**原因**：BSM 和 ISM 不需要知道对方，可以独立测试每一层。固件接线在 TriggerMap；“声音触发闪烁”等用户教导与自主决策在云端 training/Graph，不能借接线修改恢复离线自动控灯规则。
-
-**避免**：在 BSM 里发 MQTT 消息；在 ISM 里读 GPIO；在 TriggerMap 以外做 ISM↔BSM 的直接调用。
-
-### 3. UNIT_CONFIGS 作为设备注册表（普适性）
-
-**决策**：每个 unit 的引脚与探测策略声明在 `config.py` 的 `UNIT_CONFIGS` 字典里；只有智能体条目声明 manifest 元数据。`probe.py` 和 `agent_manifest.py` 按配置通用处理，不硬编码单元名称。传感器保留独立 MQTT `state/event` 供灯大脑感知，但不生成设备卡。
-
-**原因**：对已有探测策略，新增配置条目即可让通用探测与 manifest 发布层识别。新增硬件类型仍需相应 BSM 驱动、主循环实例和 TriggerMap 接线；不能承诺任意传感器只改一行即可完整工作。
-
-**避免**：在 `probe.py`、`agent_manifest.py`、`bsm.py` 里硬编码具体 unit 名称或引脚号。
-
-### 4. 逐步任务循环（意图编排）
-
-**决策**：三个云端智能体共用 `cloud/agents/common/` 的 LangGraph 运行、文件检查点、动作账本和回复契约。动作结果与任务终结使用统一的 `result/final` 契约：`accepted` 与 `ok` 均按成功处理，Graph 将接受结果投影为 `result=ok`；工具结果 `final=true` 直接清空后续调用并进入收尾，不再规划。单个动作或整批最后一个动作成功后默认终结；需要观察结果再继续原目标时，调用明确声明 `final=false`，批次中间动作和查询默认继续。`final` 是 Graph 控制字段，剥离后才校验和派发业务参数。多个工具调用按返回顺序串行执行，每步校验并保存回执；失败使本批剩余调用失效，执行中、超时或未知结果暂停后续动作。收尾只允许无工具回复，不重新进入动作循环。各角色在 `cloud/agents/{steward,lamp,go2}/graph.py` 组装提示词和设备专属工具。
-
-**后续开发约束**：智能体框架统一使用 LangChain / LangGraph。新增智能体或调整决策流程时，优先使用框架提供的模型、工具、状态图、检查点和恢复能力；不新增自研 Agent 循环、工具调用解析、记忆编排或第二套运行时。MQTT/HTTP 传输、设备安全校验与真实回执判定仍作为业务适配代码保留。
-
-一次性业务操作由服务端通过共享 Graph 的 `once_per_run_tools` 声明，成功或结果待确认后从后续模型工具中移除。重复调用只复用本运行原回执；同参成功不新增步骤或失败，只有重复调用时收尾，同批的新操作仍按序执行；不同参数不能复用成功，未知结果不得换 ID 重发。查询、相对运动等可重复操作不使用该声明；真实失败保留原回执并允许业务重试，新用户目标不继承旧运行的一次性结果。
-
-**用户目标替换**：当前固定 `main` 空间的新用户目标由 API 签发 `goal_revision`，经签名 MQTT／认证内部 HTTP 传播；模型和浏览器不得声明该代次。新目标取消旧 Graph 等待并淘汰旧排队意图，模型返回、工具派发及发言发布前复核归属；已完成或未知的物理结果仍保存到原任务。原运行追问的明确续接沿用原代次，已失效的旧运行不可恢复派发。Go2 交接等待旧任务清理和新鲜线速度／角速度停稳证据，按租约 generation 释放，未知停止不因 TTL 到期解除占用；不将 `accepted` 或单个站姿字段冒充停稳。摇杆新手势独立绑定代次，旧手势的迟到移动与零速度帧不能影响新控制。当前目标代次默认保存在 `cloud/space/data/user_goals/`，测试使用 `SSM_USER_GOALS_DIR` 临时目录。
-
-**对话过程展示**：从现有 Graph 的决策、调用和真实回执投影有界公开事实，统一使用 `common/progress_facts.py`，沿用 MQTT/SSE 与活动存储；不为阶段另调模型写进展解说。普通聊天复用原决策最终发言，工具直接结束才在原 Graph 收尾一次；Go2 自主结果由原自主 Graph 的结果回复分支处理，不另起人格包装 Graph。执行者 `agent_id`、目标 `target_unit_id`、父子运行和步骤身份必须保留；公开说明可以缺失，证据只取当次可信观察，展示元数据不得改变动作去重。PWA 只按明确身份和因果引用合并事实，不能用阶段或相邻消息补理由。
-
-游戏中间决策的 `speech` 可缺省，不强制每步报幕；邀请、必要公开约定、问题和最终回复按原 Graph 的实际阶段产生。`reason/decision_basis` 供过程详情，不能当作同伴发言；`action` 保存结构化调用，不能复制对白冒充执行结果。游戏目录由同一注册表生成概览，选中后按阶段提供必要规则；是否需要粗调由原设备 Graph 结合当前观察决定，显式动作复用既有移动工具；游戏规则和执行器不重复计算或强制追逐共线站位。
-
-所有已有和新增游戏的模型决策、工具执行与内部试错必须进入设备自身的 `agents/lamp/graph.py` 或 `agents/go2/graph.py`，经 `peers/games/role_graph.py` 提供阶段规则、结构化提交工具和受限子任务；禁止游戏直接构造模型、独立模型决策 Graph 或直接调用物理执行器。游戏层只保留规则、协议阶段、约定一致性与真实结果判定。可选过程说明校验失败不终止业务，必要观察证据仍绑定同次可信快照严格校验。
-
-活动时间线与同伴决策上下文分别投影：内部工具结果、模型错误、重试和传输回执标记 `context_scope=process`，只作过程展示；协作子任务仅以一次 `task_result` 共享最终结果，必要问题/约定才产生同伴消息。共享结果本身不要求对方回复，不把每次内部失败变成新话题。环境状态和传感器继续沿用原协议。
-
-每局以原邀请 ID 作为 `game_instance_id`，归属沿签名消息、Graph 和过程事实传播。清理前先记录 `game_closing`，撤销本局普通发言与动作资格；清理后双方各由原设备 Graph 自然回应整局最终结果，不限制句数或按标点拒绝发言，复用可用的原最终回复，不发送成需继续处理的同伴消息；随后由游戏执行归属方发布一次 `game_ended`，不能从传输任务回执提前推断整局结束。旧局消息/排队工作失效，迟到真实回执保留原任务；旧局退出当前共享上下文，活动原话标记已消费并恢复自由活动。再次玩必须新邀请并接受。真实停稳未确认时保留运动限制，不能借自由活动重发旧动作。生命周期投影同步 retained 当前活动快照，跨进程也不得恢复已结束的旧局。
-
-**原因**：灯完成后再让 Go2 行动等依赖关系必须由实际回执决定。三角色以 System 消息承载职责和表达规则、User 消息保留用户原话、原生 Tool 消息提供真实结果；普通聊天使用决策最后一轮的最终回复，独立动作/自主行动才按需生成回复。需要补充信息时使用 LangGraph `interrupt` 与原运行 ID 恢复，不重做已经完成的动作。
-
-**避免**：重新建立独立的旧编排图或第二套问答入口；在传输辅助 `tools.py` 里写智能体业务逻辑。
-
-### 5. PWA 无"订阅"UI 状态
-
-**决策**：云端 API 在 MQTT 层订阅设备消息，PWA 通过 `/api/devices` 获取快照、通过 `/api/events`（SSE）接收变化。设备发现和显示是自动的，不存在用户手动"订阅设备"的 UI 步骤。
-
-**原因**：原有“长按订阅”逻辑和 MQTT 订阅无关。设备先由总线发现，管理员将整机加入空间后，其智能体自动出现在空间内；空间成员配置不等于 MQTT 订阅，也不能代替设备能力或在线状态。
-
-**避免**：重新引入 `subscribed` state、`toggleSub` 或 `localStorage` 的订阅持久化。
-
-### 6. 灯智能体自主模式（manual / reactive）+ 用户让位窗口
-
-**决策**：ESP32 灯桌面智能体有 `manual`（默认，不自发调光）/ `reactive`（结合新鲜传感器与上下文调光）两种模式，经管理员 `PUT /api/esp32/autonomy` 或可信活动适配切换；reactive 下用户/编排器控灯触发 `USER_HOLD_TTL=300` 秒让位，同伴控灯有独立 `PEER_HOLD_TTL=60` 秒窗口。灯自己的自主/游戏任务不能误触发用户让位；窗口内不自发覆盖用户设置。
-
-**原因**：自主调光与用户/编排器命令并发会相互覆盖。模式开关与让位窗口支持用户介入，LLM 根据上下文选择颜色/亮度；底层参数校验和硬件 tick 仍由设备适配负责。Go2 自主模式存放于分层 runtime，运动权限使用租约与中断；灯使用自己的带 TTL 让位窗口，两者独立。
-
-**避免**：在灯智能体里写"什么情况配什么颜色"的硬编码规则表；manual 模式误解为只能开关灯（富命令仍可控）；让位窗口逻辑依赖 Go2 的自主层（各智能体自主逻辑独立）。
-
-### 7. Card 静态拓扑与真实设备事实分离
-
-**决策**：`state_machine.regions` 是唯一静态状态与转换声明。Go2 的 connection / activity / life / body 分层结构和灯照明区域共用 Card 契约；实时动作门禁从已有执行适配投影，PWA 不另建状态或动作目录。
-
-Go2 `status` 只表示云端服务在线；WebRTC 看 `state.connected/connection_state`，身体姿态看真实遥测和 `body_confirmation`。`autonomy_mode=manual|free_explore` 是配置，不等于当前 `life_state`。`accepted` 按动作成功处理，`executing` 仍表示执行中；姿态字段仍由遥测更新，未观测姿态为 `null`，不能因连接、重启或超时凭空设为站立。休息不自动趴下，唤醒不自动起立或恢复探索。
-
-自由探索实际启动后，`life_state=explore` 持续覆盖观察、规划和轮次间等待；具体进展沿用对话消息，不新增状态图节点或调整页面布局。互动任务接管时为 `play`，结束且探索许可仍有效时恢复 `explore`；停止、休息或断连后不得因旧任务结束重新进入探索。持续探索在轮次间没有具体 `life_task_id`，不能把该空值当作可完成的任务令牌。
-
-**合并约束**：Go2 同 `epoch` 按 `revision` 排序，拒绝退役 epoch 晚到事件；灯物理状态与云端 `control_state/control_ts` 分别合并，控制投影不能刷新物理读数时间。超时按原 `task_id/request_id/run_id` 查询，不盲目重发物理动作。
-
-**默认步态**：每次 WebRTC 连接及重连后的首次运动准备先查询原生 MotionSwitcher，`mcf` 和旧 `normal` 都是有效控制器，保留当前模式，不把 MCF 强制切成 normal。MCF 身体就绪后通过 Sport API 2049 启用 `ClassicWalk(true)`，收到成功回执才允许移动；旧 normal 使用原生步态和共用 Move/StopMove，不发送 MCF 专属 2049。仅旧 AI 入口按原协议切 normal 并读回；设置失败保留连接与停止能力，不在连接握手阶段强制切步态。摇杆准备及直接任务 Move 共用入口，成功回执只对同一连接有效；不逐帧或逐任务切换步态。配置步态不产生位移，不确认姿态，也不替代现有运动权限和真实停止证据。
-
-**运动连续性**：所有任务的位移与转向复用 Navigator，摇杆与 Navigator 共用 `go2/motion.py` 的向量加速度及角加速度约束；业务任务不各自切轴或插入速度滤波。最低巡航速度作用于目标向量模长，过渡速度可低于巡航值，不把未经实测的逐轴死区假设变成前进／横移切换。平滑后的实际速度须继续通过最新共享地图的机身通路约束；安全停止、取消和松手立即绕过平滑。周期重规划不能阻塞当前速度循环，过期结果不能恢复已撤销的路线。重复定位包不续发 Move 或延长原 0.3 秒看门狗，恢复后从零起步；收到停止请求不等于真实停稳。默认速度变化参数及模拟测试不代替真机校准。
-
-任务中的平移与原地转向分开执行，交接先确认真实停稳；明显偏航时才纠正，使用不同进入／退出角度避免反复切换。普通目的地导航先朝向路线再前进，显式相对移动只沿请求的身体轴输出；推物粗调由原 Go2 Graph 显式选择现有移动或转向工具，执行器不自动追加站位调整。任务不混发多个轴，切换身体轴时先确认停稳。目标朝向只在到点后确认。普通坐标导航沿用 0.3 米位置容差，找物观察点使用 0.15 米，最终朝向使用 10 度粗略容差，纠偏与停稳验收一致；显式相对转向保留 0.05 弧度精度，明确指定的更小位置容差仍生效。到达观察点不能代替目标的新鲜视觉复核，真实停稳、地图、权限与定位检查保持独立。任务派发前拦截同时含多个非零 x/y/z 的指令；摇杆明确的组合输入保留。速度更新目标间隔 50 毫秒，连续刷新不重复发布相同控制状态；已完成地图按原始观测时间和原有 2 秒有效期判断，新包到达不会立刻撤销仍有效的旧快照，不能通过刷新时间伪造地图新鲜度。
-
-### 8. 统一教导与可信执行链
-
-**决策**：可训练转换与参数从 Card 派生；`agents/common/training/` 统一模型、草案、管理员确认、版本、冲突校验和执行工作流。API 是配置写入方；执行器每步重读教导版本和权限，复用灯/Go2 现有任务账本与真实回执。
-
-场景文字由模型语义理解，不新增硬编码场景枚举；应用教导须带确切 ID/版本，临时参数覆盖不改写长期记录。人物出现事件不等于已识别身份，主人条件只能由可信身份观察满足。保存、加载确认和动作完成分开报告。旧 `/api/teachings`、binding 与 `/api/rules` 不恢复，旧 enabled 数据不自动导入执行。
-
-### 9. 空间活动、同伴消息与决策依据
-
-**决策**：`space/activity.py` 保存活动与有界时间线，API 发布签名 retained 当前快照；用户再次介入递增版本，旧模型运行不能重新开启已过期的活动请求。结束时只撤销活动持有的模式，并保留停止是否确认的真实结果。没有默认活动 TTL，重启检查模式归属，不重放历史动作。
-
-Go2 加入活动仍配置 `free_explore`，但活动原话先进入既有 Graph 仲裁，选择观察、交流、探索或等待；不强制先完成一轮探索，活动内不凭好奇心计数覆盖活动目标。直接开启的自由探索保留原入口。探索安全结束后先处理已收到的协作事件，再判断是否另开自主话题。
-
-`peers/` 处理签名定向消息、单技能请求与管家协调。定向消息的收到、接受、开始和最终结果分别记录；消息不能授予权限。`color_hunt` 的邀请、选色与目标由已有自主 Graph 结合当前观察决定，不硬编码延时、颜色或后续剧情；导航确认遵循真实停止和视觉复核回执。
-
-普通同伴回复沿用可信入口关联的 `conversation_id/reply_to`，同一处理轮显式发信与自动最终回复共用一个出口；需要续谈时回到原会话的现有角色 Graph，不另起确认气泡模型或无条件消息往返。管家执行收尾只总结当前运行的目标及真实回执，历史用于承接指代和偏好，不主动续写旧任务。
-
-游戏在 `peers/games/` 按游戏分文件维护规则、玩法、策略说明、可用条件和执行入口；统一注册表汇总，不在角色提示词中重复维护各游戏规则。自主社交不使用固定发送间隔、次数配额或同话题冷却，由现有 Graph 结合 traits、环境、任务和近期互动判断；保留新事件去重、活动与任务占用检查、消息期限及真实回执约束。
-
-配送 `push_delivery` 的目的地可为地面色块、小标记或物体标识。有目的地的 `go2_push_cargo` 通过 `operation=assess|approach|push` 分开观察、接近和推送，默认 `assess`。`assess` 取得同一货物与目的地的新鲜观察及粗略视图说明，返回 `assessed/final=false`，由原 Go2 Graph 判断当前是否可以直接推、是否需要接近或粗调。`approach` 只执行本次观察建议的接近距离并确认真实停稳，返回 `approached/final=false`，不扣半机身、货物半径或额外观察留距。必要的转向、平移由原 Go2 Graph 显式调用现有 `go2_move`；执行器不再自动计算共线站位、追加横移或转向，不要求机械角度共线，也不追逐地图格或 5 厘米站位。`push` 只执行明确的向前推送，不自动追加调整，不强制调整后或推送后重新观察。货物在画面下边缘、部分裁切或地面接触处不可见不作为推送门禁；已有原物体引用仍须保持。首次货物定位优先尝试雷达关联，失败才降级为视觉估距；同一订单固定首次选定的定位来源，视觉路径不再重试雷达，雷达路径丢失关联时报告受阻，不静默换源。接近与显式粗调沿用共享地图和既有运动检查；实际接触推送前读取机载避障原值，关闭并读回确认后，仅该向前推送步骤跳过云端障碍拦截。结束、失败或取消先停止再恢复原设置，旧连接清理不能操作替代连接。权限、目标代次、定位会话、动作账本和真实停稳判定继续沿用原执行链。直接对话与游戏在同一运行内绑定原货物与目的地；后续措辞变化或参数省略不更换订单，游戏沿用找货回执中的定位来源。视觉距离按相机相对机身的前置偏移转换到 odom，不混用距离起点。`directional_push_attempted=true`、`confirmation=directional_move_and_stop` 且 `stop.result=ok` 表示朝指定方向的推送尝试完成，不能证明货物实际位移或送达，`delivered=false`；未知运动或未确认停稳不能完成本单。只有本单首次观察已在目的地附近时，才可返回 `already_near_destination` 并明确本次未移动，不能用靠近后的投影变化跳过原推送。无目的地的基础推物测试保留原行为，仍核对动作后的新鲜货物观察。货物观察复用最多 3 秒的新鲜站立遥测等待，不伪造站姿。
-
-推物接近、显式粗调与前进直接复用 Navigator 和已完成的共享地图，运动循环不再重新关联货物、重建私有地图或传递接触许可／原始货物点云。动作前的目标观察与步间引用继续用于方向估计，货物感知也读取已完成的共享地图，不单独建图。接近和换位仍使用完整共享地图避障；实际接触推送前读取机载避障原值，关闭并读回确认后，仅对这一向前推送步骤跳过云端地图障碍拦截，结束或取消时停止并恢复原设置。此作用域由执行器绑定原用户目标、连接和定位会话，模型与浏览器不能声明；不改写共享地图，不重建私有地图。定位、权限、动作去重和真实停稳判定沿用原入口；关闭未确认不开始推送，恢复未知保留原运动回执，后续移动先补确认原避障设置。坐标导航的首次运动也须确认当前连接的 ClassicWalk，成功后复用，不在连续速度更新中等待步态 RPC。
-
-货物雷达测距或关联不可用时，允许视觉模型根据当前画面返回大致距离 `cargo_distance_m` 和建议前进距离 `advance_distance_m`，标记 `visual_distance_estimate`；无需雷达地面投影或特定高度门槛。推物 `distance_m` 可为任意有限正数，省略时按本次目标观察估算（首次视觉建议或已确认目标的雷达更新）；普通移动、找货及推送不设置固定步长、累计里程或导航段数上限，Go2 对话不再按固定动作次数截断，仍遵守原任务期限、权限、定位会话、完整地图避障和真实停稳。接近和换位的视觉路线不跳过障碍检查；实际接触推送沿用上述限定关闭避障流程，`push_attempted` 不能冒充实测货物位移或本步送达。用户／调用方明确指定的距离要求在降级后仍须保留。完全缺失避障地图或自身定位时仍停止，不把目标测距降级描述为纯视觉避障。
-
-推物目标首次由当前画面同时核对用户原话的空间指代和决策候选描述，确认后沿用原物体引用；近处独立盒子不能因口语材质词被替换成背景堆叠纸箱，候选不符或不确定时不移动。目的地附近判定须排除前景标记与背景货物仅投影相邻的情况，使用同尺度的粗略深度核对，不重新引入移动距离上限。“原本已在目的地附近”只看本单首次货物观察，状态随原物体引用传播；首次未到位的订单不能因后续投影变近而取消原推送。原本已在附近时，回执明确 `motion_performed=false`、`progress=already_near_destination`，Go2 沿用工具事实回复，不能将观察成功叙述为执行了移动或推送。
-
-活动消息/动作可保存 `decision_basis`、`state_at_event`、`trigger_message_id`。决策理由与引用经 `space/decisions.py` 校验，依据只来自新鲜、同活动的真实观察/状态/用户要求；不能让模型自填观察事实。历史摘要不能当成当前事实，相邻消息也不能被 UI 推断成动作原因或成功证据。
-
----
-
-## 验证方法
-
-```bash
-# 查看所有服务进程
-make ps
-
-# 查看最近会话与错误
-make logs
-
-# 追踪一个会话（也支持 AGENT_ID / RUN_ID / TASK_ID / JSON=1 / FOLLOW=1）
-make trace-task ID=<session_id>
-
-# 相关契约示例；*_checks.py 必须显式传入才能被默认 pytest 发现
-uv run python -m pytest cloud/cards/region_contract_checks.py cloud/esp32/capability_chain_checks.py cloud/agents/common/training/context_checks.py -q
-
-# 需要全量回归时，同时包含现有 *_checks.py
-uv run python -m pytest cloud -o 'python_files=test_*.py *_test.py *_checks.py' -q
-
-git diff --check
-
-# ESP32 重启后串口应看到：
-# [Probe] {'esp32_desk_light': True, 'esp32_desk_ir': False, 'esp32_desk_sound': True, ...}
-# [Manifest] Published N manifests for esp32_desk
-
-# PWA 验证：观察 /api/devices、/api/intents、/api/commands/{unit_id}、/api/events、/api/activity/*
-make tunnel-url
-```
-
-**启动与配置**：API / PWA 默认监听 `127.0.0.1:8082/8081`，经自行配置的同源代理访问。`make api` 为开发模式，监视 `cloud/` Python 文件和 `cloud/.env` 热重载，请求排空等待为 2 秒；运行数据 JSON 和日志不触发热重载。`make api-bg` 无热重载，请求排空等待为 10 秒，代码或 `.env` 修改后需手动重启；等待上限不含应用清理和已运行的线程任务。编排器配置需单独重启加载；启动命令修改不影响已运行的旧进程。`*-bg` 会先停止匹配进程，重复执行会重启。tunnel 目标依赖预先建立的 `ssm` 隧道，`make tunnel-url` 只打印配置地址。Broker 密码文件需本机创建，ACL 从 `infra/broker/acl.example` 配置并在模板显式启用。API 与编排器共用内部服务令牌；`SSM_SESSION_SECRET` 至少 32 字符才使用持久会话签名，HTTPS 保持安全 Cookie，仅本机 HTTP 调试关闭。
-
-**前端回归**：`scripts/check_*.cjs` 使用模拟 API/设备反馈；按各脚本头部提供 Node 依赖、Chrome 与 React UMD 路径后运行，例如 `node scripts/check_activity_frontend.cjs`。这些不是 PWA 构建步骤。
-
-**改动验证节奏**：拆成可快速检查的局部改动，优先跑相关现有契约与回归。文档修改检查路径、命令和格式即可；不要为验证文档重启服务或触发硬件。模拟测试、真实模型质量与真机验收分别说明，不用历史报告替代当前结果。
-
-发现与当前契约脱节的旧测试文件时直接删除，不为通过旧断言恢复已退役的接口、状态或社交配额；保留当前契约的有效回归覆盖。
-
----
-
-## QA 边界
-
-**可以做：**
-
-- 在 `UNIT_CONFIGS` 新增设备条目
-- 在 `TriggerMap` 新增事件→动作路由
-- 在三个智能体的 `cloud/agents/*/graph.py` 调整逐步任务逻辑
-- 修改 PWA UI 样式和交互（app.jsx）
-- 沿用 Card、training、peers、space 和设备适配的既有入口扩展行为，并同步协议/契约
-
-**不能做：**
-
-- 在 BSM 里调用 MQTT 或 ISM
-- 在 ISM 里读 GPIO
-- 在 `probe.py` / `agent_manifest.py` 里硬编码 unit 名称
-- 在 PWA 里重新引入 subscribed/toggleSub 状态
-- 新增第二套 Agent 循环、状态图真相、教导存储或绕过可信身份/真实回执的执行入口
-- 用消息送达、模型描述或 retained 历史快照伪造设备观测；`accepted` 的动作成功语义不改写姿态和传感器事实
-- 用测试、文档验证覆盖已有教导、人员、人格、记忆或任务账本
-- 为"将来可能有用"的功能写代码（MVP 原则）
+# SSM — Codex 工作指引
+
+本文件保留修改代码必须遵守的约束；安装、启动、迁移见 [README.md](README.md)。启动以 [Makefile](Makefile) 为准，依赖以 `pyproject.toml` / `uv.lock` 为准，配置以 `cloud/.env.example` / `edge/config.py` 为准，消息与能力契约见 `protocol/`。行为变更同步维护相关契约，过程材料不代表当前实现或验收结果。
+
+## 目录与架构边界
+
+| 位置 | 职责 |
+|---|---|
+| `edge/` | MicroPython 固件：BSM 驱动、ISM 状态转换、TriggerMap 接线 |
+| `cloud/agents/{steward,lamp,go2}/` | 三角色 Graph、提示词、人格、记忆与自主决策 |
+| `cloud/agents/common/` | LangGraph 运行、检查点、动作账本、回复、过程事实、统一教导 |
+| `cloud/{orchestrator,esp32,go2}/` | 服务入口、传输及真实设备执行适配 |
+| `cloud/api/`、`cloud/cards/` | 认证、可信上下文、SSE、MQTT retained 设备卡注册表 |
+| `cloud/{space,peers,personality,observability,storage}/` | 空间、协作、人格、追踪及原子存储 |
+| `app/` | React 18 全局脚本 + Babel standalone，直接编辑 JSX，无构建 |
+| `protocol/` | MQTT、Agent Card、标识协议 |
+
+- MQTT 是所有智能体发现、能力与在线状态的唯一真相；HTTP Agent Card 是读取投影。ESP32 任务走 MQTT，Go2 数据面走 HTTP/SSE/WebRTC。同步设备调用不得阻塞 MQTT 事件循环，使用线程池与超时。
+- `CardRegistry` 消费 retained manifest/card/status；管理员把整机加入固定 `main` 空间后，PWA 经 `/api/devices` 与 SSE 自动显示智能体。传感器只发布 state/event，不生成设备卡；不恢复手动订阅 UI 或文件型能力注册表。
+- `agents/` 定义角色决策；设备服务保留传输、校验与执行适配。新增决策使用 LangChain/LangGraph，不新增自研 Agent 循环、工具解析、记忆编排或第二套运行时。传输辅助 `orchestrator/tools.py` 不承载业务决策。
+- PWA 统一经 `ApiClient` / `CommandBus` 访问同源 API，不直连 MQTT 或轮询设备 REST 状态。新增脚本维护 `app/index.html` 加载顺序；头像仅投影呈现，不定义能力或物理状态。
+
+## 权限、用户目标与真实回执
+
+- API 校验 Cookie 会话和写请求 CSRF，构造 `actor/persist/space_id/requester` 及签名上下文；浏览器和模型不能声明权限、目标代次或运动特许。同伴消息不能授予权限。
+- 新用户目标由 API 签发 `goal_revision`，经签名 MQTT/认证内部 HTTP 传播。模型返回、工具派发、发言发布前复核归属；取消旧等待并淘汰旧排队意图。明确续接沿原代次，失效运行不能恢复派发。
+- 已完成或结果未知的物理动作保留原任务记录；超时按原 `task_id/request_id/run_id` 查询，不换 ID 重发。停止请求、传输成功和动作实测结果分别判定。
+- Go2 新旧目标交接须等待旧任务清理及新鲜线速度/角速度停稳证据，按租约 generation 释放；未知停止不能因 TTL 到期解除占用。摇杆每个新手势绑定代次，旧帧不能影响新控制。
+- 人员写入须管理员与有效腾讯云配置，开关为 `SPACE_FACE_ENROLLMENT_ENABLED`，兼容旧开关且缺省开启。本地仅存人员元数据；人物出现不等于可信身份，旧身份与历史记忆不能证明当前主人在场。
+
+## Graph、教导与公开过程
+
+- 三角色使用 System 职责、User 原话和原生 Tool 真实回执。多个工具按模型返回顺序串行执行；失败使本批剩余调用失效，执行中、超时或未知结果暂停后续动作。
+- `accepted/ok` 按动作成功处理，但不伪造姿态或实测事实；Graph 将接受结果投影为 `result=ok`。`final=true` 清空后续调用并收尾；单个/批次末动作成功默认终结，中间动作与查询默认继续，需要继续原目标时显式 `final=false`。先剥离 `final` 再校验业务参数，收尾仅允许无工具回复。
+- 一次性操作由服务端 `once_per_run_tools` 声明：成功或待确认后移出模型工具；重复同参复用原回执、不新增步骤，未知结果不换 ID 重发。真实失败允许业务重试，新目标不继承旧成功；查询和相对运动等可重复操作不使用该声明。
+- 追问使用 LangGraph interrupt 和原运行恢复，保留原始目标与回答，不重做已完成动作。普通聊天复用原决策最终发言；自主结果由原角色 Graph 的结果分支处理，不另调人格包装或进展解说模型。
+- 统一教导走 `agents/common/training/`：Card 派生能力 → 草案 → 管理员确认 → 执行器加载。逐步复核确切 ID/版本与权限；保存、加载和物理完成分别报告。本次覆盖不改长期记录；不恢复旧 `/api/teachings`、binding、`/api/rules` 或自动启用旧数据。
+- 过程事实统一用 `common/progress_facts.py`，保留执行者、目标、父子运行和步骤身份。理由只引用当次可信观察；可选说明缺失/校验失败不阻断业务，必要执行证据仍严格校验。PWA 仅按身份和因果引用合并，不从相邻消息、阶段或模型文字补理由。
+
+## ESP32 与灯
+
+- `UNIT_CONFIGS` 声明引脚、探测策略及智能体 manifest。`probe.py` / `agent_manifest.py` 通用处理，不硬编码单元或 GPIO；新硬件仍需对应驱动、主循环实例和接线。
+- BSM 只驱动硬件并抛事件，ISM 只转换状态，TriggerMap 是 BSM↔ISM↔MQTT 唯一接线点。教导与自主规则在云端；当前无离线自动控灯，不借修改接线恢复此功能。
+- 使用 `ujson`、同步 tick 主循环、`ticks_diff()`；不引入 asyncio，不用直接减法处理 ticks 溢出。控制内存，探测结束释放引脚；JSON state/event 带 `unit_id` 和 `clock.unix_time()` 的 `ts`，校时沿用现有入口。
+- 灯只有 `OFF/ON/BLINKING`，失败用任务错误报告，不新增 ERROR 状态。闪烁默认持续到开、关或调色命令，明确指定次数才有限闪烁；参数和输出上限沿用 `lamp_contract.py` / `config.py`。
+- 默认 `manual`；`reactive` 结合新鲜感知决策，不写颜色硬编码规则表。用户/编排器控灯让位 300 秒，同伴控灯让位 60 秒；灯自己的自主/游戏动作不触发用户让位。物理读数与云端 control 投影分开合并，后者不能刷新物理时间。
+- 接线以 `config.py` 和实际 `PRESENCE` 为准：灯 GPIO25、光线 GPIO34、声音 GPIO32；红外 GPIO19 记录为未接。光线/红外分别 ADC/数字探测，声音/灯使用 flag，蜂鸣器无配置条目。
+
+## Go2 状态与运动
+
+- 静态状态与转换仅由 Card `state_machine.regions` 声明，实时门禁来自执行适配。MQTT status 只表示服务在线，连接看 WebRTC，姿态看真实遥测与 `body_confirmation`，未观测为 null。模式不等于 life_state；休息不自动趴下，唤醒不自动起立或恢复探索。同 epoch 按 revision 合并，拒绝退役 epoch 迟到事件。
+- 自由探索实际启动后 `life_state=explore` 覆盖轮次等待；互动接管为 play，仅探索许可仍有效时恢复 explore。空 `life_task_id` 不是可完成任务令牌，旧任务结束不能复活已停止的探索。
+- 每次连接首次运动准备识别 MotionSwitcher：保留 mcf/normal；MCF 身体就绪后确认 ClassicWalk(true)/2049，normal 不发送该接口。每连接确认一次，摇杆与任务共用入口；步态设置不产生位移、不确认姿态，失败保留停止能力。
+- 位移/转向共用 Navigator，摇杆与 Navigator 共用 `go2/motion.py`。任务平移和原地转向分开，切轴先确认停稳；普通导航先朝路线前进，显式相对移动沿指定身体轴，任务不混发多个非零 x/y/z。摇杆保留明确组合输入。
+- 目标和经过加速度约束的实际速度都须检查最新共享地图。停止、取消、障碍、定位或权限丢失立即绕过平滑；重复定位包不续 Move 或原 0.3 秒看门狗，恢复后从零起步。后台重规划不得阻塞速度循环，过期结果不能恢复撤销路线，地图保留原观测时间及 2 秒有效期。
+- 普通坐标位置容差 0.3 米，找物观察点 0.15 米，最终朝向 10 度；显式相对转向 0.05 弧度，明确更小位置容差仍生效。纠偏与验收使用同一容差，到点不替代视觉复核或真实停稳。速度更新目标间隔 50 毫秒；软件默认值/模拟通过不代替真机校准。
+- 推物的观察、接近、推送由原 Go2 Graph 显式选择，执行器不自动追加共线站位或换位。绑定原货物、目的地和首次定位来源；视觉降级仍检查自身定位与避障，不设固定步长/里程/段数上限，保留用户明确距离和任务期限。
+- 接触推送前读取机载避障原值，关闭并读回后仅该前推步骤跳过云端障碍拦截，结束/取消先停止再恢复；绑定原连接、目标代次和租约，不改共享地图。关闭未确认不推，恢复未知保留限制。推送尝试不证明货物送达；`already_near_destination` 只看本单首次观察并明确未移动。
+
+## 活动与同伴游戏
+
+- 活动由用户请求启动，API 发布签名 retained 当前快照；无默认 TTL。新用户介入使旧活动失效，只撤销其持有模式，记录停止真实结果；重启不重放动作。Go2 加入活动先由原 Graph 仲裁观察/交流/探索/等待，不强制先探索或用好奇心计数覆盖目标。
+- 同伴消息校验签名、成员、期限和去重，收到、接受、开始、最终结果分别记录。普通回复沿可信 `conversation_id/reply_to`，显式发信与自动最终回复共用出口，不另起确认模型或无条件往返。
+- 游戏由 `peers/games/` 注册表提供概览和当前阶段规则；所有模型决策与动作进入灯/Go2 自身 Graph，经 `role_graph.py` 接入。游戏层只处理协议、约定及结果，不另建模型 Graph，不直调物理执行器或重复维护运动算法。
+- 内部错误、重试、工具回执标记 `context_scope=process`，仅作过程展示；协作子任务只共享一次最终 task_result，必要问题/约定才发同伴消息。中间决策允许静默，reason 不充当 speech，结构化 action 不充当真实回执。
+- 邀请 ID 是 `game_instance_id`。先记录 game_closing 撤销普通动作/发言资格，双方原 Graph 回应整局真实结果，执行归属方仅发布一次 game_ended；不能从单个传输回执推断整局结束。迟到回执留在原任务，旧局退出当前上下文；再次玩须新邀请并接受，停止未确认不能恢复移动。
+
+## 文件管理与验证
+
+- 跟踪代码、有效测试、示例配置与 `protocol/`；`docs/`、`output/`、`.superpowers/` 属本地过程资料，不作为当前运行契约。新测试不应被忽略；过时测试按现行契约移除，不为旧断言恢复退役接口。
+- 运行资产不得提交、清空或在验证中覆盖：共享检查点/索引/账本在 `cloud/data/`，教导在 `cloud/agents/data/training/`；设备在 `cloud/{esp32,go2,orchestrator}/data/`；空间数据在 `cloud/space/data/` 及 `cloud/space/{space,device_codes}.json`。具体环境覆盖见 README，测试全部使用临时目录或 fixture。
+- `logs/broker/mosquitto.db` 当前是持久数据，不按日志清理；改目录须正常停 Broker 并迁移原数据。密钥只在本机配置，不读取或输出；Git clone 不替代运行资产及部署配置备份。
+- Python 使用 `uv run python` / `uv run python -m pytest`，不手动激活 venv。仅跑相关验证，必要时全量：`uv run python -m pytest cloud edge -o 'python_files=test_*.py *_test.py *_checks.py' -q`。前端回归按 `scripts/check_*.cjs` 说明准备 Node/Chrome/React，不引入第二套构建链。
+- 文档修改检查路径、命令及 `git diff --check`，不为此重启服务或触发硬件。运行排查用 `make ps`、`make logs`、`make trace-task ID=<session_id>`、`make errors`。模拟、真实模型和真机验收分别报告，不引用历史报告冒充当前通过。
