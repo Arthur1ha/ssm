@@ -15,6 +15,7 @@ from cloud.go2.actions import (VELOCITY_LIMITS, ACTIONS, SPORT_COMMANDS, LED_COL
 from cloud.go2.connection.sensors import Go2Sensors
 from cloud.go2.connection.video import Go2Video
 from cloud.go2.connection.manual_velocity import ManualVelocityControl
+from cloud.go2.motion import COMMAND_TTL_S
 
 logger = logging.getLogger(__name__)
 
@@ -597,6 +598,12 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         if cmd == 'Move':
             await self._ensure_classic_walk()
             self._validate_motion(cmd, params)
+            # The admitted first frame uses the same no-reply writer as every
+            # subsequent navigation/joystick frame. Never wait for a Move RPC
+            # before starting a stream, or leave an unbounded one-shot speed.
+            self._write_velocity(*((params or {}).get(axis, 0.) for axis in ('x', 'y', 'z')),
+                                 source='command', deadman_s=COMMAND_TTL_S)
+            return None, None
         if (self._move_control_active or self._velocity_command_active) and cmd not in {'Move', 'BalanceStand'}:
             # Stop continuous velocity before starting another body action.
             self.stop_velocity()
@@ -612,7 +619,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         wire_id = uuid.uuid4().int & 0x7fffffff or 1
         # Goals are stored separately. In particular, a sent Sit command is not
         # a sitting observation and its high body height is not standing proof.
-        body_action = cmd not in {"StopMove", "Move", "BalanceStand"}
+        body_action = cmd not in {"StopMove", "BalanceStand"}
         waiter = None
         if body_action:
             self._motion_observation_enabled = False
@@ -639,9 +646,6 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             if spec.completion == 'joint_posture' and self._joint_observation_available:
                 waiter = asyncio.get_running_loop().create_future()
                 self._completion = waiter
-        previous_velocity_requested = self._velocity_command_active
-        if cmd == 'Move':
-            self._velocity_command_active = True
         options = {"api_id": spec.api_id, "id": wire_id}
         if params:
             options["parameter"] = params
@@ -730,8 +734,6 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
                                   'body_state': self.body_state})
             return completed, response
         if type(code) is int and code != 0:
-            if cmd == 'Move':
-                self._velocity_command_active = previous_velocity_requested
             if body_action:
                 self._finish_pending('error', 'sport_rpc_rejected')
                 self.runtime.finish_body_action(request_id, 'error', phase='rejected',
@@ -767,9 +769,6 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             if self.pending_action is not None:
                 self.pending_action = {**self.pending_action, "phase": "stop_requested_unconfirmed"}
             self.body_state = next_state
-        elif cmd == "Move":
-            self._motion_observation_enabled = True
-            self._stationary_samples = 0
         logger.info("[Go2/Conn] 发送命令: %s request=%s code=%s", cmd, request_id, code)
         return waiter, response
 
@@ -858,7 +857,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self._native_motion_connection = self._classic_walk_connection = None
         self._native_motion_mode = None
 
-    def _publish_velocity(self, vx, vy, vyaw):
+    def _publish_velocity(self, vx, vy, vyaw, *, source):
         active = any((vx, vy, vyaw))
         try:
             self._velocity_request_id = (self._velocity_request_id + 1) & 0x7fffffff or 1
@@ -881,15 +880,28 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             stats['move_count' if active else 'stop_count'] += 1
             if active and previous and previous['active']:
                 stats['max_gap_s'] = max(stats['max_gap_s'], round(now-previous['sent_at'], 4))
+            from cloud.observability import current_event_context, emit_agent_event
+            context = current_event_context()
+            identity = {key: context[key] for key in ('run_id', 'step_id', 'task_id') if context.get(key)}
             self._last_velocity_packet = {'vx': vx, 'vy': vy, 'yaw': vyaw,
-                                          'sent_at': now, 'active': active}
+                                          'sent_at': now, 'active': active,
+                                          'source': source, **identity}
+            if (previous is None or previous['active'] != active
+                    or active and (previous.get('source'), previous.get('run_id'), previous.get('step_id'))
+                    != (source, context.get('run_id'), context.get('step_id'))):
+                emit_agent_event('navigation.progress', phase='velocity_stream',
+                    source=source, command={'vx': vx, 'vy': vy, 'yaw': vyaw},
+                    active=active, **identity)
+                logger.info('[Go2/Velocity] source=%s active=%s run=%s step=%s vx=%.3f vy=%.3f yaw=%.3f',
+                    source, active, context.get('run_id'), context.get('step_id'), vx, vy, vyaw)
         except Exception as exc:
             self._cancel_manual_velocity()
             self.is_connected = False
             self.runtime.connection('offline')
             raise RuntimeError(f'发送失败，连接已断开: {exc}') from exc
 
-    def move_velocity(self, vx: float, vy: float, vyaw: float, *, deadman_s: float | None = None) -> dict:
+    def move_velocity(self, vx: float, vy: float, vyaw: float, *, deadman_s: float | None = None,
+                      source='velocity') -> dict:
         """Stream physical velocities through Sport Move; zero sends StopMove.
 
         Navigation and manual control use the same m/s and rad/s interface.
@@ -905,8 +917,20 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         )
         if self._command_lock.locked() and any((vx, vy, vyaw)):
             raise CommandBlocked("command_in_flight")
-        self._cancel_manual_velocity()
-        self._publish_velocity(vx, vy, vyaw)
+        self._write_velocity(vx, vy, vyaw, source=source, deadman_s=deadman_s)
+        return {"result": "accepted", "confirmation": "transport", "body_state": target}
+
+    def _write_velocity(self, vx, vy, vyaw, *, source, deadman_s=None, manual_tick=False):
+        """Single physical writer after the caller's ownership/body checks.
+
+        Joystick resampling shares motion state and wire output but must never
+        renew its user-input deadline. All other writes retire that resampler.
+        This method does not await and cannot interleave two physical writes.
+        """
+        active = any((vx, vy, vyaw))
+        if not manual_tick:
+            self._cancel_manual_velocity()
+        self._publish_velocity(vx, vy, vyaw, source=source)
         self._finish_pending("cancelled", "velocity_override")
         self._motion_epoch += 1
         was_active = self._velocity_command_active
@@ -922,12 +946,11 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         # every control tick (as with the joystick's periodic stream).
         if active != was_active:
             self._state_changed()
-        if self._velocity_timer:
+        if not manual_tick and self._velocity_timer:
             self._velocity_timer.cancel()
             self._velocity_timer = None
-        if deadman_s and any((vx, vy, vyaw)):
+        if not manual_tick and deadman_s and active:
             self._velocity_timer = asyncio.get_running_loop().call_later(deadman_s, self._expire_velocity)
-        return {"result": "accepted", "confirmation": "transport", "body_state": target}
 
     def stop_velocity(self) -> dict:
         """紧急停止和会话清理同时退出遥控状态。"""
@@ -953,7 +976,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         started = time.monotonic()
         self._motion_stationary_samples = 0
         if preserve_remote_control:
-            self.move_velocity(0, 0, 0)
+            self.move_velocity(0, 0, 0, source='handoff')
         else:
             self.stop_velocity()
         epoch, connection = self._motion_epoch, self._conn
@@ -976,7 +999,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self._velocity_timer = None
         logger.warning('[Go2/Motion] velocity input watchdog expired; sending StopMove')
         try:
-            self.move_velocity(0, 0, 0)
+            self.move_velocity(0, 0, 0, source='watchdog')
         except (RuntimeError, ValueError):
             logger.warning("velocity stop could not be sent")
 

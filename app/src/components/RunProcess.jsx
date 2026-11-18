@@ -16,13 +16,21 @@ function AgentSpeech({agent, name, target, text, compact = false, showName = tru
     <div className="agent-speech__bubble">{processUserText(text) || processErrorText(text)}</div>{children}
   </div>;
 }
-function ProcessWaiting({label = '等待回复'}) {
+function ProcessWaiting({label = '等待回复', since}) {
+  const [now,setNow] = React.useState(Date.now());
+  React.useEffect(() => {
+    if (!since) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()),1000);
+    return () => clearInterval(timer);
+  },[since]);
+  const elapsed = Number.isFinite(since) ? Math.max(0,Math.floor(now/1000-since)) : 0;
   return <span className="run-process__waiting" role="status" aria-live="polite">
     <span className="run-process__waiting-dots" aria-hidden="true"><i/><i/><i/></span>
-    <span>{label}</span>
+    <span>{label}{elapsed > 0 ? ` · 已等待 ${elapsed} 秒` : ''}</span>
   </span>;
 }
-function RunProcess({events = [], allEvents = events, agents = [], getName = getAgentDisplayName, finished = false, pending = false}) {
+function RunProcess({events = [], allEvents = events, agents = [], getName = getAgentDisplayName, finished = false, pending = false, busyProgress}) {
   const steps = processSteps(events);
   const attention = steps.filter(step => processNeedsAttention(step.event));
   const [open,setOpen] = React.useState(false);
@@ -54,10 +62,12 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
             <strong className="run-process-summary__device">{getName(item.actor)}{item.target ? ` → ${getName(item.target)}` : ''}</strong>
             <span className="run-process-summary__action">{item.titles.join('、') || '过程详情'}</span>
           </span>
-        )}</span>
+        )}
+          {pending && <ProcessWaiting label={busyProgress ? processPendingLabel(busyProgress) : executing ? `执行中：${processFactTitle(executing.event,agents)}` : '等待回复'}
+            since={busyProgress?.ts || executing?.event.ts}/>}
+        </span>
         {status && !completed && !pending && <span className="run-process-summary__status"
           data-attention={Boolean(attention.length) || undefined}>{status}</span>}
-        {pending && <ProcessWaiting label={executing ? '执行中' : '等待回复'}/>}
         <svg className="process-chevron" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
       </summary>
       <div className="run-process__body">

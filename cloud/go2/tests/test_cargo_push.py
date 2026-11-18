@@ -121,7 +121,7 @@ async def test_robot_advance_does_not_prove_cargo_movement(nudge):
 
 
 @pytest.mark.asyncio
-async def test_camera_approach_alone_cannot_complete_delivery(nudge):
+async def test_delivery_assessment_does_not_claim_movement_or_completion(nudge):
     for sample in nudge.samples:
         sample['destination_anchor_1000'] = [500, 400]
     for sample in nudge.samples[1:]:
@@ -129,10 +129,13 @@ async def test_camera_approach_alone_cannot_complete_delivery(nudge):
         sample['near_destination'] = True
     with use_context(nudge.context):
         result = await push.push_cargo('盒子', '蓝色小方标')
-    assert result['progress'] == 'push_attempted' and result['delivered'] is False
+    assert result['progress'] == 'assessed' and result['delivered'] is False
+    assert result['final'] is False and result['motion_performed'] is False
     assert result['cargo_motion_confirmed'] is False
     assert 'cargo_displacement_m' not in result
     assert nudge.observe.await_count == 1
+    nudge.contact.assert_not_awaited()
+    nudge.move.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -255,7 +258,7 @@ async def test_directional_delivery_finishes_attempt_without_requiring_a_post_co
         sample['destination_anchor_1000'] = [500, 400]
     nudge.observe.side_effect = [nudge.samples[0], TargetUnlocalized('cargo_or_destination_ambiguous')]
     with use_context(nudge.context):
-        result = await push.push_cargo('盒子', '蓝色小方标')
+        result = await push.push_cargo('盒子', '蓝色小方标', operation='push')
     assert result['delivered'] is False
     assert result['directional_push_attempted'] is True
     assert result['confirmation'] == 'directional_move_and_stop'
@@ -285,7 +288,7 @@ async def test_new_pixel_proximity_after_approach_does_not_cancel_required_push(
     # The 19:07 trace became pixel-near after getting closer to the camera.
     nudge.samples[0]['near_destination'] = True
     with use_context(nudge.context), push.expect_cargo(reference):
-        result = await push.push_cargo('盒子', '蓝点', distance_m=.4)
+        result = await push.push_cargo('盒子', '蓝点', distance_m=.4, operation='push')
     assert result['progress'] == 'push_attempted'
     assert result['delivered'] is False and result['directional_push_attempted'] is True
     nudge.contact.assert_awaited_once()
@@ -300,15 +303,6 @@ def test_replay_background_cluster_disagrees_with_visual_cargo_range():
         {'cargo_distance_m': 1.2, 'cargo_bbox_1000': [469, 556, 609, 700]},
         {'width': 640, 'height': 360}, go2_camera_profile(640, 360), diagnostics)
     assert diagnostics['reason'] == 'lidar_visual_range_disagreement'
-
-
-def test_delivery_direction_uses_the_same_scale_for_both_visual_targets(nudge):
-    sample = deepcopy(nudge.samples[0])
-    sample['cargo_location'].update(x=2.1, y=0.)
-    sample['cargo_direction_location'] = {'x': 1.2, 'y': 0.}
-    sample['destination_location'].update(x=1.4, y=.2)
-    plan = push._delivery_plan(sample, nudge.pose)
-    assert plan['heading'] == pytest.approx(math.pi/4)
 
 
 @pytest.mark.parametrize('kind,box,near', [
@@ -564,229 +558,120 @@ async def test_visual_step_does_not_claim_push_or_delivery_for_unknown_motion(vi
 
 
 @pytest.mark.asyncio
-async def test_delivery_approaches_then_reobserves_before_positioning_and_pushing(visual_nudge, monkeypatch):
-    """Replay the 15:42 geometry: start toward the box, not the lateral station."""
+async def test_graph_selects_approach_then_push_without_automatic_station(visual_nudge, monkeypatch):
     n = visual_nudge
     sample = deepcopy(n.samples[0])
-    sample.update(cargo_bbox_1000=[456, 548, 526, 626], advance_distance_m=.5, cargo_nearby=False)
-    sample['cargo_location'].update(x=1.206, y=.020)
-    sample['destination_location'].update(x=1.567, y=-.355)
-    observations = []
-
-    async def observe(*args, **kwargs):
-        observations.append((args, kwargs))
-        return {**deepcopy(sample), 'pose': dict(n.pose), 'frame_id': len(observations)}
-
-    async def navigate(x, y, **kwargs):
-        n.pose.update(x=x, y=y, heading=kwargs.get('heading', math.atan2(
-            sample['cargo_location']['y']-y, sample['cargo_location']['x']-x)))
-        return {'status': 'succeeded', 'last_trusted_pose': dict(n.pose)}
-
-    n.observe.side_effect = observe
-    navigation = AsyncMock(side_effect=navigate)
+    sample.update(cargo_nearby=False, advance_distance_m=.5)
+    sample['cargo_location'].update(x=1.2, y=.02)
+    sample['destination_location'].update(x=1.5, y=-.4)
+    n.observe.side_effect = [sample]
+    navigation = AsyncMock(return_value={'status': 'succeeded', 'last_trusted_pose': dict(n.pose)})
     monkeypatch.setattr(push.navigator, 'go_to_coordinate', navigation)
-    with use_context(n.context), push.expect_cargo(None, request_id='approach-first'):
-        approach = await push.push_cargo('正前方的盒子', '右后方蓝点', distance_m=1.1)
-        replay = await push.push_cargo('正前方的盒子', '右后方蓝点', distance_m=1.1)
-    assert approach['progress'] == 'approached' and approach['final'] is False
-    assert approach['directional_push_attempted'] is False and approach['delivered'] is False
-    assert approach['stop']['result'] == 'ok'
-    assert replay['replayed'] is True and navigation.await_count == 1
-    n.contact.assert_not_awaited()
+    with use_context(n.context), push.expect_cargo(None, request_id='assess-order'):
+        assessed = await push.push_cargo('原盒子', '蓝点')
+    assert assessed['progress'] == 'assessed' and assessed['final'] is False
+    navigation.assert_not_awaited()
     n.move.assert_not_awaited()
-    x, y = navigation.await_args.args
-    assert 0 < x < sample['cargo_location']['x'] and abs(y) < .02
-    assert math.hypot(x, y) == pytest.approx(.5)  # Execute the suggested approach without deductions.
-    assert 'heading' not in navigation.await_args.kwargs
-    assert 'route_keepout' not in navigation.await_args.kwargs
-    assert navigation.await_args.kwargs['coarse_arrival'] is True
-    assert navigation.await_args.kwargs['arrival_tolerance_m'] == n.grid.resolution
 
-    # The closer view may revise the destination; do not stage using the old view.
-    sample['destination_location'].update(y=-.5)
-    with use_context(n.context), push.expect_cargo(approach['reference'], request_id='position-and-push'):
-        result = await push.push_cargo('换个说法的盒子', distance_m=1.1)
-        replay = await push.push_cargo('换个说法的盒子', distance_m=1.1)
-    assert result['progress'] == 'push_attempted' and result.get('final') is not False
-    assert result['preparation']['navigation']['status'] == 'succeeded'
-    assert replay['replayed'] is True
-    assert observations[1][0] == ('正前方的盒子', '右后方蓝点')
-    assert observations[1][1]['after_received_at'] == approach['reference']['reobserve_after']
-    assert observations[1][1]['after_frame_id'] == 1
-    assert navigation.await_count == 2
-    assert navigation.await_args.args[1] > 0
-    assert navigation.await_args.kwargs['heading'] < 0
-    assert navigation.await_args.kwargs['strafe'] is True
-    assert navigation.await_args.kwargs['coarse_arrival'] is True
-    assert navigation.await_args.kwargs['arrival_tolerance_m'] == n.grid.resolution
-    assert 'reobserve_after' not in result['reference']
-    assert len(observations) == 2  # No new clipped view after positioning.
-    assert result['directional_push_attempted'] is True
-    assert result['confirmation'] == 'directional_move_and_stop' and result['delivered'] is False
-    assert navigation.await_count == 2
-    n.contact.assert_awaited_once()
+    with use_context(n.context), push.expect_cargo(assessed['reference'], request_id='approach-order'):
+        approach = await push.push_cargo('换种说法的盒子', operation='approach')
+        replay = await push.push_cargo('换种说法的盒子', operation='approach')
+    assert approach['progress'] == 'approached' and approach['final'] is False
+    assert approach['reference']['approach_completed'] is True
+    assert 'reobserve_after' in approach['reference']
+    assert replay['replayed'] is True and n.move.await_count == 1
     n.move.assert_awaited_once_with('go2_move', {
-        'direction': 'forward', 'distance_m': 1.1, 'speed': .25}, context=n.context)
+        'direction': 'forward', 'distance_m': .5, 'speed': .25}, context=n.context)
+    navigation.assert_not_awaited()
+    assert n.observe.await_count == 1
+    n.contact.assert_not_awaited()
+
+    # A turn/translation chosen by the Graph changes pose. The explicit push
+    # must retain the same order, rather than recomputing a positioning trip.
+    n.pose.update(x=.3, y=-.2, heading=.5)
+    with use_context(n.context), push.expect_cargo(approach['reference'], request_id='push-order'):
+        result = await push.push_cargo('盒子', operation='push', distance_m=.4)
+    assert result['progress'] == 'push_attempted' and result['delivered'] is False
+    assert result['directional_push_attempted'] is True
+    assert result['confirmation'] == 'directional_move_and_stop'
+    assert result['reference']['cargo'] == '原盒子'
+    assert result['reference']['destination'] == '蓝点'
+    assert n.observe.await_count == 1 and n.move.await_count == 2
+    navigation.assert_not_awaited()
+    n.contact.assert_awaited_once()
+    assert n.move.await_args.args == ('go2_move', {
+        'direction': 'forward', 'distance_m': .4, 'speed': .25})
 
 
 @pytest.mark.asyncio
-async def test_successful_approach_cannot_restart_from_reestimated_distance(nudge, monkeypatch):
+async def test_nearby_cropped_cargo_does_not_trigger_a_62_degree_station_trip(nudge, monkeypatch):
+    # Recorded geometry from 20:21. The old executor invented a 1.30 m right
+    # shift and kept chasing a 5 cm station. Only the Graph now chooses moves.
     n = nudge
+    n.pose.update(x=5.970934, y=.992609, heading=1.5249967424711983)
     sample = n.samples[0]
-    sample.update(cargo_nearby=False, cargo_bbox_1000=[414, 700, 690, 935])
-    sample['cargo_location'].update(x=1.3, y=0.)
-    reference = {**push._reference_for(sample, '盒子', '蓝标'), 'approach_completed': True}
-    navigation = AsyncMock()
+    sample.update(pose=dict(n.pose), cargo_nearby=True,
+        cargo_bbox_1000=[535, 795, 1000, 1000], advance_distance_m=.5)
+    sample['cargo_location'].update(x=6.487128670357346, y=2.160240197048579)
+    sample['destination_location'].update(x=5.624596151635247, y=3.2592552744555525)
+    navigation = AsyncMock(side_effect=AssertionError('executor must not invent a station'))
     monkeypatch.setattr(push.navigator, 'go_to_coordinate', navigation)
-    with use_context(n.context), push.expect_cargo(reference):
-        result = await push.push_cargo('盒子', '蓝标', distance_m=.4)
-    assert result['progress'] == 'push_attempted', result
+    with use_context(n.context):
+        assessed = await push.push_cargo('脚边裁切的原盒子', '蓝点')
+    assert assessed['progress'] == 'assessed' and assessed['final'] is False
+    n.move.assert_not_awaited()
+    with use_context(n.context), push.expect_cargo(assessed['reference']):
+        result = await push.push_cargo('原盒子', operation='push')
+    assert result['directional_push_attempted'] is True
     navigation.assert_not_awaited()
-    n.contact.assert_awaited_once()
+    assert n.observe.await_count == 1
+    n.move.assert_awaited_once_with('go2_move', {
+        'direction': 'forward', 'distance_m': .5, 'speed': .25}, context=n.context)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('uncertain_stop', [False, True])
-async def test_failed_delivery_approach_cannot_position_or_push(visual_nudge, monkeypatch, uncertain_stop):
-    n = visual_nudge
-    n.samples[0]['cargo_location'].update(x=1.2, y=0.)
-    n.samples[0]['cargo_nearby'] = False
-    n.samples[0]['cargo_bbox_1000'] = [456, 548, 526, 626]
-    n.samples[0]['destination_location'].update(x=1.56, y=-.35)
-    navigation = AsyncMock(return_value={
-        'status': 'succeeded' if uncertain_stop else 'blocked',
-        'reason': None if uncertain_stop else 'body_clearance_unavailable',
-        'last_trusted_pose': {**n.pose, 'x': .2}})
-    monkeypatch.setattr(push.navigator, 'go_to_coordinate', navigation)
-    if uncertain_stop:
-        push._stop_approach.return_value = {'result': 'accepted'}
+async def test_failed_explicit_approach_cannot_fall_through_to_push(nudge, monkeypatch, uncertain_stop):
+    n = nudge
+    sample = n.samples[0]
+    sample.update(cargo_nearby=False, advance_distance_m=.5)
+    sample['cargo_location'].update(x=1.2, y=0.)
+    n.move.return_value = {'result': 'accepted' if uncertain_stop else 'blocked',
+        'reason': 'stop_unconfirmed' if uncertain_stop else 'body_clearance_unavailable',
+        'distance_m': .2, 'stop': {'result': 'accepted' if uncertain_stop else 'ok'}}
     with use_context(n.context), push.expect_cargo(None, request_id='failed-approach'):
-        result = await push.push_cargo('盒子', '蓝点')
-        replay = await push.push_cargo('盒子', '蓝点')
+        result = await push.push_cargo('盒子', '蓝点', operation='approach')
+        replay = await push.push_cargo('盒子', '蓝点', operation='approach')
     assert result['result'] == ('accepted' if uncertain_stop else 'blocked')
     assert result['directional_push_attempted'] is False
-    assert 'progress' not in result and 'reobserve_after' not in result['reference']
-    if not uncertain_stop:
-        assert '已接近约0.20米' in result['message'] and '未执行向前推送' in result['message']
-    assert replay['replayed'] is True and navigation.await_count == n.observe.await_count == 1
-    n.move.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('target', [(1., 1.), (1., -1.), (-1., 0.)])
-async def test_off_axis_destination_requires_positioning_before_any_push(visual_nudge, monkeypatch, target):
-    n = visual_nudge
-    n.samples[0]['destination_location'].update(x=target[0], y=target[1])
-    navigation = AsyncMock(return_value={'status': 'succeeded', 'last_trusted_pose': n.pose})
-    monkeypatch.setattr(push.navigator, 'go_to_coordinate', navigation)
-    with use_context(n.context), push.expect_cargo(None, request_id='position-for-blue'):
-        result = await push.push_cargo('脚边深色盒子', '蓝色点位')
-        replay = await push.push_cargo('脚边深色盒子', '蓝色点位')
-    assert result['progress'] == 'push_attempted' and result['directional_push_attempted'] is True
-    assert result['delivered'] is False and n.observe.await_count == 1
-    n.move.assert_awaited_once()
-    n.contact.assert_awaited_once()
-    assert navigation.await_count == 1 and replay['replayed'] is True
-    assert navigation.await_args.kwargs['minimum_command_speed'] == .25
-    x, y = navigation.await_args.args
-    cargo = n.samples[0]['cargo_location']
-    # The dog stages on the opposite side of the cargo from the blue marker.
-    assert (x-cargo['x'])*(target[0]-cargo['x']) + (y-cargo['y'])*(target[1]-cargo['y']) < 0
-    assert 'route_keepout' not in navigation.await_args.kwargs
-    assert 'keepout' not in navigation.await_args.kwargs
-    assert result.get('final') is not False
-
-
-@pytest.mark.asyncio
-async def test_positioning_failure_cannot_fall_through_to_a_wrong_direction_push(visual_nudge, monkeypatch):
-    n = visual_nudge
-    n.samples[0]['destination_location']['y'] = 2.
-    monkeypatch.setattr(push.navigator, 'go_to_coordinate', AsyncMock(return_value={
-        'status': 'blocked', 'reason': 'no_known_free_path'}))
-    with use_context(n.context):
-        result = await push.push_cargo('盒子', '蓝标')
-    assert result['result'] == 'blocked' and result['reason'] == 'no_known_free_path'
-    assert result['directional_push_attempted'] is False
-    n.move.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('failure', ['stop_unknown', 'session_changed', 'goal_changed'])
-async def test_positioning_handoff_cannot_push_without_stop_and_original_context(visual_nudge, monkeypatch, failure):
-    n = visual_nudge
-    n.samples[0]['destination_location']['y'] = 2.
-
-    async def position(*_, **__):
-        if failure == 'session_changed':
-            n.pose['session_id'] = 'replacement-odom'
-        elif failure == 'goal_changed':
-            def superseded(_):
-                raise ValueError('newer_user_goal')
-            monkeypatch.setattr(push, '_authorize', superseded)
-        return {'status': 'succeeded', 'last_trusted_pose': dict(n.pose)}
-
-    monkeypatch.setattr(push.navigator, 'go_to_coordinate', AsyncMock(side_effect=position))
-    if failure == 'stop_unknown':
-        push._stop_approach.return_value = {'result': 'accepted', 'reason': 'stop_unconfirmed'}
-    with use_context(n.context):
-        result = await push.push_cargo('盒子', '蓝标')
-    assert result['result'] == ('accepted' if failure == 'stop_unknown' else 'blocked')
-    assert result['directional_push_attempted'] is False
-    assert (result.get('preparation') or result['movement'])['navigation']['status'] == 'succeeded'
+    assert 'reobserve_after' not in result['reference']
+    assert replay['replayed'] is True and n.move.await_count == n.observe.await_count == 1
+    assert result['movement']['distance_m'] == .2
     n.contact.assert_not_awaited()
-    n.move.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('status', ['ok', 'blocked', 'accepted'])
-async def test_coarse_turn_proceeds_to_contact_only_after_confirmed_success(visual_nudge, status):
-    n = visual_nudge
-    sample = n.samples[0]
-    sample['cargo_location'].update(y=.2)
-    sample['destination_location'].update(x=1.3, y=.4)
-    turn = {'result': status, 'stop': {'result': 'accepted' if status == 'accepted' else 'ok'}}
-    n.move.side_effect = [turn, {'result': 'ok', 'stop': {'result': 'ok'}}]
-    with use_context(n.context):
-        result = await push.push_cargo('画面下边缘的盒子', '蓝标', distance_m=.4)
-    assert n.move.await_args_list[0].args[1]['direction'] == 'turn_left'
-    assert n.observe.await_count == 1
-    if status == 'ok':
-        assert result['directional_push_attempted'] is True and result['preparation'] == turn
-        assert n.move.await_args_list[1].args[1]['direction'] == 'forward'
-        n.contact.assert_awaited_once()
-    else:
-        assert result['directional_push_attempted'] is False
-        assert n.move.await_count == 1
-        n.contact.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_stalled_positioning_preserves_completed_movement_in_report(visual_nudge, monkeypatch):
-    n = visual_nudge
-    n.samples[0]['destination_location']['y'] = 2.
-    pose = n.pose
-    monkeypatch.setattr(push.navigator, 'go_to_coordinate', AsyncMock(return_value={
-        'status': 'blocked', 'reason': 'motion_not_observed',
-        'message': '运动指令未产生可确认的位移，已停止',
-        'last_trusted_pose': {**pose, 'x': pose['x'] + 1.23}}))
-    with use_context(n.context):
-        result = await push.push_cargo('盒子', '蓝标')
-    assert result['result'] == 'blocked' and result['reason'] == 'motion_not_observed'
-    assert '已换位约1.23米' in result['message']
-    assert '未执行向前推送' in result['message']
-    assert result['directional_push_attempted'] is False and result['delivered'] is False
+async def test_explicit_push_retains_original_odometry_session(nudge):
+    n = nudge
+    reference = push._reference_for(n.samples[0], '盒子', '蓝点')
+    n.pose['session_id'] = 'replacement-odom'
+    with use_context(n.context), push.expect_cargo(reference):
+        result = await push.push_cargo('盒子', operation='push')
+    assert result['result'] == 'blocked' and result['reason'] == 'odom_session_mismatch'
+    n.observe.assert_not_awaited()
+    n.contact.assert_not_awaited()
     n.move.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('uncertain', [False, True])
-async def test_directional_attempt_keeps_motion_failure_and_uncertain_stop(visual_nudge, uncertain):
+async def test_explicit_push_keeps_motion_failure_and_uncertain_stop(visual_nudge, uncertain):
     n = visual_nudge
     n.move.return_value = {'result': 'accepted' if uncertain else 'blocked',
         'reason': 'stop_unconfirmed' if uncertain else 'motion_not_observed',
         'distance_m': .03, 'stop': {'result': 'accepted' if uncertain else 'ok'}}
     with use_context(n.context):
-        result = await push.push_cargo('盒子', '蓝标', distance_m=.2)
+        result = await push.push_cargo('盒子', '蓝标', distance_m=.2, operation='push')
     assert result['result'] == ('accepted' if uncertain else 'blocked')
     assert result['directional_push_attempted'] is False and result['delivered'] is False
     assert result['movement']['distance_m'] == .03 and n.observe.await_count == 1

@@ -85,10 +85,12 @@ async def test_tasks_and_joystick_select_classic_once_per_connection():
 
 @pytest.mark.asyncio
 async def test_direct_move_selects_gait_before_sending_velocity():
-    robot, rpc, _ = robot_at_stand()
+    robot, rpc, packets = robot_at_stand()
     robot._classic_walk_connection = None
     await robot.send_command('Move', {'x': .2})
-    assert [c.args[1]['api_id'] for c in rpc.await_args_list] == [2049, 1008]
+    assert [c.args[1]['api_id'] for c in rpc.await_args_list] == [2049]
+    assert packets.call_args.kwargs['data']['header']['identity']['api_id'] == 1008
+    robot.move_velocity(0, 0, 0)
 
 
 @pytest.mark.asyncio

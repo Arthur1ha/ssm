@@ -5,6 +5,10 @@ for(const file of ['utils/agentMeta.js','utils/color.js','utils/activityView.js'
   vm.runInContext(fs.readFileSync('app/src/'+file,'utf8'),context);
 context.ssmColor=context.window.ssmColor;
 const steps=context.processSteps, merge=context.mergeProcessFact;
+assert.equal(context.processPendingLabel({stage:'considering'}),'正在规划下一步');
+assert.equal(context.processPendingLabel({stage:'dispatching',tool:'go2_push_cargo',arguments:{operation:'assess'}}),'正在观察货物与目的地');
+assert.equal(context.processPendingLabel({stage:'dispatching',tool:'go2_push_cargo',arguments:{operation:'approach'}}),'正在接近货物');
+assert.equal(context.processActionDetail({tool:'go2_move',arguments:{direction:'turn_left',angle_deg:30}}).text,'向左转动 30°');
 const call={event_id:'call-1',agent_id:'cloud_orchestrator',target_unit_id:'go2',run_id:'run-1',
   step_id:'step-1',tool_call_id:'tool-1',tool:'go2_observe',fact_kind:'call',stage:'dispatching',status:'executing',sequence:1};
 assert.equal(steps([{stage:'planning'},{stage:'narrated',text:'旧解说'}]).length,0,'Ordinary chat acquired empty process details');

@@ -54,7 +54,7 @@ class ManualVelocityControl:
         loop = asyncio.get_running_loop()
         if self._manual_velocity_connection is None:
             first = slew_velocity((0, 0, 0), target, _INTERVAL_S)
-            self.move_velocity(*first)
+            self.move_velocity(*first, source='joystick')
             self._manual_velocity_current = first
             self._manual_velocity_connection = self._conn
             self._manual_velocity_at = loop.time()
@@ -84,7 +84,7 @@ class ManualVelocityControl:
             dt = min(loop.time() - self._manual_velocity_at, 2 * _INTERVAL_S)
             self._manual_velocity_at = loop.time()
             velocity = slew_velocity(self._manual_velocity_current, self._manual_velocity_target, dt)
-            self._publish_velocity(*velocity)
+            self._write_velocity(*velocity, source='joystick', manual_tick=True)
             self._manual_velocity_current = velocity
             self._manual_velocity_handle = loop.call_later(_INTERVAL_S, self._tick_manual_velocity)
         except (ValueError, RuntimeError):

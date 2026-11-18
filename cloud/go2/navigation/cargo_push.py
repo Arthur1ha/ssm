@@ -1,6 +1,6 @@
 """Guarded cargo nudges and coarse directional delivery using ordinary Go2 gait.
 
-Positioning uses the shared obstacle map and Navigator body-axis translation.
+The role Graph decides whether to assess, approach, adjust or push.
 Actual contact pushes temporarily disable avoidance through a scoped adapter.
 Directional attempts require real movement and stopping; measured cargo motion
 and delivery remain distinct facts.
@@ -31,6 +31,7 @@ _request: ContextVar[str | None] = ContextVar('cargo_push_request', default=None
 _signal: ContextVar[tuple | None] = ContextVar('cargo_push_signal', default=None)
 
 _REASONS = {
+    'vision_timeout': '本次视觉识别等待超过30秒，未取得观察结果，未开始新的移动或推送。',
     'cargo_target_mismatch': '候选货物尚未与用户所指的物体核对一致，未执行移动或推送；需要重新辨认，不能改推远处同类物体。',
     'cargo_alignment_required': '货物尚未在机身正前方的可推送方向，需要先重新对齐。',
     'cargo_destination_alignment_required': '货物与指定配送区域尚未在同一推送方向，需要先重新对齐。',
@@ -217,31 +218,21 @@ async def _visual_step(cargo, destination, distance_m, before, context, ledger, 
     return _visual_result(cargo, destination, before, after, movement, turning, close)
 
 
-def _delivery_plan(sample, pose):
-    """Stand behind the cargo-to-destination axis, allowing a coarse angle."""
-    cargo, target = sample['cargo_location'], sample.get('destination_location')
-    if (not isinstance(target, dict) or any(type(target.get(k)) not in (int, float)
-            or not math.isfinite(target[k]) for k in ('x', 'y'))):
-        raise TargetUnlocalized('delivery_direction_unavailable')
-    direction_origin = sample.get('cargo_direction_location') or cargo
-    dx, dy = target['x'] - direction_origin['x'], target['y'] - direction_origin['y']
-    if math.hypot(dx, dy) <= .01:
-        raise TargetUnlocalized('delivery_direction_unavailable')
-    heading = math.atan2(dy, dx)
-    bearing = math.atan2(cargo['y'] - pose['y'], cargo['x'] - pose['x'])
-    error = abs(math.atan2(math.sin(bearing-heading), math.cos(bearing-heading)))
-    # 0.3 rad (~17 degrees) is coarse directional agreement, not exact docking.
-    aligned = error <= .3
-    # Adjust around the cargo at the distance already reached. No synthetic
-    # cargo radius, body-size deduction or extra observation distance.
-    distance = math.hypot(cargo['x']-pose['x'], cargo['y']-pose['y'])
-    x, y = cargo['x']-distance*math.cos(heading), cargo['y']-distance*math.sin(heading)
-    return {'heading': heading, 'aligned': aligned, 'x': x, 'y': y}
-
-
-async def _directional_delivery(cargo, destination, advance, before, context, ledger, identity):
-    """Approach, or finish coarse positioning and push without another camera gate."""
+async def _directional_delivery(cargo, destination, advance, before, context, ledger, identity,
+                                operation):
+    """Execute the role Graph's explicit operation, never invent a station."""
     from cloud.go2.tools.executor import execute_tool
+
+    result = {'delivered': False, 'cargo_motion_confirmed': False,
+              'cargo_before': before, 'cargo_after': None,
+              'reference': _reference_for(before, cargo, destination),
+              'directional_push_attempted': False, 'operation': operation}
+    if operation == 'assess':
+        return {**result, 'result': 'ok', 'progress': 'assessed', 'final': False,
+                'motion_performed': False, 'push_view': before.get('push_view', ''),
+                'message': ('已观察并绑定原货物与目的地，尚未移动。根据当前观察决定：'
+                            '已能大致朝目标推送就调用 operation=push；仍远才 approach；'
+                            '方向明显不合适才用 go2_move 粗调，不追精确共线坐标。')}
 
     snapshot, reason = navigator.snapshot()
     if reason:
@@ -249,108 +240,48 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
     pose, _grid = snapshot
     if pose.get('session_id') != before['odom_session_id']:
         raise TargetUnlocalized('odom_session_mismatch')
-    _ensure_stable(before['pose'], pose)
-    plan = _delivery_plan(before, pose)
-    target = before['cargo_location']
-    bearing = math.atan2(target['y']-pose['y'], target['x']-pose['x']) - pose['heading']
-    bearing = math.atan2(math.sin(bearing), math.cos(bearing))
-    turning = abs(bearing) > HEADING_THRESHOLD
-    distance = _distance(target, pose)
-    # A successful approach advances the order. New visual range estimates
-    # must not reset it to another approach and create centimeter-long trips.
-    approaching = (not (_reference.get() or {}).get('approach_completed')
-                   and before.get('cargo_nearby') is not True)
-    progress = 'approached' if approaching else 'push_attempted'
     movement = None
-    navigation_receipts = []
-    result = {'delivered': False, 'cargo_motion_confirmed': False,
-              'cargo_before': before, 'cargo_after': None,
-              'reference': _reference_for(before, cargo, destination),
-              'push_heading_rad': plan['heading'], 'push_direction_precision': 'approximate_visual',
-              'directional_push_attempted': False}
     try:
         with use_effect(ledger, identity):
-            if approaching or not plan['aligned']:
-                if approaching:
-                    ratio = _advance_distance(None, before) / distance
-                    x = pose['x'] + (target['x'] - pose['x']) * ratio
-                    y = pose['y'] + (target['y'] - pose['y']) * ratio
-                    options = {'strafe': True}  # Keep heading until near the cargo.
-                else:
-                    x, y = plan['x'], plan['y']
-                    options = {'heading': plan['heading'], 'strafe': True}
-                navigation = await _await_authorized(navigator.go_to_coordinate(
-                    x, y, owner_session_id=context.session_id, **options,
-                    face_target=(target['x'], target['y']),
-                    speed_limit=.25, minimum_command_speed=.25, coarse_arrival=True,
-                    arrival_tolerance_m=_grid.resolution), context,
-                    on_result=navigation_receipts.append)
-                stopped = await _stop_approach(context, bounded=True)
-                movement = {'result': 'ok' if navigation.get('status') == 'succeeded' else 'blocked',
-                            'reason': navigation.get('reason'), 'navigation': navigation,
-                            'stop': stopped, 'message': navigation.get('message')}
-                last_pose = navigation.get('last_trusted_pose') or {}
-                if (last_pose.get('session_id') == pose.get('session_id')
-                        and all(type(last_pose.get(key)) in (int, float)
-                                and math.isfinite(last_pose[key]) for key in ('x', 'y'))):
-                    travelled = _distance(pose, last_pose)
-                    if travelled > .02 and navigation.get('status') != 'succeeded':
-                        detail = ('后段未再观察到移动' if navigation.get('reason') == 'motion_not_observed'
-                                  else navigation.get('message') or '站位未完成')
-                        action, goal = ('接近', '接近') if approaching else ('换位', '站位')
-                        movement['message'] = (f'已{action}约{travelled:.2f}米，但尚未完成本次{goal}；'
-                                               f'{detail}，未执行向前推送。')
-            elif turning:
+            if operation == 'approach':
+                # Ordinary forward motion retains map obstacle checks and
+                # measured distance receipts. No coordinate target can append
+                # a sideways leg or impose an extra station-arrival tolerance.
                 movement = await execute_tool('go2_move', {
-                    'direction': 'turn_left' if bearing > 0 else 'turn_right',
-                    'angle_deg': math.degrees(abs(bearing))}, context=context)
-            # The same visual geometry has already supplied the station and
-            # push direction. After real positioning/turning and stopping, go
-            # straight into contact; a fresh view would clip the nearby cargo
-            # or move the estimated station and start another positioning trip.
-            if not approaching and (movement is None or (
-                    movement.get('result') == 'ok'
-                    and (movement.get('stop') or {}).get('result') == 'ok')):
-                if movement is not None:
-                    result['preparation'] = movement
+                    'direction': 'forward', 'distance_m': _advance_distance(None, before),
+                    'speed': .25}, context=context)
+            else:
+                # Prior trusted observation identifies the cargo. A successful
+                # Graph-selected adjustment may change body pose; it must not
+                # cause another observation gate, automatic turn or side trip.
                 _authorize(context)
-                current, reason = navigator.snapshot()
-                if reason:
-                    raise TargetUnlocalized(reason)
-                if current[0].get('session_id') != before['odom_session_id']:
-                    raise TargetUnlocalized('odom_session_mismatch')
-                operation = lambda: execute_tool('go2_move', {
+                action = lambda: execute_tool('go2_move', {
                     'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
-                movement = await execute_contact_push(context, operation)
+                movement = await execute_contact_push(context, action)
     except asyncio.CancelledError:
         await _stop_approach(context, bounded=True)
         raise
     except (TargetUnlocalized, ValueError) as exc:
-        # A lease change after navigation must not erase the real movement.
-        if movement is None and navigation_receipts:
-            movement = {'navigation': navigation_receipts[-1], 'result': 'blocked'}
         stopped = await _stop_approach(context, bounded=True) if movement is not None else None
         return {**result, 'result': 'accepted' if stopped and stopped.get('result') != 'ok' else 'blocked',
                 'reason': getattr(exc, 'reason', str(exc)), 'movement': movement, 'stop': stopped,
-                'message': '本次位置调整或推送已中止；保留已有运动回执，未确认货物移动或送达。'}
+                'message': '本次明确动作已中止；保留实际运动回执，未确认货物移动或送达。'}
     result.update(movement=movement, stop=movement.get('stop'))
     if movement.get('result') != 'ok' or (movement.get('stop') or {}).get('result') != 'ok':
         uncertain = (movement.get('result') in {'accepted', 'executing', 'timeout', 'unknown'}
                      or (movement.get('stop') or {}).get('result') != 'ok')
         return {**result, 'result': 'accepted' if uncertain else 'blocked',
                 'reason': movement.get('reason') or 'cargo_move_unconfirmed',
-                'message': movement.get('message') or '本次调整位置或前进未确认完成。'}
-    attempted = progress == 'push_attempted'
-    if approaching:
-        # Require a new view of both objects after stopping. LiDAR tracking
-        # alone would retain the distant destination estimate for positioning.
-        result['reference']['reobserve_after'] = time.monotonic()
-        result['reference']['approach_completed'] = True
-    return {**result, 'result': 'ok', 'progress': progress, 'motion_performed': True,
-            'directional_push_attempted': attempted,
-            'confirmation': 'directional_move_and_stop' if attempted else 'positioning_and_stop',
-            'message': ('已按货物到指定目的地的大致方向执行前进推送尝试并确认停稳；未复核货物位移或送达。' if attempted else
-                        '已按本轮建议距离接近同一货物并停稳，接近步骤完成；下一步核对原货物与目的地，调整位置和朝向后直接推送，不再重复接近。')}
+                'message': movement.get('message') or '本次明确动作或停稳尚未确认完成。'}
+    if operation == 'approach':
+        result['reference'].update(reobserve_after=time.monotonic(), approach_completed=True)
+        return {**result, 'result': 'ok', 'progress': 'approached', 'motion_performed': True,
+                'confirmation': 'approach_and_stop', 'final': False,
+                'message': '已按本轮建议距离接近原货物并停稳；用 assess 判断现在是否能推，仅在必要时粗调，然后明确 push。'}
+    return {**result, 'result': 'ok', 'progress': 'push_attempted', 'motion_performed': True,
+            'directional_push_attempted': True, 'confirmation': 'directional_move_and_stop',
+            'push_direction_precision': 'approximate_visual',
+            'message': '已按当前朝向执行明确的向前推送并确认停稳；未复核货物位移或送达。'}
 
 
 def _visual_result(cargo, destination, before, after, movement, turning, close):
@@ -370,11 +301,13 @@ def _visual_result(cargo, destination, before, after, movement, turning, close):
                         '已按视觉估计位置接近同一货物并停稳；尚未确认接触或推动。')}
 
 
-async def push_cargo(cargo: str, destination: str | None = None, distance_m: float | None = None) -> dict:
+async def push_cargo(cargo: str, destination: str | None = None, distance_m: float | None = None,
+                     operation: str = 'assess') -> dict:
     """One guarded step; directional delivery does not require post-contact vision."""
     from cloud.go2.tools.executor import execute_tool
 
-    if (not isinstance(cargo, str) or not cargo.strip() or len(cargo) > 150
+    if (not isinstance(operation, str) or operation not in {'assess', 'approach', 'push'}
+            or not isinstance(cargo, str) or not cargo.strip() or len(cargo) > 150
             or destination is not None and (not isinstance(destination, str)
                 or not destination.strip() or len(destination) > 150)
             or distance_m is not None and (type(distance_m) not in (float, int)
@@ -386,6 +319,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         # with viewpoint, but never replaces this run's confirmed order.
         cargo = reference.get('cargo') or cargo
         destination = reference.get('destination', destination)
+        if distance_m is None:
+            distance_m = reference.get('requested_distance_m')
     context = current_context()
     parent_effect = current_effect()
     request_id = _request.get()
@@ -394,7 +329,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
     request_id = request_id or 'cargo_' + uuid.uuid4().hex
     ledger = FileEffectLedger()
     identity = ('go2', 'cargo:' + context.session_id, request_id, 'bounded_move')
-    parameters = {'cargo': cargo, 'destination': destination, 'distance_m': distance_m}
+    parameters = {'cargo': cargo, 'destination': destination, 'distance_m': distance_m,
+                  'operation': operation}
     reservation = ledger.reserve(*identity, 'go2_push_cargo', parameters)
     if reservation['reservation'] != 'new':
         return {**(reservation.get('result') or {
@@ -407,12 +343,18 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         if _signal.get() is not None and destination is None:
             raise TargetUnlocalized('cargo_delivery_contract_changed')
         _authorize(context)
-        refresh = ({'after_received_at': reference['reobserve_after'],
-                    'after_frame_id': reference['observation']['frame_id']}
-                   if reference is not None and 'reobserve_after' in reference else {})
-        observation = (observe_cargo(cargo, destination, reference=reference, **refresh) if reference is not None
-                       else observe_cargo(cargo, destination))
-        before = await _await_authorized(observation, context)
+        saved = (reference or {}).get('observation')
+        if destination is not None and operation != 'assess' and isinstance(saved, dict):
+            before = deepcopy(saved)
+        else:
+            refresh = {}
+            if reference is not None and reference.get('reobserve_after') is not None:
+                refresh['after_received_at'] = reference['reobserve_after']
+            if destination is not None and isinstance(saved, dict):
+                refresh['after_frame_id'] = saved['frame_id']
+            observation = (observe_cargo(cargo, destination, reference=reference, **refresh)
+                           if reference is not None else observe_cargo(cargo, destination))
+            before = await _await_authorized(observation, context)
         if reference is not None and reference.get('search_evidence') is not None:
             _check_search_reference(reference, before)
         elif reference is not None:
@@ -432,8 +374,9 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                       'cargo_before': before, 'cargo_after': None, 'stop': stopped,
                       'message': '观察时货物原本就在指定目的地附近；本次推物检查仅原地观察并确认停稳，没有执行靠近或推送。'}
         elif destination is not None:
-            result = await _directional_delivery(cargo, destination, _advance_distance(distance_m, before),
-                                                 before, context, ledger, identity)
+            result = await _directional_delivery(cargo, destination,
+                _advance_distance(distance_m, before) if operation != 'assess' else None,
+                before, context, ledger, identity, operation)
         elif before['cargo_location'].get('source') in {'visual_ground_estimate', 'visual_distance_estimate'}:
             result = await _visual_step(cargo, destination, _advance_distance(distance_m, before),
                                         before, context, ledger, identity)
@@ -544,6 +487,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                      and (result.get('stop') or {}).get('result') == 'ok')
         if not completed:
             result['final'] = False
+    if result.get('reference') is not None and distance_m is not None:
+        result['reference']['requested_distance_m'] = distance_m
     result = {**result, 'request_id': request_id}
     ledger.mark_result(*identity, result)
     return result

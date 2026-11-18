@@ -159,6 +159,35 @@ async def test_detection_requests_pixel_bbox_as_json(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vision_total_deadline_cancels_slow_inference_without_retry(monkeypatch):
+    from cloud.go2 import models
+    from cloud.go2.perception import visual_target
+    calls, cancelled, events = [], [], []
+
+    class SlowVision:
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            calls.append(messages)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(True)
+
+    monkeypatch.setattr(models, 'get_vision_llm', SlowVision)
+    monkeypatch.setattr(visual_target, 'VISION_REQUEST_TIMEOUT_S', .01)
+    monkeypatch.setattr(visual_target, 'emit_agent_event',
+                        lambda event, **fields: events.append((event, fields)))
+    with pytest.raises(TargetUnlocalized, match='vision_timeout'):
+        await visual_target._ask_vision(b'jpeg', '盒子',
+            {'width': 640, 'height': 360, 'frame_id': 688}, '定位货物', 'cargo_delivery_geometry')
+    assert len(calls) == 1 and cancelled == [True]
+    assert any(fields.get('phase') == 'error' and fields.get('frame_id') == 688
+               for _, fields in events)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('mode', ['cargo_geometry', 'cargo_delivery_geometry'])
 @pytest.mark.parametrize('wrapped', [False, True])
 async def test_cargo_geometry_logs_actual_fields_instead_of_empty_ground_target_fields(monkeypatch, mode, wrapped):

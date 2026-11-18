@@ -32,9 +32,13 @@ async def test_manual_targets_stream_without_more_http_or_state_publications():
     robot._move_control_active = True
     robot.manual_velocity(.5, 0, .8, can_continue=lambda: True)
     changed = robot.runtime.data['revision']
+    first_epoch, input_deadline = robot._motion_epoch, robot._velocity_timer
     try:
         await asyncio.sleep(.12)
         assert packets.call_count >= 3
+        assert robot._motion_epoch > first_epoch
+        assert robot._last_velocity_packet['source'] == 'joystick'
+        assert robot._velocity_timer is input_deadline  # Ticks cannot renew user authority.
         assert robot.runtime.data['revision'] == changed
         assert all(call.kwargs['data']['header']['identity']['api_id'] == 1008
                    for call in packets.call_args_list)

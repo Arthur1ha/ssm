@@ -193,7 +193,7 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     visual_target.validate_samples(frame, pose, frame.get('pose_received_at'), frame['received_at'],
         go2.odom_frame_id, 'odom', frame['odom_session_id'])
     instruction = (
-        '只定位本张图像中指定的同一地面货物和指定目的地，不判断送达、是否靠近或动作成功。'
+        '报告本张图像中指定的同一地面货物和指定目的地的可见位置与粗略相对方位，不判断送达或动作成功。'
         '输出JSON：{"cargo_count":整数,"destination_count":整数,"cargo_ground_contact_visible":布尔值,'
         '"destination_ground_contact_visible":布尔值,"destination_kind":"region或marker或object",'
         '"cargo_bbox_1000":[左,上,右,下],"destination_bbox_1000":[左,上,右,下]}。'
@@ -212,6 +212,12 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         '另外输出cargo_nearby（布尔值）：货物已在机身前方近处、可以开始调整站位推送时为true；'
         '仍需先走过一段地面接近时为false。advance_distance_m是建议机身实际前进的距离，'
         '由执行器直接执行，不会再扣机身尺寸、货物半径或观察留距。'
+        '另外输出push_view（简短中文）：描述货物是否位于身前可接触区域、目的地相对货物的大致方向、'
+        '当前朝前推是否大致朝目的地，以及观察中的不确定性，供机器狗原Graph判断。'
+        '分别描述机身到货物、货物到目的地的方位；只报告观察，不建议左转、右转或换位动作。'
+        '目的地在画面左侧不等于机身应左转，不能把目的地方位当成接触货物的朝向。'
+        '不要求货物中心精确在画面中线；近处裁切框的中心不等于货物真实中心，'
+        '不得据此断言必须横移或精确共线，不指定世界坐标站位。'
         '不输出世界坐标或送达结论。')
     if destination is None:
         instruction = (
@@ -300,6 +306,8 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         cluster = None
     geometry['advance_distance_m'] = detected.get('advance_distance_m')
     geometry['cargo_nearby'] = detected.get('cargo_nearby') is True
+    view = detected.get('push_view')
+    geometry['push_view'] = view[:1600] if isinstance(view, str) else ''
     geometry['capture_pose'] = pose
     geometry['image_size'] = {key: frame[key] for key in ('width', 'height')}
     emit_agent_event('vision.lidar', phase='cargo_foreground_association',

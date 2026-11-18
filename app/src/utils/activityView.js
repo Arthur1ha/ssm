@@ -127,6 +127,7 @@ function activityReasonText(event) {
     odom_session_mismatch:'位置数据所属的连接已变化，需要重新观察',
     odom_session_changed:'位置数据所属的连接已变化，需要重新观察',
     fresh_still_frame_unavailable:'暂未取得停稳后的新画面',
+    vision_timeout:'视觉识别等待超时，未取得本次观察结果',
     pose_changed_during_detection:'观察期间位置发生变化，需要重新观察',
   };
   if (labels[reason]) return labels[reason];

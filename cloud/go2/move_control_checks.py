@@ -139,3 +139,59 @@ async def test_missing_stick_heartbeat_sends_native_stopmove():
     await asyncio.sleep(.03)
     assert [call.kwargs['data']['header']['identity']['api_id'] for call in packets.call_args_list] == [1008,1003]
     assert robot._velocity_command_active is False
+
+
+@pytest.mark.asyncio
+async def test_admitted_move_and_navigation_share_no_reply_packets_without_move_rpc():
+    robot, rpc, packets = robot_at_stand()
+
+    async def reject_move_rpc(topic, options):
+        assert options['api_id'] != 1008, 'Move must not use an RPC path'
+        return {'data': {'header': {'status': {'code': 0}}}}
+
+    rpc.side_effect = reject_move_rpc
+    result = await robot.send_command('Move', {'x': .2})
+    assert result['result'] == 'accepted'
+    assert result['confirmation'] == 'transport'
+    assert result['request_status_code'] is None
+    assert robot._last_velocity_packet['source'] == 'command'
+    robot.move_velocity(.2, 0, 0, source='navigation', deadman_s=.3)
+    assert robot._last_velocity_packet['source'] == 'navigation'
+    rpc.assert_not_awaited()
+    assert packets.call_count == 2
+    for call in packets.call_args_list:
+        assert call.kwargs['msg_type'] == DATA_CHANNEL_TYPE['MSG']
+        assert call.kwargs['data']['header']['identity']['api_id'] == 1008
+        assert call.kwargs['data']['header']['policy']['noreply'] is True
+        assert json.loads(call.kwargs['data']['parameter']) == {'x': .2, 'y': 0., 'z': 0.}
+    robot.move_velocity(0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_admitted_move_has_same_deadman_when_no_navigation_refresh_follows(monkeypatch):
+    from cloud.go2.connection import webrtc
+    robot, rpc, packets = robot_at_stand()
+    monkeypatch.setattr(webrtc, 'COMMAND_TTL_S', .02)
+    await robot.send_command('Move', {'x': .2})
+    await asyncio.sleep(.05)
+    assert [call.kwargs['data']['header']['identity']['api_id']
+            for call in packets.call_args_list] == [1008, 1003]
+    assert robot._last_velocity_packet['source'] == 'watchdog'
+    assert not robot._velocity_command_active
+    rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_admitted_move_retires_existing_joystick_ticks():
+    robot, rpc, packets = robot_at_stand()
+    robot._move_control_active = True
+    robot.manual_velocity(.3, 0, 0, can_continue=lambda: True)
+    await asyncio.sleep(.04)
+    await robot.send_command('Move', {'y': .2})
+    count = packets.call_count
+    assert robot._manual_velocity_handle is None
+    assert robot._last_velocity_packet['source'] == 'command'
+    await asyncio.sleep(.06)
+    assert packets.call_count == count, 'An old joystick tick overwrote the admitted task'
+    assert json.loads(packets.call_args.kwargs['data']['parameter']) == {'x': 0., 'y': .2, 'z': 0.}
+    robot.move_velocity(0, 0, 0)

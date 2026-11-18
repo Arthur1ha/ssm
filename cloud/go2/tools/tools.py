@@ -235,10 +235,11 @@ async def go2_find_object(target: str) -> dict:
     return await run_search(target)
 
 
-async def go2_push_cargo(cargo: str, destination: str | None = None, distance_m: float | None = None) -> dict:
-    """One guarded gait advance; only actual cargo/zone evidence proves delivery."""
+async def go2_push_cargo(cargo: str, destination: str | None = None,
+                         distance_m: float | None = None, operation: str = 'assess') -> dict:
+    """Execute the role Graph's explicit cargo operation without adding moves."""
     from cloud.go2.navigation.cargo_push import push_cargo
-    return await push_cargo(cargo, destination, distance_m)
+    return await push_cargo(cargo, destination, distance_m, operation=operation)
 
 
 def go2_list_locations() -> str:

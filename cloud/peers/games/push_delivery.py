@@ -461,7 +461,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         def guard(name, arguments):
             if name != "go2_push_cargo":
                 return None
-            if (params.get("distance_m") is not None
+            if (arguments.get("operation", "assess") == "push" and params.get("distance_m") is not None
                     and arguments.get("distance_m") != params["distance_m"]):
                 return {"result": "rejected", "error": "cargo_delivery_contract_changed"}
             return None
@@ -485,13 +485,15 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
 
         result = await run_device_task("go2", f"将本单货物{state['cargo']}朝{order['destination']}尝试推送并确认停稳。",
             context=context, run_id=push_id, deadline=deadline,
-            allowed_tools=frozenset({"go2_observe", "go2_push_cargo"}),
+            allowed_tools=frozenset({"go2_observe", "go2_push_cargo", "go2_move"}),
             tool_guard=guard, tool_context=tool_context, result_transform=transform,
             task_context=lambda: {"order": order, "parameters": params,
                 "cargo_reference": current_reference, "stage": "delivery"},
             instructions="保留本单确切货物、目的地以及显式距离要求，不改订单。"
-                         "必要的重新观察、站位和明确失败后的调整在本任务内解决，不逐条向同伴报错。"
-                         "positioned/aligned/approached仍是前置进展；只有现有推物工具完成方向尝试并真实停稳，"
+                         "先用推物工具operation=assess取得原货物与目的地当前观察。"
+                         "已能大致朝目标推就明确operation=push；仍远才operation=approach。"
+                         "只有方向明显不合适才显式go2_move粗调，停稳后直接push；不追精确共线或视觉站位坐标。"
+                         "assessed/approached仍是前置进展；只有现有推物工具完成方向尝试并真实停稳，"
                          "或确认货物已在目的地附近且停稳，才结束本单；完成后不再推送或后退复查。"
                          "不能用未确认结果重发动作，不能声称未观测的货物位移或送达。",
             availability=available, parent_run_id=invitation_id)

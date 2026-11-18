@@ -113,6 +113,29 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     assert.equal(await page.$eval('input', node => node.disabled), false,
       'A running goal must allow a new user request');
     await page.evaluate(() => {
+      apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
+        agent_id:lamp.unit_id,run_id:sent[0].run_id,source:'device_chat',event_id:'cargo-observing',
+        stage:'dispatching',tool:'go2_push_cargo',arguments:{operation:'assess'},
+        step_id:'cargo-assess',ts:Date.now()/1000-16}}));
+    });
+    await page.waitForFunction(() => document.querySelector('.run-process__waiting')?.textContent.includes('正在观察货物与目的地'));
+    assert.match(await page.$eval('.run-process__waiting',node=>node.textContent),/已等待 1[6-9] 秒/);
+    assert.equal(await page.$eval('details',node=>node.open),false,
+      'The current step and elapsed wait must be visible with details closed');
+    await page.setViewport({width:320,height:568});
+    assert(await page.$eval('.run-process__waiting',node=>{
+      const rect=node.getBoundingClientRect();
+      return rect.left>=0 && rect.right<=innerWidth;
+    }),'Current phase and elapsed time overflowed the mobile viewport');
+    await page.evaluate(() => {
+      const event = detail => apiClient.dispatchEvent(new CustomEvent('server-event',{detail}));
+      event({type:'agent_progress',agent_id:lamp.unit_id,run_id:sent[0].run_id,source:'device_chat',
+        event_id:'cargo-next-plan',stage:'considering',ts:Date.now()/1000});
+      event({type:'agent_progress',agent_id:lamp.unit_id,run_id:'unrelated-run',source:'device_chat',
+        event_id:'other-progress',stage:'summarizing',ts:Date.now()/1000});
+    });
+    await page.waitForFunction(() => document.querySelector('.run-process__waiting')?.textContent.includes('正在规划下一步'));
+    await page.evaluate(() => {
       const event = detail => apiClient.dispatchEvent(new CustomEvent('server-event', {detail}));
       const run_id = sent[0].run_id;
       event({type:'agent_progress',agent_id:lamp.unit_id,run_id,source:'device_chat',event_id:'p1',

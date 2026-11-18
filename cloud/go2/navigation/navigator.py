@@ -440,6 +440,7 @@ class Navigator:
                             stop_motion('body_clearance_unavailable')
                             return {'reason': 'body_clearance_unavailable',
                                     'command': {'vx': vx, 'vy': vy, 'yaw': yaw}}
+                admitted_first_frame = False
                 if loc.get("relative_motion") and not motion_started:
                     from cloud.go2.tools.executor import execute_action
                     restore_control = getattr(go2, '_move_control_active', None) is False
@@ -454,6 +455,7 @@ class Navigator:
                     if started.get("result") not in {"ok", "accepted"}:
                         return {"reason": started.get("error") or "motion_start_rejected", "start": started}
                     motion_started = True
+                    admitted_first_frame = True
                     # Gateway calls yield; recheck sensor and task ownership
                     # before beginning the periodic stream of this same action.
                     _, changed = self._snapshot()
@@ -465,7 +467,8 @@ class Navigator:
                     return {**stalled, 'last_command': last_command}
                 try:
                     command_at = time.monotonic()
-                    go2.move_velocity(vx, vy, yaw, deadman_s=COMMAND_TTL_S)
+                    if not admitted_first_frame:
+                        go2.move_velocity(vx, vy, yaw, deadman_s=COMMAND_TTL_S, source='navigation')
                 except CommandBlocked as exc:
                     if str(exc) != '等待有效设备反馈':
                         raise
@@ -682,7 +685,8 @@ class Navigator:
                 arrival_tolerance = ARRIVAL_THRESHOLD / 2 if near_radius is not None else ARRIVAL_THRESHOLD
                 if precise_tolerance is not None:
                     arrival_tolerance = min(arrival_tolerance, precise_tolerance)
-                heading_tolerance = MOVE_ANGLE_TOLERANCE_RAD if loc.get("relative_motion") else HEADING_THRESHOLD
+                heading_tolerance = (MOVE_ANGLE_TOLERANCE_RAD
+                    if loc.get('relative_direction') in {'turn_left', 'turn_right'} else HEADING_THRESHOLD)
                 arrival_stop_goal = None if loc.get('coarse_arrival') else goal
                 if aligning_at_goal or dist < arrival_tolerance:
                     if not aligning_at_goal and not loc.get('relative_motion'):

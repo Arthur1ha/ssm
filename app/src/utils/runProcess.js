@@ -19,6 +19,10 @@ function processCapability(event, agents = []) {
 }
 function processFactTitle(event, agents = []) {
   const id = event.skill_id || event.tool || event.action;
+  if (id === 'go2_push_cargo') {
+    const title = {assess:'观察货物与目的地',approach:'接近货物',push:'推送货物'}[event.arguments?.operation];
+    if (title) return title;
+  }
   if (id) return processCapability(event,agents);
   if (event.public_result?.game_rules) return processUserText(event.public_result.game_rules.name) || '游戏规则';
   if (activityMediaUrl(event)) return '观察照片';
@@ -89,7 +93,7 @@ function processActionDetail(event, agents = []) {
   if (target) parts.push(`目标：${target}`);
   const destination = processUserText(args.destination);
   if (destination) parts.push(`目的地：${destination}`);
-  const direction = {forward:'向前',backward:'向后',left:'向左',right:'向右'}[args.direction] || '';
+  const direction = {forward:'向前',backward:'向后',left:'向左',right:'向右',turn_left:'向左',turn_right:'向右'}[args.direction] || '';
   if (Number.isFinite(args.distance_m)) parts.push(`${direction}移动 ${args.distance_m} 米`);
   if (Number.isFinite(args.angle_deg)) parts.push(`${direction}转动 ${args.angle_deg}°`);
   const duration = args.duration_s ?? args.duration;
@@ -134,6 +138,15 @@ function processOutcome(event) {
 function processNeedsAttention(event) {
   return ['partial','error','failed','blocked','rejected','timeout','unknown','offline','unavailable','needs_clarification'].includes(event.status)
     || activityEventKind(event) === 'question' || processReceiptNeedsAttention(event.public_result);
+}
+function processPendingLabel(event = {}) {
+  if (['planning','considering'].includes(event.stage)) return '正在规划下一步';
+  if (event.stage === 'summarizing') return '正在整理结果';
+  if (event.tool || event.action || event.skill_id) {
+    const title = processFactTitle(event);
+    return `正在${title}`;
+  }
+  return '等待回复';
 }
 function processHasContent(event) {
   if (event.stage === 'narrated') return false;
@@ -334,4 +347,4 @@ function activityProcessRows(events) {
   return rows.filter(row => !row.attached);
 }
 Object.assign(window,{processRecord,processGroupKey,processCapability,processFactTitle,processUserText,processErrorText,processActionDetail,processOutcome,
-  processNeedsAttention,processHasContent,mergeProcessFact,processResultNotes,processSteps,activityProcessRows});
+  processNeedsAttention,processPendingLabel,processHasContent,mergeProcessFact,processResultNotes,processSteps,activityProcessRows});

@@ -99,5 +99,6 @@ def get_vision_model(model_class=None):
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0,
         timeout=30,
+        max_retries=0,
         **_async_client_options(),
     )

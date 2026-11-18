@@ -1,7 +1,7 @@
 /* Shared conversation hierarchy: speech bubbles and expandable process records.
  * Domain-specific cards are supplied by the surrounding feed. */
 function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator',
-  training, onReviseRule, renderEntry, busy = false }) {
+  training, onReviseRule, renderEntry, busy = false, busyProgress }) {
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const rows = [], groups = new Map();
   entries.forEach((entry,index) => {
@@ -26,7 +26,7 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
         if (e.type === 'process_group') {
           const finished = entries.some(item => item.requestId === e.requestId && item.type === 'ai' && item.final);
           return <RunProcess key={`process-${e.key}`} events={e.items} agents={agents} getName={getName}
-            finished={finished} pending={e === pendingGroup}/>;
+            finished={finished} pending={e === pendingGroup} busyProgress={e === pendingGroup ? busyProgress : undefined}/>;
         }
         if (e.type === 'user') {
           return (
@@ -54,7 +54,8 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
         }
         return renderEntry?.(e) || null;
       })}
-      {busy && !pendingGroup && <div className="chat-messages__waiting"><ProcessWaiting/></div>}
+      {busy && !pendingGroup && <div className="chat-messages__waiting"><ProcessWaiting
+        label={processPendingLabel(busyProgress)} since={busyProgress?.ts}/></div>}
       {training?.error && <p className="chat-system-status" role="status">{processErrorText(training.error)}</p>}
     </div>;
 }

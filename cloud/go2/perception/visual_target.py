@@ -28,6 +28,7 @@ from cloud.space.execution import current_context
 logger = logging.getLogger(__name__)
 CAPTURE_DIR = LOG_DIR / "vision"
 MAX_CAPTURE_BYTES = 2_000_000
+VISION_REQUEST_TIMEOUT_S = 30.
 
 CALIBRATION_PATH = Path(__file__).with_name('camera_calibration.json')
 MAX_FRAME_AGE = 0.8
@@ -227,16 +228,19 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
                      width=width, height=height, mode=mode)
     started = time.monotonic()
     try:
-        response = await get_vision_llm().bind(response_format={'type': 'json_object'}).ainvoke([
-            SystemMessage(content=instruction),
-            HumanMessage(content=[{'type': 'text', 'text': '目标：' + target},
-                                  {'type': 'image_url', 'image_url': {'url':
-                                   'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode()}}]),
-        ])
+        async with asyncio.timeout(VISION_REQUEST_TIMEOUT_S):
+            response = await get_vision_llm().bind(response_format={'type': 'json_object'}).ainvoke([
+                SystemMessage(content=instruction),
+                HumanMessage(content=[{'type': 'text', 'text': '目标：' + target},
+                                      {'type': 'image_url', 'image_url': {'url':
+                                       'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode()}}]),
+            ])
     except Exception as exc:
         emit_agent_event('vision.model', phase='error', frame_id=frame.get('frame_id'),
                          mode=mode, error_type=type(exc).__name__, detail=str(exc)[:300],
                          duration_ms=round((time.monotonic() - started) * 1000))
+        if isinstance(exc, TimeoutError) or type(exc).__name__ == 'APITimeoutError':
+            raise TargetUnlocalized('vision_timeout') from exc
         raise
     raw = getattr(response, 'content', None)
     # Keep the model's textual answer for diagnosis, never the image bytes.

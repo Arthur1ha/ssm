@@ -1,12 +1,16 @@
 # 当前对话事实与排查（2026-11-18）
 
-推物已移除半机身、估计货物半径、额外 0.3 米观察留距及普通导航提前 0.3 米到达的叠加计算；接近直接执行当前观察建议的距离，到点尺度取现有地图分辨率。接近成功在原引用保存 `approach_completed=true`，后续估距不重置该阶段。视觉位置使用相机前置偏移转换到 odom，推送效果待真机验收。
+20:50:46 推盒对话为 `chat_e915b03bcbe47b69d4dbd195c7201acc39d889f8`。20:51:04–15 的原始发送记录为 185 条 Move，全部为 `x=0.25/y=0/z=0` 的 `msg/noreply`，该区间没有 StopMove；不能把这段拖步归因于已证实的多路速度交替或反复停止。该轮相对运动启动时仍各有一条 RPC Move，随后才切入流式发送；摇杆定时刷新也曾直接写传输层，未共用全部运动状态处理。现任务首帧、导航刷新与摇杆刷新统一经过 `Go2Connection._write_velocity → _publish_velocity`，Move 全部使用同一 no-reply 封装，首帧不等待 Move 回包，也不在同轮重复派发。离散 StopMove／步态配置仍保留各自请求回执。任务首帧使用同一 0.3 秒看门狗，摇杆内部刷新不续期用户输入期限，任务接管撤销旧摇杆定时器。`[Go2/Velocity]` 和 `navigation.progress/velocity_stream` 记录实际发送来源切换；`MotionTelemetry.last_command` 保留 `source/run_id/step_id/task_id` 中可用的关联字段，可核对是否发生交错。统一发送路径不证明拖腿已消失，仍须以同速真机观察验证。
+
+20:34 推盒对话为 `chat_ef563aeb474465ab66f09a0da97a5a817f3a6766`，运行 `go2_0a0bd0aac29d4c51ad450e84e8451535`。20:35:25 观察明确记录货物在右下方、蓝点在左侧；20:35:30 原 Graph 却以蓝点偏左为由派发 `turn_left/30°`，实际左转约 28.88°，是模型混淆机身到货物与货物到目的地的方向，不是执行器反转左右。20:35:35 的视觉请求在 20:36:05、20:36:35 隐式重试，直到 20:36:53 新用户目标取消；现共享视觉模型关闭 SDK 自动重试，结构化视觉请求总等待上限 30 秒，超时记录 `vision_timeout`。设备聊天折叠过程显示当前规划／观察／接近／推送步骤及已等待秒数；这只是原 Graph 事实与等待时长，不证明模型或设备仍有进展。方向判断仍在原 Go2 Graph，视觉描述不再建议转向。另修正该轮前进 1.506/1.5 米、约 3.3° 朝向漂移导致的到点误判：相对平移停稳使用 10° 容差，显式相对转向保留 0.05 弧度。实机决策质量与推送效果仍待现场验收。
+
+推物当前按 `operation=assess|approach|push` 记录观察、接近和推送。`assessed/final=false` 表示观察已完成，`approached/final=false` 表示本次接近已真实停稳，二者均不表示已推送。需要粗调时核对原 Go2 Graph 显式派发的 `go2_move` 及其真实回执；执行器不再自动生成共线站位、不追加横移或转向，不追地图格或 5 厘米站位。`push` 不强制调整后或推送后再观察；视觉距离使用相机前置偏移转换到 odom，实机效果待验收。
 
 19:56 最新推盒对话为 `chat_e4a5351147195b36ad7d45ae5d36525276fc604e`。19:56:28–32 五条运动诊断合计 75 次 Move、0 次 StopMove，最大连续发送间隔 0.1533 秒，目标前进速度 0.25 m/s；五个瞬时速度样本均值约 0.118 m/s，不是全程积分平均速度。该连续直行段仍被现场观察为拖步，因此后续几厘米接近循环不能解释全程症状。MCF 已在本次运动前接受 2049，但 LF 足端位置／速度全零、足力固定，不能据此证明实际抬腿或诊断电机故障，`error_code=100/2010` 也不套用不相关的 App 错误源表解释。
 
 连续 Move 的传输封装已对齐原厂 SDK `_CallNoReply` 和 WebRTC MCF 示例：`type=msg`、`header.policy.noreply=true`、`binary=[]`；此前为不等回包的普通 `req`，没有声明 no-reply。停止和真实停稳证据仍沿用原链路。这是已确认的协议差异修正，尚无真机对照证据证明它是拖步根因。管理员 `GET /api/go2/diagnostics/motion-settings` 只读查询 Sport GetState 1034 的原始 `gait/continuousGait/economicGait/speedLevel` 等设置，不切换控制器、不配置步态、不移动；缺失／拒绝回包为 unknown，设置回包不证明实际步态正常。需将原厂控制与同速 SSM 运动、实际步周期对照，才能进一步区分控制流和机载步态问题。
 
-首次货物定位优先尝试雷达关联，失败才降级为视觉估距；同一订单固定首次选定的定位来源，视觉路径不再重试雷达，雷达路径丢失关联时报告受阻，不静默换源。 `cargo_foreground_association` 的 `localization_source` 表示本单已有来源；`association_diagnostics.reason=visual_source_locked` 表示未重试雷达关联。接近成功返回 `approached/final=false`；换位和转向成功后直接推送，准备阶段真实回执保存在 `preparation`。`directional_push_attempted=true`、`confirmation=directional_move_and_stop` 且 `stop.result=ok` 表示本单方向推送尝试完成，不要求接触后仍看见货物或后退复查，不证明货物实际位移或送达，`delivered=false`。未知运动或未确认停稳不算完成。货物地面接触处不可见只影响“原本已在目的地附近”的证据，不阻断推物。模拟验证不代表真机效果。
+首次货物定位优先尝试雷达关联，失败才降级为视觉估距；同一订单固定首次选定的定位来源，视觉路径不再重试雷达，雷达路径丢失关联时报告受阻，不静默换源。 `cargo_foreground_association` 的 `localization_source` 表示本单已有来源；`association_diagnostics.reason=visual_source_locked` 表示未重试雷达关联。`directional_push_attempted=true`、`confirmation=directional_move_and_stop` 且 `stop.result=ok` 表示朝指定方向的推送尝试完成，不能证明货物实际位移或送达，`delivered=false`；未知运动或未确认停稳不能完成本单。只有本单首次观察已在目的地附近时，才可返回 `already_near_destination` 并明确本次未移动，不能用靠近后的投影变化跳过原推送。无目的地的基础推物测试保留原行为，仍核对动作后的新鲜货物观察。货物地面接触处不可见只影响“原本已在目的地附近”的证据，不阻断推物。模拟验证不代表真机效果。
 
 19:20 最新任务三次查询均返回 `code=0/name=mcf`；此前新增的 normal 专属门禁错误地尝试切换 normal，导致两次推物接近与一次手动准备均被挡住，未进入实际移动。已按 SDK 的 MCF/normal 协议分支修正，保留有效原模式，导航、直接 Move 和摇杆准备共用同一入口。该次拒动是模式兼容回归，不归因为设备站姿、地图或 MQTT。
 
@@ -14,13 +18,13 @@
 
 首次运动准备先查询原生 MotionSwitcher 控制器名；MCF 保持 `mcf` 并设置 ClassicWalk 2049，旧 normal 保持原步态，两者共用 Move/StopMove。不能把有效 MCF 强制切到 normal；只有旧 AI 入口沿用 normal 切换及读回。`[Go2/MotionMode]` 记录查询与切换，`GET /api/go2/diagnostics/motion-mode` 只读查询当前控制器，不建连、不移动。原生控制器名与 SportModeState 的数值 `mode` 分开记录。`[Go2/MotionTelemetry]` 补充 `error_code`、真实足端位置／速度和 `command_stream` 的 Move/StopMove 计数、最大连续发包间隔；缺失字段保持 null。LF 的 `mode/gait_type/foot_raise_height` 为 0 不能单独证明腿未迈步，ClassicWalk 请求成功也不能证明实际步态正常。19:06 行走段每秒约 14–19 条连续 Move，未见对应看门狗超时；当时拖步的唯一物理原因尚无足端轨迹／原生控制器证据，不将模拟通过写成真机已修复。
 
-推物换位的 `motion_mode=body_axis_translation` 表示保持身体朝向按前后或左右单轴平移，到站后再对齐推送方向；`last_command.vy` 可核对实际横移，轴切换仍等待停稳。接近和换位继续使用完整共享地图。实际接触推送记录 `navigation.progress` 的 `contact_push_started/contact_push_finished`：`avoidance.before/disabled/restored/restore_error` 保留原设置、关闭确认及恢复结果；机载开关经 SET 和 GET 读回确认。仅该前进步骤跳过云端地图障碍拦截，不改写共享地图。取消时等待停止和恢复，旧连接的清理不操作替代连接；恢复未知保留原运动与停稳回执，后续移动先补恢复确认。`[Go2/Avoidance] enabled=... confirmed=true` 记录真实请求与读回结果，模拟测试不代表真机推送效果。
+历史 `motion_mode=body_axis_translation` 表示 Navigator 保持身体朝向按前后或左右单轴平移，可通过 `last_command.vy` 核对右移或左移；该模式本身不证明调整是当前 Graph 明确选择的。当前推物不再自动调用坐标站位导航，必要粗调看显式 `go2_move`。实际接触推送记录 `navigation.progress` 的 `contact_push_started/contact_push_finished`：`avoidance.before/disabled/restored/restore_error` 保留原设置、关闭确认及恢复结果；机载开关经 SET 和 GET 读回确认。仅该前进步骤跳过云端地图障碍拦截，不改写共享地图。取消时等待停止和恢复，旧连接清理不操作替代连接；恢复未知保留原运动与停稳回执，后续移动先补恢复确认。`[Go2/Avoidance] enabled=... confirmed=true` 记录真实请求与读回结果。
 
-导航到点记录 `phase=arrival_alignment`，从该阶段起不再按脚边路径点恢复前进。推物接近和站位使用现有地图分辨率判到点，不套普通导航的 0.3 米提前到达容差；到点后只核验真实停稳及最终朝向，不因停车后的坐标漂移失败或补走。其他精确导航继续按自身容差核验位置。最终朝向停车后残差可在原任务内继续纠正，记录 `phase=arrival_heading_correction`、目标朝向及停稳诊断；残差不改善则失败。`arrival_unconfirmed` 的回执保留 `near_goal/heading_ok/still`，区分位置、朝向与停稳：`near_goal=true/still=true/heading_ok=false` 表示已停稳但朝向不符，不能解释为未停下或前方障碍。
+导航到点记录 `phase=arrival_alignment`，从该阶段起不再按脚边路径点恢复前进。当前推物不再追逐自动生成的站位坐标；必要粗调按 Graph 显式移动的回执核对，不设置地图格或 5 厘米站位门槛。其他精确导航继续按自身容差核验位置。最终朝向停车后残差可在原任务内继续纠正，记录 `phase=arrival_heading_correction`、目标朝向及停稳诊断；残差不改善则失败。`arrival_unconfirmed` 的回执保留 `near_goal/heading_ok/still`，区分位置、朝向与停稳：`near_goal=true/still=true/heading_ok=false` 表示已停稳但朝向不符，不能解释为未停下或前方障碍。
 
 连续非零 Move 期间，身体状态的低速反馈需持续达到现有关节稳定观察窗口才可回到站立，避免三个高频低速包把单个步周期误判成停车；持续静止仍可报告站立，不能用命令仍在发送冒充实际移动。显式归零沿用原有新鲜停稳反馈。步态请求 `code=0` 与实际 `gait_type/foot_raise_height` 分别判读，不把请求接受写成实测步态正常。
 
-推物运动已移除逐轮货物关联、私有通路地图重建和接触许可链，接近、站位和前进直接读取普通 Navigator 的共享地图。货物观察也复用已完成的共享地图，普通地图更新仍在传感器后台完成。速度输入的 0.3 秒看门狗保持原值；排查连续移动时核对实际 Move 间隔与 StopMove 原因，不再查找已移除的 cargo_contact 回执。坐标导航首次发速度前确认当前连接的 ClassicWalk，等待结束后重新检查定位和控制归属，连续速度更新不等待步态 RPC。
+推物运动已移除逐轮货物关联、私有通路地图重建和接触许可链，接近、显式粗调和前进继续复用普通 Navigator 及共享地图。货物观察也复用已完成的共享地图，普通地图更新仍在传感器后台完成。速度输入的 0.3 秒看门狗保持原值；排查连续移动时核对实际 Move 间隔与 StopMove 原因，不再查找已移除的 cargo_contact 回执。坐标导航首次发速度前确认当前连接的 ClassicWalk，等待结束后重新检查定位和控制归属，连续速度更新不等待步态 RPC。
 
 每次连接及重连后的首次运动准备记录 `[Go2/Gait] ClassicWalk api=2049 enabled=true code=... request=...`。必须先有 `code=0`，随后才允许摇杆与任务 Move；拒绝、缺失成功码或超时阻止本次移动，保留连接及停止能力。连接握手阶段不切换步态，常规运动期间不重复设置步态。配置回执和实际腿部遥测分别判读。
 

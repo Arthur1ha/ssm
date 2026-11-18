@@ -100,6 +100,54 @@ async def test_push_positioning_continues_with_original_cargo_reference(entry, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('adjust', [False, True])
+async def test_cargo_graph_decides_adjustment_then_explicitly_pushes_original_order(entry, monkeypatch, adjust):
+    from cloud.go2.navigation.cargo_push import _reference
+
+    reference = {'cargo': '脚边的棕色扁盒', 'destination': '蓝点',
+                 'odom_session_id': 'same-odom', 'approach_completed': True,
+                 'cargo_location': {'x': 6.487, 'y': 2.160, 'source': 'visual_distance_estimate'}}
+    calls = []
+    replies = [AIMessage(content='', tool_calls=[{'name': 'go2_push_cargo', 'id': 'assess',
+        'args': {'cargo': reference['cargo'], 'destination': '蓝点', 'operation': 'assess'}}])]
+    if adjust:
+        replies.append(AIMessage(content='', tool_calls=[{'name': 'go2_move', 'id': 'adjust',
+            'args': {'direction': 'right', 'distance_m': .15, 'final': False}}]))
+    replies.extend([
+        AIMessage(content='', tool_calls=[{'name': 'go2_push_cargo', 'id': 'push',
+            'args': {'cargo': '画面下边缘那个盒子', 'operation': 'push', 'distance_m': .5}}]),
+        AIMessage(content='已按蓝点方向尝试推送并停稳。'),
+    ])
+    model = ScriptedModel(replies)
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+
+    async def execute(name, params, *, context):
+        calls.append((name, params))
+        if name == 'go2_move':
+            assert adjust and params == {'direction': 'right', 'distance_m': .15}
+            return {'result': 'ok', 'distance_m': .15, 'stop': {'result': 'ok'}}
+        if params['operation'] == 'assess':
+            assert _reference.get() is None
+            return {'result': 'ok', 'progress': 'assessed', 'motion_performed': False,
+                    'message': '原货物位于身前近处，蓝点在大致前方，可直接推送。',
+                    'reference': reference, 'final': False}
+        assert params['operation'] == 'push'
+        assert _reference.get() == reference
+        return {'result': 'ok', 'directional_push_attempted': True,
+                'confirmation': 'directional_move_and_stop', 'stop': {'result': 'ok'},
+                'reference': reference}
+
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    context = ExecutionContext('cargo-graph-choice', 'admin', False, expires_at=time.time()+60)
+    result = await go2_graph.run_go2_loop(context.session_id, '把这个盒子推到蓝点', context=context)
+    assert [name for name, _ in calls] == (
+        ['go2_push_cargo', 'go2_move', 'go2_push_cargo'] if adjust
+        else ['go2_push_cargo', 'go2_push_cargo'])
+    assert result['tool_results'][-1]['result']['directional_push_attempted'] is True
+
+
+@pytest.mark.asyncio
 async def test_delegated_native_skill_returns_facts_without_model_or_device_reply(entry, monkeypatch):
     model = ScriptedModel([])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
@@ -231,6 +279,9 @@ async def test_cancelled_entry_is_durable_and_new_run_does_not_replay(entry, mon
 
 @pytest.fixture
 def entry(tmp_path, monkeypatch):
+    # This Graph suite mocks execution; other device suites may have populated
+    # the process-wide runtime. Admission must not touch that physical state.
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
     monkeypatch.setenv("SSM_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
     monkeypatch.setenv("SSM_EFFECT_LEDGER_DIR", str(tmp_path / "effects"))
     monkeypatch.setattr(go2_graph, "get_store", lambda: Go2RunView(

@@ -78,6 +78,31 @@ def movement(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_arrival_accepts_small_heading_drift_without_extra_turn(movement):
+    """20:34 reached 1.506/1.5m but 3.3 degrees of drift failed arrival."""
+    from cloud.go2.tools.tools import go2_move
+
+    original = movement.robot.move_velocity
+    moved = False
+
+    def brake_drift(vx, vy, yaw, **kwargs):
+        nonlocal moved
+        if vx:
+            moved = True
+        elif moved and not vy and not yaw:
+            movement.robot.odom['heading'] = movement.start['heading'] + math.radians(3.3)
+        return original(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = brake_drift
+    with use_context(movement.context):
+        result = await go2_move('forward', distance_m=1.5)
+    assert result['result'] == 'ok', result
+    assert result['stop']['result'] == 'ok'
+    assert result['distance_m'] == pytest.approx(1.5, abs=.05)
+    assert not any(vy or yaw for _, vy, yaw in movement.commands)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('direction', ['forward', 'backward', 'left', 'right'])
 async def test_distance_uses_projected_odometry_and_streams_until_stopped(movement, direction):
     from cloud.go2.tools.tools import go2_move
@@ -172,9 +197,8 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('progress', ['approached', 'positioned'])
-async def test_cargo_approach_and_positioning_use_separate_body_axes(movement, monkeypatch, tmp_path, progress):
-    """Replay both delivery stages with the real loop and low-speed gait."""
+async def test_explicit_cargo_approach_uses_measured_forward_motion_without_station_precision(movement, monkeypatch, tmp_path):
+    """Approach follows the existing measured forward-motion contract, without side trips."""
     from cloud.go2.navigation import cargo_push
     from cloud.go2.navigation import navigator as nav_module
     monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
@@ -188,13 +212,15 @@ async def test_cargo_approach_and_positioning_use_separate_body_axes(movement, m
         'cargo_location': cargo, 'cargo_bbox_1000': [672, 612, 758, 662],
         'destination_location': {'x': 4.809291794668575, 'y': 2.683830000982215},
         'near_destination': False, 'advance_distance_m': .6}
-    sample['cargo_nearby'] = progress == 'positioned'
-    if progress == 'positioned':
-        cargo.update(x=pose['x'] + .65, y=pose['y'])
-        sample['destination_location'].update(x=cargo['x'] + .43, y=cargo['y'] + .65)
+    sample['cargo_nearby'] = False
     monkeypatch.setattr(cargo_push, 'navigator', movement.nav)
     monkeypatch.setattr(cargo_push, '_authorize', nav_module.control_lease.acquire)
     monkeypatch.setattr(cargo_push, 'observe_cargo', AsyncMock(return_value=sample))
+    from cloud.go2.tools.tools import go2_move
+    async def execute(name, params, **_kwargs):
+        assert name == 'go2_move'
+        return await go2_move(**params)
+    monkeypatch.setattr('cloud.go2.tools.executor.execute_tool', execute)
     async def authorized(operation, _context, *, on_result=None):
         result = await operation
         if on_result:
@@ -208,20 +234,14 @@ async def test_cargo_approach_and_positioning_use_separate_body_axes(movement, m
     monkeypatch.setattr(cargo_push, 'execute_contact_push', contact)
     movement.fault['minimum_linear_speed'] = .20
     with use_context(movement.context):
-        result = await cargo_push.push_cargo('近处右侧的深色扁盒子', '左后方蓝色点位')
+        result = await cargo_push.push_cargo('近处右侧的深色扁盒子', '左后方蓝色点位', operation='approach')
     assert result['result'] == 'ok', (result.get('reason'), result.get('movement'))
-    assert result['progress'] == ('approached' if progress == 'approached' else 'push_attempted')
-    assert result['directional_push_attempted'] is (progress == 'positioned')
-    assert result['stop']['result'] == 'ok'
-    if progress == 'approached':
-        assert result['final'] is False
-        contact.assert_not_awaited()
-        assert any(vx >= .2 for vx, _, _ in movement.commands)
-        assert math.hypot(pose['x']-sample['pose']['x'], pose['y']-sample['pose']['y']) >= .5
-    else:
-        contact.assert_awaited_once()
-        assert result['preparation']['navigation']['status'] == 'succeeded'
-        assert any(abs(vy) >= .2 for _, vy, _ in movement.commands)
+    assert result['progress'] == 'approached' and result['directional_push_attempted'] is False
+    assert result['stop']['result'] == 'ok' and result['final'] is False
+    contact.assert_not_awaited()
+    assert any(vx >= .2 for vx, _, _ in movement.commands)
+    assert all(vy == 0 for _, vy, _ in movement.commands)
+    assert result['movement']['distance_m'] >= .55
     assert all(sum(abs(v) > 1e-9 for v in command) <= 1 for command in movement.commands)
     assert movement.commands[-1] == (0, 0, 0)
 

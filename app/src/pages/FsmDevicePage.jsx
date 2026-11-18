@@ -4,6 +4,7 @@
  */
 function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, activityQuestion, trainingLocation }) {
   const { useState, useEffect, useRef, useMemo } = React;
+  const [busyProgress,setBusyProgress] = useState(null);
 
   /* Card from /api/devices and SSE is authoritative. Fetch only fills a missing snapshot. */
   const [fetchedCard, setFetchedCard] = useState(null);
@@ -153,6 +154,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           }
         }
       } else if (item.type === 'run_stage' || item.type === 'agent_progress') {
+        if (!autonomous && activeRun.current === item.run_id) setBusyProgress(item);
         if (item.stage !== 'finished' || processHasContent(item)) {
           appendProcess(requestId, item.stage === 'narrated' ? '' : item.text || '', item.event_id, item);
         }
@@ -315,6 +317,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     const requestId = `chat:${++nextRequestId.current}`;
     setMessages(prev => [...prev, { id: `${requestId}:user`, type: 'user', text, requestId, runId }]);
     setSending(true);
+    setBusyProgress({stage:'planning',ts:Date.now()/1000});
     setPendingRunId(null);
     activeRun.current = runId;
     pendingRuns.current.set(runId, { key: requestId, timer: null });
@@ -450,6 +453,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         inputAvatar={<CompanionAvatar unitId={unitId} agent={card} size={48}
           label={`${getAgentDisplayName(card || unitId)}的形象`}/>}
         busy={sending}
+        busyProgress={busyProgress}
         suggestions={!hasUserMsg && !sending && !offline ? suggestions : []}
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : sending ? '正在处理…' : '告诉设备要做什么…'}

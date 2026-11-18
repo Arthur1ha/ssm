@@ -10,6 +10,30 @@ from cloud.agents.common import models
 
 
 @pytest.mark.asyncio
+async def test_vision_transport_timeout_does_not_retry_hidden_requests(monkeypatch):
+    import openai
+
+    monkeypatch.setenv('OPENAI_API_KEY', 'local-test-key')
+    monkeypatch.setenv('OPENAI_BASE_URL', 'http://model.test/v1')
+    requests = []
+    real_client = httpx.AsyncClient
+
+    def timeout(request):
+        requests.append(request)
+        raise httpx.ReadTimeout('simulated slow vision', request=request)
+
+    class LocalClient(real_client):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(timeout), **kwargs)
+
+    monkeypatch.setattr(models.httpx, 'AsyncClient', LocalClient)
+    async with models.async_model_clients():
+        with pytest.raises(openai.APITimeoutError):
+            await models.get_vision_model().ainvoke('inspect')
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_all_roles_share_text_model_and_vision_uses_its_own_setting(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "local-test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://model.test/v1")
