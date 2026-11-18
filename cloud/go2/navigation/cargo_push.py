@@ -222,7 +222,7 @@ def _delivery_plan(sample, pose):
     radius = distance * (box[2]-box[0]) / 1000 * 640 / camera['fx'] / 2
     keepout = ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M + radius
     standoff = keepout + .3  # leave room to stop and see the cargo before contact
-    return {'heading': heading, 'aligned': aligned,
+    return {'heading': heading, 'aligned': aligned, 'standoff': standoff,
             'x': cargo['x']-standoff*math.cos(heading),
             'y': cargo['y']-standoff*math.sin(heading),
             'keepout': (cargo['x'], cargo['y'], keepout)}
@@ -244,10 +244,16 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
     bearing = math.atan2(target['y']-pose['y'], target['x']-pose['x']) - pose['heading']
     bearing = math.atan2(math.sin(bearing), math.cos(bearing))
     turning = abs(bearing) > .12
+    distance = _distance(target, pose)
+    # Reach an observation point before choosing a lateral pushing position
+    # from a distant estimate. The gap also prevents arrival tolerance from
+    # repeatedly scheduling the same approach.
+    approaching = distance > plan['standoff'] + .1
     close = (math.hypot(target['x']-pose['x'], target['y']-pose['y'])
              <= ROBOT_HALF_LENGTH_M + SAFETY_MARGIN_M + advance + .15
              or before['cargo_bbox_1000'][3] >= 950)
-    progress = 'positioned' if not plan['aligned'] else 'aligned' if turning else 'push_attempted' if close else 'approached'
+    progress = ('approached' if approaching else 'positioned' if not plan['aligned']
+                else 'aligned' if turning else 'push_attempted' if close else 'approached')
     movement = None
     navigation_receipts = []
     result = {'delivered': False, 'cargo_motion_confirmed': False,
@@ -257,10 +263,17 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
               'directional_push_attempted': False}
     try:
         with use_effect(ledger, identity):
-            if not plan['aligned']:
+            if approaching or not plan['aligned']:
+                if approaching:
+                    ratio = (distance - plan['standoff']) / distance
+                    x = pose['x'] + (target['x'] - pose['x']) * ratio
+                    y = pose['y'] + (target['y'] - pose['y']) * ratio
+                    options = {}  # Face the cargo on arrival, not the push axis.
+                else:
+                    x, y = plan['x'], plan['y']
+                    options = {'heading': plan['heading'], 'route_keepout': plan['keepout']}
                 navigation = await _await_authorized(navigator.go_to_coordinate(
-                    plan['x'], plan['y'], owner_session_id=context.session_id,
-                    heading=plan['heading'], route_keepout=plan['keepout'],
+                    x, y, owner_session_id=context.session_id, **options,
                     face_target=(target['x'], target['y']),
                     speed_limit=.25, minimum_command_speed=.25, arrival_tolerance_m=.1), context,
                     on_result=navigation_receipts.append)
@@ -276,7 +289,8 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
                     if travelled > .02 and navigation.get('status') != 'succeeded':
                         detail = ('后段未再观察到移动' if navigation.get('reason') == 'motion_not_observed'
                                   else navigation.get('message') or '站位未完成')
-                        movement['message'] = (f'已换位约{travelled:.2f}米，但尚未完成本次站位；'
+                        action, goal = ('接近', '接近') if approaching else ('换位', '站位')
+                        movement['message'] = (f'已{action}约{travelled:.2f}米，但尚未完成本次{goal}；'
                                                f'{detail}，未执行向前推送。')
             elif turning:
                 movement = await execute_tool('go2_move', {
@@ -304,10 +318,15 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
                 'reason': movement.get('reason') or 'cargo_move_unconfirmed',
                 'message': movement.get('message') or '本次调整位置或前进未确认完成。'}
     attempted = progress == 'push_attempted'
+    if approaching:
+        # Require a new view of both objects after stopping. LiDAR tracking
+        # alone would retain the distant destination estimate for positioning.
+        result['reference']['reobserve_after'] = time.monotonic()
     return {**result, 'result': 'ok', 'progress': progress, 'motion_performed': True,
             'directional_push_attempted': attempted,
             'confirmation': 'directional_move_and_stop' if attempted else 'positioning_and_stop',
             'message': ('已按货物到指定目的地的大致方向执行前进推送尝试并确认停稳；未复核货物位移或送达。' if attempted else
+                        '已接近同一货物的安全观察位置并停稳，尚未接触或推送；下一步重新观察货物与目的地，再决定是否换位。' if approaching else
                         '已完成向货物背向指定目的地一侧的位置调整并停稳，下一步重新观察后对齐推送。' if progress == 'positioned' else
                         '已朝同一货物转身并停稳，下一步重新观察后继续。' if turning else
                         '已沿指定目的地方向接近同一货物并停稳，尚未确认接触。')}
@@ -367,7 +386,10 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         if _signal.get() is not None and destination is None:
             raise TargetUnlocalized('cargo_delivery_contract_changed')
         _authorize(context)
-        observation = (observe_cargo(cargo, destination, reference=reference) if reference is not None
+        refresh = ({'after_received_at': reference['reobserve_after'],
+                    'after_frame_id': reference['observation']['frame_id']}
+                   if reference is not None and 'reobserve_after' in reference else {})
+        observation = (observe_cargo(cargo, destination, reference=reference, **refresh) if reference is not None
                        else observe_cargo(cargo, destination))
         before = await _await_authorized(observation, context)
         if reference is not None and reference.get('search_evidence') is not None:

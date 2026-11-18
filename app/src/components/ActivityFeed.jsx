@@ -40,7 +40,6 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     if (index < entries.length) rows.push(entries[index]);
   }
   return <ChatMessages entries={rows} agents={agents} training={training} onReviseRule={onReviseRule} busy={busy}
-    autoScroll={false}
     renderEntry={e => {
       if (e.type === 'space_activity') {
         const card = e.card;
@@ -217,7 +216,7 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     {(hasNewEvents || latestOutside) && showTimeline && <button type="button" className="space-activity__new" onClick={() => {
       setHasNewEvents(false);
       const anchor=latestRef.current, scroller=anchor?.closest('.chat-panel__scroll');
-      if (scroller) scroller.scrollTop+=anchor.getBoundingClientRect().bottom-scroller.getBoundingClientRect().bottom+12;
+      if (scroller) scroller.scrollTop=scroller.scrollHeight;
       else anchor?.scrollIntoView({block:'end'});
     }}>{hasNewEvents ? '有新动态 · ' : ''}回到最新 ↓</button>}
     {allRows.length>0 && !hasQuestion && (!isActive || allRows.length>rows.length || expanded) && <button type="button"

@@ -5,6 +5,7 @@ does not construct a model or a separate decision Graph.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -281,7 +282,11 @@ async def decide(role: str, phase: str, facts: dict, *, thread_id: str,
     context = dict(facts)
     if role == "go2" and phase in {"setup", "performance"}:
         context["available_gestures"] = gesture_options()
-    return await device_decide(
-        role, phase, context, schema=schema, instructions=_instructions(role, phase),
-        thread_id="rps:" + thread_id + ":" + role + ":" + phase,
-        deadline=deadline, availability=availability)
+    from cloud.agents.common.models import text_model_sampling
+    # Each role makes its own sampled model call; the existing checkpoint
+    # locks the submitted choice. No extra draw, weights or reroll mechanism.
+    with text_model_sampling(0.8) if phase == "throw" else nullcontext():
+        return await device_decide(
+            role, phase, context, schema=schema, instructions=_instructions(role, phase),
+            thread_id="rps:" + thread_id + ":" + role + ":" + phase,
+            deadline=deadline, availability=availability)

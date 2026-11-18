@@ -519,7 +519,7 @@ class DeviceSearch:
             options = ({'minimum_command_speed': .25, 'speed_limit': .30}
                        if reposition or segmented else {})
             if reposition:
-                options.update(arrival_tolerance_m=.08)
+                options.update(arrival_tolerance_m=.15)
             if self.advance_budget is not None:
                 from cloud.go2.navigation.target_approach import _path_prefix_waypoint
                 remaining = self.advance_budget - self.travelled_m

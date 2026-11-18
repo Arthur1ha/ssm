@@ -18,10 +18,65 @@ from cloud.peers.games.role_graph import DECISION_TOOL, RoleTask, decide, run_de
 from cloud.space.execution import ExecutionContext
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [None, "深蓝色小盒", "另一个箱子"])
+async def test_delivery_search_uses_bound_target_before_checkpoint_and_dispatch(entry, monkeypatch, target):
+    from cloud.peers.games.push_delivery import cargo_search_schema
+    cargo = "画面中央偏下、距你约1.5–2米地面上平放的深蓝色小盒，正面有白色圆形图案"
+    model = ScriptedModel([AIMessage(content="", tool_calls=[{
+        "name": "go2_find_object", "id": "find-order-cargo",
+        "args": {} if target is None else {"target": target}}])])
+    monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
+    monkeypatch.setattr(go2_graph, "runtime_for", lambda _: None)
+    monkeypatch.setattr(go2_graph, "go2", SimpleNamespace(is_connected=True, state_snapshot=lambda: {}))
+    execute = AsyncMock(return_value={"result": "ok", "target": cargo,
+        "outcome": "nearby", "found": True, "stop": {"result": "ok"}})
+    monkeypatch.setattr(go2_graph, "execute_tool", execute)
+    context = ExecutionContext("peer_delivery_bound", "visitor", False,
+                               origin_kind="agent_autonomous", expires_at=int(time.time() + 60))
+    result = await run_device_task("go2", "寻找本单货物。", context=context,
+        run_id="bound-cargo", deadline=time.time() + 50,
+        allowed_tools={"go2_find_object", "go2_observe"},
+        tool_declarations={"go2_find_object": cargo_search_schema(cargo)},
+        result_transform=lambda _n, _p, r: {**r, "final": True},
+        share_result=False, reply_required=False)
+    assert result["result"] == "ok", result
+    assert execute.await_args.args == ("go2_find_object", {"target": cargo})
+    assert result["tool_results"][0]["params"] == {"target": cargo}
+    saved = go2_graph.get_store().get("bound-cargo", context.session_id)
+    assert saved.steps[0]["params"] == {"target": cargo}
+    search_tool = next(t for t in model.bound_tools if t["function"]["name"] == "go2_find_object")
+    assert "target" not in search_tool["function"]["parameters"]["properties"]
+    assert len(model.inputs) == 1
+
+
 class Choice(BaseModel):
     choice: Literal["left", "right"]
     target: str | None
     speech: str = ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("speech", [
+    # Offline model stubs for sentence/paragraph validation, never runtime dialogue.
+    "第一句测试文本。第二句测试文本。",
+    "第一句测试文本！第二句测试文本？",
+    "第一段测试文本。\n第二段测试文本。",
+])
+async def test_game_final_preserves_multiple_sentences_in_original_graph(entry, monkeypatch, speech):
+    from cloud.peers.games.role_graph import GameFinal
+
+    model = ScriptedModel([AIMessage(content="", tool_calls=[{
+        "name": DECISION_TOOL, "id": "game-final", "args": {"speech": speech}}])])
+    monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)
+    monkeypatch.setattr(go2_graph, "runtime_for", lambda _: None)
+    monkeypatch.setattr(go2_graph, "go2", SimpleNamespace(is_connected=True))
+    kwargs = dict(schema=GameFinal, instructions="自然回应本局最终结果。",
+                  thread_id="multisentence-final", deadline=time.time() + 60)
+    first = await decide("go2", "final", {}, **kwargs)
+    second = await decide("go2", "final", {}, **kwargs)
+    assert first["speech"] == second["speech"] == speech
+    assert len(model.inputs) == 1
 
 
 @pytest.mark.asyncio
@@ -148,10 +203,10 @@ async def test_closing_only_allows_final_submission_and_reuses_existing_line(mon
     replies = await role_graph.final_responses(SimpleNamespace(game_id="push_delivery", metadata=lambda: {}),
         activity_id="act_final", invitation_id="game_final", context=context,
         result={"result": "ok", "role_replies": {"go2": {
-            "terminal": True, "result": "ok", "speech": "我朝指定方向尝试推送并停稳了。"}}},
+            "terminal": True, "result": "ok", "speech": "我朝指定方向尝试推送了。\n已经停稳，这局结束啦。"}}},
         deadline=time.time() + 30)
     assert seen == [("lamp", "final", True)]
-    assert len(replies) == 2 and replies[1]["speech"] == "我朝指定方向尝试推送并停稳了。"
+    assert len(replies) == 2 and replies[1]["speech"] == "我朝指定方向尝试推送了。\n已经停稳，这局结束啦。"
     store._events["act_final"].append({"event_type": "game_ended", "game_instance_id": "game_final"})
     with terminal_game_scope("act_final", "game_final", "push_delivery"):
         assert not terminal_scope_available()

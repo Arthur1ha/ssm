@@ -129,7 +129,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict | None:
                      "observation": "observation"}.get(kind, "observation")
         return get_activity_store().record_event(activity_id, kind,
             unit_id=LAMP if role == "lamp" else "go2", text=text,
-            **{"game_id": GAME_ID, "trigger_message_id": invitation_id,
+            **{"game_id": GAME_ID, "game_instance_id": invitation_id, "trigger_message_id": invitation_id,
                "task_id": task_id, "source_event_id": source_id,
                "context_scope": "shared" if kind == "message" else "process",
                "fact_kind": fact_kind, "result_kind": "action", **facts})
@@ -190,7 +190,12 @@ async def _execute(drive, event: dict, task_id: str) -> dict | None:
                     and (receipt.get("stop") or {}).get("result") == "ok"
                     and receipt.get("target") == arguments.get("target")
                     and receipt.get("task_id") == request_id)
-            return {**receipt, "final": complete or receipt.get("result") == "cancelled"}
+            # Object search already owns its observations, moves and recovery.
+            # Once it terminates, preserve that receipt instead of asking the
+            # outer model to rewrite the locked target and replay the search.
+            terminal_search = name == "go2_find_object" and receipt.get("result") in {
+                "error", "blocked", "rejected"}
+            return {**receipt, "final": complete or terminal_search or receipt.get("result") == "cancelled"}
 
         result = await run_device_task(
             "go2", "执行本局已经锁定的动作；不改变本局约定或补充其他动作。",
@@ -362,6 +367,14 @@ async def _execute(drive, event: dict, task_id: str) -> dict | None:
                public_result={"game_rules": {"rule_id": GAME_ID, "status": "revealing", "round": number}})
         for role in ("lamp", "go2"):
             record("message", choices[role].get("speech"), role=role, stage="throw_announcement", emotion=choices[role].get("emotion"))
+        public_throw = {"round": number,
+            "choices": {LAMP: choices["lamp"]["choice"], "go2": choices["go2"]["choice"]},
+            "mapping": {
+                LAMP: {"choice": choices["lamp"]["choice"], "color": color,
+                       "label": terms["lamp_color_names"][choices["lamp"]["choice"]]},
+                "go2": {"choice": choices["go2"]["choice"], "action": "go2_sport",
+                        "arguments": {"cmd": command}, "label": gesture_options()[command]["label"]}}}
+        record("action_progress", "", stage="rps_dispatched", status="executing", game_throw=public_throw)
         # Dispatch both without waiting for either receipt. Collect both
         # outcomes before scoring; never leave a sibling task unobserved.
         results = await asyncio.gather(
@@ -374,13 +387,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict | None:
         if winner != "draw":
             adjudicated_winner = winner
         record("action_result", "",               stage="rps_result", reason=winner + "_won" if winner != "draw" else "draw",
-               game_round={"round": number,
-                   "choices": {LAMP: choices["lamp"]["choice"], "go2": choices["go2"]["choice"]},
-                   "mapping": {
-                       LAMP: {"choice": choices["lamp"]["choice"], "color": color,
-                              "label": terms["lamp_color_names"][choices["lamp"]["choice"]]},
-                       "go2": {"choice": choices["go2"]["choice"], "action": "go2_sport",
-                               "arguments": {"cmd": command}, "label": gesture_options()[command]["label"]}},
+               game_round={**public_throw,
                    "winner": LAMP if winner == "lamp" else winner})
         history = [*state["history"], {"round": number, "lamp": choices["lamp"]["choice"],
                    "go2": choices["go2"]["choice"], "winner": winner}]
@@ -538,7 +545,7 @@ GAME = Game(
            "约定目标保留圆球灯的位置与固定特征，猜拳变色不更换目标。"
            "映射是双方和用户都能读到的公开规则，不能用保密出拳为由隐瞒。"
            "不规定固定映射，双方确认后本局冻结，不协商回合数或推进距离。"
-           "双方私下锁定选择后并发派发变色和动作，不等待一方完成才派发另一方；设备与网络存在时延，不承诺物理上精确同步。不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
+           "双方私下独立选拳并锁定后并发派发变色和动作，不等待一方完成才派发另一方；派发时公开拳型，真实回执返回前保持展示。设备与网络存在时延，不承诺物理上精确同步。不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
            "一把定胜负，平局原地重来，直到分出胜负或本局期限到达。展示须灯物理回执与狗真实动作反馈均确认才能判拳。"
            "狗赢后接近约定的灯，挥手抬前腿象征性按灯，再关灯，不要求实际碰灯；"
            "灯赢后由狗结合当前条件选择一个支持的表演动作，可以跳舞或其他动作，须真实完成回执。"

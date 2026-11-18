@@ -6,13 +6,12 @@ function createCompanionPresentation(options = {}) {
   const cancel = options.clearTimeout || (id => clearTimeout(id));
   const createdAt = now();
   const devices = new Map(), views = new Map(), listeners = new Set();
-  const clients = new Map(), seen = new Map(), retiredActivities = new Map();
+  const clients = new Map(), seen = new Map(), retiredActivities = new Map(), games = new Map();
   let connected = true, activeActivity = null, timer = null, eventFloor = createdAt - 1000;
   const empty = Object.freeze({agent:null,shape:'idle', emotion:'neutral', behavior:'idle', animated:false,
     online:null, label:'状态待同步', motion:'none', animationKey:null, animationStartedAt:null,
     motionDurationMs:0, motionEpoch:createdAt, lightingState:null, lightingColor:null, lightingBrightness:null});
   const emotionTime = typeof AVATAR_TIMING === 'undefined' ? 6000 : AVATAR_TIMING.emotion;
-  const gestureTime = typeof AVATAR_TIMING === 'undefined' ? 1600 : AVATAR_TIMING.gesture;
   const normalize = value => typeof normalizeAvatarEmotion === 'function' ? normalizeAvatarEmotion(value) : 'neutral';
   const bounded = (map, key, value, limit = 640) => {
     map.set(key,value);
@@ -143,7 +142,7 @@ function createCompanionPresentation(options = {}) {
     item.repliedRuns.delete(runId);
     item.request={runId,startedAt:now(),active:true,behavior:requestOptions.behavior==='working'?'working':'thinking',
       activityId:requestOptions.activityId || null,kind:requestOptions.kind || 'chat',uncertain:false};
-    item.emotion=null;item.gesture=null;
+    item.emotion=null;
     bounded(item.runs,runId,item.request,32);
     publish();
   }
@@ -199,8 +198,22 @@ function createCompanionPresentation(options = {}) {
         if(runId)bounded(item.repliedRuns,runId,identity,32);
       }
     }
-    if(event.type==='activity' && event.stage==='rps_result' && event.game_round?.choices) {
-      for(const unitId of Object.keys(event.game_round.choices)) {
+    const gameId=event.game_instance_id;
+    const gameKey=activityId && gameId ? `${activityId}:${gameId}` : null;
+    if(event.type==='activity' && gameKey) {
+      const game=games.get(gameKey) || {dispatched:0,finished:0,closed:false};
+      const finishedRound=event.stage==='rps_result' ? event.game_round?.round : null;
+      if(['game_closing','game_ended'].includes(event.event_type) || event.stage==='settlement') game.closed=true;
+      if(Number.isInteger(finishedRound)) game.finished=Math.max(game.finished,finishedRound);
+      bounded(games,gameKey,game,64);
+      for(const target of devices.values()) if(target.gesture?.gameKey===gameKey
+          && (game.closed || target.gesture.round<=game.finished)) target.gesture=null;
+    }
+    if(event.type==='activity' && event.stage==='rps_dispatched' && gameKey && event.game_throw?.choices) {
+      const game=games.get(gameKey),round=event.game_throw.round;
+      if(game.closed || !Number.isInteger(round) || round<=Math.max(game.dispatched,game.finished)) {publish();return;}
+      game.dispatched=round;
+      for(const unitId of Object.keys(event.game_throw.choices)) {
         const target=record(unitId);
         const gesture=typeof avatarEventPresentation==='function'?avatarEventPresentation(event,unitId):null;
         const identity=gesture && acceptIdentity(unitId,event,'gesture');
@@ -209,7 +222,7 @@ function createCompanionPresentation(options = {}) {
         target.order.gesture=order;
         const currentEmotion=target.emotion?.until>time && scopeValid(target.emotion.activityId)?target.emotion.value:'neutral';
         target.gesture={...gesture,eventId:identity,expression:currentEmotion,
-          startedAt:receivedAt,until:Math.min(receivedAt+gestureTime,order+gestureTime),activityId};
+          startedAt:receivedAt,until:Infinity,activityId,gameKey,round};
       }
     }
     if(item && ['agent_progress','run_stage','reply_error'].includes(event.type) && currentRun(item,event)) {
@@ -248,7 +261,7 @@ function createCompanionPresentation(options = {}) {
   }
   function reset() {
     if(timer!==null){cancel(timer);timer=null;}
-    devices.clear();views.clear();seen.clear();retiredActivities.clear();activeActivity=null;eventFloor=now();
+    devices.clear();views.clear();seen.clear();retiredActivities.clear();games.clear();activeActivity=null;eventFloor=now();
     listeners.forEach(listener=>listener());
   }
   function attach(client) {

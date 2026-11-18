@@ -276,6 +276,10 @@ async def test_old_game_cleanup_cannot_stop_new_activity_motion(isolated_drive, 
     h = isolated_drive
     await start(h, "act_old")
     h.module.go2.send_command = AsyncMock(return_value={"result": "ok"})
+    # This check isolates motion ownership; lifecycle journaling still uses
+    # the current store/messenger interface during cancellation cleanup.
+    monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: SimpleNamespace(
+        current=lambda: h.activity, get=lambda _aid: {}, events=lambda _aid: [], record_event=Mock()))
     monkeypatch.setattr("cloud.go2.control.control_lease.snapshot", lambda: None)
     monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready", lambda *_args: True)
     monkeypatch.setattr("cloud.peers.games.game_is_playable", lambda *_args: True)
@@ -290,7 +294,8 @@ async def test_old_game_cleanup_cannot_stop_new_activity_motion(isolated_drive, 
 
     monkeypatch.setattr("cloud.peers.games.get_game", lambda _game_id:
                         SimpleNamespace(game_id="example", execute=execute))
-    messenger = SimpleNamespace(send_progress=Mock(), send_result=Mock())
+    messenger = SimpleNamespace(send_progress=Mock(), send_result=Mock(),
+                                get_received_result=lambda _id: None, close_game=Mock())
     old_event = {**event(h), "interaction_kind": "game_invite", "game_id": "example",
         "message_id": "old_invite", "game_preaccepted": True,
         "original_invitation_id": "old_original", "decision": {"choice": "accept"},

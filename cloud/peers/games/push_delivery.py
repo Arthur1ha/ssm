@@ -10,6 +10,8 @@ from dataclasses import replace
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from .base import Game
@@ -42,6 +44,25 @@ class DeliveryState(TypedDict, total=False):
 
 class DeliveryStopped(Exception):
     pass
+
+
+def cargo_search_schema(cargo: str):
+    """The Graph chooses when to search; the server owns this order's target.
+
+    Inject before the common runner records/reserves the effect, so receipts,
+    checkpoints and deduplication all use the original description.
+    """
+    class FindOrderCargo(BaseModel):
+        """寻找并核对本单已指定的货物；目标由服务端绑定，无需重新填写。"""
+        model_config = ConfigDict(extra="forbid")
+        target: SkipJsonSchema[str] = cargo
+
+        @model_validator(mode="before")
+        @classmethod
+        def bind_order_target(cls, values):
+            return {**values, "target": cargo}
+
+    return FindOrderCargo
 
 
 def _push_completed(receipt):
@@ -91,10 +112,17 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
     epochs = agent._autonomy_epoch, agent._command_epoch
     odom_session = getattr(go2, "_odom_session_id", None)
     expected_color = None
+    stage = "preparing"
     runtime = runtime_for(go2)
     runtime_epoch = runtime.data["epoch"] if runtime is not None else None
     goal = dict(drive._active_goal or {})
     goal.update(kind="game", game_id=GAME_ID)
+
+    def interruption_reason(fallback):
+        activity = get_activity_store().get(activity_id) or {}
+        return activity.get("end_reason") or (
+            "user_intervention" if getattr(drive, "_user_handoff_in_progress", False) else
+            "device_offline" if not go2.is_connected else fallback)
 
     def check():
         if not game_scope_available():
@@ -136,6 +164,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
             text=str(text)[:1000], **{"game_id": GAME_ID, "trigger_message_id": invitation_id,
                 "task_id": task_id, "source_event_id": source_id,
                 "fact_kind": fact_kind, "result_kind": "action",
+                "stage": stage,
                 "context_scope": "shared" if kind == "message" else "process", **details})
 
     def available():
@@ -144,6 +173,13 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         except DeliveryStopped:
             return False
         return True
+
+    def enter_stage(value):
+        nonlocal stage
+        stage = value
+        # Persist the stage before awaiting a model/device, including when
+        # cancellation prevents that operation from producing a receipt.
+        record("action_progress", "", display=False, status="executing")
 
     def observation_space(state, role):
         """The coordinator may explicitly supply this task's trusted camera result.
@@ -267,6 +303,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         check()
 
     async def cargo(state):
+        enter_stage("cargo")
         observed = await observe("为灯选择货物描述当前地面场景：分别描述有一定体积、可辨认厚度或高度的独立物品，"
                                  "以及地面色块、贴纸、小站点标记和普通杂物。提供物品相对狗的远近、外形、"
                                  "地面接触及周围通路等可见线索，帮助灯优先选择较近、容易接近和推动的货物；"
@@ -279,6 +316,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         return {"cargo": answer["cargo"], "observation": observed}
 
     async def find(state):
+        enter_stage("find_cargo")
         check()
         search_id = "delivery_" + invitation_id + "_cargo"
         record("action", "", action="go2_find_object", arguments={"target": state["cargo"]}, task_id=search_id)
@@ -304,9 +342,10 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         result = await run_device_task("go2", "寻找并核对本单货物：" + state["cargo"],
             context=context, run_id=search_id, deadline=deadline,
             allowed_tools=frozenset({"go2_observe", "go2_find_object"}),
+            tool_declarations={"go2_find_object": cargo_search_schema(state["cargo"])},
             tool_guard=guard, tool_context=tool_context, result_transform=complete_find,
             task_context=lambda: {"cargo": state["cargo"], "stage": "find_cargo"},
-            instructions="只寻找同一货物；可先观察，明确失败时在本子任务内修正。"
+            instructions="只寻找同一货物，找货目标由服务端绑定，不用重新填写target；可先观察，明确失败时在本子任务内修正。"
                          "找到且确认停稳后结束本子任务，报告货物真实特征并等待指挥官指定目的地，不能自行配送。",
             availability=available, parent_run_id=invitation_id)
         receipt = task_receipt(result, "go2_find_object")
@@ -330,6 +369,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
                                   "receipt": state["cargo_receipt"]}}
 
     async def destination(state):
+        enter_stage("destination")
         observed = await observe("货物已按原任务找到。本单现在等待指挥官指定目的地。描述当前真正的配送区域"
                                  "（色块、小地面标记或物体标识）的位置及可辨认特征；只需大概送到附近，"
                                  "不要求区域完整边界或能够容纳货物。若目标不可见或有多个相似目标，明确说明。")
@@ -350,6 +390,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
 
     async def signal(state):
         nonlocal expected_color
+        enter_stage("signal")
         await physical_signal(state["order"], state["decision_basis"])
         color = state["order"]["color"]
         pending_color = {"rgb": tuple(color[key] for key in ("r", "g", "b")), "brightness": color["brightness"]}
@@ -368,6 +409,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         raise DeliveryStopped("delivery_signal_unconfirmed")
 
     async def plan(state):
+        enter_stage("delivery")
         check()
         answer = await decision("go2", "next", {**state, "stage": "delivery"})
         answer["decision_basis"] = decision_basis(answer)
@@ -400,6 +442,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         return {"observation": observed, "sequence": state["sequence"] + 1}
 
     async def push(state):
+        enter_stage("push")
         from cloud.go2.navigation.cargo_push import expect_cargo
         check()
         order, answer = state["order"], state["next_action"]
@@ -506,6 +549,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
     graph.add_edge("complete", END)
 
     status, reason, work, final = "unknown", "delivery_unconfirmed", None, {}
+    stop_reason = None
     try:
         check()
         if not event.get("game_preaccepted"):
@@ -533,7 +577,12 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         status, reason = final.get("result", "unknown"), final.get("reason", "delivery_unconfirmed")
     except DeliveryStopped as exc:
         reason = str(exc)
+        if reason in {"game_ended", "activity_ended", "autonomy_interrupted_or_offline"}:
+            reason = interruption_reason(reason)
         status = "unknown" if "unconfirmed" in reason else "cancelled"
+    except asyncio.CancelledError:
+        status, reason = "cancelled", interruption_reason("autonomy_stopped")
+        raise
     except Exception as exc:
         logger.exception("delivery failed invitation=%s", invitation_id)
         reason = "delivery_error:" + type(exc).__name__
@@ -547,16 +596,16 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
             if status != "ok":
                 lease = control_lease.snapshot()
                 if lease is not None and lease.owner_session_id != context.session_id:
-                    status, reason = "unknown", "control_lease_changed:" + reason
+                    status, stop_reason = "unknown", "control_lease_changed"
                 else:
                     stopped = await asyncio.wait_for(navigator.stop_and_confirm(
                         owner_session_id=context.session_id), timeout=5)
                     stop_confirmed = stopped.get("result") == "ok"
                     if not stop_confirmed:
-                        status, reason = "unknown", "stop_unconfirmed:" + reason
+                        status, stop_reason = "unknown", stopped.get("reason") or "stop_unconfirmed"
         except Exception as exc:
             logger.warning("delivery cleanup failed error=%s", type(exc).__name__)
-            status, reason = "unknown", "cleanup_unconfirmed:" + reason
+            status, stop_reason = "unknown", "cleanup_unconfirmed"
         finally:
             agent.end_peer_game(owner)
         lease = control_lease.snapshot()
@@ -568,7 +617,9 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
             # back to autonomous travel, even after releasing the game token.
             runtime.set_exploration(False)
         try:
-            await drive._advance_task(goal, stage="finish", result={"result": status, "reason": reason})
+            await drive._advance_task(goal, stage="finish", result={"result": status, "reason": reason,
+                "stage": stage, "physical_stop": "confirmed" if stop_confirmed else "unknown",
+                "stop_reason": stop_reason})
         except Exception as exc:
             # Physical completion and lamp ownership cleanup precede the
             # journal; a journal failure must not prevent the original reply.
@@ -576,7 +627,8 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
     if status != "ok":
         record("response", "本次配送已结束，尚未确认货物送达指定区域。", status=status, reason=reason)
     messenger.send_result(event["message_id"], status, task_id=task_id, reason=reason)
-    outcome = {"result": status, "reason": reason}
+    outcome = {"result": status, "reason": reason, "stage": stage,
+               "physical_stop": "confirmed" if stop_confirmed else "unknown", "stop_reason": stop_reason}
     if status == "ok" and _push_completed(final.get("push_receipt") or {}) and final.get("push_response"):
         outcome["role_replies"] = {DOG: {"speech": final["push_response"],
             "emotion": final.get("response_emotion", "neutral"), "status": status, "terminal": True}}

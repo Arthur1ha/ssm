@@ -1004,7 +1004,7 @@ async def test_search_reposition_requires_actual_motion_and_fresh_next_view(monk
         'x': start['x']+.30, 'y': start['y'], 'heading': start['heading'],
         'source': 'observation_reposition', 'path_cost_m': .30}))
     assert receipt['result'] == expected
-    assert navigate.call_args.kwargs['arrival_tolerance_m'] == .08
+    assert navigate.call_args.kwargs['arrival_tolerance_m'] == .15
     assert navigate.call_args.kwargs['minimum_command_speed'] == .25
     assert navigate.call_args.kwargs['speed_limit'] == .30
     assert adapter.after_time >= before

@@ -28,8 +28,8 @@ NAV_TIMEOUT          = 60.0   # s
 MAP_STALE_S          = 2.0    # s
 STOP_CONFIRMATION_S = 3.0  # same bounded window for fresh stationary feedback
 TELEMETRY_RECOVERY_S = 3.0    # s; hold still while fresh odom/map packets resume
-ARRIVAL_THRESHOLD    = 0.3    # m
-HEADING_THRESHOLD    = MOVE_ANGLE_TOLERANCE_RAD  # rad，终点朝向与相对转向使用同一容差
+ARRIVAL_THRESHOLD    = 0.3    # m，普通导航到目标附近即可
+HEADING_THRESHOLD    = math.radians(10)  # 普通导航只要求大致朝向；显式相对转向另用其角度容差
 WALK_SPEED           = 0.3    # m/s
 MAX_RETRIES          = 6
 MIN_LINEAR_VEL       = 0.1    # m/s，路径跟随最低线速度
@@ -661,6 +661,7 @@ class Navigator:
                 arrival_tolerance = ARRIVAL_THRESHOLD / 2 if near_radius is not None else ARRIVAL_THRESHOLD
                 if precise_tolerance is not None:
                     arrival_tolerance = min(arrival_tolerance, precise_tolerance)
+                heading_tolerance = MOVE_ANGLE_TOLERANCE_RAD if loc.get("relative_motion") else HEADING_THRESHOLD
                 if dist < arrival_tolerance:
                     arrival_heading = loc.get('heading')
                     if arrival_heading is None and loc.get('face_target') is not None:
@@ -670,7 +671,6 @@ class Navigator:
                             bias() if callable(bias) else bias)
                     if arrival_heading is not None:
                         heading_error = _normalize_angle(arrival_heading - odom["heading"])
-                        heading_tolerance = MOVE_ANGLE_TOLERANCE_RAD if loc.get("relative_motion") else HEADING_THRESHOLD
                         if abs(heading_error) > heading_tolerance:
                             details = self._turn_details(fresh_grid, odom, arrival_heading)
                             if not details["clear"]:
@@ -687,7 +687,8 @@ class Navigator:
                             await asyncio.sleep(CONTROL_INTERVAL_S)
                             continue
                     stop_goal = (odom['x'], odom['y'], False) if loc.get('relative_motion') else goal
-                    if await self._confirm_stopped(stop_goal, arrival_heading, arrival_tolerance):
+                    if await self._confirm_stopped(stop_goal, arrival_heading, arrival_tolerance,
+                                                   heading_tolerance):
                         suffix = "停靠点" if goal[2] else f"「{name}」"
                         return self._finish("succeeded", None, f"已到达{suffix}", task_id)
                     return self._finish("failed", "arrival_unconfirmed", "未能确认停稳抵达", task_id)
@@ -1019,6 +1020,7 @@ class Navigator:
         return path, grid_obj, (wx, wy, goal != raw_goal)
 
     async def _confirm_stopped(self, goal, heading, arrival_tolerance=ARRIVAL_THRESHOLD,
+                               heading_tolerance=HEADING_THRESHOLD,
                                *, _move_control=None):
         started = time.monotonic()
         self.last_stop_diagnostics = {"reason": "awaiting_fresh_pose", "samples": 0}
@@ -1084,7 +1086,7 @@ class Navigator:
                 continue
             near_goal = goal is None or math.hypot(pose["x"] - goal[0], pose["y"] - goal[1]) < arrival_tolerance
             heading_ok = (heading is None or
-                          abs(_normalize_angle(pose["heading"] - heading)) <= HEADING_THRESHOLD)
+                          abs(_normalize_angle(pose["heading"] - heading)) <= heading_tolerance)
             still = math.hypot(pose["x"] - previous_pose["x"],
                                pose["y"] - previous_pose["y"]) <= 0.02
             still = still and abs(_normalize_angle(pose["heading"] - previous_pose["heading"])) <= .03

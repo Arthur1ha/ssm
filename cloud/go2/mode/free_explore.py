@@ -967,6 +967,8 @@ class Drive:
     def _queue_completed_game(self, goal: dict, result: dict, activity_id: str,
                               generation: int) -> None:
         """Resume free activity without reopening or discussing the old goal."""
+        if result.get("physical_stop") == "unknown":
+            return
         reason = str(result.get("reason") or result.get("error") or "")
         if any(code in reason for code in ("stop_unconfirmed", "cleanup_unconfirmed", "control_lease_changed")):
             return
@@ -1140,18 +1142,31 @@ class Drive:
                     returned = await game.execute(self, event, task_id)
                     outcome = returned if isinstance(returned, dict) else {}
             except asyncio.CancelledError:
+                store = get_activity_store()
+                activity = store.get(activity_id) or {}
+                reason = activity.get("end_reason") or (
+                    "user_intervention" if getattr(self, "_user_handoff_in_progress", False) else
+                    "device_offline" if not go2.is_connected else "autonomy_stopped")
+                stage = next((row["stage"] for row in reversed(store.events(activity_id))
+                              if (row.get("game_instance_id") or row.get("trigger_message_id")) == invitation_id
+                              and row.get("stage") and row["stage"] != "game_final"), "")
                 with game_scope(activity_id, invitation_id, game.game_id):
                     begin_game_close()
                 stopped = await stop_original_motion()
+                outcome = {"result": "cancelled" if stopped else "unknown", "reason": reason,
+                           "stage": stage, "physical_stop": "confirmed" if stopped else "unknown",
+                           "stop_reason": None if stopped else "stop_unconfirmed"}
                 messenger.send_result(event["message_id"],
-                                      "cancelled" if stopped else "unknown", task_id=task_id,
-                                      reason="autonomy_stopped" if stopped else "stop_unconfirmed")
+                                      outcome["result"], task_id=task_id, reason=reason)
                 raise
             except Exception as exc:
                 with game_scope(activity_id, invitation_id, game.game_id):
                     begin_game_close()
                 logger.exception("[Drive] game failed game_id=%s", game.game_id)
-                await stop_original_motion()
+                stopped = await stop_original_motion()
+                outcome = {"result": "unknown", "reason": "game_error:" + type(exc).__name__,
+                           "physical_stop": "confirmed" if stopped else "unknown",
+                           "stop_reason": None if stopped else "stop_unconfirmed"}
                 messenger.send_result(event["message_id"], "unknown", task_id=task_id,
                                       reason="game_error:" + type(exc).__name__)
             finally:
@@ -1161,7 +1176,9 @@ class Drive:
                 with game_scope(activity_id, invitation_id, game.game_id):
                     begin_game_close()
                 terminal = messenger.get_received_result(event["message_id"])
-                terminal = {**outcome, **(terminal if isinstance(terminal, dict) else {})}
+                # The execution owner retains the trigger and separate stop
+                # evidence even when transport has a smaller/older receipt.
+                terminal = {**(terminal if isinstance(terminal, dict) else {}), **outcome}
                 store = get_activity_store()
                 started = any(row.get("event_type") == "game_started"
                               and (row.get("game_instance_id") or row.get("trigger_message_id")) == invitation_id
@@ -1191,6 +1208,8 @@ class Drive:
                     game_id=game.game_id, game_instance_id=invitation_id,
                     trigger_message_id=invitation_id, task_id=task_id,
                     status=terminal.get("result", "unknown"), reason=terminal.get("reason"),
+                    stage=terminal.get("stage", ""), physical_stop=terminal.get("physical_stop", ""),
+                    stop_reason=terminal.get("stop_reason"),
                     context_scope="process", source_event_id="game:ended:" + invitation_id)
                 messenger.close_game(invitation_id, result=terminal, task_id=task_id)
                 # Keep only unrelated collaboration work. A task's real

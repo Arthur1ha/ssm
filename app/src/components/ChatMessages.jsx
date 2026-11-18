@@ -1,8 +1,7 @@
 /* Shared conversation hierarchy: speech bubbles and expandable process records.
  * Domain-specific cards are supplied by the surrounding feed. */
 function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator',
-  training, onReviseRule, renderEntry, scrollTargetRef, scrollKey, scrollTrigger = entries, autoScroll = true, busy = false }) {
-  const bottomRef = React.useRef(null);
+  training, onReviseRule, renderEntry, busy = false }) {
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const rows = [], groups = new Map();
   entries.forEach((entry,index) => {
@@ -17,12 +16,6 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
   const latestRequest = [...entries].reverse().find(entry => entry.type === 'user');
   const pendingGroup = busy && latestRequest?.requestId != null
     ? rows.find(row => row.entry.type === 'process_group' && row.entry.requestId === latestRequest.requestId)?.entry : null;
-
-  React.useEffect(() => {
-    if (!autoScroll) return;
-    const target = scrollTargetRef?.current || bottomRef.current;
-    target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, [scrollTrigger, scrollKey, autoScroll, busy]);
 
   return <div className="chat-messages" style={{ padding: '0 16px' }}>
       {rows.map(({ entry: e, index: i }) => {
@@ -63,7 +56,6 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
       })}
       {busy && !pendingGroup && <div className="chat-messages__waiting"><ProcessWaiting/></div>}
       {training?.error && <p className="chat-system-status" role="status">{processErrorText(training.error)}</p>}
-      <div ref={bottomRef}/>
     </div>;
 }
 window.ChatMessages = ChatMessages;

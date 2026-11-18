@@ -51,16 +51,15 @@ function resolveAvatarProfile(agent) {
 
 // Extend this table for new, explicitly structured presentation events. Never
 // infer a gesture, mood or completion from persona prose or nearby events.
-const AVATAR_EVENT_MAPPINGS = Object.freeze({
-  rps_result(event, unitId) {
-    const round = event.game_round;
-    const shape = round?.choices?.[unitId];
-    if (!['rock', 'paper', 'scissors'].includes(shape)) return null;
-    return {shape, expression:'neutral', motion:'pop',
-      label:`第 ${round.round} 轮 · ${AVATAR_SHAPES[shape].label}`,
-      mapping:round.mapping?.[unitId]?.label || '', eventId:event.event_id};
-  },
-});
+function rpsAvatarPresentation(event, unitId) {
+  const round = event.stage==='rps_dispatched' ? event.game_throw : event.game_round;
+  const shape = round?.choices?.[unitId];
+  if (!['rock', 'paper', 'scissors'].includes(shape)) return null;
+  return {shape, expression:'neutral', motion:'pop',
+    label:`第 ${round.round} 轮 · ${AVATAR_SHAPES[shape].label}`,
+    mapping:round.mapping?.[unitId]?.label || '', eventId:event.event_id};
+}
+const AVATAR_EVENT_MAPPINGS = Object.freeze({rps_dispatched:rpsAvatarPresentation,rps_result:rpsAvatarPresentation});
 function avatarEventPresentation(event, unitId) {
   return AVATAR_EVENT_MAPPINGS[event?.stage]?.(event, unitId) || null;
 }

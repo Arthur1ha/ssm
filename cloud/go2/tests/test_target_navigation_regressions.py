@@ -304,8 +304,9 @@ async def test_short_observation_move_requires_real_progress_before_arrival(monk
     monkeypatch.setattr(nav, '_snapshot', lambda: ((pose.copy(), grid), None))
     monkeypatch.setattr(nav, '_plan_path', lambda *_: (
         [(i, 0) for i in range(7)], grid, (.30, 0., False)))
-    async def stopped(goal, heading, tolerance):
+    async def stopped(goal, heading, tolerance, heading_tolerance):
         assert tolerance == .08
+        assert heading_tolerance == pytest.approx(math.radians(10))
         assert pose['x'] >= .22
         return True
     monkeypatch.setattr(nav, '_confirm_stopped', stopped)

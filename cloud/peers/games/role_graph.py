@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -34,6 +33,7 @@ class RoleTask:
     result_transform: Callable | None = None
     initial_tool: tuple[str, dict] | None = None
     decision_schema: type[BaseModel] | None = None
+    tool_declarations: dict = field(default_factory=dict)
     reply_required: bool = True
     terminal: bool = False
     scope_fields: dict = field(default_factory=dict)
@@ -54,7 +54,8 @@ class RoleTask:
     def declarations(self, ordinary: dict) -> dict:
         if self.decision_schema is not None:
             return {DECISION_TOOL: self.decision_schema}
-        return {name: schema for name, schema in ordinary.items() if name in self.allowed_tools}
+        return {name: self.tool_declarations.get(name, schema)
+                for name, schema in ordinary.items() if name in self.allowed_tools}
 
     def submit(self, name: str, params: dict) -> dict | None:
         if name != DECISION_TOOL or self.decision_schema is None:
@@ -203,16 +204,17 @@ async def run_device_task(role: str, goal: str, *, context: ExecutionContext,
                           parent_run_id: str | None = None, initial_tool=None,
                           tool_context=None, result_transform=None,
                           execution_options=None, share_result: bool = True,
-                          reply_required: bool = True) -> dict:
+                          reply_required: bool = True, tool_declarations=None) -> dict:
     """Run one cooperative subtask and share only its final role-owned result."""
     task = RoleTask(instructions=instructions + (
         "\n在本次设备子任务内部处理可恢复的失败和重新观察，不向同伴逐步报告错误或重试。"
-        "结果未知时等待或查询原任务，不换身份重复执行。只在完成或无法继续时用一句简短事实说明最终结果，"
+        "结果未知时等待或查询原任务，不换身份重复执行。只在完成或无法继续时按真实结果说明最终情况，"
         "不要邀请重玩或继续已经结束的游戏。"),
         task_context=task_context, allowed_tools=frozenset(allowed_tools),
         availability=availability, tool_guard=tool_guard, tool_context=tool_context,
         execution_options=execution_options, result_transform=result_transform,
-        initial_tool=initial_tool, scope_fields=_scope_fields(), reply_required=reply_required)
+        initial_tool=initial_tool, scope_fields=_scope_fields(), reply_required=reply_required,
+        tool_declarations=tool_declarations or {})
     result = await _run(role, goal, context=context, run_id=run_id, deadline=deadline,
                       task=task, dispatch=dispatch, on_step=on_step,
                       parent_run_id=parent_run_id)
@@ -237,15 +239,14 @@ async def run_device_task(role: str, goal: str, *, context: ExecutionContext,
 
 class GameFinal(EmotionModel):
     speech: str = Field(min_length=1, max_length=160,
-                        description="本局结束时，以自己的口吻给出一句简短最终回应；不提问、不续局、不安排动作")
+                        description="本局结束时，以自己的口吻自然回应最终结果；不提问、不续局、不安排动作")
 
     @field_validator("speech")
     @classmethod
-    def short_final(cls, value):
+    def nonblank_speech(cls, value):
         value = value.strip()
-        if not value or "\n" in value or len([
-                part for part in re.split(r"[。！？!?]+", value) if part.strip()]) > 1:
-            raise ValueError("one_short_final_response_required")
+        if not value:
+            raise ValueError("nonblank_final_response_required")
         return value
 
 
@@ -255,10 +256,9 @@ def _reusable_final(value: object, status: str) -> dict | None:
     if (value.get("result") or value.get("status")) != status:
         return None
     text = str(value.get("speech") or value.get("response") or value.get("reply") or "").strip()
-    # Reuse an already suitable final line exactly. A long response needs the
+    # Reuse an already suitable final response exactly. A long response needs the
     # original role to formulate its final expression; never slice its meaning.
-    if (not text or len(text) > 160 or "\n" in text
-            or len([part for part in re.split(r"[。！？!?]+", text) if part.strip()]) > 1):
+    if not text or len(text) > 160:
         return None
     return {"speech": text, "emotion": value.get("emotion", "neutral")}
 
@@ -266,7 +266,7 @@ def _reusable_final(value: object, status: str) -> dict | None:
 async def final_responses(game, *, activity_id: str, invitation_id: str,
                           context: ExecutionContext, result: dict, deadline: float,
                           existing: dict | None = None) -> list[dict]:
-    """Both original brains close this game with one line and no new effects."""
+    """Both original brains close this game naturally, without new effects."""
     from .scope import terminal_game_scope, terminal_scope_available
     prior = existing if existing is not None else result.get("role_replies") or {}
     status = str(result.get("result") or result.get("status") or "unknown")
@@ -285,7 +285,7 @@ async def final_responses(game, *, activity_id: str, invitation_id: str,
                         "execution_context": {"space_id": context.space_id,
                                               "origin_kind": context.origin_kind}},
                         schema=GameFinal,
-                        instructions=("本局已经关闭动作和讨论，现在只给出你自己的一句简短最终回应。"
+                        instructions=("本局已经关闭动作和讨论，现在以自己的口吻自然回应最终结果，不限制句数。"
                                       "依据本局真实终局结果，以自己的口吻接话；不复述规则、内部错误或执行过程。"
                                       "完成尝试不冒充送达，未知不冒充成功。无需重复对方的话。"
                                       "不要提出问题、邀请重试、续写目标或承诺之后行动；说完回到自由活动。"),

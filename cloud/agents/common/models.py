@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 
 import httpx
@@ -11,6 +11,17 @@ from langchain_openai import ChatOpenAI
 
 
 _async_client: ContextVar[tuple | None] = ContextVar("agent_model_http_client", default=None)
+_text_temperature: ContextVar[float] = ContextVar("agent_text_temperature", default=0)
+
+
+@contextmanager
+def text_model_sampling(temperature: float):
+    """Scope sampling to one decision, including its device worker thread."""
+    token = _text_temperature.set(temperature)
+    try:
+        yield
+    finally:
+        _text_temperature.reset(token)
 
 
 @asynccontextmanager
@@ -62,7 +73,7 @@ def get_text_model(role: str, model_class=None):
     common = {
         "base_url": os.getenv("OPENAI_BASE_URL"),
         "api_key": os.getenv("OPENAI_API_KEY"),
-        "temperature": 0,
+        "temperature": _text_temperature.get(),
         **_async_client_options(),
     }
     if role == "steward":

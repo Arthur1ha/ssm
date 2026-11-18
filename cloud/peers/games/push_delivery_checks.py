@@ -237,6 +237,7 @@ async def delivery_harness(monkeypatch):
                         if config.directional else "同一货物已确认在指定标识附近，这单大致送到了。")
         elif name == "go2_find_object":
             params = {"target": _kwargs["task_context"]()["cargo"]}
+            params = _kwargs["tool_declarations"][name].model_validate(params).model_dump()
             response = "我找到货物了，这单送去哪里？"
         else:
             params, response = {"question": goal}, ""
@@ -260,7 +261,8 @@ async def delivery_harness(monkeypatch):
         "cloud.go2.navigation.cargo_push": {"expect_cargo": expect_cargo},
         "cloud.go2.tools.registry": {"get_tool_spec": lambda _name: SimpleNamespace(description="推物工具的当前契约")},
         "cloud.go2.tools.executor": {"execute_tool": execute_tool},
-        "cloud.space.activity": {"get_activity_store": lambda: SimpleNamespace(record_event=record)},
+        "cloud.space.activity": {"get_activity_store": lambda: SimpleNamespace(record_event=record,
+            get=lambda _aid: {"end_reason": "user_intervention"})},
         "cloud.space.context": {"get_space_context": space_context},
         "cloud.space.decisions": {"resolve_decision": resolve_decision,
                                   "decision_evidence": lambda space: space.get("decision_evidence", [])},
@@ -433,4 +435,62 @@ async def test_unconfirmed_push_never_claims_delivery(delivery_harness, push_res
     h.messenger.send_result.assert_called_once_with(
         "msg_delivery", "unknown", task_id="task_delivery", reason="cargo_push_unconfirmed:"+push_result)
     h.navigator.stop_and_confirm.assert_awaited_once()
+    assert h.agent._peer_game_id is None
+
+
+async def test_delivery_cleanup_keeps_trigger_separate_from_unknown_stop(delivery_harness):
+    h = delivery_harness
+    h.config.push_result = "blocked"
+    h.navigator.stop_and_confirm.return_value = {"result": "accepted", "reason": "telemetry_stale"}
+    outcome = await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
+    assert outcome["result"] == "unknown"
+    assert outcome["reason"] == "cargo_push_unconfirmed:blocked"
+    assert outcome["physical_stop"] == "unknown"
+    assert outcome["stop_reason"] == "telemetry_stale"
+    assert outcome["stage"] == "push"
+    h.messenger.send_result.assert_called_once_with("msg_delivery", "unknown",
+        task_id="task_delivery", reason="cargo_push_unconfirmed:blocked")
+    assert h.agent._peer_game_id is None
+
+
+async def test_delivery_cancel_drains_child_and_journals_original_cause(delivery_harness, monkeypatch):
+    h = delivery_harness
+    module = sys.modules["cloud.peers.games.role_graph"]
+    original = module.run_device_task
+    ready, drained = asyncio.Event(), asyncio.Event()
+
+    async def wait_for_cargo(role, goal, **kwargs):
+        if kwargs["run_id"].endswith("_cargo"):
+            ready.set()
+            try:
+                await asyncio.Future()
+            finally:
+                drained.set()
+        return await original(role, goal, **kwargs)
+
+    monkeypatch.setattr(module, "run_device_task", wait_for_cargo)
+    h.navigator.stop_and_confirm.return_value = {"result": "accepted", "reason": "telemetry_stale"}
+    task = asyncio.create_task(push_delivery.GAME.execute(h.drive, h.event, "task_delivery"))
+    await asyncio.wait_for(ready.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert drained.is_set()
+    assert h.agent._peer_game_id is None
+    finish = h.drive._advance_task.await_args.kwargs["result"]
+    assert finish["reason"] == "user_intervention"
+    assert finish["physical_stop"] == "unknown"
+    assert finish["stop_reason"] == "telemetry_stale"
+    assert finish["stage"] == "find_cargo"
+    assert not any(name == "go2_push_cargo" for name, _ in h.calls)
+    h.messenger.send_result.assert_not_called()  # The game owner closes cancellation once.
+
+
+async def test_scope_revocation_keeps_activity_intervention_cause(delivery_harness, monkeypatch):
+    h = delivery_harness
+    monkeypatch.setattr(push_delivery, "game_scope_available", lambda: False)
+    outcome = await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
+    assert outcome["reason"] == "user_intervention"
+    assert outcome["physical_stop"] == "confirmed"
+    assert not h.calls
     assert h.agent._peer_game_id is None

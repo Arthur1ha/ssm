@@ -163,20 +163,30 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     const searching = await latestProcess.evaluate(node => ({
       open:node.open,text:node.textContent,photos:node.querySelectorAll('img').length,
     }));
-    assert.equal(searching.open, true, 'An executing concrete call should remain visible');
+    assert.equal(searching.open, false, 'An executing concrete call keeps details collapsed');
     assert.match(searching.text, /可达的边界观察点/);
     assert.doesNotMatch(searching.text, /停止搜索/);
     assert.equal(searching.photos, 1);
     assert.doesNotMatch(await latestProcess.$eval('.run-process__body',node=>node.textContent), /上下文|去找猫头鹰/,
       'Process details should explain the agent actions without repeating the user request');
+    // Pause as a reader before Puppeteer scrolls a historic summary into view.
+    await page.focus('.chat-panel__scroll');
+    await page.keyboard.press('Home');
+    await page.waitForSelector('.chat-panel__latest');
+    await page.waitForFunction(()=>document.querySelector('.chat-panel__scroll').scrollTop<=2);
+    await (await latestProcess.$('summary')).click();
+    await page.waitForFunction(node=>node.querySelector('summary').getAttribute('aria-expanded')==='true',{},latestProcess);
     await page.evaluate(() => apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
       agent_id:lamp.unit_id,run_id:sent[1].run_id,source:'object_search',stage:'search_observe',
       event_id:'search-copy',text:'同一张照片的新说明',media_ref:'/api/search-photo',observation_event_id:'search-observation'}})));
     await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('同一张照片的新说明'));
     assert.equal(await latestProcess.evaluate(node=>node.open),true,'A new progress record closed the user-opened process');
     assert.equal(await latestProcess.$$eval('img',nodes=>nodes.length),1,'Repeated media duplicated an observation');
+    await (await latestProcess.$('summary')).click();
+    await page.waitForFunction(node=>node.querySelector('summary').getAttribute('aria-expanded')==='false',{},latestProcess);
     await page.evaluate(() => finishCommand({result:'blocked',reply:'本次搜索结束，遮挡区域仍未确认。'}));
     await page.waitForFunction(() => !document.querySelector('input').disabled);
+    assert.equal(await latestProcess.evaluate(node=>node.open),false,'A failure must not reopen details the user closed');
     if (process.env.SCREENSHOT_DIR) {
       fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
       await page.screenshot({path:process.env.SCREENSHOT_DIR+'/device-chat.png'});
@@ -273,6 +283,58 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     assert.equal(await page.$$('.chat-messages details').then(rows=>rows.length),0);
     assert.equal(await page.$$('.chat-messages .shape-face').then(rows=>rows.length),0);
     if(process.env.SCREENSHOT_DIR){await page.setViewport({width:390,height:844});await page.screenshot({path:process.env.SCREENSHOT_DIR+'/ordinary-chat-390.png'});}
+    // One shared scrollport follows arrivals and late content sizing until the
+    // user scrolls up; returning to latest restores that behavior.
+    await page.setViewport({width:390,height:480});
+    await page.evaluate(()=>{
+      window.followRows=Array.from({length:24},(_,i)=>({type:'ai',agent:'go2',requestId:'follow-'+i,
+        final:true,text:'第 '+i+' 条聊天。'.repeat(8)}));
+      window.renderFollow=()=>ReactDOM.flushSync(()=>root.render(React.createElement('div',
+        {style:{display:'flex',height:'100dvh'}},React.createElement(ChatPanel,{
+          key:'following',messages:followRows,agents:[lamp],onSend(){}}))));
+      renderFollow();
+    });
+    const atBottom=()=>page.waitForFunction(()=>{
+      const el=document.querySelector('.chat-panel__scroll');return el.scrollHeight-el.clientHeight-el.scrollTop<=2;
+    });
+    await atBottom();
+    await page.evaluate(()=>{followRows.push({type:'ai',text:'刚到的新消息。'.repeat(12)});renderFollow();});
+    await atBottom();
+    await page.evaluate(()=>{followRows.splice(-6);renderFollow();});
+    await atBottom();
+    await page.setViewport({width:390,height:640});
+    await atBottom();
+    await page.evaluate(()=>{followRows.push({type:'ai',text:'内容缩短和视口增高后继续跟随。'.repeat(12)});renderFollow();});
+    await atBottom();
+    await page.evaluate(()=>{
+      const growing=document.createElement('div');growing.id='late-sized-content';growing.style.height='400px';
+      document.querySelector('.chat-panel__content').append(growing);
+    });
+    await atBottom();
+    // Browser layout/anchoring scroll events are not user intent and must not
+    // disable following, even if the offset temporarily moves upward.
+    await page.$eval('.chat-panel__scroll',el=>{el.scrollTop-=120;el.dispatchEvent(new Event('scroll',{bubbles:true}));});
+    await atBottom();
+    assert.equal(await page.$('.chat-panel__latest'),null);
+    const wheelStart=await page.$eval('.chat-panel__scroll',el=>{
+      const box=el.getBoundingClientRect();return {top:el.scrollTop,x:box.left+box.width/2,y:box.top+box.height/2};
+    });
+    await page.mouse.move(wheelStart.x,wheelStart.y);
+    await page.mouse.wheel({deltaY:-400});
+    await page.waitForSelector('.chat-panel__latest');
+    await page.waitForFunction(top=>Math.abs(document.querySelector('.chat-panel__scroll').scrollTop-(top-400))<=2,{timeout:5000},wheelStart.top);
+    const readingTop=await page.$eval('.chat-panel__scroll',el=>el.scrollTop);
+    await page.evaluate(()=>{followRows.push({type:'ai',text:'阅读历史时到达的消息。'.repeat(10)});renderFollow();});
+    assert.equal(await page.$eval('.chat-panel__scroll',el=>el.scrollTop),readingTop);
+    await page.click('.chat-panel__latest');
+    await atBottom();
+    await page.evaluate(()=>{followRows.push({type:'ai',text:'恢复跟随后的消息。'.repeat(10)});renderFollow();});
+    await atBottom();
+    await page.focus('.chat-panel__scroll');
+    await page.keyboard.press('PageUp');
+    await page.waitForSelector('.chat-panel__latest');
+    await page.click('.chat-panel__latest');
+    await atBottom();
     // Waiting belongs to the current request's feed, then its concrete process.
     for (const home of [true,false]) {
       await page.evaluate(home=>{

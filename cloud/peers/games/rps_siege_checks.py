@@ -494,6 +494,11 @@ async def test_both_throws_dispatch_before_either_receipt_and_score_waits_for_bo
             await asyncio.wait_for(started.wait(), timeout=2)
         assert not task.done()
         assert not any(row.get("stage") == "rps_result" for row in h.timeline)
+        dispatched = [row for row in h.timeline if row.get("stage") == "rps_dispatched"]
+        assert len(dispatched) == 1
+        assert dispatched[0]["game_instance_id"] == "msg_test_rps"
+        assert dispatched[0]["game_throw"]["choices"] == {rps_siege.LAMP: "scissors", "go2": "rock"}
+        assert "winner" not in dispatched[0]["game_throw"]
         assert not any(name == "go2_find_object" for name, _ in h.calls)
         assert len([phase for _, phase, _ in h.decisions if phase == "throw"]) == 2
     finally:
@@ -727,11 +732,55 @@ async def test_public_round_is_receipt_gated_and_throw_speech_precedes_verdict(g
     assert all('game_round' not in row for row in h.timeline[:verdict_index])
 
 
-async def test_unknown_throw_never_publishes_structured_choices(game_harness):
+async def test_unknown_throw_publishes_dispatch_but_never_a_verdict(game_harness):
     h = game_harness
     h.config.gesture_result = 'unknown'
     await rps_siege.GAME.execute(h.drive, h.event, 'task_test_rps')
     assert all('game_round' not in row for row in h.timeline)
+    dispatched = next(row for row in h.timeline if row.get('stage') == 'rps_dispatched')
+    assert dispatched['game_throw']['choices'] == {rps_siege.LAMP: 'scissors', 'go2': 'rock'}
+    assert 'winner' not in dispatched['game_throw']
+
+
+async def test_finished_search_failure_keeps_its_physical_reason(game_harness, monkeypatch):
+    h = game_harness
+    h.config.search_results = [{"result": "error", "reason": "arrival_unconfirmed",
+        "stop": {"result": "ok"}, "task_id": "rps_msg_test_rps_lamp"}]
+    run_task = rps_siege.run_device_task
+    transformed = []
+
+    async def capture_search(role, goal, **kwargs):
+        outcome = await run_task(role, goal, **kwargs)
+        name, arguments = kwargs["initial_tool"]
+        if name == "go2_find_object":
+            transformed.append(kwargs["result_transform"](name, arguments, outcome["tool_results"][-1]["result"]))
+        return outcome
+
+    monkeypatch.setattr(rps_siege, "run_device_task", capture_search)
+    await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
+    assert len(transformed) == 1 and transformed[0]["final"] is True
+    assert transformed[0]["reason"] == "arrival_unconfirmed"
+    assert h.messenger.send_result.call_args.kwargs["reason"] == "go2_won:game_approach_unconfirmed:arrival_unconfirmed"
+    assert ("SET_STATE", {"state": "OFF"}) not in h.calls
+
+
+async def test_throw_sampling_is_independent_and_scoped_to_this_stage(monkeypatch):
+    from cloud.agents.common.models import get_text_model
+    from cloud.peers.games import role_graph, rps_decisions
+
+    samples = []
+
+    async def sample(role, phase, _facts, **_kwargs):
+        await asyncio.sleep(0)  # Both throws overlap with another stage.
+        options = get_text_model(role, model_class=lambda **values: values)
+        samples.append((role, phase, options["temperature"]))
+        return {"choice": "rock"}
+
+    monkeypatch.setattr(role_graph, "decide", sample)
+    await asyncio.gather(*(rps_decisions.decide(role, phase, {}, thread_id=role + phase,
+        deadline=time.time() + 10) for role, phase in (("lamp", "throw"), ("go2", "throw"), ("lamp", "setup"))))
+    assert sorted(samples) == [("go2", "throw", 0.8), ("lamp", "setup", 0), ("lamp", "throw", 0.8)]
+    assert get_text_model("go2", model_class=lambda **values: values)["temperature"] == 0
 
 
 async def test_silent_game_decisions_keep_public_mapping_and_real_round_result(game_harness, monkeypatch):

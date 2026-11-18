@@ -217,6 +217,17 @@ def test_game_round_is_bounded_and_only_published_for_revealed_result(tmp_path):
     assert 'private_reasoning' not in public['game_round']
     hidden = store.record_event(activity_id, 'message', game_id='rps_siege', stage='reveal', game_round=result)
     assert 'game_round' not in hidden
+    dispatched = store.record_event(activity_id, 'action_progress', game_id='rps_siege',
+                                    stage='rps_dispatched', game_throw=result)
+    assert dispatched['game_throw']['choices'] == result['choices']
+    assert 'winner' not in dispatched['game_throw']
+    assert 'private_reasoning' not in dispatched['game_throw']
+    assert 'game_round' not in dispatched
+    private = store.record_event(activity_id, 'message', game_id='rps_siege', stage='choosing', game_throw=result)
+    assert 'game_throw' not in private
     result['mapping']['go2']['arguments'] = ['bad']
     malformed = store.record_event(activity_id, 'message', game_id='rps_siege', stage='rps_result', game_round=result)
     assert 'game_round' not in malformed
+    malformed_throw = store.record_event(activity_id, 'action_progress', game_id='rps_siege',
+                                         stage='rps_dispatched', game_throw=result)
+    assert 'game_throw' not in malformed_throw

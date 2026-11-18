@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const sucrase = require('sucrase');
 const compile = name => sucrase.transform(fs.readFileSync(name,'utf8'),{transforms:['jsx'],production:true}).code;
 const files = ['utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/stateSnapshot.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js','avatars/presentation.js',
-  'components/Icon.jsx','avatars/Avatar.jsx','avatars/CompanionAvatar.jsx','components/RunProcess.jsx','components/ActivityMembers.jsx','components/ActivityFeed.jsx'];
+  'components/Icon.jsx','avatars/Avatar.jsx','avatars/CompanionAvatar.jsx','components/RunProcess.jsx','components/ActivityMembers.jsx','components/ChatMessages.jsx','components/ChatPanel.jsx','components/ActivityFeed.jsx'];
 const context = vm.createContext({window:{}});
 for (const file of files) {
   vm.runInContext(compile('app/src/'+file),context);
@@ -140,6 +140,13 @@ assert.equal(context.activityGameEnd({...result,game_id:'push_delivery'}),null,
 assert.equal(projectActivityEvents([legacyGameEnd,gameEnd]).length,1,
   'Legacy terminal response and signed final result duplicated the game ending');
 assert.equal(context.activityGameEnd({...gameEnd,status:'ok',reason:''}).reason,'');
+assert.equal(context.activityGameEnd({...gameEnd,reason:'user_intervention',stage:'find_cargo',
+  physical_stop:'unknown',stop_reason:'stop_unconfirmed'}).reason,
+  '用户发出了新的安排（找货阶段）；退出时尚未确认停稳');
+assert.equal(context.activityGameEnd({...gameEnd,reason:'user_intervention',stage:'find_cargo',
+  physical_stop:'confirmed'}).reason,'用户发出了新的安排（找货阶段）');
+assert.equal(context.activityGameEnd({...gameEnd,reason:'stop_unconfirmed',physical_stop:'unknown'}).reason,
+  '停止结果尚未确认','Legacy stop-only reasons should not be duplicated');
 assert.match(context.activityGameEnd({...gameEnd,reason:'delivery_signal_changed_or_stale'}).reason,/灯光信号.*过期/);
 const gameStart={...gameEnd,event_id:'game-started',event_type:'game_started',status:'executing'};
 assert.deepEqual(Array.from(activityProcessRows([gameStart,gameEnd]),row=>row.kind),['game_start','game_end']);
@@ -161,6 +168,7 @@ async function browserChecks() {
     // history endpoint deliberately starts empty, so REST cannot mask dropped
     // named SSE events (the previous mapping_proposal transport bug).
     const streamPage = await browser.newPage();
+    await streamPage.setViewport({width:390,height:480});
     const streamErrors = [];
     streamPage.on('pageerror', error=>{streamErrors.push(error.message);console.error('SSE browser error:',error.message);});
     const streamActivity = sseReplay?.activity || {...activity,activity_id:'act_sse'};
@@ -204,10 +212,15 @@ async function browserChecks() {
         if(!__received.some(row=>row.event_id===message.detail.event_id)) __received.push(message.detail);
         if(__received.length>=expected) apiClient.closeEvents();
       });
-      function Harness(){
+      function ActivityChild(){
         const view=useActivityTimeline();window.__timeline=view;
         return React.createElement(SpaceActivityFeed,{activity:view.displayActivity,events:view.events,
           agents:[go2,lamp],unitData:states,connected:true});
+      }
+      function Harness(){
+        window.__parentRenders=(window.__parentRenders || 0)+1;
+        return React.createElement('div',{style:{height:'100dvh',display:'flex'}},
+          React.createElement(ChatPanel,{onSend(){},messageContent:React.createElement(ActivityChild)}));
       }
       window.__root=ReactDOM.createRoot(document.getElementById('root'));
       window.__mount=()=>__root.render(React.createElement(Harness));__mount();
@@ -231,6 +244,28 @@ async function browserChecks() {
     await streamPage.evaluate(()=>apiClient.dispatchEvent(new Event('events-open')));
     await streamPage.waitForFunction(count=>__timeline.events.length===count,{},streamRows.length);
     assert.equal(await streamPage.evaluate(()=>__timeline.events.filter(row=>row.stage==='mapping_proposal').length),mappingRows.length);
+    const streamAtBottom=()=>streamPage.waitForFunction(()=>{
+      const s=document.querySelector('.chat-panel__scroll');return s.scrollHeight-s.clientHeight-s.scrollTop<=2;
+    });
+    await streamAtBottom();
+    // The real hook updates only the child. The ChatPanel's parent stays mounted
+    // unchanged, so its render effect cannot hide a broken resize observer.
+    for(let index=0;index<4;index++) {
+      await streamPage.evaluate(({index,activityId})=>apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
+        type:'activity',event_type:'message',event_id:'incremental-sse-'+index,activity_id:activityId,
+        unit_id:'go2',ts:Date.now()/1000+index,text:`逐条到达的活动消息 ${index}：`+'这是一段需要继续下滑才能看到的现场交流。'.repeat(12),
+      }})),{index,activityId:streamActivity.activity_id});
+      await streamPage.waitForFunction(index=>document.querySelector('.space-activity__timeline').textContent
+        .includes(`逐条到达的活动消息 ${index}`),{},index);
+      await streamAtBottom();
+      if(index===1) {
+        await streamPage.$eval('.chat-panel__scroll',s=>{s.scrollTop-=120;s.dispatchEvent(new Event('scroll',{bubbles:true}));});
+        await streamAtBottom();
+        assert.equal(await streamPage.$('.chat-panel__latest'),null,'Layout-generated scroll must not pause the live activity');
+      }
+    }
+    assert.equal(await streamPage.evaluate(()=>__parentRenders),1,'The child SSE fixture unexpectedly rerendered its parent');
+    console.log('PASS: child-only activity SSE updates follow the latest; layout-generated upward scroll does not pause following.');
     assert.deepEqual(streamErrors,[]);
     await streamPage.close();
     console.log('PASS: native named SSE -> ApiClient -> activity hook -> both mapping bubbles; history recovery deduplicates.');
@@ -279,8 +314,8 @@ async function browserChecks() {
     for (const member of await page.$$('.activity-member')) await member.click();
     assert.equal(await page.evaluate(()=>location.hash),activityHash,'Companion presentation must not navigate');
     await page.waitForSelector('.run-process-summary');
-    assert.equal(await page.$$eval('.run-process-summary', rows=>rows.every(row=>row.open)),true,
-      'An unconfirmed result must expose its cause by default');
+    assert.equal(await page.$$eval('.run-process-summary', rows=>rows.every(row=>!row.open)),true,
+      'Process details stay collapsed, including unconfirmed outcomes');
     assert.match(await page.$eval('.run-process-summary summary',el=>el.innerText),/确认/);
     assert(await page.$eval('.space-activity',e=>e.textContent.includes('对方已接受')));
     for(const width of [320,390,1280]) {
@@ -314,6 +349,10 @@ async function browserChecks() {
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
       if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`game-ended-${width}.png`),fullPage:true});
     }
+    await page.evaluate(boundary=>__render({events:[boundary]}), {...gameEnd,
+      reason:'user_intervention',stage:'find_cargo',physical_stop:'unknown',stop_reason:'stop_unconfirmed'});
+    await page.waitForFunction(()=>document.querySelector('.space-activity__item--game_end')?.textContent
+      .includes('用户发出了新的安排（找货阶段）；退出时尚未确认停稳'));
     // Public rationale belongs inside the same disclosure, never a second bubble.
     await page.evaluate(({invite,basis})=>__render({events:[{...invite,decision_basis:basis}]}),
       {invite:groundedInvite,basis:decisionBasis});
@@ -392,20 +431,8 @@ async function browserChecks() {
       const r=el.getBoundingClientRect(),v=el.closest('.chat-panel__scroll').getBoundingClientRect();
       return r.top>=v.top && r.bottom<=v.bottom+1;
     }),true,'Return to latest did not reveal the latest activity through the outer scrollport');
-    // Arrivals never force scrolling, including when the user was at the bottom.
-    for (const offset of [0,35,180]) {
-      const before=await page.$eval('.test-shell',(el,offset)=>{
-        el.scrollTop=el.scrollHeight-el.clientHeight-offset;
-        el.dispatchEvent(new Event('scroll'));
-        return el.scrollTop;
-      },offset);
-      await page.evaluate(offset=>__render({events:[...__props.events,
-        {event_id:'stationary-'+offset,event_type:'message',unit_id:'go2',
-          text:'更新消息时保留阅读位置 '+offset,ts:Date.now()/1000+40+offset}]}),offset);
-      await page.waitForFunction(offset=>document.querySelector('.space-activity__timeline')
-        .textContent.includes('更新消息时保留阅读位置 '+offset),{},offset);
-      assert.equal(await page.$eval('.test-shell',el=>el.scrollTop),before,'A message arrival moved the page');
-    }
+    // ChatPanel owns default following and user-paused reading; its actual
+    // shared scrollport is exercised below and in check_chat_frontend.cjs.
     // Unknown feedback must not display old physical facts as current.
     await page.evaluate(()=>__render({connected:false}));
     await page.waitForFunction(()=>document.querySelector('.activity-member__state')?.textContent==='状态待确认');
@@ -522,6 +549,30 @@ async function browserChecks() {
     await home.waitForFunction(()=>{
       const el=document.querySelector('.chat-panel__scroll');return el.scrollHeight>el.clientHeight+100;
     });
+    for(let index=0;index<3;index++) {
+      await home.evaluate(({activityId,index})=>apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
+        type:'activity',activity_id:activityId,event_id:'home-incremental-'+index,event_type:'message',unit_id:'go2',
+        text:`首页实时消息 ${index}：`+'新的活动交流应当自动跟随到聊天底部。'.repeat(12),ts:Date.now()/1000+index,
+      }})),{activityId:activity.activity_id,index});
+      await home.waitForFunction(index=>document.querySelector('.space-activity__timeline').textContent.includes(`首页实时消息 ${index}`),{},index);
+      await home.waitForFunction(()=>{
+        const s=document.querySelector('.chat-panel__scroll');return s.scrollHeight-s.clientHeight-s.scrollTop<=2;
+      });
+      if(index===0) {
+        await home.$eval('.chat-panel__scroll',s=>{s.scrollTop-=120;s.dispatchEvent(new Event('scroll',{bubbles:true}));});
+        await home.waitForFunction(()=>{
+          const s=document.querySelector('.chat-panel__scroll');return s.scrollHeight-s.clientHeight-s.scrollTop<=2;
+        });
+      }
+    }
+    assert.equal(await home.$('.chat-panel__latest'),null,'The real home stream lost default following');
+    console.log('PASS: real App home follows three sequential activity messages and recovers automatic scroll-offset changes.');
+    const readingPointer=await home.$eval('.chat-panel__scroll',el=>{
+      const r=el.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};
+    });
+    await home.mouse.move(readingPointer.x,readingPointer.y);
+    await home.mouse.wheel({deltaY:-240});
+    await home.waitForSelector('.chat-panel__latest');
     const outerTop=await home.$eval('.chat-panel__scroll',el=>{el.scrollTop=45;return el.scrollTop;});
     await home.evaluate(()=>apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
       type:'agent_progress',scope:'space',source:'object_search',agent_id:'go2',
@@ -530,7 +581,7 @@ async function browserChecks() {
     await home.evaluate(()=>new Promise(resolve=>setTimeout(resolve,500)));
     assert.equal(await home.$eval('.chat-panel__scroll',el=>el.scrollTop),outerTop,
       'Incoming chat progress pulled the outer page away from its reading position');
-    console.log('PASS: outer page and timeline stay still on arrivals, including at or near the bottom.');
+    console.log('PASS: user-paused reading stays still when new progress arrives.');
     assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-activity-390.png')});
     // A delayed or unusually shaped image must not change the space reserved
@@ -561,6 +612,10 @@ async function browserChecks() {
     await home.waitForFunction(()=>document.querySelector('.space-activity__timeline').textContent.includes('完整活动消息 29'));
     for(const [width,height] of [[320,568],[390,844],[390,320],[844,390],[1280,800]]) {
       await home.setViewport({width,height});
+      await home.focus('.chat-panel__scroll');
+      await home.keyboard.press('Home');
+      await home.waitForSelector('.chat-panel__latest',{timeout:5000});
+      await home.waitForFunction(()=>document.querySelector('.chat-panel__scroll').scrollTop<=2,{timeout:5000});
       const pointer=await home.evaluate(()=>{
         const s=document.querySelector('.chat-panel__scroll'),t=document.querySelector('.space-activity__timeline');
         s.scrollTop+=t.getBoundingClientRect().top-s.getBoundingClientRect().top+40;
@@ -574,10 +629,11 @@ async function browserChecks() {
         return t.scrollHeight<=t.clientHeight+1 && document.documentElement.scrollWidth<=innerWidth
           && input.top>=0 && input.bottom<=innerHeight;
       }),true,`Activity content or composer was clipped at ${width}×${height}`);
-      await home.click('.space-activity__new');
+      await home.waitForSelector('.chat-panel__latest');
+      await home.click('.chat-panel__latest');
       await home.waitForFunction(()=>{
-        const a=document.querySelector('.space-activity__latest'),r=a.getBoundingClientRect(),v=a.closest('.chat-panel__scroll').getBoundingClientRect();
-        return r.top>=v.top && r.bottom<=v.bottom+1;
+        const s=document.querySelector('.chat-panel__scroll');
+        return s.scrollHeight-s.clientHeight-s.scrollTop<=2;
       });
     }
     await home.setViewport({width:390,height:320});
@@ -594,7 +650,7 @@ async function browserChecks() {
         public_result:{activity:{revision:1,members:[{unit_id:lamp.unit_id,status:'joined',mode:'reactive'},
           {unit_id:'go2',status:'offline',reason:'device_offline'}]}}}]}),{activity,lamp});
     await page.waitForFunction(()=>document.querySelector('.run-process-summary')?.textContent.includes('部分完成'));
-    assert.equal(await page.$eval('.run-process-summary',el=>el.open),true);
+    assert.equal(await page.$eval('.run-process-summary',el=>el.open),false);
     assert.match(await page.$eval('.run-process__notes',el=>el.textContent),/呆呆狗当前离线，未能加入活动/);
     assert.match(await page.$eval('.activity-members__footer',el=>el.textContent),/1 位伙伴参与活动/);
     assert.match(await page.$eval('.activity-members',el=>el.textContent),/未加入 · 设备离线/);

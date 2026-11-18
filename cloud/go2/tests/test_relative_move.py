@@ -172,8 +172,9 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
 
 
 @pytest.mark.asyncio
-async def test_cargo_positioning_uses_separate_turning_and_forward_motion(movement, monkeypatch, tmp_path):
-    """Replay staging with the real loop and an ineffective low-speed gait."""
+@pytest.mark.parametrize('progress', ['approached', 'positioned'])
+async def test_cargo_approach_and_positioning_use_separate_turning_and_forward_motion(movement, monkeypatch, tmp_path, progress):
+    """Replay both delivery stages with the real loop and low-speed gait."""
     from cloud.go2.navigation import cargo_push
     from cloud.go2.navigation import navigator as nav_module
     monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
@@ -187,6 +188,9 @@ async def test_cargo_positioning_uses_separate_turning_and_forward_motion(moveme
         'cargo_location': cargo, 'cargo_bbox_1000': [672, 612, 758, 662],
         'destination_location': {'x': 4.809291794668575, 'y': 2.683830000982215},
         'near_destination': False, 'advance_distance_m': .6}
+    if progress == 'positioned':
+        cargo.update(x=pose['x'] + .65, y=pose['y'])
+        sample['destination_location'].update(x=cargo['x'] + .43, y=cargo['y'] + .65)
     monkeypatch.setattr(cargo_push, 'navigator', movement.nav)
     monkeypatch.setattr(cargo_push, '_authorize', nav_module.control_lease.acquire)
     monkeypatch.setattr(cargo_push, 'observe_cargo', AsyncMock(return_value=sample))
@@ -203,7 +207,8 @@ async def test_cargo_positioning_uses_separate_turning_and_forward_motion(moveme
     with use_context(movement.context):
         result = await cargo_push.push_cargo('近处右侧的深色扁盒子', '左后方蓝色点位')
     assert result['result'] == 'ok', (result.get('reason'), result.get('movement'))
-    assert result['progress'] == 'positioned' and result['directional_push_attempted'] is False
+    assert result['progress'] == progress and result['directional_push_attempted'] is False
+    assert result['final'] is False
     assert result['stop']['result'] == 'ok'
     assert any(vx >= .2 for vx, _, _ in movement.commands)
     assert all(vy == 0 for _, vy, _ in movement.commands)
@@ -338,9 +343,12 @@ async def test_turn_reaches_heading_through_native_packets(movement, angle_deg, 
     finally:
         if robot.is_connected:
             robot.move_velocity(0, 0, 0)
-    assert abs(math.degrees(movement.robot.odom['heading'] - goal)) <= 3.
+    assert abs(math.degrees(movement.robot.odom['heading'] - goal)) <= (3. if relative else 10.)
     assert all(vx == vy == 0 for vx, vy, _ in movement.commands)
-    assert .35 <= max(abs(yaw) for _, _, yaw in movement.commands) <= .8
+    if relative or abs(angle_deg) > 10.:
+        assert .35 <= max(abs(yaw) for _, _, yaw in movement.commands) <= .8
+    else:
+        assert all(yaw == 0 for _, _, yaw in movement.commands)
     assert movement.commands[-1] == (0, 0, 0)
     assert robot._move_control_active is False
 
@@ -371,7 +379,9 @@ async def test_stalled_turn_still_stops_without_claiming_success(movement):
 
 
 @pytest.mark.asyncio
-async def test_heading_drift_while_braking_is_not_confirmed_as_arrival(movement):
+@pytest.mark.parametrize('drift, expected', [(math.radians(4), 'succeeded'),
+                                           (math.radians(12), 'failed')])
+async def test_coordinate_arrival_uses_coarse_heading_after_braking(movement, drift, expected):
     original = movement.robot.move_velocity
     turned = False
     goal = movement.start['heading'] + math.radians(20.5)
@@ -381,7 +391,7 @@ async def test_heading_drift_while_braking_is_not_confirmed_as_arrival(movement)
         if yaw:
             turned = True
         elif turned and not any((vx, vy, yaw)):
-            movement.robot.odom['heading'] = goal - .10
+            movement.robot.odom['heading'] = goal - drift
             turned = False
         return original(vx, vy, yaw, **kwargs)
 
@@ -389,8 +399,47 @@ async def test_heading_drift_while_braking_is_not_confirmed_as_arrival(movement)
     result = await movement.nav.go_to_coordinate(
         movement.start['x'], movement.start['y'],
         heading=goal, holonomic=True)
-    assert result['status'] == 'failed'
+    assert result['status'] == expected
+    assert result['reason'] == ('arrival_unconfirmed' if expected == 'failed' else None)
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_explicit_relative_turn_keeps_precise_heading_after_braking(movement):
+    from cloud.go2.tools.tools import go2_move
+    original = movement.robot.move_velocity
+    turned = False
+    goal = movement.start['heading'] + math.radians(20.5)
+
+    def brake_drift(vx, vy, yaw, **kwargs):
+        nonlocal turned
+        if yaw:
+            turned = True
+        elif turned and not any((vx, vy, yaw)):
+            movement.robot.odom['heading'] = goal - math.radians(4)
+            turned = False
+        return original(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = brake_drift
+    with use_context(movement.context):
+        result = await go2_move('turn_left', angle_deg=20.5)
+    assert result['result'] == 'blocked'
     assert result['reason'] == 'arrival_unconfirmed'
+    assert result['stop']['result'] == 'ok'
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('distance, tolerance, needs_motion', [(.12, .15, False), (.20, .15, True),
+                                                            (.20, None, False)])
+async def test_coordinate_arrival_accepts_point_nearby_with_fresh_stop(movement, distance, tolerance, needs_motion):
+    result = await movement.nav.go_to_coordinate(
+        movement.start['x'] + distance * math.cos(movement.start['heading']),
+        movement.start['y'] + distance * math.sin(movement.start['heading']),
+        heading=movement.start['heading'] + math.radians(4), arrival_tolerance_m=tolerance)
+    assert result['status'] == 'succeeded'
+    assert any(vx or vy for vx, vy, _ in movement.commands) is needs_motion
+    assert all(yaw == 0 for _, _, yaw in movement.commands)
     assert movement.commands[-1] == (0, 0, 0)
 
 

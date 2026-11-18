@@ -144,7 +144,14 @@ function activityGameEnd(event) {
   if (event.event_type !== 'game_ended' && !(event.trigger_message_id &&
       (event.event_type === 'response' || event.stage === 'settlement'))) return null;
   const name = {push_delivery:'送货游戏',color_hunt:'找颜色游戏',rps_siege:'猜拳攻灯'}[event.game_id] || '游戏';
-  const reason = activityReasonText(event) || (event.status === 'ok' ? '' : '结束原因尚未记录');
+  let reason = activityReasonText(event) || (event.status === 'ok' ? '' : '结束原因尚未记录');
+  if (event.event_type === 'game_ended' && event.status !== 'ok') {
+    const stage = {preparing:'准备',cargo:'选择货物',find_cargo:'找货',destination:'选择目的地',
+      signal:'设置指令灯色',delivery:'配送规划',push:'推送'}[event.stage];
+    if (stage) reason += `（${stage}阶段）`;
+    if (event.physical_stop === 'unknown' && event.reason !== 'stop_unconfirmed')
+      reason += '；退出时尚未确认停稳';
+  }
   return {name,reason};
 }
 

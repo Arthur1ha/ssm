@@ -25,15 +25,7 @@ function ProcessWaiting({label = '等待回复'}) {
 function RunProcess({events = [], allEvents = events, agents = [], getName = getAgentDisplayName, finished = false, pending = false}) {
   const steps = processSteps(events);
   const attention = steps.filter(step => processNeedsAttention(step.event));
-  const attentionKey = attention.map(step => `${step.key}:${step.event.status}`).join('|');
-  const executingKey = steps.filter(step => step.event.status === 'executing' || step.event.stage === 'dispatching'
-    && !processOutcome(step.event)).map(step => step.key).join('|');
-  const userToggled = React.useRef(false);
-  const [open,setOpen] = React.useState(Boolean(attention.length || executingKey));
-  React.useEffect(() => {
-    if (attentionKey || executingKey) setOpen(true);
-    else if (!userToggled.current) setOpen(false);
-  },[attentionKey,executingKey]);
+  const [open,setOpen] = React.useState(false);
   if (!steps.length) return null;
   const titles = [...new Set(steps.map(step => processFactTitle(step.event,agents)).filter(Boolean))];
   const description = titles.slice(0,2).join('、') || '详情';
@@ -46,7 +38,7 @@ function RunProcess({events = [], allEvents = events, agents = [], getName = get
   let previousActor = null;
   return <div className="run-process" data-process>
     <details className="run-process-summary" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-      <summary onClick={() => {userToggled.current=true;}} aria-label="查看调用与反馈" aria-expanded={open}>
+      <summary aria-label="查看调用与反馈" aria-expanded={open}>
         <span className="run-process-summary__marker" aria-hidden="true"/>
         <span className="run-process-summary__text"><span>{description}</span></span>
         {status && !completed && !pending && <span className="run-process-summary__status"

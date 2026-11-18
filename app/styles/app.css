@@ -88,6 +88,9 @@ body {
 /* Shared conversation shell and homepage-style input/suggestions. */
 .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .chat-panel__scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.chat-panel__content { display: flow-root; }
+.chat-panel__latest { display: block; margin: 6px auto 0; padding: 4px 12px; color: var(--color-text-dim); background: transparent; border: 0; cursor: pointer; font: inherit; font-size: 12px; }
+.chat-panel .space-activity__new { display: none; }
 .chat-panel__footer { flex-shrink: 0; background: var(--color-bar); border-top: 1px solid var(--color-border); }
 .chat-input { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .chat-input__field { flex: 1; min-width: 0; }

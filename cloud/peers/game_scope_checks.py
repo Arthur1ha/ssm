@@ -1,6 +1,7 @@
 """Focused offline boundaries: private attempts, closed games and fresh invites."""
 from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock
+import asyncio
 import time
 
 import pytest
@@ -31,6 +32,111 @@ def activity(tmp_path, monkeypatch):
         store.set_device(aid, unit, mode="reactive" if unit == LAMP else "free_explore", status="joined")
     store.activate(aid)
     return store, aid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activity_state", ["active", "ending", "ended", "new_activity"])
+@pytest.mark.parametrize("stopped", [True, False])
+async def test_cancelled_game_journals_cause_and_stop_without_late_speech(
+        activity, monkeypatch, activity_state, stopped):
+    from cloud.go2.mode import free_explore
+    from cloud.peers import games
+    from cloud.peers.games import base, role_graph
+    from cloud.go2.navigation import navigator as nav_module
+    from cloud.go2 import control
+    from cloud.space.execution import ExecutionContext
+    store, aid = activity
+    drive = free_explore.Drive()
+    drive.owner_session_id = aid
+    drive._context = ExecutionContext(aid, "visitor", False,
+        origin_kind="agent_autonomous", expires_at=int(time.time() + 60))
+    drive._queue_completed_game = Mock()
+    monkeypatch.setattr(free_explore, "go2", SimpleNamespace(is_connected=True))
+    monkeypatch.setattr(free_explore, "runtime_for", lambda _: None)
+    monkeypatch.setattr(base, "game_invitation_ready", lambda *_: True)
+    monkeypatch.setattr(games, "game_is_playable", lambda *_: True)
+    monkeypatch.setattr("cloud.agents.common.effects.FileEffectLedger",
+                        lambda: SimpleNamespace(reserve=lambda *a, **kw: {"reservation": "new"}))
+    navigator = SimpleNamespace(stop=Mock(), stop_and_confirm=AsyncMock(
+        return_value={"result": "ok" if stopped else "accepted"}))
+    monkeypatch.setattr(nav_module, "navigator", navigator)
+    monkeypatch.setattr(control, "control_lease", SimpleNamespace(snapshot=lambda: None))
+    ready = asyncio.Event()
+
+    async def execute(*_args):
+        store.record_event(aid, "game_started", game_id="push_delivery", game_instance_id="original")
+        store.record_event(aid, "action", game_id="push_delivery", game_instance_id="original",
+                           action="go2_find_object", stage="find_cargo")
+        ready.set()
+        await asyncio.Future()
+
+    game = SimpleNamespace(game_id="push_delivery", execute=execute, metadata=lambda: {})
+    monkeypatch.setattr(games, "get_game", lambda _: game)
+    finals = AsyncMock()
+    monkeypatch.setattr(role_graph, "final_responses", finals)
+    messenger = Mock()
+    # A smaller/older transport receipt cannot replace the owner's cause.
+    messenger.get_received_result.return_value = {"result": "unknown", "reason": "stop_unconfirmed"}
+    message = {"message_id": "accepted", "sender": LAMP, "target": DOG,
+        "activity_id": aid, "game_instance_id": "original", "conversation_id": "original"}
+    task = asyncio.create_task(drive._handle_event_owned({"event_id": "accepted", "message_id": "accepted",
+        "kind": "peer_message", "source": LAMP, "activity_id": aid,
+        "interaction_kind": "game_invite", "game_id": "push_delivery",
+        "original_invitation_id": "original", "game_preaccepted": True,
+        "message": message, "messenger": messenger, "deadline": time.time() + 50,
+        "decision": {"choice": "accept"}}, None, None, "test-cancel"))
+    await asyncio.wait_for(ready.wait(), timeout=5)
+    if activity_state != "active":
+        store.begin_end("user_intervention")
+        if activity_state in {"ended", "new_activity"}:
+            store.finish_end(aid)
+    if activity_state == "new_activity":
+        revision = store.note_user_intervention("new-request")
+        record = store.begin("新的活动", "new-request", revision)
+        store.activate(record["activity_id"])
+    current_before = store.current()
+    drive.user_interrupt = True
+    drive._user_handoff_in_progress = True
+    drive._generation += 1
+    drive.owner_session_id = None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    rows = store.events(aid)
+    ended = [r for r in rows if r["event_type"] == "game_ended"]
+    assert len(ended) == 1
+    assert ended[0]["reason"] == "user_intervention"
+    assert ended[0]["physical_stop"] == ("confirmed" if stopped else "unknown")
+    assert ended[0]["stop_reason"] == (None if stopped else "stop_unconfirmed")
+    assert ended[0]["stage"] == "find_cargo"
+    assert ended[0]["status"] == ("cancelled" if stopped else "unknown")
+    assert not any(row.get("stage") == "game_final" for row in rows)
+    finals.assert_not_awaited()
+    drive._queue_completed_game.assert_not_called()
+    if activity_state == "new_activity":
+        assert store.current() == current_before
+    assert store.record_event(aid, "message", game_instance_id="original", text="旧任务续谈") is None
+    assert store.record_event(aid, "game_ended", game_id="push_delivery",
+        game_instance_id="original", reason="迟到结果") == ended[0]
+    assert len([r for r in store.events(aid) if r["event_type"] == "game_ended"]) == 1
+
+
+def test_stop_uncertainty_prevents_free_activity_after_reason_is_separated(monkeypatch):
+    from cloud.go2.mode import free_explore
+    runtime = Mock()
+    monkeypatch.setattr(free_explore, "runtime_for", runtime)
+    drive = free_explore.Drive()
+    drive._queue_completed_game({}, {"reason": "cargo_push_unconfirmed:blocked",
+        "physical_stop": "unknown", "stop_reason": "control_lease_changed"}, "activity", drive._generation)
+    runtime.assert_not_called()
+    assert not drive._events
+
+
+def test_activity_ending_does_not_allow_a_new_game_lifecycle(activity):
+    store, aid = activity
+    store.begin_end("user_intervention")
+    assert store.record_event(aid, "game_started", game_instance_id="new") is None
+    assert store.record_event(aid, "game_ended", game_instance_id="new") is None
 
 
 def test_attempts_stay_visible_but_only_completed_subtasks_enter_shared_context(activity):
@@ -158,8 +264,13 @@ def test_game_modules_cannot_introduce_another_model_or_device_execution_loop():
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
+                if node.module == "cloud.agents.common.models":
+                    # A sampling scope changes the original device Graph's
+                    # request options; it cannot construct or invoke a model.
+                    assert all(alias.name == "text_model_sampling" for alias in node.names), path
+                    continue
                 assert node.module not in {
-                    "cloud.agents.common.models", "cloud.go2.models",
+                    "cloud.go2.models",
                     "cloud.go2.tools.executor", "cloud.esp32.tool_executor"}, path
             if isinstance(node, ast.Call):
                 assert not (isinstance(node.func, ast.Attribute)

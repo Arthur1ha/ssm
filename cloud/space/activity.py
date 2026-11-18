@@ -143,8 +143,8 @@ def _state_at_event(unit_id: str, now: float) -> dict[str, Any]:
     return {**validity, "values": values}
 
 
-def _game_round_snapshot(value: Any) -> dict[str, Any] | None:
-    """Keep the game's receipt-gated public reveal, never its private state."""
+def _game_round_snapshot(value: Any, *, verdict: bool = True) -> dict[str, Any] | None:
+    """Project a public throw; only a receipt-gated verdict includes a winner."""
     if not isinstance(value, dict) or type(value.get("round")) is not int or value["round"] < 1:
         return None
     choices, mapping = value.get("choices"), value.get("mapping")
@@ -154,7 +154,7 @@ def _game_round_snapshot(value: Any) -> dict[str, Any] | None:
     if any(not isinstance(choices.get(unit), str) or choices[unit] not in {"rock", "scissors", "paper"}
            for unit in units):
         return None
-    if not isinstance(value.get("winner"), str) or value["winner"] not in {*units, "draw"}:
+    if verdict and (not isinstance(value.get("winner"), str) or value["winner"] not in {*units, "draw"}):
         return None
     projected = {}
     for unit in units:
@@ -176,7 +176,7 @@ def _game_round_snapshot(value: Any) -> dict[str, Any] | None:
                 return None
             projected[unit].update(action="go2_sport", arguments={"cmd": command})
     return {"round": value["round"], "choices": {unit: choices[unit] for unit in units},
-            "mapping": projected, "winner": value["winner"]}
+            "mapping": projected, **({"winner": value["winner"]} if verdict else {})}
 
 
 class ActivityStore:
@@ -441,14 +441,24 @@ class ActivityStore:
                      text: str = "", source_event_id: str = "",
                      **facts: Any) -> dict[str, Any] | None:
         with self._lock:
-            if not self._current or self._current["activity_id"] != activity_id or self._current["status"] == "ending":
-                return None
             from cloud.peers.games.scope import current_game_scope, current_terminal_scope, terminal_scope_available
             scope = current_game_scope()
             if scope is not None and scope.activity_id == activity_id:
                 facts.setdefault("game_instance_id", scope.invitation_id)
                 facts.setdefault("game_id", scope.game_id)
             instance = game_instance_id(facts)
+            active = (self._current and self._current["activity_id"] == activity_id
+                      and self._current["status"] != "ending")
+            # Cancellation may finish after begin_end/finish_end. Only the
+            # existing game's lifecycle can be journaled then; no old speech,
+            # decisions or effects regain permission, even during a new activity.
+            closing_existing = (event_type in {"game_closing", "game_ended"} and instance
+                                and activity_id in self._records
+                                and any(row.get("event_type") == "game_started"
+                                        and game_instance_id(row) == instance
+                                        for row in self._events.get(activity_id, [])))
+            if not active and not closing_existing:
+                return None
             terminal = current_terminal_scope()
             final_speech = bool(event_type == "message" and facts.get("stage") == "game_final"
                                 and terminal is not None and terminal.invitation_id == instance
@@ -485,7 +495,7 @@ class ActivityStore:
                       if key in {"target_unit_id", "message_id", "conversation_id", "task_id",
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
                                  "interaction_kind", "game_id", "game_instance_id", "context_scope",
-                                 "question_id", "action", "physical_stop", "reason",
+                                 "question_id", "action", "physical_stop", "stop_reason", "reason",
                                  "source", "confidence", "source_event_id", "display", "stage"}})
         event["context_scope"] = ("shared" if facts.get("context_scope") == "shared"
                                   else "process" if facts.get("context_scope") == "process"
@@ -504,6 +514,10 @@ class ActivityStore:
         game_round = _game_round_snapshot(facts.get("game_round"))
         if event.get("game_id") == "rps_siege" and event.get("stage") == "rps_result" and game_round:
             event["game_round"] = game_round
+        if event.get("game_id") == "rps_siege" and event.get("stage") == "rps_dispatched":
+            game_throw = _game_round_snapshot(facts.get("game_throw"), verdict=False)
+            if game_throw:
+                event["game_throw"] = game_throw
         trigger = facts.get("trigger_message_id")
         if isinstance(trigger, str) and 0 < len(trigger) <= 120:
             event["trigger_message_id"] = trigger
@@ -530,10 +544,13 @@ class ActivityStore:
             event.pop("confidence")
         rows = self._events.setdefault(activity_id, [])
         rows.append(event)
-        if event_type in {"game_started", "game_closing", "game_ended"} and self._current:
-            self._current.update(activity_game_context(rows))
-            self._current["revision"] = self._bump_locked()
-            self._records[activity_id] = deepcopy(self._current)
+        if event_type in {"game_started", "game_closing", "game_ended"}:
+            record = (self._current if self._current and self._current["activity_id"] == activity_id
+                      else self._records.get(activity_id))
+            if record is not None:
+                record.update(activity_game_context(rows))
+                record["revision"] = self._bump_locked()
+                self._records[activity_id] = deepcopy(record)
         details = [index for index, item in enumerate(rows) if item["event_type"] not in _KEY_EVENTS]
         if len(details) > _MAX_DETAIL_EVENTS:
             rows.pop(details[0])
