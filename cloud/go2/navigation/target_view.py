@@ -129,7 +129,7 @@ def select_target_view(grid, pose, hint, bounds=None, attempted=(), *, approach=
                     and clear(pose['x'], pose['y'], heading)
                     and sweep(pose['x'], pose['y'], h, heading)['clear']):
                 return {'x': float(pose['x']), 'y': float(pose['y']), 'heading': heading,
-                        'holonomic': True, 'source': 'target_reobservation', 'view_kind': 'turn',
+                        'source': 'target_reobservation', 'view_kind': 'turn',
                         'odom_session_id': pose['session_id'], 'target_distance_known': False}
         return None
 
@@ -154,7 +154,7 @@ def select_target_view(grid, pose, hint, bounds=None, attempted=(), *, approach=
             count = math.ceil((length + .10) / grid.resolution)
             if all(clear(pose['x']+d*math.cos(direction), pose['y']+d*math.sin(direction), h)
                    for d in (i * (length + .10) / count for i in range(count + 1))):
-                return {'x': float(x), 'y': float(y), 'heading': float(h), 'holonomic': True,
+                return {'x': float(x), 'y': float(y), 'heading': float(h),
                         'source': 'target_reobservation', 'view_kind': kind,
                         'odom_session_id': pose['session_id'], 'target_distance_known': False}
     # Turning has no translational parallax, but can recover a clipped view.

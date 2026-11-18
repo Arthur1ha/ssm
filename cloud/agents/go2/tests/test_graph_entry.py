@@ -63,6 +63,43 @@ async def test_already_near_receipt_cannot_be_rewritten_as_physical_push(entry, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('reword_target', [False, True])
+async def test_push_positioning_continues_with_original_cargo_reference(entry, monkeypatch, reword_target):
+    from cloud.go2.navigation.cargo_push import _reference
+
+    cargo, destination = '近处带白圆标的盒子', '蓝色点位'
+    reference = {'cargo': cargo, 'destination': destination, 'odom_session_id': 's',
+                 'cargo_location': {'x': 1., 'y': 0., 'precision': 'approximate'}}
+    model = ScriptedModel([
+        AIMessage(content='', tool_calls=[{'name': 'go2_push_cargo', 'id': 'position',
+            'args': {'cargo': cargo, 'destination': destination, 'final': True}}]),
+        AIMessage(content='', tool_calls=[{'name': 'go2_push_cargo', 'id': 'push',
+            'args': {'cargo': '换位后右侧的白圆标盒子' if reword_target else cargo,
+                     'destination': '盒子左前方的蓝点' if reword_target else destination, 'final': True}}]),
+        AIMessage(content='本次结果已确认。'),
+    ])
+    monkeypatch.setattr(go2_graph, 'get_text_llm', lambda: model)
+    monkeypatch.setattr(go2_graph, 'runtime_for', lambda _: None)
+    calls = []
+    async def execute(name, params, *, context):
+        calls.append(params)
+        if len(calls) == 1:
+            assert _reference.get() is None
+            return {'result': 'ok', 'progress': 'positioned', 'final': False,
+                    'reference': reference, 'stop': {'result': 'ok'}}
+        assert _reference.get() == reference
+        return {'result': 'ok', 'directional_push_attempted': True,
+                'confirmation': 'directional_move_and_stop', 'stop': {'result': 'ok'},
+                'reference': reference, 'final': True}
+    monkeypatch.setattr(go2_graph, 'execute_tool', execute)
+    context = ExecutionContext('push-chain', 'admin', False, expires_at=time.time()+60)
+    result = await go2_graph.run_go2_loop(context.session_id, '把眼前盒子推到蓝点', context=context)
+    assert len(calls) == 2
+    assert len(result['tool_results']) == 2
+    assert result['tool_results'][-1]['result']['directional_push_attempted'] is True
+
+
+@pytest.mark.asyncio
 async def test_delegated_native_skill_returns_facts_without_model_or_device_reply(entry, monkeypatch):
     model = ScriptedModel([])
     monkeypatch.setattr(go2_graph, "get_text_llm", lambda: model)

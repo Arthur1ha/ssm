@@ -33,6 +33,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self.is_connected: bool = False
         self._status_task: asyncio.Task | None = None
         self._command_lock = asyncio.Lock()
+        self._classic_walk_connection = None
         self._completion = None
         self._motion_epoch = 0
         self._last_zero_velocity_epoch = None
@@ -50,6 +51,8 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
 
     async def connect(self, email: str, password: str, serial: str, region: str = "cn") -> None:
         self._stop_manual_velocity()
+        self.is_connected = False
+        self._classic_walk_connection = None
         self._motion_observation_enabled = False
         self._velocity_command_active = False
         if self._status_task is not None:
@@ -188,6 +191,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
     async def disconnect(self) -> None:
         self._stop_manual_velocity()
         connection, self._conn = self._conn, None
+        self._classic_walk_connection = None
         self._odom_session_id = uuid.uuid4().hex
         owner = self.runtime.data['life_owner']
         self._connected_serial = None
@@ -438,6 +442,11 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
         next_state = self._validate_motion(cmd, params, dispatch_only=dispatch_only)
+        if cmd == 'Move' and sum(abs((params or {}).get(axis, 0.)) > 1e-9
+                                 for axis in ('x', 'y', 'z')) > 1:
+            # Task/training dispatch cannot reintroduce mixed-axis walking.
+            # Joystick targets use their separate explicit velocity entrance.
+            raise CommandBlocked('mixed_motion_command')
         spec = ACTIONS[cmd]
         if cmd == "EnterMoveControl":
             # Prepare the explicit Sport Move channel without entering
@@ -453,10 +462,14 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
                 raise ValueError('机器狗尚未确认移动准备')
             if code != 0:
                 return None, response
+            await self._ensure_classic_walk()
             self._validate_motion(cmd)
             self._move_control_active = True
             logger.info('[Go2/Conn] 移动准备已确认（Sport Move/StopMove）')
             return None, response
+        if cmd == 'Move':
+            await self._ensure_classic_walk()
+            self._validate_motion(cmd, params)
         if (self._move_control_active or self._velocity_command_active) and cmd not in {'Move', 'BalanceStand'}:
             # Stop continuous velocity before starting another body action.
             self.stop_velocity()
@@ -633,6 +646,45 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         logger.info("[Go2/Conn] 发送命令: %s request=%s code=%s", cmd, request_id, code)
         return waiter, response
 
+    async def _ensure_classic_walk(self) -> None:
+        """Select once when the observed body is ready, shared by all Move users."""
+        connection, epoch = self._conn, self._motion_epoch
+        if self._classic_walk_connection is connection:
+            return
+        result = await self._select_classic_walk(connection, can_continue=lambda: (
+            self.is_connected and self._conn is connection and self._motion_epoch == epoch))
+        if result['result'] != 'accepted':
+            raise CommandBlocked(f"经典行走步态尚未确认: {result}")
+
+    async def enable_classic_walk(self, *, can_continue) -> dict:
+        """Select native ClassicWalk, without changing posture or commanding speed."""
+        async with self._command_lock:
+            if not can_continue():
+                raise ValueError('control_owner_changed')
+            self._validate_motion('Move', {'x': .3, 'y': 0., 'z': 0.})
+            return await self._select_classic_walk(self._conn, can_continue=can_continue)
+
+    async def _select_classic_walk(self, connection, *, can_continue) -> dict:
+        """Configure native gait only; connection setup needs no body posture."""
+        if self._conn is not connection or not can_continue():
+            raise ValueError('control_owner_changed')
+        wire_id = time.time_ns() & 0x7fffffff or 1
+        response = await asyncio.wait_for(self._publish_sport_request(connection, {
+            'api_id': 2049, 'id': wire_id, 'parameter': {'data': True},
+        }), timeout=_SPORT_RPC_TIMEOUT_S)
+        packet = response.get('data') if isinstance(response, dict) else None
+        header = packet.get('header') if isinstance(packet, dict) else None
+        status = header.get('status') if isinstance(header, dict) else None
+        code = status.get('code') if isinstance(status, dict) else None
+        logger.info('[Go2/Gait] ClassicWalk api=2049 enabled=true code=%s request=%s', code, wire_id)
+        if not can_continue() or self._conn is not connection:
+            return {'result': 'blocked', 'error': 'control_owner_changed', 'code': code}
+        if type(code) is int and code == 0:
+            self._classic_walk_connection = connection
+        return {'result': 'accepted' if type(code) is int and code == 0 else 'error',
+                'gait': 'ClassicWalk', 'api_id': 2049, 'code': code,
+                'confirmation_scope': 'request'}
+
     async def switch_mode(self, mode: str) -> None:
         if not self.is_connected or not self._conn:
             raise RuntimeError("Go2 not connected")
@@ -677,6 +729,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         self._publish_velocity(vx, vy, vyaw)
         self._finish_pending("cancelled", "velocity_override")
         self._motion_epoch += 1
+        was_active = self._velocity_command_active
         self._velocity_command_active = active
         self._last_zero_velocity_epoch = self._motion_epoch if not active else None
         if active:
@@ -684,7 +737,11 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
             self._stationary_samples = 0
         elif self.body_state == "moving":
             self.runtime.body(None, confirmation="unknown")
-        self._state_changed()
+        # A velocity refresh is not a new public state. Telemetry already
+        # publishes real body changes; avoid running all state subscribers on
+        # every control tick (as with the joystick's periodic stream).
+        if active != was_active:
+            self._state_changed()
         if self._velocity_timer:
             self._velocity_timer.cancel()
             self._velocity_timer = None
@@ -737,6 +794,7 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
 
     def _expire_velocity(self):
         self._velocity_timer = None
+        logger.warning('[Go2/Motion] velocity input watchdog expired; sending StopMove')
         try:
             self.move_velocity(0, 0, 0)
         except (RuntimeError, ValueError):

@@ -3,6 +3,7 @@
 只在新鲜同帧的已知自由空间规划，所有退出路径停止。
 """
 import asyncio
+from asyncio import create_task as create_planning_task, gather as gather_planning_tasks
 from cloud.agents.common.runner import invoke_blocking
 import logging
 import math
@@ -18,6 +19,7 @@ from cloud.go2.navigation.astar import astar
 from cloud.go2.control import control_lease, LeaseConflict
 from cloud.go2.actions import (VELOCITY_LIMITS, resolve_move_speed,
     MOVE_DISTANCE_TOLERANCE_M, MOVE_ANGLE_TOLERANCE_RAD)
+from cloud.go2.motion import COMMAND_TTL_S, CONTROL_INTERVAL_S, VelocityProfile, turn_velocity
 from cloud.observability import emit_agent_event
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,6 @@ TELEMETRY_RECOVERY_S = 3.0    # s; hold still while fresh odom/map packets resum
 ARRIVAL_THRESHOLD    = 0.3    # m
 HEADING_THRESHOLD    = MOVE_ANGLE_TOLERANCE_RAD  # rad，终点朝向与相对转向使用同一容差
 WALK_SPEED           = 0.3    # m/s
-KP_YAW               = 0.8
 MAX_RETRIES          = 6
 MIN_LINEAR_VEL       = 0.1    # m/s，路径跟随最低线速度
 MOTION_PROGRESS_TIMEOUT_S = 5.0
@@ -37,8 +38,9 @@ LOOKAHEAD_DIST       = 0.6    # m，前瞻距离
 REPLAN_INTERVAL      = 1.0    # s，重规划间隔
 MAX_PATH_DEVIATION   = 0.8    # m，偏离路径超过此值立即重规划
 MAX_SPIN_TIME        = 10.0   # s，初始转向超时
-# 偏角超过此值时纯转向，否则边走边修正
-PATH_HEADING_INHIBIT = 0.5    # rad (~28°)
+# 明显偏航时停稳转正，转正后连续走；不同阈值避免在临界角反复切换。
+PATH_HEADING_INHIBIT = 0.3    # rad (~17°)，进入纠正
+PATH_HEADING_RELEASE = 0.08  # rad (~5°)，结束纠正
 
 
 class _MotionProgress:
@@ -192,7 +194,8 @@ class Navigator:
         y = start["y"] if turning else start["y"] + distance_m * math.sin(axis)
         loc = {"name": "相对移动", "x": x, "y": y, "heading": heading,
                "session_id": session, "frame_id": "odom", "relative_motion": True,
-               "speed_limit": None if turning else speed, "holonomic": True,
+               "relative_direction": direction, "motion_axis": axis,
+               "speed_limit": None if turning else speed,
                "arrival_tolerance_m": MOVE_DISTANCE_TOLERANCE_M,
                "context": context}
         if turning:
@@ -262,16 +265,31 @@ class Navigator:
                                stop_cell_tolerance_m: float | None = None,
                                face_target_bias_rad: float | Callable[[], float] = 0.0,
                                arrival_tolerance_m: float | None = None,
-                               bounds: tuple[float, float, float, float] | None = None) -> dict:
+                               bounds: tuple[float, float, float, float] | None = None,
+                               route_keepout: tuple[float, float, float] | None = None,
+                               cargo_contact=None) -> dict:
+        """Reach a map coordinate by turning toward the route and walking forward.
+
+        ``holonomic`` is accepted for existing callers but cannot enable mixed
+        XY movement. ``heading`` / ``face_target`` only align the body at arrival.
+        Explicit sideways/backward requests use move_relative instead.
+        """
+        if cargo_contact is not None:
+            from cloud.go2.tools.executor import validate_execution_context
+            validate_execution_context(cargo_contact.context)
+            if cargo_contact.context.session_id != owner_session_id:
+                return {'status': 'blocked', 'reason': 'cargo_contact_scope_mismatch'}
         task = asyncio.current_task()
         self._begin("exploration target", owner_session_id, task)
         return await self._run_to("exploration target", {"name": "exploration target", "x": x, "y": y,
                                                           "heading": heading, "frame_id": "odom",
                                                           "keepout": keepout,
+                                                          "route_keepout": route_keepout,
+                                                          "cargo_contact": cargo_contact,
+                                                          "context": cargo_contact.context if cargo_contact else None,
                                                           "bounds": bounds,
                                                           "speed_limit": speed_limit,
                                                           "minimum_command_speed": minimum_command_speed,
-                                                          "holonomic": holonomic,
                                                           "face_target": face_target,
                                                           "stop_when_near_target_m": stop_when_near_target_m,
                                                           "stop_cell_tolerance_m": stop_cell_tolerance_m,
@@ -282,6 +300,19 @@ class Navigator:
     async def _run_to(self, name: str, loc: dict | None = None) -> dict:
         task = asyncio.current_task()
         task_id = self.task_id
+        velocity_profile = VelocityProfile()
+        planning_task = None
+        planning_pose = None
+
+        def stop_motion(reason):
+            # Safety stops bypass smoothing; the next move ramps from rest.
+            if velocity_profile.sent_at is not None:
+                emit_agent_event('navigation.progress', task_id=task_id,
+                                 phase='motion_paused', reason=reason,
+                                 last_command=dict(zip(('vx', 'vy', 'yaw'), velocity_profile.velocity)))
+            velocity_profile.reset()
+            go2.move_velocity(0, 0, 0)
+
         try:
             if loc is None:
                 loc = await spatial_memory.find_location(name)
@@ -340,6 +371,7 @@ class Navigator:
             last_control_stamp = getattr(go2, 'odom_received_at', None)
             motion_gap_since = None
             body_gap_since = None
+            turning_to_heading = True  # Align once before the first translation.
 
             async def checked_snapshot():
                 snapshot, reason = self._snapshot()
@@ -348,7 +380,6 @@ class Navigator:
                     from cloud.go2.perception.visual_target import TargetUnlocalized
                     pose, grid = snapshot
                     try:
-                        checked_at = time.monotonic()
                         grid = await invoke_blocking(contact.grid_for, grid, pose)
                     except TargetUnlocalized as exc:
                         return None, exc.reason
@@ -368,11 +399,7 @@ class Navigator:
                         return None, 'map_mismatch'
                     if context.expires_at and time.time() >= context.expires_at:
                         return None, 'cargo_contact_scope_changed'
-                    if (time.monotonic() - checked_at > .3
-                            or math.hypot(live['x']-pose['x'], live['y']-pose['y']) > .03
-                            or abs(_normalize_angle(live['heading']-pose['heading'])) > .05):
-                        return None, 'map_unavailable'
-                    snapshot = pose, grid
+                    snapshot = live, grid
                 return snapshot, reason
 
             motion_started = False
@@ -383,17 +410,54 @@ class Navigator:
                 if (type(stamp) not in (int, float) or not math.isfinite(stamp)
                         or (last_control_stamp is not None and stamp <= last_control_stamp)):
                     # Never refresh a velocity command using the same cached
-                    # sample. Hold still until the existing recovery window
-                    # supplies another packet, rather than expiring old poses.
-                    go2.move_velocity(0, 0, 0)
-                    progress.reset()
+                    # sample. A duplicate packet is not a new stop/start action:
+                    # withhold output; the unchanged .3s watchdog bounds motion.
                     now = time.monotonic()
+                    if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+                            or velocity_profile.sent_at is not None
+                            and now - velocity_profile.sent_at >= COMMAND_TTL_S):
+                        stop_motion('odometry_not_updated')
+                        progress.reset()
                     if motion_gap_since is None:
                         motion_gap_since = now
                     if now - motion_gap_since >= TELEMETRY_RECOVERY_S:
                         return {'reason': 'localization_unavailable'}
                     return None
                 last_control_stamp, motion_gap_since = stamp, None
+                previous = velocity_profile.velocity
+                if any(previous) and bool(vx or vy) != bool(previous[0] or previous[1]):
+                    # Walk and turn are separate body actions. Finish braking
+                    # before changing between them, rather than blending a
+                    # forward/sideways remnant into the next rotation.
+                    stop_motion('walk_turn_transition')
+                    if not await self._confirm_stopped(None, None):
+                        return {'reason': 'stop_unconfirmed'}
+                    progress.reset()
+                    return None  # Recompute from the new pose and permissions.
+                command_at = time.monotonic()
+                vx, vy, yaw = velocity_profile.preview((vx, vy, yaw), command_at)
+                if sum(abs(value) > 1e-9 for value in (vx, vy, yaw)) > 1:
+                    stop_motion('mixed_motion_command')
+                    return {'reason': 'mixed_motion_command'}
+                # Smoothing retains momentum while changing direction. Check
+                # that actual command as well as the requested path, using the
+                # current full/private contact map and keepout constraints.
+                # No await separates the outer snapshot/target calculation
+                # from this check. Reuse its validated contact view rather
+                # than adding another map-building wait to every control tick.
+                live, grid = pose, fresh_grid
+                body_clear = getattr(grid, 'is_body_clear', None)
+                if body_clear is not None:
+                    c, s = math.cos(live['heading']), math.sin(live['heading'])
+                    for horizon in (.1, .2, COMMAND_TTL_S):
+                        px = live['x'] + (vx*c-vy*s) * horizon
+                        py = live['y'] + (vx*s+vy*c) * horizon
+                        keepout = loc.get('keepout')
+                        if (keepout and math.hypot(px-keepout[0], py-keepout[1]) < keepout[2]
+                                or not body_clear(px, py, live['heading']+yaw*horizon)):
+                            stop_motion('body_clearance_unavailable')
+                            return {'reason': 'body_clearance_unavailable',
+                                    'command': {'vx': vx, 'vy': vy, 'yaw': yaw}}
                 if loc.get("relative_motion") and not motion_started:
                     from cloud.go2.tools.executor import execute_action
                     restore_control = getattr(go2, '_move_control_active', None) is False
@@ -430,17 +494,18 @@ class Navigator:
                 if stalled:
                     return {**stalled, 'last_command': last_command}
                 try:
-                    go2.move_velocity(vx, vy, yaw, deadman_s=.3)
+                    go2.move_velocity(vx, vy, yaw, deadman_s=COMMAND_TTL_S)
                 except CommandBlocked as exc:
                     if str(exc) != '等待有效设备反馈':
                         raise
                     # A planner/deadman pause may invalidate body confirmation
                     # after this iteration's snapshot. Yield to actual telemetry;
                     # the outer loop owns the bounded recovery and all rechecks.
-                    go2.move_velocity(0, 0, 0)
+                    stop_motion('posture_not_confirmed')
                     progress.reset()
                     return None
                 last_command = {"vx": round(vx, 3), "vy": round(vy, 3), "yaw": round(yaw, 3)}
+                velocity_profile.sent((vx, vy, yaw), command_at)
                 return None
 
             while time.monotonic() < deadline:
@@ -457,7 +522,7 @@ class Navigator:
                                    and getattr(go2, "is_connected", False))
                     if sensor_gap_since is None or not recoverable:
                         try:
-                            go2.move_velocity(0, 0, 0)
+                            stop_motion(reason)
                         except (RuntimeError, ValueError):
                             pass
                     if recoverable:
@@ -467,7 +532,7 @@ class Navigator:
                             logger.warning("[Go2/Nav] telemetry paused reason=%s diagnostics=%s",
                                            reason, getattr(go2, "sensor_diagnostics", None))
                         if now - sensor_gap_since < TELEMETRY_RECOVERY_S:
-                            await asyncio.sleep(0.1)
+                            await asyncio.sleep(CONTROL_INTERVAL_S)
                             continue
                     diagnostics = {
                         "sensor": getattr(go2, "sensor_diagnostics", None),
@@ -499,7 +564,7 @@ class Navigator:
                                             '身体反馈不可用，未继续发送移动指令', task_id)
                     if body_gap_since is None:
                         body_gap_since = time.monotonic()
-                        go2.move_velocity(0, 0, 0)
+                        stop_motion('posture_not_confirmed')
                         logger.info('[Go2/Nav] waiting for body feedback after pause')
                     if time.monotonic() - body_gap_since >= TELEMETRY_RECOVERY_S:
                         return self._finish('blocked', 'posture_not_confirmed',
@@ -535,14 +600,32 @@ class Navigator:
                             return self._finish("succeeded", None, "已接近目标并停稳", task_id)
                         return self._finish("failed", "arrival_unconfirmed", "未能确认停稳抵达", task_id)
                 now = time.monotonic()
-                if path is None or now - last_replan >= REPLAN_INTERVAL:
-                    planned_pose = odom.copy()
-                    planned = await invoke_blocking(self._plan_path, loc, fresh_grid, odom, avoided_points)
+                if path is not None and planning_task is None and now - last_replan >= REPLAN_INTERVAL:
+                    # A periodic plan may be slow. Keep validating/controlling
+                    # the current route against each live map while it runs.
+                    planning_pose = odom.copy()
+                    planning_task = create_planning_task(invoke_blocking(
+                        self._plan_path, loc.copy(), fresh_grid, planning_pose, avoided_points.copy()))
+                    last_replan = now
+                if path is None or planning_task is not None and planning_task.done():
+                    if path is None:
+                        # A safety invalidation requires a new route from rest;
+                        # a pending periodic result cannot undo that stop.
+                        if planning_task is not None:
+                            planning_task.cancel()
+                            await gather_planning_tasks(planning_task, return_exceptions=True)
+                            planning_task = None
+                        planned_pose = odom.copy()
+                        planned = await invoke_blocking(self._plan_path, loc, fresh_grid, odom, avoided_points)
+                    else:
+                        planned_pose = planning_pose
+                        planned = planning_task.result()
+                        planning_task = None
                     # Planning yields control. Its input may be stale or the
                     # device/session/owner may have changed before it returns.
                     latest, latest_reason = await checked_snapshot()
                     if latest_reason:
-                        go2.move_velocity(0, 0, 0)
+                        stop_motion(latest_reason)
                         if latest_reason.startswith('cargo_contact_'):
                             return self._finish('blocked', latest_reason, '货物接触条件变化，已停止推送', task_id)
                         progress.reset()
@@ -559,9 +642,12 @@ class Navigator:
                             return self._finish('cancelled', 'control_lease_lost', '运动租约已失效', task_id)
                     if (math.hypot(odom['x']-planned_pose['x'], odom['y']-planned_pose['y']) > .10
                             or abs(_normalize_angle(odom['heading']-planned_pose['heading'])) > .15):
-                        go2.move_velocity(0, 0, 0)
-                        progress.reset()
-                        path = None
+                        if path is None:
+                            stop_motion('plan_pose_changed')
+                            progress.reset()
+                        # A stale replacement is discarded. The previous path
+                        # is still subject to all live footprint checks.
+                        await asyncio.sleep(.1)
                         continue
                     self.last_trusted_pose = odom.copy()
                     if keepout and math.hypot(odom['x']-keepout[0], odom['y']-keepout[1]) < keepout[2]:
@@ -577,6 +663,9 @@ class Navigator:
                     self.actual_goal = {"x": goal[0], "y": goal[1], "adjusted": goal[2]}
                     last_replan = now
                     replan_count += 1
+                    route_x, route_y = _find_lookahead_on_path(
+                        path, grid_obj, odom['x'], odom['y'], odom['heading'],
+                        {'x': goal[0], 'y': goal[1]}, front_only=True)
                     emit_agent_event(
                         "navigation.progress", task_id=task_id,
                         replan_count=replan_count,
@@ -586,9 +675,25 @@ class Navigator:
                             odom["y"] - start_pose["y"]), 3),
                         goal_odom_xy=[round(goal[0], 3), round(goal[1], 3)],
                         last_command=last_command,
+                        motion_mode=loc.get('relative_direction') or 'turn_then_forward',
+                        pose_heading_rad=odom['heading'],
+                        lookahead_odom_xy=[round(route_x, 3), round(route_y, 3)],
+                        route_heading_error_rad=_normalize_angle(
+                            math.atan2(route_y-odom['y'], route_x-odom['x'])-odom['heading']),
                     )
                 dx, dy = goal[0] - odom["x"], goal[1] - odom["y"]
                 dist = math.hypot(dx, dy)
+                relative_translation = loc.get('relative_direction') in {'forward', 'backward', 'left', 'right'}
+                if loc.get('relative_direction') in {'turn_left', 'turn_right'}:
+                    # A turn requests an angle, not a return to the exact XY
+                    # origin after the feet/body shift slightly during rotation.
+                    dist = 0.
+                elif relative_translation:
+                    # A body-axis distance request finishes on its measured
+                    # projected distance, without adding another axis to chase
+                    # a small lateral odometry/heading drift.
+                    axis = loc['motion_axis']
+                    dist = max(0., dx * math.cos(axis) + dy * math.sin(axis))
                 stop_cell_tolerance = loc.get("stop_cell_tolerance_m")
                 if (near_radius is not None and stop_cell_tolerance is not None
                         and 0 < stop_cell_tolerance <= 0.5
@@ -605,81 +710,75 @@ class Navigator:
                 if precise_tolerance is not None:
                     arrival_tolerance = min(arrival_tolerance, precise_tolerance)
                 if dist < arrival_tolerance:
-                    if loc.get("heading") is not None:
-                        heading_error = _normalize_angle(loc["heading"] - odom["heading"])
+                    arrival_heading = loc.get('heading')
+                    if arrival_heading is None and loc.get('face_target') is not None:
+                        fx, fy = loc['face_target']
+                        bias = loc.get('face_target_bias_rad', 0.)
+                        arrival_heading = math.atan2(fy-odom['y'], fx-odom['x']) + (
+                            bias() if callable(bias) else bias)
+                    if arrival_heading is not None:
+                        heading_error = _normalize_angle(arrival_heading - odom["heading"])
                         heading_tolerance = MOVE_ANGLE_TOLERANCE_RAD if loc.get("relative_motion") else HEADING_THRESHOLD
                         if abs(heading_error) > heading_tolerance:
-                            details = self._turn_details(fresh_grid, odom, loc["heading"])
+                            details = self._turn_details(fresh_grid, odom, arrival_heading)
                             if not details["clear"]:
                                 return self._finish("blocked", "turn_clearance_unavailable",
                                                     "转向扫掠空间未确认，已停止", task_id,
                                                     diagnostics=details)
-                            yaw = math.copysign(turn_speed, heading_error)
+                            yaw = turn_velocity(heading_error, turn_speed, heading_tolerance)
                             stalled = await send_motion(0, 0, yaw, odom)
                             if stalled:
                                 return self._finish("blocked", stalled.get("reason") or "motion_not_observed",
                                                     "设备约束拒绝启动转向" if stalled.get("reason") else
                                                     "转向指令未产生可确认的转动，已停止", task_id,
                                                     diagnostics=stalled)
-                            await asyncio.sleep(0.1)
+                            await asyncio.sleep(CONTROL_INTERVAL_S)
                             continue
-                    if await self._confirm_stopped(goal, loc.get("heading"), arrival_tolerance):
+                    stop_goal = (odom['x'], odom['y'], False) if loc.get('relative_motion') else goal
+                    if await self._confirm_stopped(stop_goal, arrival_heading, arrival_tolerance):
                         suffix = "停靠点" if goal[2] else f"「{name}」"
                         return self._finish("succeeded", None, f"已到达{suffix}", task_id)
                     return self._finish("failed", "arrival_unconfirmed", "未能确认停稳抵达", task_id)
                 if _distance_to_path(path, grid_obj, odom["x"], odom["y"]) > MAX_PATH_DEVIATION:
-                    go2.move_velocity(0, 0, 0)
+                    stop_motion('path_deviation')
                     progress.reset()
                     path = None
                     continue
-                lx, ly = _find_lookahead_on_path(path, grid_obj, odom["x"], odom["y"], odom["heading"],
-                                                  {"x": goal[0], "y": goal[1]},
-                                                  front_only=not loc.get("holonomic", False))
-                if loc.get("relative_motion"):
+                if relative_translation:
                     lx, ly = loc["x"], loc["y"]
+                else:
+                    lx, ly = _find_lookahead_on_path(path, grid_obj, odom["x"], odom["y"], odom["heading"],
+                                                   {"x": goal[0], "y": goal[1]}, front_only=True)
                 heading_error = _normalize_angle(math.atan2(ly - odom["y"], lx - odom["x"]) - odom["heading"])
-                if loc.get("holonomic"):
-                    # A short measured move still needs the requested velocity:
-                    # distance-proportional slowdown can stay below the robot's
-                    # effective gait input for the entire remaining distance.
-                    speed = (speed_limit if loc.get('relative_motion') else
-                             min(speed_limit or WALK_SPEED, max(command_floor, dist * 0.8)))
-                    vx, vy = speed * math.cos(heading_error), speed * math.sin(heading_error)
-                    if loc.get('minimum_command_speed') is not None:
-                        # A vector norm floor alone leaves small diagonal axes
-                        # ineffective. Prefer the dominant body axis instead of
-                        # amplifying both axes beyond the requested norm limit.
-                        if abs(vx) < command_floor or abs(vy) < command_floor:
-                            if abs(vx) >= abs(vy):
-                                vx, vy = math.copysign(speed, vx), 0.
-                            else:
-                                vx, vy = 0., math.copysign(speed, vy)
-                    face_target = loc.get("face_target")
-                    if face_target is None:
-                        yaw = (max(-turn_speed, min(turn_speed, KP_YAW * _normalize_angle(
-                            loc["heading"] - odom["heading"]))) if loc.get("relative_motion") else 0.0)
-                    else:
-                        bias = loc.get("face_target_bias_rad", 0.0)
-                        if callable(bias):
-                            bias = bias()
-                        target_heading = math.atan2(
-                            face_target[1] - odom["y"],
-                            face_target[0] - odom["x"]) + bias
-                        yaw_error = _normalize_angle(target_heading - odom["heading"])
-                        yaw = max(-turn_speed, min(turn_speed, KP_YAW * yaw_error))
-                elif abs(heading_error) > PATH_HEADING_INHIBIT:
-                    vx, vy, yaw = 0.0, 0.0, math.copysign(turn_speed, heading_error)
+                if relative_translation:
+                    speed = speed_limit
+                    vx, vy = {
+                        'forward': (speed, 0.), 'backward': (-speed, 0.),
+                        'left': (0., speed), 'right': (0., -speed),
+                    }[loc['relative_direction']]
+                    yaw_error = _normalize_angle(loc['heading'] - odom['heading'])
                 else:
                     vx = min(speed_limit or WALK_SPEED, max(command_floor, dist * 0.8))
                     vy = 0.0
-                    yaw = max(-turn_speed, min(turn_speed, KP_YAW * heading_error))
+                    yaw_error = heading_error
+                # Turn to a useful heading, then walk without perpetual tiny
+                # yaw corrections. Separate thresholds prevent chatter at a
+                # path bend. Relative movement keeps its requested body axis;
+                # absolute navigation faces the route, then aligns at arrival.
+                turning_to_heading = abs(yaw_error) > (
+                    PATH_HEADING_RELEASE if turning_to_heading else PATH_HEADING_INHIBIT)
+                if turning_to_heading:
+                    vx, vy = 0., 0.
+                    yaw = turn_velocity(yaw_error, turn_speed, PATH_HEADING_RELEASE)
+                else:
+                    yaw = 0.
                 body_clear = getattr(fresh_grid, "is_body_clear", None)
                 if body_clear is not None:
                     if not body_clear(odom["x"], odom["y"], odom["heading"]):
                         return self._finish("blocked", "body_clearance_unavailable",
                                             "地图未确认当前机身周围可通行空间，已停止", task_id)
                     if vx == 0 and vy == 0 and yaw != 0:
-                        details = self._turn_details(fresh_grid, odom, odom["heading"] + heading_error)
+                        details = self._turn_details(fresh_grid, odom, odom["heading"] + yaw_error)
                         if not details["clear"]:
                             return self._finish("blocked", "turn_clearance_unavailable",
                                                 "转向扫掠空间未确认，已停止", task_id,
@@ -712,7 +811,7 @@ class Navigator:
                         )
                         if (not loc.get("relative_motion") and blocked_cell is not None and blocked_cell != current_cell
                                 and blocked_cell not in previous_cells):
-                            go2.move_velocity(0, 0, 0)
+                            stop_motion('body_clearance_replan')
                             progress.reset()
                             avoided_points.append((predicted_x, predicted_y))
                             path = None
@@ -725,7 +824,7 @@ class Navigator:
                                         "设备约束拒绝启动移动" if stalled.get("reason") else
                                         "运动指令未产生可确认的位移，已停止", task_id,
                                         diagnostics=stalled)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(CONTROL_INTERVAL_S)
             return self._finish(
                 "failed", "navigation_timeout", "导航超时，已停止", task_id,
                 diagnostics={
@@ -755,6 +854,9 @@ class Navigator:
                     go2.move_velocity(0, 0, 0)
             except (RuntimeError, ValueError):
                 logger.warning("[Go2/Nav] stop packet could not be sent")
+            if planning_task is not None:
+                planning_task.cancel()
+                await gather_planning_tasks(planning_task, return_exceptions=True)
             if self._task is task:
                 runtime = runtime_for(go2)
                 if runtime is not None:
@@ -856,8 +958,10 @@ class Navigator:
             return None, "map_unavailable"
         if getattr(grid, "session_id", getattr(go2, "_odom_session_id", None)) != getattr(go2, "_odom_session_id", None):
             return None, "map_mismatch"
-        if (now - getattr(grid, "observed_at", map_age) > MAP_STALE_S
-                or map_age - getattr(grid, "observed_at", map_age) > .3):
+        # Receiving a new voxel packet does not invalidate the last completed
+        # map while its replacement builds. Judge that map by its own original
+        # observation time, retaining the existing two-second freshness bound.
+        if now - getattr(grid, "observed_at", map_age) > MAP_STALE_S:
             return None, "map_unavailable"
         return (odom, grid), None
 
@@ -876,7 +980,10 @@ class Navigator:
             if not grid_obj.is_free(*raw_goal):
                 return None
             return [start, raw_goal], grid_obj, (loc["x"], loc["y"], False)
-        keepout = loc.get("keepout")
+        # A cargo estimate can suggest a detour without becoming a physical
+        # exclusion zone. Live motion still checks the complete obstacle map.
+        advisory = loc.get("route_keepout") if not loc.get("keepout") else None
+        keepout = loc.get("keepout") or advisory
         path_grid = grid_obj.grid
         bounds = loc.get("bounds")
         if bounds is not None:
@@ -905,6 +1012,8 @@ class Navigator:
                     continue
                 path_grid[iy, ix] = True
         if path_grid[start[1], start[0]]:
+            if advisory:
+                return self._plan_path({**loc, "route_keepout": None}, grid_obj, odom, avoided_points)
             return None
         goal = raw_goal
         goal_tolerance = loc.get('arrival_tolerance_m') or ARRIVAL_THRESHOLD
@@ -928,7 +1037,7 @@ class Navigator:
             else:
                 goal = None
         path = astar(path_grid, start, goal) if goal is not None else None
-        if (path is None and keepout and loc.get("face_target") is not None
+        if (path is None and keepout and not advisory and loc.get("face_target") is not None
                 and loc.get('arrival_tolerance_m') is None):
             # The live map may mark the original stop cell occupied as the
             # robot approaches. Choose a new reachable stop from this map.
@@ -938,6 +1047,8 @@ class Navigator:
                 goal = grid_obj.odom_to_grid(stop["x"], stop["y"])
                 path = astar(path_grid, start, goal)
         if path is None:
+            if advisory:
+                return self._plan_path({**loc, "route_keepout": None}, grid_obj, odom, avoided_points)
             return None
         wx, wy = grid_obj.grid_to_odom(*goal)
         if goal == raw_goal:
@@ -1092,7 +1203,7 @@ def _find_lookahead_on_path(
     goal_loc: dict,
     front_only: bool = True,
 ) -> tuple[float, float]:
-    """Find a path lookahead; holonomic motion may follow a point beside the body."""
+    """Find the next route point, without revisiting the path behind the robot."""
     if not path:
         return goal_loc["x"], goal_loc["y"]
     # Replanning and odom updates can move the robot past the first few path

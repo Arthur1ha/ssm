@@ -1,4 +1,4 @@
-"""One server-owned forward contact allowance, using fresh measured cargo.
+"""One target-aware map view shared by cargo approach and forward pushing.
 
 Ordinary navigation keeps the full obstacle map. This bounded movement uses a
 private map view excluding only the uniquely re-associated cargo component.
@@ -40,17 +40,6 @@ def claim_contact(direction, distance_m, speed, context):
     return contact
 
 
-class _ContactGrid:
-    def __init__(self, grid, contact):
-        self._grid, self._contact = grid, contact
-
-    def __getattr__(self, name):
-        return getattr(self._grid, name)
-
-    def is_body_clear(self, x, y, heading):
-        return self._contact.in_scope(x, y, heading) and self._grid.is_body_clear(x, y, heading)
-
-
 class CargoContact:
     def __init__(self, sample, start, advance, context):
         self.context, self.advance = context, advance
@@ -59,9 +48,10 @@ class CargoContact:
         source = sample.get('contact_observation') or {}
         self.points = np.asarray(source.get('points_odom', []), dtype=float)
         if (self.points.ndim != 2 or self.points.shape[1] != 3
-                or not 6 <= len(self.points) <= 512 or not np.isfinite(self.points).all()
-                or type(advance) not in (int, float) or not math.isfinite(advance)
-                or advance <= 0 or start.get('session_id') != self.session):
+                or not 0 < len(self.points) <= 512 or not np.isfinite(self.points).all()
+                or advance is not None and (type(advance) not in (int, float)
+                    or not math.isfinite(advance) or advance <= 0)
+                or start.get('session_id') != self.session):
             raise TargetUnlocalized('cargo_contact_geometry_unavailable')
         self.frame, self.capture_pose = source['frame'], source['pose']
         if self.capture_pose.get('session_id') != self.session:
@@ -72,7 +62,7 @@ class CargoContact:
         self.c, self.s = math.cos(start['heading']), math.sin(start['heading'])
         # Project the measured component's bounded forward sweep into the
         # original image as a tracking gate; no new visual facts are invented.
-        shifted = self.points + [self.c * (advance + .08), self.s * (advance + .08), 0.]
+        shifted = self.points + [self.c * (advance or 0.), self.s * (advance or 0.), 0.]
         pixels, _, _ = project_odom_points(np.vstack([self.points, shifted]),
             self.capture_pose, self.camera, self.frame['width'], self.frame['height'])
         if not len(pixels):
@@ -84,17 +74,10 @@ class CargoContact:
                     min(1000., max(box[2], (hi[0]+8) * 1000 / self.frame['width'])),
                     min(1000., max(box[3], (hi[1]+8) * 1000 / self.frame['height']))]
 
-    def in_scope(self, x, y, heading):
-        dx, dy = x-self.start['x'], y-self.start['y']
-        along, cross = dx*self.c + dy*self.s, -dx*self.s + dy*self.c
-        turn = abs(math.atan2(math.sin(heading-self.start['heading']), math.cos(heading-self.start['heading'])))
-        return (-.04 <= along <= self.advance + .05 and abs(cross) <= .05 and turn <= .15)
-
-    def grid_for(self, grid, pose):
-        """Re-associate one compact cargo; all other raw returns stay blocked."""
+    def measure(self, grid, pose):
+        """Follow the confirmed component without another model decision."""
         if (self.context.expires_at and time.time() >= self.context.expires_at
-                or pose.get('session_id') != self.session
-                or not self.in_scope(pose['x'], pose['y'], pose['heading'])):
+                or pose.get('session_id') != self.session):
             raise TargetUnlocalized('cargo_contact_scope_changed')
         voxel = getattr(grid, 'voxel_message', None)
         if voxel is None or grid.measured_floor_z is None:
@@ -102,17 +85,23 @@ class CargoContact:
         measured = []
         target = associate_lidar_target(voxel, self.capture_pose, self.camera, self.frame,
             self.box, grid.measured_floor_z, target_points=measured)
-        if target is None or len(measured) < 6:
+        if target is None or not measured:
             raise TargetUnlocalized('cargo_contact_tracking_lost')
         points = np.asarray(measured)
         center = np.median(points[:, :2], axis=0)
-        delta = center - self.center
-        progress = ((pose['x']-self.start['x'])*self.c + (pose['y']-self.start['y'])*self.s)
-        along, cross = delta[0]*self.c + delta[1]*self.s, -delta[0]*self.s + delta[1]*self.c
-        if (not -.06 <= along <= max(0., progress) + .10 or abs(cross) > .08
-                or max(abs(np.ptp(points, axis=0)-self.extent)) > grid.resolution + 1e-6
-                or not len(self.points)/1.5 <= len(points) <= len(self.points)*1.5):
+        travel = math.hypot(pose['x']-self.start['x'], pose['y']-self.start['y'])
+        # Identity follows the associated object, without imposing a second
+        # body corridor, exact shape or point-count ratio on ordinary gait.
+        if np.linalg.norm(center-self.center) > travel + max(grid.resolution, max(self.extent[:2])/2):
             raise TargetUnlocalized('cargo_contact_tracking_lost')
+        return target, points
+
+    def grid_for(self, grid, pose):
+        """Exclude the same measured cargo from the complete obstacle map."""
+        _target, points = self.measure(grid, pose)
+        voxel = grid.voxel_message
+        center = np.median(points[:, :2], axis=0)
+        progress = ((pose['x']-self.start['x'])*self.c + (pose['y']-self.start['y'])*self.s)
         # Exclude exact measured 3D voxels, not a disk or rectangle that could
         # also hide a nearby person, wall or second object.
         raw = np.asarray(voxel['data']['data']['points'])
@@ -123,7 +112,7 @@ class CargoContact:
         remaining = raw[[tuple(key) not in cargo_keys for key in raw_keys]]
         # Also protect the cargo's forward sweep, beyond the robot's body.
         obstacles = remaining[remaining[:, 2] > grid.measured_floor_z + TARGET_FLOOR_BAND_M]
-        if len(obstacles):
+        if self.advance is not None and len(obstacles):
             relative = obstacles[:, :2] - center
             ox, oy = relative[:, 0]*self.c + relative[:, 1]*self.s, -relative[:, 0]*self.s + relative[:, 1]*self.c
             shape = points[:, :2]-center
@@ -133,5 +122,14 @@ class CargoContact:
                       & (oy >= sy.min()-margin) & (oy <= sy.max()+margin)):
                 raise TargetUnlocalized('cargo_contact_path_blocked')
         data = {**voxel['data'], 'data': {**voxel['data']['data'], 'points': remaining}}
-        private = OccupancyGrid({**voxel, 'data': data}, robot_pose=pose)
-        return _ContactGrid(private, self)
+        local = OccupancyGrid({**voxel, 'data': data}, robot_pose=pose)
+        obstacles = grid.obstacles.copy()
+        # Change only the cargo's cells. Old obstacles outside the current
+        # voxel window and other heights at the same XY remain represented.
+        for point in points:
+            gx, gy = np.rint((point[:2]-np.asarray(grid.origin[:2])) / grid.resolution).astype(int)
+            lx, ly = np.rint((point[:2]-origin[:2]) / grid.resolution).astype(int)
+            if (0 <= gx < grid.width[0] and 0 <= gy < grid.width[1]
+                    and 0 <= lx < local.width[0] and 0 <= ly < local.width[1]):
+                obstacles[gy, gx] = local.obstacles[ly, lx]
+        return grid.with_obstacles(obstacles)

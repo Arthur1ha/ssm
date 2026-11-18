@@ -115,7 +115,7 @@ async def _localize_with_reobservation(target, locate, context, bounds, receipts
                          target_distance_known=False)
         receipt = await _await_authorized(navigator.go_to_coordinate(
             point['x'], point['y'], owner_session_id=context.session_id,
-            heading=point['heading'], bounds=bounds, holonomic=point['holonomic'],
+            heading=point['heading'], bounds=bounds,
             speed_limit=APPROACH_COMMAND_LIMIT, minimum_command_speed=APPROACH_COMMAND_FLOOR,
             arrival_tolerance_m=.08), context, on_result=receipts.append)
         if receipt.get('status') != 'succeeded':
@@ -316,8 +316,8 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
                        arrival_tolerance_m=.10,
                        keepout=(location['x'], location['y'], TARGET_KEEPOUT_M + location['uncertainty_m']))
         if calibration is None:
-            # Recover the existing holonomic, target-facing map follower.
-            options.update(holonomic=True, face_target=(location['x'], location['y']),
+            # Walk along the route, then face the visual target at the stop.
+            options.update(face_target=(location['x'], location['y']),
                            speed_limit=APPROACH_COMMAND_LIMIT,
                            minimum_command_speed=APPROACH_COMMAND_FLOOR)
         if bounds is not None:
@@ -344,7 +344,7 @@ async def navigate_to_visible_target(target: str, *, bounds: tuple | None = None
             waypoint = {'x': x, 'y': y,
                         'heading': math.atan2(location['y'] - y, location['x'] - x),
                         'planned_distance_m': planned_distance}
-            options.update(heading=waypoint['heading'], holonomic=True,
+            options.update(heading=waypoint['heading'],
                            face_target=(location['x'], location['y']),
                            speed_limit=APPROACH_COMMAND_LIMIT,
                            minimum_command_speed=APPROACH_COMMAND_FLOOR,

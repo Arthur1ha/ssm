@@ -4,24 +4,11 @@ import asyncio
 import logging
 
 from cloud.go2.connection.fsm import CommandBlocked
+from cloud.go2.motion import slew_velocity
 
 logger = logging.getLogger(__name__)
 
 _INTERVAL_S = 1 / 30
-_ACCELERATION = (.6, .6, 1.2)  # m/s², m/s², rad/s²; zero input always stops immediately.
-
-
-def slew_velocity(current, target, dt):
-    result = []
-    for value, goal, acceleration in zip(current, target, _ACCELERATION):
-        if goal == 0:
-            result.append(0.0)
-            continue
-        # Decelerate through zero before reversing direction.
-        desired = 0.0 if value * goal < 0 else goal
-        step = acceleration * dt
-        result.append(value + max(-step, min(step, desired - value)))
-    return tuple(result)
 
 
 class ManualVelocityControl:
@@ -50,7 +37,7 @@ class ManualVelocityControl:
         self._cancel_manual_velocity()
 
     def manual_velocity(self, vx, vy, vyaw, *, can_continue, deadman_s=1.0):
-        """Only HTTP joystick targets use this ramp; navigation stays unchanged."""
+        """Resample joystick targets using navigation's physical motion policy."""
         target = (vx, vy, vyaw)
         self._validate_velocity(*target)
         if not any(target):

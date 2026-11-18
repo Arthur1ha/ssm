@@ -417,9 +417,7 @@ async def _execute(drive, event: dict, task_id: str) -> dict:
         def guard(name, arguments):
             if name != "go2_push_cargo":
                 return None
-            if (arguments.get("cargo") != params["cargo"]
-                    or arguments.get("destination") != params["destination"]
-                    or params.get("distance_m") is not None
+            if (params.get("distance_m") is not None
                     and arguments.get("distance_m") != params["distance_m"]):
                 return {"result": "rejected", "error": "cargo_delivery_contract_changed"}
             return None

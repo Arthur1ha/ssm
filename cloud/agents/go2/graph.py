@@ -305,9 +305,16 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             interaction_token = None
         from cloud.agents.go2.workflows.search import search_request
         from cloud.go2.perception.cargo import cargo_request
+        from cloud.go2.navigation.cargo_push import expect_cargo
         from contextlib import nullcontext
         original_target = cargo_request(run.goal) if name == 'go2_push_cargo' else nullcontext()
+        cargo_reference = None
+        if name == 'go2_push_cargo' and task_adapter is None:
+            cargo_reference = next(((step.get('result') or {}).get('reference')
+                for step in reversed(run.steps)
+                if step.get('tool') == name and (step.get('result') or {}).get('reference')), None)
         with search_request(run.run_id, run.deadline), original_target, (
+                expect_cargo(cargo_reference) if cargo_reference is not None else nullcontext()), (
                 task_adapter.execution_context(name, arguments, step_id)
                 if task_adapter is not None else nullcontext()):
             options = task_adapter.options(name, arguments, step_id) if task_adapter is not None else {}

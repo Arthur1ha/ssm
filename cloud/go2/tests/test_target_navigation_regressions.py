@@ -84,6 +84,61 @@ def test_lookahead_does_not_reverse_toward_old_path_start():
     assert lookahead[0] > 0.82
 
 
+@pytest.mark.parametrize('inside,wall', [(False, False), (True, False), (True, True), (False, 'corridor')])
+def test_cargo_route_hint_can_be_relaxed_but_real_obstacles_remain(inside, wall):
+    from cloud.go2.navigation.navigator import Navigator
+
+    blocked = np.zeros((20, 20), dtype=bool)
+    if wall is True:
+        blocked[:, 12] = True
+    elif wall == 'corridor':
+        blocked[:] = True
+        blocked[10, :] = False
+    grid = SimpleNamespace(
+        grid=blocked, resolution=1., has_free_space_evidence=True,
+        odom_to_grid=lambda x, y: (int(round(x+10)), int(round(y+10))),
+        grid_to_odom=lambda x, y: (float(x-10), float(y-10)),
+        is_free=lambda x, y: 0 <= x < 20 and 0 <= y < 20 and not blocked[y, x],
+        is_body_clear=lambda *_: True)
+    circle = (0. if inside else 2., 0., 1.5)
+    result = Navigator()._plan_path(
+        {'x': 4., 'y': 0., 'route_keepout': circle}, grid,
+        {'x': 0., 'y': 0., 'heading': 0.})
+    if wall is True:
+        assert result is None
+    else:
+        assert result is not None
+        path = result[0]
+        assert all(grid.is_free(x, y) for x, y in path)
+        if not inside and not wall:
+            assert all(math.hypot(x-circle[0], y-circle[1]) >= circle[2]
+                       for x, y in (grid.grid_to_odom(*cell) for cell in path))
+
+
+@pytest.mark.asyncio
+async def test_cargo_route_hint_is_not_a_live_motion_exclusion(monkeypatch):
+    from cloud.go2.navigation import navigator as module
+
+    pose = {'x': 0., 'y': 0., 'heading': 0., 'session_id': 's'}
+    commands = []
+    def move(vx, vy, yaw, **_):
+        commands.append((vx, vy, yaw))
+        if vx or vy:
+            pose['x'] = 1.
+    grid = SimpleNamespace(grid_to_odom=lambda x, y: (float(x), float(y)),
+                           is_body_clear=lambda *_: True)
+    monkeypatch.setattr(module, 'go2', StreamingRobot(_odom_session_id='s', move_velocity=move))
+    nav = module.Navigator()
+    monkeypatch.setattr(nav, '_snapshot', lambda: ((pose.copy(), grid), None))
+    monkeypatch.setattr(nav, '_plan_path', lambda *_: ([(0, 0), (1, 0)], grid, (1., 0., False)))
+    async def stopped(*_):
+        return True
+    monkeypatch.setattr(nav, '_confirm_stopped', stopped)
+    result = await nav.go_to_coordinate(1., 0., holonomic=True, route_keepout=(0., 0., .55))
+    assert result['status'] == 'succeeded'
+    assert any(vx > 0 for vx, _, _ in commands)
+
+
 def test_replan_routes_around_measured_body_clearance_failure():
     from cloud.go2.navigation.navigator import Navigator
 
@@ -285,7 +340,8 @@ async def test_unexecuted_motion_stops_without_waiting_for_navigation_timeout(mo
     assert result['reason'] == 'motion_not_observed'
     assert tick[0] < 106.
     assert commands[-1] == (0, 0, 0)
-    assert all(vx >= .25 for vx, vy, yaw in commands if vx)
+    assert max(vx for vx, vy, yaw in commands) == pytest.approx(.25)
+    assert all(0 <= vx <= .250001 for vx, vy, yaw in commands)
 
 
 def control_simulation(monkeypatch, *, goal=(.4, .4), on_tick=None, effective_motion=False):
@@ -302,9 +358,10 @@ def control_simulation(monkeypatch, *, goal=(.4, .4), on_tick=None, effective_mo
     def move(vx, vy, yaw, **_):
         commands.append((vx, vy, yaw))
         if effective_motion:
-            if abs(vx) >= .24:
+            # The measured command floor is a speed magnitude, not an
+            # assertion that both physical axes have independent dead zones.
+            if math.hypot(vx, vy) >= .24:
                 pose['x'] += vx * .1
-            if abs(vy) >= .24:
                 pose['y'] += vy * .1
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: tick[0], time=time.time))
     monkeypatch.setattr(module, 'asyncio', SimpleNamespace(current_task=lambda: None,
@@ -322,7 +379,7 @@ def control_simulation(monkeypatch, *, goal=(.4, .4), on_tick=None, effective_mo
 
 
 @pytest.mark.asyncio
-async def test_diagonal_floor_moves_effective_axes_without_increasing_norm(monkeypatch):
+async def test_diagonal_floor_preserves_direction_without_increasing_norm(monkeypatch):
     nav, tick, pose, commands = control_simulation(monkeypatch, effective_motion=True)
     result = await nav.go_to_coordinate(.4, .4, holonomic=True, arrival_tolerance_m=.08,
                                         minimum_command_speed=.25, speed_limit=.3)
@@ -330,7 +387,8 @@ async def test_diagonal_floor_moves_effective_axes_without_increasing_norm(monke
     assert pose['x'] > .3 and pose['y'] > .3
     for vx, vy, _ in commands:
         assert math.hypot(vx, vy) <= .300001
-        assert all(abs(axis) >= .25 for axis in (vx, vy) if axis)
+        assert vx == pytest.approx(vy)
+    assert max(math.hypot(vx, vy) for vx, vy, _ in commands) >= .25
 
 
 @pytest.mark.asyncio

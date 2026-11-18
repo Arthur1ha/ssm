@@ -110,7 +110,9 @@ def _reference_for(sample, cargo, destination):
     return {'cargo': cargo, 'destination': destination,
             'odom_session_id': sample['odom_session_id'],
             'cargo_location': sample['cargo_location'],
-            'destination_kind': sample.get('destination_kind')}
+            'destination_kind': sample.get('destination_kind'),
+            'observation': {key: value for key, value in sample.items()
+                            if key != 'contact_observation'}}
 
 
 def _check_search_reference(reference, sample):
@@ -142,12 +144,9 @@ def _aligned(sample):
     dx, dy = target['x'] - pose['x'], target['y'] - pose['y']
     forward = dx * math.cos(pose['heading']) + dy * math.sin(pose['heading'])
     lateral = -dx * math.sin(pose['heading']) + dy * math.cos(pose['heading'])
-    box = sample['cargo_bbox_1000']
-    # Screen geometry only constrains the push direction. It supplies neither
-    # world distances nor successful movement evidence.
-    if (forward <= 0 or abs(lateral) > .10
-            or abs(math.atan2(lateral, forward)) > .18
-            or abs((box[0] + box[2]) / 2 - 500) > 100):
+    # One bearing check suffices; pixel centering and a second lateral gate
+    # disagree with the measured target as camera perspective changes.
+    if forward <= 0 or abs(math.atan2(lateral, forward)) > .3:
         raise TargetUnlocalized('cargo_alignment_required')
     return forward
 
@@ -283,11 +282,13 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
     try:
         with use_effect(ledger, identity):
             if not plan['aligned']:
-                # Keep the full map and avoid touching low cargo while circling.
+                contact = (CargoContact(before, pose, None, context)
+                           if before.get('contact_observation') is not None else None)
                 navigation = await _await_authorized(navigator.go_to_coordinate(
                     plan['x'], plan['y'], owner_session_id=context.session_id,
-                    heading=plan['heading'], keepout=plan['keepout'],
-                    holonomic=True, face_target=(target['x'], target['y']),
+                    heading=plan['heading'], route_keepout=plan['keepout'],
+                    face_target=(target['x'], target['y']),
+                    cargo_contact=contact,
                     speed_limit=.25, minimum_command_speed=.25, arrival_tolerance_m=.1), context,
                     on_result=navigation_receipts.append)
                 stopped = await _stop_approach(context, bounded=True)
@@ -310,8 +311,7 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
                     'angle_deg': math.degrees(abs(bearing))}, context=context)
             else:
                 contact = None
-                if before.get('contact_observation') is not None and close:
-                    _aligned(before)
+                if before.get('contact_observation') is not None:
                     contact = CargoContact(before, pose, advance, context)
                     grid = await _await_authorized(invoke_blocking(contact.grid_for, grid, pose), context)
                 _check_forward_path(grid, pose, advance)
@@ -373,6 +373,12 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
             or distance_m is not None and (type(distance_m) not in (float, int)
                 or not math.isfinite(distance_m) or distance_m <= 0)):
         return {'result': 'rejected', 'error': 'invalid_cargo_push_parameters', 'delivered': False}
+    reference = _reference.get()
+    if reference is not None:
+        # References identify the original objects. Model wording may change
+        # with viewpoint, but never replaces this run's confirmed order.
+        cargo = reference.get('cargo') or cargo
+        destination = reference.get('destination', destination)
     context = current_context()
     parent_effect = current_effect()
     request_id = _request.get()
@@ -388,26 +394,20 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
             'result': 'accepted', 'reason': 'prior_cargo_step_unconfirmed', 'delivered': False,
             'message': '原推送请求尚无可靠结果，需要按原请求继续核对。'}),
             'request_id': request_id, 'replayed': True}
-    reference = _reference.get()
     before = after = movement = None
     moving = False
     try:
-        if reference is not None and (reference.get('cargo') != cargo
-                or reference.get('destination') != destination):
-            raise TargetUnlocalized('cargo_delivery_contract_changed')
         if _signal.get() is not None and destination is None:
             raise TargetUnlocalized('cargo_delivery_contract_changed')
         _authorize(context)
-        before = await _await_authorized(observe_cargo(cargo, destination), context)
+        observation = (observe_cargo(cargo, destination, reference=reference) if reference is not None
+                       else observe_cargo(cargo, destination))
+        before = await _await_authorized(observation, context)
         if reference is not None and reference.get('search_evidence') is not None:
             _check_search_reference(reference, before)
         elif reference is not None:
             if reference.get('odom_session_id') != before['odom_session_id']:
                 raise TargetUnlocalized('odom_session_mismatch')
-            if (reference['cargo_location'].get('precision') != 'approximate'
-                    and before['cargo_location'].get('precision') != 'approximate'
-                    and _distance(reference['cargo_location'], before['cargo_location']) > .20):
-                raise TargetUnlocalized('cargo_identity_or_position_changed')
         if destination is not None and before['near_destination']:
             stopped = await _stop_approach(context, bounded=True)
             if stopped.get('result') != 'ok':
@@ -429,11 +429,9 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         else:
             distance_m = _advance_distance(distance_m, before)
             forward = _aligned(before)
-            # Distant cargo uses ordinary approach. Near cargo gets a scoped
-            # contact allowance shared by preflight and live Navigator checks.
-            uncertainty = before['cargo_location'].get('uncertainty_m')
-            if type(uncertainty) not in (int, float) or not math.isfinite(uncertainty):
-                raise TargetUnlocalized('cargo_contact_geometry_unavailable')
+            # Approach and contact use the same target view; proximity only
+            # describes progress and never decides whether cargo is an obstacle.
+            uncertainty = before['cargo_location'].get('uncertainty_m', 0.)
             clearance = forward - uncertainty - ROBOT_HALF_LENGTH_M - SAFETY_MARGIN_M
             nudge_attempted = clearance <= distance_m + .06
             advance = distance_m
@@ -445,7 +443,7 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                 raise TargetUnlocalized('odom_session_mismatch')
             _ensure_stable(before['pose'], pose)
             contact = None
-            if nudge_attempted:
+            if before.get('contact_observation') is not None:
                 contact = CargoContact(before, pose, advance, context)
                 grid = await _await_authorized(invoke_blocking(contact.grid_for, grid, pose), context)
             _check_forward_path(grid, pose, advance)
@@ -533,6 +531,16 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
     for key in ('cargo_before', 'cargo_after'):
         if isinstance(result.get(key), dict):
             result[key] = {k: v for k, v in result[key].items() if k != 'contact_observation'}
+    if destination is not None and result.get('result') == 'ok':
+        # Positioning is a successful step, not completion of the user's push.
+        # The next call refreshes the confirmed target before another motion.
+        completed = ((result.get('directional_push_attempted') is True
+                      and result.get('confirmation') == 'directional_move_and_stop'
+                      or result.get('delivered') is True
+                      and result.get('confirmation') == 'cargo_near_destination_and_stopped')
+                     and (result.get('stop') or {}).get('result') == 'ok')
+        if not completed:
+            result['final'] = False
     result = {**result, 'request_id': request_id}
     ledger.mark_result(*identity, result)
     return result

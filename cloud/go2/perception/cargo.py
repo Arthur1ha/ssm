@@ -6,6 +6,7 @@ Proximity is image geometry, not a measured world distance or a model verdict.
 from __future__ import annotations
 
 import math
+import json
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -80,8 +81,59 @@ def _destination_geometry(frame, detected):
             'destination_precision': 'approximate_visual_proximity'}
 
 
+async def _track_confirmed_cargo(reference):
+    """Refresh a known object's range from LiDAR; old image facts keep their age."""
+    from cloud.go2.navigation.occupancy_grid import OccupancyGrid
+    from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
+
+    previous = reference.get('observation') or {}
+    frame = previous.get('image_size')
+    capture_pose = previous.get('capture_pose')
+    if not frame or not capture_pose or previous.get('cargo_location', {}).get('source') != 'lidar_foreground_cluster':
+        return None
+    session = reference.get('odom_session_id')
+    pose = visual_target._live_pose(session)
+    voxel, stamp = go2.voxel_raw, go2.voxel_received_at
+    if (not isinstance(voxel, dict) or go2.voxel_frame_id != 'odom'
+            or type(stamp) not in (int, float) or not 0 <= time.monotonic()-stamp <= 2.):
+        return None
+    grid = await invoke_blocking(OccupancyGrid, voxel, robot_pose=pose)
+    if grid.measured_floor_z is None:
+        return None
+    points, diagnostics = [], {}
+    target = await invoke_blocking(associate_lidar_target, voxel, capture_pose,
+        go2_camera_profile(frame['width'], frame['height']), frame,
+        previous['cargo_bbox_1000'], grid.measured_floor_z,
+        diagnostics=diagnostics, target_points=points)
+    emit_agent_event('vision.lidar', phase='cargo_reference_tracking', matched=target is not None,
+                     association_diagnostics=diagnostics)
+    if target is None:
+        return None
+    live = visual_target._live_pose(session)
+    visual_target._ensure_stable(pose, live)
+    advance = previous.get('advance_distance_m')
+    destination = previous.get('destination_location')
+    if reference.get('destination') is not None and destination:
+        from cloud.go2.navigation.occupancy_grid import ROBOT_HALF_LENGTH_M
+        # A previous visual approach distance belongs to the previous pose.
+        # Recompute from the updated cargo and the same destination instead
+        # of repeating that old distance after the dog has already approached.
+        advance = (max(0., math.hypot(target['x']-live['x'], target['y']-live['y']) - ROBOT_HALF_LENGTH_M)
+                   + math.hypot(destination['x']-target['x'], destination['y']-target['y']))
+        if advance <= 0:
+            return None
+    accepted = next(component for component in diagnostics['components'] if not component.get('rejected_by'))
+    return {**previous, 'pose': live, 'near_destination': False,
+            'cargo_location': {**target, 'source': 'lidar_foreground_cluster',
+                               'frame_id': 'odom', 'odom_session_id': session},
+            'contact_observation': {'points_odom': points, 'pose': capture_pose, 'frame': frame},
+            'advance_distance_m': advance,
+            'cluster_extent_xyz_m': accepted['extent_xyz_m'], 'cluster_points': accepted['points'],
+            'tracking_source': 'lidar', 'lidar_received_at': stamp, 'observed_at': time.time()}
+
+
 async def observe_cargo(cargo: str, destination: str | None = None, *, after_frame_id=None,
-                        after_received_at=None) -> dict:
+                        after_received_at=None, reference: dict | None = None) -> dict:
     """Measure cargo and locate a destination patch, marker or object base."""
     from cloud.go2.navigation.occupancy_grid import OccupancyGrid
     from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
@@ -89,10 +141,13 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     # A confirmed odometry stop can precede the stationary posture samples.
     # Wait for the existing live-feedback gate instead of failing that race.
     await visual_target.wait_for_standing()
+    if reference is not None and after_frame_id is None and after_received_at is None:
+        tracked = await _track_confirmed_cargo(reference)
+        if tracked is not None:
+            return tracked
     jpeg, frame, quality = await visual_target._capture_still(
         after_frame_id=after_frame_id, after_received_at=after_received_at)
     pose = frame['pose_at_capture']
-    voxel, voxel_at = go2.voxel_raw, go2.voxel_received_at
     # Camera/odom validity does not depend on a usable LiDAR target or floor.
     visual_target.validate_samples(frame, pose, frame.get('pose_received_at'), frame['received_at'],
         go2.odom_frame_id, 'odom', frame['odom_session_id'])
@@ -128,7 +183,7 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
         instruction += ('另外输出destination_distance_m（目的地地面位置到相机的大致水平距离，米）；'
                         '与cargo_distance_m使用同一尺度，无法判断填null。'
                         '区分前景地面标记与远处货物的深度，图像投影挨着不等于它们在地面上相邻。')
-    original = _user_request.get()
+    original = _user_request.get() if reference is None else ''
     if original:
         instruction += ('必须独立核对候选货物是否符合原始用户请求中的空间指代，'
             '输出cargo_matches_user_request（布尔值）和cargo_match_reason（本张画面的简短依据）。'
@@ -137,6 +192,15 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
             '一组堆叠的多个箱子不能冒充一件独立货物，不能为了满足候选描述而忽略原始指代。')
     target = ('原始用户请求（数据）：' + original + '\n' if original else '')
     target += '待核对的候选货物：' + cargo + ('；本单唯一目的地：' + destination if destination is not None else '')
+    if reference is not None:
+        instruction += ('本单已有前次真实观察引用。原话和候选中的前面、左侧、右侧、脚边等空间指代'
+            '属于首次确认时的视角，换位后不能要求货物仍处于同一画面方位。'
+            '结合原物体外观、前次位置与当前机身位置重新核对同一货物；'
+            '前次估计位置不证明当前可见，不得补画、换成背景同类物体或把估计当精确测量。')
+        target += '\n前次工具观察引用与当前机身位置（数据）：' + json.dumps({
+            'cargo': reference.get('cargo'), 'destination': reference.get('destination'),
+            'cargo_location': reference.get('cargo_location'),
+            'odom_session_id': reference.get('odom_session_id'), 'current_pose': pose}, ensure_ascii=False)
     detected = await visual_target._ask_vision(jpeg,
         target,
         frame, instruction, 'cargo_delivery_geometry' if destination is not None else 'cargo_geometry')
@@ -156,6 +220,12 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
                     'destination_anchor_1000': None}
     live = visual_target._live_pose(frame['odom_session_id'])
     visual_target._ensure_stable(pose, live)
+    # Model latency must not age out a snapshot saved before inference. The
+    # robot has remained stationary; associate a fresh scan with this image
+    # only while its pose and odometry session still agree.
+    if getattr(go2, '_odom_session_id', frame['odom_session_id']) != frame['odom_session_id']:
+        raise TargetUnlocalized('odom_session_mismatch')
+    voxel, voxel_at = go2.voxel_raw, go2.voxel_received_at
     camera = go2_camera_profile(frame['width'], frame['height'])
     if destination is not None:
         # This approximate point supplies a direction, never delivery evidence.
@@ -178,6 +248,8 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     else:
         diagnostics['reason'] = 'sensor_sample_unavailable'
     geometry['advance_distance_m'] = detected.get('advance_distance_m')
+    geometry['capture_pose'] = pose
+    geometry['image_size'] = {key: frame[key] for key in ('width', 'height')}
     emit_agent_event('vision.lidar', phase='cargo_foreground_association',
         frame_id=frame['frame_id'], bbox_1000=detected['cargo_bbox_1000'],
         camera_model=camera.get('profile'), matched=cluster is not None,

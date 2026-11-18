@@ -76,10 +76,9 @@ def _can_start_observation(grid, odom, target, bounds, plans):
     """Preview Navigator's first action without acquiring control or moving."""
     from cloud.go2.navigation.navigator import (
         Navigator, _find_lookahead_on_path, _normalize_angle,
-        ARRIVAL_THRESHOLD, HEADING_THRESHOLD, PATH_HEADING_INHIBIT,
-        WALK_SPEED, MIN_LINEAR_VEL, KP_YAW,
+        ARRIVAL_THRESHOLD, HEADING_THRESHOLD, PATH_HEADING_RELEASE,
+        WALK_SPEED, MIN_LINEAR_VEL,
     )
-    from cloud.go2.actions import VELOCITY_LIMITS
     key = (target.x, target.y, target.heading)
     if key not in plans:
         plans[key] = Navigator()._plan_path(
@@ -97,16 +96,15 @@ def _can_start_observation(grid, odom, target, bounds, plans):
                                   odom['heading'], {'x': goal[0], 'y': goal[1]},
                                   front_only=True)
     error = _normalize_angle(math.atan2(y-odom['y'], x-odom['x'])-odom['heading'])
-    if abs(error) > PATH_HEADING_INHIBIT:
+    if abs(error) > PATH_HEADING_RELEASE:
         return Navigator._turn_details(grid, odom, odom['heading']+error)['clear']
     speed = min(WALK_SPEED, max(MIN_LINEAR_VEL, distance*.8))
-    yaw = max(-VELOCITY_LIMITS['z'], min(VELOCITY_LIMITS['z'], KP_YAW*error))
     body_clear = getattr(grid, 'is_body_clear', None)
     return bool(callable(body_clear)
                 and body_clear(odom['x'], odom['y'], odom['heading'])
                 and body_clear(odom['x']+speed*math.cos(odom['heading'])*.3,
                                odom['y']+speed*math.sin(odom['heading'])*.3,
-                               odom['heading']+yaw*.3))
+                               odom['heading']))
 
 
 def _forward_observation_target(grid, odom, coverage, bounds, session):

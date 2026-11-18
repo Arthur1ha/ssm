@@ -21,6 +21,7 @@ def robot_at_stand():
     sticks = MagicMock()
     robot._conn = SimpleNamespace(datachannel=SimpleNamespace(pub_sub=SimpleNamespace(
         publish_request_new=publish, publish_without_callback=sticks)))
+    robot._classic_walk_connection = robot._conn  # Existing connection already prepared.
     return robot, publish, sticks
 
 

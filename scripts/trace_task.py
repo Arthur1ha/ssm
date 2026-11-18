@@ -63,6 +63,8 @@ def _brief(event: dict) -> str:
                 "target_unit_id", "initiator_unit_id", "skill_id",
                 "request_id", "task_id", "transport", "status", "duration_ms",
                 "input", "output", "decision", "params", "result",
+                "motion_mode", "last_command", "command",
+                "pose_heading_rad", "lookahead_odom_xy", "route_heading_error_rad",
                 "reply", "response", "question", "error", "cause", "message"):
         if key in event and event[key] is not None:
             if kind == "model.request" and key == "input" and event.get("goal"):

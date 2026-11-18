@@ -4,6 +4,7 @@ Measured floor is retained for perception, not required to authorize navigation.
 Raw obstacles and their clearance inflation remain blocked.
 """
 import math
+from copy import copy
 
 import numpy as np
 
@@ -146,6 +147,24 @@ class OccupancyGrid:
 
     def is_free(self, ix: int, iy: int) -> bool:
         return bool(0 <= ix < self.width[0] and 0 <= iy < self.width[1] and self.cells[iy, ix] == FREE)
+
+    def with_obstacles(self, obstacles):
+        """Make a private view while retaining the complete session map."""
+        view = copy(self)
+        view.obstacles = obstacles
+        inflated = obstacles.copy()
+        radius = math.ceil(PATH_CLEARANCE_M / self.resolution)
+        ys, xs = np.nonzero(obstacles)
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if (dx*self.resolution)**2 + (dy*self.resolution)**2 > PATH_CLEARANCE_M**2:
+                    continue
+                ix, iy = xs+dx, ys+dy
+                valid = (ix >= 0) & (ix < self.width[0]) & (iy >= 0) & (iy < self.width[1])
+                inflated[iy[valid], ix[valid]] = True
+        view.cells = np.where(inflated, OCCUPIED, FREE).astype(np.uint8)
+        view.grid = inflated
+        return view
 
     def is_body_clear(self, x: float, y: float, heading: float) -> bool:
         """Check the oriented body against measured obstacles before motion."""

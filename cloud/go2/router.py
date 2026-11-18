@@ -185,6 +185,83 @@ async def go2_avoidance_switch(context=Depends(require_admin_read)):
         raise HTTPException(status_code=503, detail="avoidance switch status unavailable") from exc
 
 
+_classic_walk_test_active = False
+
+
+@router.post('/diagnostics/classic-walk-test')
+async def classic_walk_test(context: ExecutionContext = Depends(require_intervening_service_context)):
+    """One bounded native-gait trial through the shared movement executor."""
+    from cloud.go2.service import prepare_user_goal
+    from cloud.go2.tools.executor import execute_tool
+    from cloud.space.user_goals import get_goal_registry, run_for_goal
+    global _classic_walk_test_active
+    _require_admin_persist(context)
+    if context.origin_kind != 'user_delegated' or context.expires_at < time.time() + 35:
+        raise HTTPException(status_code=400, detail='fresh_user_delegation_required')
+    if not go2.is_connected:
+        raise HTTPException(status_code=503, detail='Go2 未连接')
+    if _classic_walk_test_active or control_lease.snapshot() is not None:
+        raise HTTPException(status_code=409, detail='motion_control_busy')
+    _classic_walk_test_active = True
+    registry = get_goal_registry()
+    context = replace(context, goal_revision=registry.advance(context.session_id))
+
+    async def trial():
+        result = {}
+        try:
+            prepared = await prepare_user_goal(context)
+            if prepared.get('result') != 'ok':
+                return prepared
+            _acquire_motion(context)
+            lease = control_lease.snapshot()
+            allowed = lambda: (registry.is_current(context.goal_revision)
+                and time.time() < context.expires_at
+                and control_lease.allows(context.session_id, lease.generation))
+            stopped = await go2.stop_and_confirm_motion(can_continue=allowed)
+            if stopped.get('physical_stop') != 'confirmed':
+                return stopped
+            result['gait_request'] = await go2.enable_classic_walk(can_continue=allowed)
+            if result['gait_request'].get('result') != 'accepted':
+                result['result'] = 'blocked'
+                return result
+            result['before'] = dict(go2._robot_state)
+            with use_context(context):
+                result['movement'] = await execute_tool('go2_move', {
+                    'direction': 'forward', 'distance_m': .3, 'speed': .3,
+                }, context=context)
+            result['after'] = dict(go2._robot_state)
+            result['result'] = result['movement'].get('result', 'error')
+            return result
+        except (ValueError, RuntimeError, TimeoutError) as exc:
+            result.update(result='blocked', error=type(exc).__name__, message=str(exc))
+            return result
+        finally:
+            lease = control_lease.snapshot()
+            if (lease is not None and lease.owner_session_id == context.session_id
+                    and registry.is_current(context.goal_revision)):
+                allowed = lambda: (registry.is_current(context.goal_revision)
+                    and control_lease.allows(context.session_id, lease.generation))
+                stopped = await go2.stop_and_confirm_motion(can_continue=allowed)
+                result['stop'] = stopped
+                if stopped.get('physical_stop') == 'confirmed':
+                    control_lease.release(context.session_id, generation=lease.generation,
+                                          stop_confirmed=True)
+                else:
+                    control_lease.hold_for_handoff(lease)
+
+    try:
+        task = asyncio.create_task(run_for_goal(trial(), context.goal_revision))
+        session_tasks.track(context.session_id, task)
+        try:
+            result = await asyncio.wait_for(task, timeout=30.)
+        except TimeoutError:
+            result = {'result': 'blocked', 'error': 'classic_walk_test_timeout'}
+        logging.info('[Go2/Gait] ClassicWalk bounded trial result=%s', result)
+        return result
+    finally:
+        _classic_walk_test_active = False
+
+
 class NavigationRecordingRequest(BaseModel):
     duration_s: float = 10.0
 

@@ -14,11 +14,16 @@ from cloud.space.execution import ExecutionContext
 from cloud.space.user_goals import get_goal_registry
 
 
-def test_ramp_brakes_before_reversing_and_zero_axes_stop_immediately():
-    assert slew_velocity((0, 0, 0), (.5, -.5, .8), .1) == pytest.approx((.06, -.06, .12))
-    assert slew_velocity((.2, -.2, .3), (-.5, .5, -.8), .1) == pytest.approx((.14, -.14, .18))
+def test_ramp_bounds_vector_change_and_stops_explicit_zero_immediately():
+    import math
+    step = .06 / math.sqrt(2)
+    assert slew_velocity((0, 0, 0), (.5, -.5, .8), .1) == pytest.approx((step, -step, .12))
+    assert slew_velocity((.2, -.2, .3), (-.5, .5, -.8), .1) == pytest.approx((.2-step, -.2+step, .18))
     assert slew_velocity((.01, -.01, .01), (-.5, .5, -.8), .1) == pytest.approx((0, 0, 0))
-    assert slew_velocity((.5, .5, .8), (0, .1, 0), .1) == pytest.approx((0, .44, 0))
+    changed = slew_velocity((.5, .5, .8), (0, .1, 0), .1)
+    assert math.hypot(changed[0]-.5, changed[1]-.5) == pytest.approx(.06)
+    assert changed[2] == pytest.approx(.68)
+    assert slew_velocity((.5, .5, .8), (0, 0, 0), .1) == (0, 0, 0)
 
 
 @pytest.mark.asyncio
