@@ -1,8 +1,7 @@
 """Guarded cargo nudges and coarse directional delivery using ordinary Go2 gait.
 
-The shared obstacle map stays intact. A bounded contact step permits only the
-freshly re-associated cargo component; other obstacles remain blocked. Progress
-Directional attempts require real movement and stopping; measured cargo motion
+Movement uses the shared obstacle map and ordinary Navigator. Directional
+attempts require real movement and stopping; measured cargo motion
 and delivery remain distinct facts.
 """
 from __future__ import annotations
@@ -17,10 +16,8 @@ import time
 import uuid
 
 from cloud.agents.common.effects import FileEffectLedger, current_effect, use_effect
-from cloud.agents.common.runner import invoke_blocking
 from cloud.go2.control import control_lease
 from cloud.go2.navigation.navigator import navigator
-from cloud.go2.navigation.cargo_contact import CargoContact, permit_contact
 from cloud.go2.navigation.occupancy_grid import ROBOT_HALF_LENGTH_M, SAFETY_MARGIN_M
 from cloud.go2.navigation.target_approach import _authorize, _await_authorized, _stop_approach
 from cloud.go2.perception.cargo import observe_cargo
@@ -43,10 +40,6 @@ _REASONS = {
     'delivery_direction_unavailable': '当前画面尚不能判断货物到指定目的地的方向，未开始推送。',
     'cargo_returns_unavailable': '雷达尚不能可靠分离这件货物，未开始推送。',
     'cargo_association_unconfirmed': '货物的视觉与雷达对应关系尚未确认。',
-    'cargo_contact_geometry_unavailable': '当前测量不足以确认可靠的靠近或腿部接触位置。',
-    'cargo_contact_path_blocked': '机身避障检查未通过，靠近或接触货物的通路受阻。',
-    'cargo_contact_tracking_lost': '推送中无法继续核对同一货物，已停止。',
-    'cargo_contact_scope_changed': '本次接触范围或定位条件已变化，已停止。',
     'cargo_motion_unconfirmed': '尚未测得可靠的货物移动，本次不算推送完成。',
     'cargo_move_unconfirmed': '本次前进或停稳结果尚未确认，需要核对原任务。',
     'cargo_identity_or_position_changed': '货物的位置变化超出本步可确认范围，需要重新核对同一件货物。',
@@ -111,8 +104,7 @@ def _reference_for(sample, cargo, destination):
             'odom_session_id': sample['odom_session_id'],
             'cargo_location': sample['cargo_location'],
             'destination_kind': sample.get('destination_kind'),
-            'observation': {key: value for key, value in sample.items()
-                            if key != 'contact_observation'}}
+            'observation': dict(sample)}
 
 
 def _check_search_reference(reference, sample):
@@ -158,21 +150,6 @@ def _advance_distance(requested, sample):
     return float(value)
 
 
-def _check_forward_path(grid, pose, distance):
-    # Sample at map resolution across the requested route, regardless of its
-    # length. Checking only six points could miss obstacles on a longer move.
-    x = pose['x'] + distance * math.cos(pose['heading'])
-    y = pose['y'] + distance * math.sin(pose['heading'])
-    if not all(math.isfinite(v) for v in (x, y)) or not grid.is_body_clear(x, y, pose['heading']):
-        raise TargetUnlocalized('cargo_contact_path_blocked')
-    count = max(1, math.ceil(distance / grid.resolution))
-    for i in range(count + 1):
-        offset = distance * i / count
-        if not grid.is_body_clear(pose['x'] + offset * math.cos(pose['heading']),
-                                  pose['y'] + offset * math.sin(pose['heading']), pose['heading']):
-            raise TargetUnlocalized('cargo_contact_path_blocked')
-
-
 async def _visual_step(cargo, destination, distance_m, before, context, ledger, identity):
     """One coarse visual step on the full map; no contact obstacle exemption."""
     from cloud.go2.tools.executor import execute_tool
@@ -180,7 +157,7 @@ async def _visual_step(cargo, destination, distance_m, before, context, ledger, 
     snapshot, reason = navigator.snapshot()
     if reason:
         raise TargetUnlocalized(reason)
-    pose, grid = snapshot
+    pose, _grid = snapshot
     if pose.get('session_id') != before['odom_session_id']:
         raise TargetUnlocalized('odom_session_mismatch')
     _ensure_stable(before['pose'], pose)
@@ -197,7 +174,6 @@ async def _visual_step(cargo, destination, distance_m, before, context, ledger, 
         params = {'direction': 'turn_left' if bearing > 0 else 'turn_right',
                   'angle_deg': math.degrees(abs(bearing))}
     else:
-        _check_forward_path(grid, pose, advance)
         params = {'direction': 'forward', 'distance_m': advance, 'speed': .25}
     # Ordinary movement retains its preflight, live obstacle checks, control
     # lease, teaching validation, odometry and real stop confirmation.
@@ -259,7 +235,7 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
     snapshot, reason = navigator.snapshot()
     if reason:
         raise TargetUnlocalized(reason)
-    pose, grid = snapshot
+    pose, _grid = snapshot
     if pose.get('session_id') != before['odom_session_id']:
         raise TargetUnlocalized('odom_session_mismatch')
     _ensure_stable(before['pose'], pose)
@@ -282,13 +258,10 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
     try:
         with use_effect(ledger, identity):
             if not plan['aligned']:
-                contact = (CargoContact(before, pose, None, context)
-                           if before.get('contact_observation') is not None else None)
                 navigation = await _await_authorized(navigator.go_to_coordinate(
                     plan['x'], plan['y'], owner_session_id=context.session_id,
                     heading=plan['heading'], route_keepout=plan['keepout'],
                     face_target=(target['x'], target['y']),
-                    cargo_contact=contact,
                     speed_limit=.25, minimum_command_speed=.25, arrival_tolerance_m=.1), context,
                     on_result=navigation_receipts.append)
                 stopped = await _stop_approach(context, bounded=True)
@@ -310,14 +283,8 @@ async def _directional_delivery(cargo, destination, advance, before, context, le
                     'direction': 'turn_left' if bearing > 0 else 'turn_right',
                     'angle_deg': math.degrees(abs(bearing))}, context=context)
             else:
-                contact = None
-                if before.get('contact_observation') is not None:
-                    contact = CargoContact(before, pose, advance, context)
-                    grid = await _await_authorized(invoke_blocking(contact.grid_for, grid, pose), context)
-                _check_forward_path(grid, pose, advance)
-                with permit_contact(contact):
-                    movement = await execute_tool('go2_move', {
-                        'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
+                movement = await execute_tool('go2_move', {
+                    'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
     except asyncio.CancelledError:
         await _stop_approach(context, bounded=True)
         raise
@@ -429,8 +396,8 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
         else:
             distance_m = _advance_distance(distance_m, before)
             forward = _aligned(before)
-            # Approach and contact use the same target view; proximity only
-            # describes progress and never decides whether cargo is an obstacle.
+            # Proximity describes progress. Ordinary navigation owns all
+            # obstacle checks; cargo has no separate map or contact allowance.
             uncertainty = before['cargo_location'].get('uncertainty_m', 0.)
             clearance = forward - uncertainty - ROBOT_HALF_LENGTH_M - SAFETY_MARGIN_M
             nudge_attempted = clearance <= distance_m + .06
@@ -438,25 +405,19 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
             snapshot, reason = navigator.snapshot()
             if reason:
                 raise TargetUnlocalized(reason)
-            pose, grid = snapshot
+            pose, _grid = snapshot
             if pose.get('session_id') != before['odom_session_id']:
                 raise TargetUnlocalized('odom_session_mismatch')
             _ensure_stable(before['pose'], pose)
-            contact = None
-            if before.get('contact_observation') is not None:
-                contact = CargoContact(before, pose, advance, context)
-                grid = await _await_authorized(invoke_blocking(contact.grid_for, grid, pose), context)
-            _check_forward_path(grid, pose, advance)
             moving = True
             # The child effect identity keeps native training/action accounting
             # tied to this original step, including cancellation uncertainty.
-            with use_effect(ledger, identity), permit_contact(contact):
+            with use_effect(ledger, identity):
                 movement = await execute_tool('go2_move',
                     {'direction': 'forward', 'distance_m': advance, 'speed': .25}, context=context)
             moving = False
             if movement.get('result') != 'ok' or (movement.get('stop') or {}).get('result') != 'ok':
-                reason = movement.get('reason') or ''
-                raise TargetUnlocalized(reason if reason.startswith('cargo_contact_') else 'cargo_move_unconfirmed')
+                raise TargetUnlocalized('cargo_move_unconfirmed')
             stopped_at = time.monotonic()
             after = await _await_authorized(observe_cargo(cargo, destination,
                 after_frame_id=before['frame_id'], after_received_at=stopped_at), context)
@@ -526,11 +487,6 @@ async def push_cargo(cargo: str, destination: str | None = None, distance_m: flo
                 and movement is not None and (movement.get('stop') or {}).get('result') == 'ok'
                 and movement.get('message')):
             result['message'] = movement['message'] + '尚未确认货物发生位移。'
-    # Raw component points are an in-process allowance, not a public tool
-    # parameter, checkpoint capability, or retained observation projection.
-    for key in ('cargo_before', 'cargo_after'):
-        if isinstance(result.get(key), dict):
-            result[key] = {k: v for k, v in result[key].items() if k != 'contact_observation'}
     if destination is not None and result.get('result') == 'ok':
         # Positioning is a successful step, not completion of the user's push.
         # The next call refreshes the confirmed target before another motion.

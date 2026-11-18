@@ -53,14 +53,11 @@ async def go2_move(direction: str, distance_m: float | None = None,
         if value is not None}}
     validate_params(move_tool_schema(), params)
     validate_move_goal(params)
-    from cloud.go2.navigation.cargo_contact import claim_contact
     from cloud.go2.actions import resolve_move_speed
     speed = resolve_move_speed(direction, speed)
     context = current_context()
-    contact = claim_contact(direction, distance_m, speed, context)
     return await navigator.move_relative(direction, distance_m=distance_m,
-        angle_deg=angle_deg, speed=speed, context=context,
-        **({'cargo_contact': contact} if contact is not None else {}))
+        angle_deg=angle_deg, speed=speed, context=context)
 
 
 _OBSERVE_SYSTEM_PROMPT = (

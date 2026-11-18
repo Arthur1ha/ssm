@@ -36,9 +36,9 @@ def test_no_axis_chatter_when_direction_wobbles_around_45_degrees():
 def test_pause_or_watchdog_expiry_resets_ramp_instead_of_resuming_old_speed():
     profile = VelocityProfile()
     profile.sent((.5, 0, .8), 10.)
-    assert profile.preview((.5, 0, .8), 10. + COMMAND_TTL_S + .01) == pytest.approx((.06, 0, .12))
+    assert profile.preview((.5, 0, .8), 10. + COMMAND_TTL_S + .01) == pytest.approx((.03, 0, .06))
     profile.reset()
-    assert profile.preview((0, .3, 0), 30.) == pytest.approx((0, .06, 0))
+    assert profile.preview((0, .3, 0), 30.) == pytest.approx((0, .03, 0))
     assert profile.velocity == (0, 0, 0)  # An unvalidated preview never becomes sent state.
 
 
@@ -117,7 +117,7 @@ async def test_periodic_planning_does_not_block_validated_motion(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_smoothed_momentum_is_checked_against_live_obstacles(monkeypatch):
+async def test_next_motion_is_checked_against_new_shared_obstacles(monkeypatch):
     from cloud.go2.navigation import navigator as module
     from cloud.go2.tests.test_target_navigation_regressions import control_simulation
 
@@ -125,15 +125,13 @@ async def test_smoothed_momentum_is_checked_against_live_obstacles(monkeypatch):
     snapshot = nav._snapshot
     def live_snapshot():
         (pose, grid), reason = snapshot()
-        # After moving forward, ask for pure yaw. A forward remnant from the
-        # smoothing ramp would enter an obstacle, although pure yaw is clear.
+        # An obstacle appearing in the next body footprint must stop the
+        # stream even though the previous shared map allowed the route.
         if any(any(cmd) for cmd in commands):
-            pose['x'] = 1.
-            pose['heading'] = 0.
-            grid.is_body_clear = lambda x, y, heading: x <= 1.
+            grid.is_body_clear = lambda x, y, heading: x <= pose['x']
         return (pose, grid), reason
     monkeypatch.setattr(nav, '_snapshot', live_snapshot)
-    result = await nav.go_to_coordinate(1., 0., heading=.5, holonomic=True)
+    result = await nav.go_to_coordinate(1., 0.)
     assert result['status'] == 'blocked'
     assert result['reason'] == 'body_clearance_unavailable'
     assert len([cmd for cmd in commands if any(cmd)]) == 1

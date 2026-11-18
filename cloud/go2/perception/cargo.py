@@ -81,9 +81,19 @@ def _destination_geometry(frame, detected):
             'destination_precision': 'approximate_visual_proximity'}
 
 
+def _cargo_map(session):
+    """Use the completed shared map; cargo perception never rebuilds it."""
+    grid = getattr(go2, 'occupancy_grid', None)
+    stamp = getattr(grid, 'observed_at', None)
+    if (grid is None or getattr(grid, 'session_id', None) != session
+            or getattr(grid, 'frame_id', None) != 'odom'
+            or type(stamp) not in (int, float) or not 0 <= time.monotonic()-stamp <= 2.):
+        return None
+    return grid
+
+
 async def _track_confirmed_cargo(reference):
     """Refresh a known object's range from LiDAR; old image facts keep their age."""
-    from cloud.go2.navigation.occupancy_grid import OccupancyGrid
     from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
 
     previous = reference.get('observation') or {}
@@ -93,18 +103,15 @@ async def _track_confirmed_cargo(reference):
         return None
     session = reference.get('odom_session_id')
     pose = visual_target._live_pose(session)
-    voxel, stamp = go2.voxel_raw, go2.voxel_received_at
-    if (not isinstance(voxel, dict) or go2.voxel_frame_id != 'odom'
-            or type(stamp) not in (int, float) or not 0 <= time.monotonic()-stamp <= 2.):
+    grid = _cargo_map(session)
+    if grid is None or grid.measured_floor_z is None:
         return None
-    grid = await invoke_blocking(OccupancyGrid, voxel, robot_pose=pose)
-    if grid.measured_floor_z is None:
-        return None
-    points, diagnostics = [], {}
+    voxel, stamp = grid.voxel_message, grid.observed_at
+    diagnostics = {}
     target = await invoke_blocking(associate_lidar_target, voxel, capture_pose,
         go2_camera_profile(frame['width'], frame['height']), frame,
         previous['cargo_bbox_1000'], grid.measured_floor_z,
-        diagnostics=diagnostics, target_points=points)
+        diagnostics=diagnostics)
     emit_agent_event('vision.lidar', phase='cargo_reference_tracking', matched=target is not None,
                      association_diagnostics=diagnostics)
     if target is None:
@@ -126,7 +133,6 @@ async def _track_confirmed_cargo(reference):
     return {**previous, 'pose': live, 'near_destination': False,
             'cargo_location': {**target, 'source': 'lidar_foreground_cluster',
                                'frame_id': 'odom', 'odom_session_id': session},
-            'contact_observation': {'points_odom': points, 'pose': capture_pose, 'frame': frame},
             'advance_distance_m': advance,
             'cluster_extent_xyz_m': accepted['extent_xyz_m'], 'cluster_points': accepted['points'],
             'tracking_source': 'lidar', 'lidar_received_at': stamp, 'observed_at': time.time()}
@@ -135,7 +141,6 @@ async def _track_confirmed_cargo(reference):
 async def observe_cargo(cargo: str, destination: str | None = None, *, after_frame_id=None,
                         after_received_at=None, reference: dict | None = None) -> dict:
     """Measure cargo and locate a destination patch, marker or object base."""
-    from cloud.go2.navigation.occupancy_grid import OccupancyGrid
     from cloud.go2.perception.rgb_lidar import associate_lidar_target, go2_camera_profile
 
     # A confirmed odometry stop can precede the stationary posture samples.
@@ -225,22 +230,20 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     # only while its pose and odometry session still agree.
     if getattr(go2, '_odom_session_id', frame['odom_session_id']) != frame['odom_session_id']:
         raise TargetUnlocalized('odom_session_mismatch')
-    voxel, voxel_at = go2.voxel_raw, go2.voxel_received_at
+    grid = _cargo_map(frame['odom_session_id'])
+    voxel = grid.voxel_message if grid is not None else None
     camera = go2_camera_profile(frame['width'], frame['height'])
     if destination is not None:
         # This approximate point supplies a direction, never delivery evidence.
         geometry['destination_location'] = _visual_cargo_location(frame, pose, camera,
             detected['destination_bbox_1000'],
             {'cargo_distance_m': detected.get('destination_distance_m')})
-    diagnostics, target_points, cluster = {}, [], None
-    if (isinstance(voxel, dict) and go2.voxel_frame_id == 'odom'
-            and type(voxel_at) in (int, float) and 0 <= time.monotonic() - voxel_at <= 2.):
+    diagnostics, cluster = {}, None
+    if grid is not None:
         try:
-            grid = await invoke_blocking(OccupancyGrid, voxel, robot_pose=pose)
             if grid.measured_floor_z is not None:
                 cluster = await invoke_blocking(associate_lidar_target, voxel, pose, camera, frame,
-                    detected['cargo_bbox_1000'], grid.measured_floor_z, diagnostics=diagnostics,
-                    target_points=target_points)
+                    detected['cargo_bbox_1000'], grid.measured_floor_z, diagnostics=diagnostics)
             else:
                 diagnostics['reason'] = 'measured_floor_unavailable'
         except (ValueError, KeyError, TypeError):
@@ -276,8 +279,6 @@ async def observe_cargo(cargo: str, destination: str | None = None, *, after_fra
     if len(accepted) != 1:
         raise TargetUnlocalized('cargo_association_unconfirmed')
     return {**geometry, 'cargo_location': location, 'pose': live,
-            'contact_observation': {'points_odom': target_points, 'pose': pose,
-                                    'frame': {'width': frame['width'], 'height': frame['height']}},
             'frame_id': frame['frame_id'], 'received_at': frame['received_at'],
             'odom_session_id': frame['odom_session_id'], 'quality': quality,
             'cluster_extent_xyz_m': accepted[0]['extent_xyz_m'],

@@ -646,6 +646,14 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         logger.info("[Go2/Conn] 发送命令: %s request=%s code=%s", cmd, request_id, code)
         return waiter, response
 
+    async def prepare_motion(self) -> None:
+        """Prepare direct navigation streams without issuing a movement."""
+        async with self._command_lock:
+            params = {'x': .1, 'y': 0., 'z': 0.}
+            self._validate_motion('Move', params)
+            await self._ensure_classic_walk()
+            self._validate_motion('Move', params)
+
     async def _ensure_classic_walk(self) -> None:
         """Select once when the observed body is ready, shared by all Move users."""
         connection, epoch = self._conn, self._motion_epoch

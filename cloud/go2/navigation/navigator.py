@@ -166,14 +166,11 @@ class Navigator:
 
     async def move_relative(self, direction: str, *, distance_m: float | None = None,
                             angle_deg: float | None = None, speed: float | None = None,
-                            context, cargo_contact=None) -> dict:
+                            context) -> dict:
         """Reuse navigation's velocity loop and stop proof for an odom goal."""
         from cloud.go2.tools.executor import validate_execution_context
         validate_execution_context(context)
         speed = resolve_move_speed(direction, speed)
-        if cargo_contact is not None and (context != cargo_contact.context
-                or direction != 'forward' or distance_m != cargo_contact.advance or speed > .25):
-            return {'result': 'blocked', 'reason': 'cargo_contact_scope_mismatch'}
         snapshot, reason = self.snapshot()
         if reason:
             return {"result": "blocked", "reason": reason,
@@ -200,9 +197,6 @@ class Navigator:
                "context": context}
         if turning:
             loc['turn_speed'] = speed
-        if cargo_contact is not None:
-            loc['cargo_contact'] = cargo_contact
-            loc['minimum_command_speed'] = speed
         control_lease.acquire(context)
         task = asyncio.current_task()
         self._begin("相对移动", context.session_id, task)
@@ -266,27 +260,19 @@ class Navigator:
                                face_target_bias_rad: float | Callable[[], float] = 0.0,
                                arrival_tolerance_m: float | None = None,
                                bounds: tuple[float, float, float, float] | None = None,
-                               route_keepout: tuple[float, float, float] | None = None,
-                               cargo_contact=None) -> dict:
+                               route_keepout: tuple[float, float, float] | None = None) -> dict:
         """Reach a map coordinate by turning toward the route and walking forward.
 
         ``holonomic`` is accepted for existing callers but cannot enable mixed
         XY movement. ``heading`` / ``face_target`` only align the body at arrival.
         Explicit sideways/backward requests use move_relative instead.
         """
-        if cargo_contact is not None:
-            from cloud.go2.tools.executor import validate_execution_context
-            validate_execution_context(cargo_contact.context)
-            if cargo_contact.context.session_id != owner_session_id:
-                return {'status': 'blocked', 'reason': 'cargo_contact_scope_mismatch'}
         task = asyncio.current_task()
         self._begin("exploration target", owner_session_id, task)
         return await self._run_to("exploration target", {"name": "exploration target", "x": x, "y": y,
                                                           "heading": heading, "frame_id": "odom",
                                                           "keepout": keepout,
                                                           "route_keepout": route_keepout,
-                                                          "cargo_contact": cargo_contact,
-                                                          "context": cargo_contact.context if cargo_contact else None,
                                                           "bounds": bounds,
                                                           "speed_limit": speed_limit,
                                                           "minimum_command_speed": minimum_command_speed,
@@ -373,35 +359,6 @@ class Navigator:
             body_gap_since = None
             turning_to_heading = True  # Align once before the first translation.
 
-            async def checked_snapshot():
-                snapshot, reason = self._snapshot()
-                contact = loc.get('cargo_contact')
-                if snapshot is not None and not reason and contact is not None:
-                    from cloud.go2.perception.visual_target import TargetUnlocalized
-                    pose, grid = snapshot
-                    try:
-                        grid = await invoke_blocking(contact.grid_for, grid, pose)
-                    except TargetUnlocalized as exc:
-                        return None, exc.reason
-                    # Matching runs off the event loop. Recheck authority and
-                    # sensor/session freshness after that yield, before Move.
-                    if self.owner_session_id != 'system':
-                        try:
-                            control_lease.heartbeat_session(self.owner_session_id)
-                        except LeaseConflict:
-                            return None, 'control_lease_lost'
-                    latest, latest_reason = self._snapshot()
-                    if latest_reason:
-                        return None, latest_reason
-                    live = latest[0]
-                    if (loc['session_id'] != getattr(go2, '_odom_session_id', None)
-                            or live.get('session_id') != loc['session_id']):
-                        return None, 'map_mismatch'
-                    if context.expires_at and time.time() >= context.expires_at:
-                        return None, 'cargo_contact_scope_changed'
-                    snapshot = live, grid
-                return snapshot, reason
-
             motion_started = False
             async def send_motion(vx, vy, yaw, pose):
                 """Require progress in the dimension actually being commanded."""
@@ -424,6 +381,17 @@ class Navigator:
                         return {'reason': 'localization_unavailable'}
                     return None
                 last_control_stamp, motion_gap_since = stamp, None
+                if not loc.get('relative_motion') and not motion_started:
+                    # Coordinate navigation streams Move directly, so it must
+                    # prepare this connection's gait before the first packet.
+                    prepare = getattr(go2, 'prepare_motion', None)
+                    if callable(prepare):
+                        await prepare()
+                        motion_started = True
+                        # Preparation yields. Recompute the pose, route and
+                        # lease on the next iteration before sending speed.
+                        return None
+                    motion_started = True
                 previous = velocity_profile.velocity
                 if any(previous) and bool(vx or vy) != bool(previous[0] or previous[1]):
                     # Walk and turn are separate body actions. Finish braking
@@ -441,10 +409,8 @@ class Navigator:
                     return {'reason': 'mixed_motion_command'}
                 # Smoothing retains momentum while changing direction. Check
                 # that actual command as well as the requested path, using the
-                # current full/private contact map and keepout constraints.
-                # No await separates the outer snapshot/target calculation
-                # from this check. Reuse its validated contact view rather
-                # than adding another map-building wait to every control tick.
+                # current shared map and keepout constraints. No cargo
+                # association or map construction belongs in this loop.
                 live, grid = pose, fresh_grid
                 body_clear = getattr(grid, 'is_body_clear', None)
                 if body_clear is not None:
@@ -467,18 +433,6 @@ class Navigator:
                     loc['_move_control'] = {
                         'restore': restore_control, 'lease': control_lease.snapshot(),
                         'session': loc['session_id']}
-                    if loc.get('cargo_contact') is not None:
-                        latest, changed = await checked_snapshot()
-                        if changed:
-                            return {'reason': changed}
-                        live, grid = latest
-                        c, s = math.cos(live['heading']), math.sin(live['heading'])
-                        px = live['x'] + (vx*c-vy*s) * .3
-                        py = live['y'] + (vx*s+vy*c) * .3
-                        if (not grid.is_body_clear(live['x'], live['y'], live['heading'])
-                                or not grid.is_body_clear(px, py, live['heading']+yaw*.3)):
-                            return {'reason': 'cargo_contact_path_blocked'}
-                        control_lease.heartbeat_session(self.owner_session_id)
                     started = await execute_action("Move", {"x": vx, "y": vy, "z": yaw}, context=context)
                     loc['_move_control']['lease'] = control_lease.snapshot()
                     if started.get("result") not in {"ok", "accepted"}:
@@ -486,7 +440,7 @@ class Navigator:
                     motion_started = True
                     # Gateway calls yield; recheck sensor and task ownership
                     # before beginning the periodic stream of this same action.
-                    _, changed = await checked_snapshot()
+                    _, changed = self._snapshot()
                     if changed or loc['session_id'] != getattr(go2, '_odom_session_id', None):
                         return {"reason": changed or "map_mismatch"}
                     control_lease.heartbeat_session(self.owner_session_id)
@@ -494,6 +448,7 @@ class Navigator:
                 if stalled:
                     return {**stalled, 'last_command': last_command}
                 try:
+                    command_at = time.monotonic()
                     go2.move_velocity(vx, vy, yaw, deadman_s=COMMAND_TTL_S)
                 except CommandBlocked as exc:
                     if str(exc) != '等待有效设备反馈':
@@ -514,7 +469,7 @@ class Navigator:
                         control_lease.heartbeat_session(self.owner_session_id)
                     except LeaseConflict:
                         return self._finish("cancelled", "control_lease_lost", "运动租约已失效", task_id)
-                snapshot, reason = await checked_snapshot()
+                snapshot, reason = self._snapshot()
                 if reason:
                     progress.reset()
                     now = time.monotonic()
@@ -545,8 +500,7 @@ class Navigator:
                             if self.last_trusted_pose and start_pose else None,
                     }
                     return self._finish("failed", sensor_gap_reason if recoverable else reason,
-                                        "货物接触条件变化，已停止推送" if reason.startswith('cargo_contact_')
-                                        else "定位或地图数据中断，已停止导航", task_id,
+                                        "定位或地图数据中断，已停止导航", task_id,
                                         diagnostics=diagnostics)
                 if sensor_gap_since is not None:
                     logger.info("[Go2/Nav] telemetry resumed after %.2fs; replanning",
@@ -623,11 +577,9 @@ class Navigator:
                         planning_task = None
                     # Planning yields control. Its input may be stale or the
                     # device/session/owner may have changed before it returns.
-                    latest, latest_reason = await checked_snapshot()
+                    latest, latest_reason = self._snapshot()
                     if latest_reason:
                         stop_motion(latest_reason)
-                        if latest_reason.startswith('cargo_contact_'):
-                            return self._finish('blocked', latest_reason, '货物接触条件变化，已停止推送', task_id)
                         progress.reset()
                         path = None
                         await asyncio.sleep(.1)

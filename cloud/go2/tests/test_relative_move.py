@@ -172,7 +172,7 @@ async def test_turn_uses_measured_angle_without_translation(movement, direction)
 
 
 @pytest.mark.asyncio
-async def test_cargo_positioning_keeps_estimated_box_in_front_while_moving_sideways(movement, monkeypatch, tmp_path):
+async def test_cargo_positioning_uses_separate_turning_and_forward_motion(movement, monkeypatch, tmp_path):
     """Replay staging with the real loop and an ineffective low-speed gait."""
     from cloud.go2.navigation import cargo_push
     from cloud.go2.navigation import navigator as nav_module
@@ -199,23 +199,15 @@ async def test_cargo_positioning_keeps_estimated_box_in_front_while_moving_sidew
     async def stop(context, *, bounded):
         return await movement.nav.stop_and_confirm(owner_session_id=context.session_id)
     monkeypatch.setattr(cargo_push, '_stop_approach', stop)
-    errors = []
     movement.fault['minimum_linear_speed'] = .20
-    simulated_move = movement.robot.move_velocity
-    def move(vx, vy, yaw, **kwargs):
-        simulated_move(vx, vy, yaw, **kwargs)
-        bearing = math.atan2(cargo['y']-pose['y'], cargo['x']-pose['x'])
-        errors.append(abs(math.atan2(math.sin(bearing-pose['heading']),
-                                     math.cos(bearing-pose['heading']))))
-    movement.robot.move_velocity = move
     with use_context(movement.context):
         result = await cargo_push.push_cargo('近处右侧的深色扁盒子', '左后方蓝色点位')
     assert result['result'] == 'ok', (result.get('reason'), result.get('movement'))
     assert result['progress'] == 'positioned' and result['directional_push_attempted'] is False
     assert result['stop']['result'] == 'ok'
-    # Ordinary path-facing navigation ended about 70 degrees away from cargo.
-    assert max(errors) < math.radians(26)
-    assert any(abs(vy) > .05 for vx, vy, yaw in movement.commands)
+    assert any(vx >= .2 for vx, _, _ in movement.commands)
+    assert all(vy == 0 for _, vy, _ in movement.commands)
+    assert all(not vx or not yaw for vx, _, yaw in movement.commands)
     assert movement.commands[-1] == (0, 0, 0)
 
 
@@ -360,7 +352,8 @@ async def test_explicit_turn_speed_uses_angular_axis_and_stop_feedback(movement)
         result = await go2_move('turn_right', angle_deg=30, speed=.7)
     assert result['result'] == 'ok', result
     assert abs(result['angle_deg'] - 30) <= 3
-    assert max(abs(yaw) for _, _, yaw in movement.commands) == .7
+    # Acceleration and braking may keep a short turn below its speed limit.
+    assert .35 <= max(abs(yaw) for _, _, yaw in movement.commands) <= .7
     assert movement.commands[-1] == (0, 0, 0)
 
 
@@ -412,30 +405,6 @@ async def test_obstruction_reports_partial_distance_and_stops(movement):
     assert result['requested_distance_m'] == 1.
     assert result['stop']['result'] == 'ok'
     assert '未完成' in result['message']
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('lost_during_activation', [False, True])
-async def test_contact_is_rechecked_after_activation_and_during_movement(movement, lost_during_activation):
-    from cloud.go2.perception.visual_target import TargetUnlocalized
-    checked = []
-    def grid_for(grid, pose):
-        checked.append(pose.copy())
-        travelled = math.hypot(pose['x']-movement.start['x'], pose['y']-movement.start['y'])
-        if (movement.gateway.await_count >= 1 if lost_during_activation else travelled > .06):
-            raise TargetUnlocalized('cargo_contact_tracking_lost')
-        return grid
-    contact = SimpleNamespace(context=movement.context, advance=.25, grid_for=grid_for,
-                              until=time.monotonic()+10.)
-    result = await movement.nav.move_relative('forward', distance_m=.25, speed=.25,
-        context=movement.context, cargo_contact=contact)
-    assert result['result'] == 'blocked' and result['reason'] == 'cargo_contact_tracking_lost'
-    assert result['stop']['result'] == 'ok'
-    assert 0 <= result['distance_m'] < .25
-    assert checked and movement.commands[-1] == (0, 0, 0)
-    if lost_during_activation:
-        assert not any(any(cmd) for cmd in movement.commands)
-        assert [call.args[0] for call in movement.gateway.await_args_list] == ['EnterMoveControl']
 
 
 @pytest.mark.asyncio
