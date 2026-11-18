@@ -347,8 +347,10 @@ def check_lamp_sets_color_after_acceptance() -> None:
             send_progress=lambda *args: receipts.append(("progress", args)),
             send_result=lambda *args, **kwargs: receipts.append(("result", args, kwargs)))
 
-        def run_lamp(*args, **kwargs):
+        async def run_lamp(role, goal, **kwargs):
+            args = (goal, "esp32_desk_led", kwargs["context"], kwargs["dispatch"])
             setup_calls.append((args, kwargs))
+            assert role == "lamp"
             assert "优先" not in args[0] and "白色" not in args[0] and "猫头鹰" not in args[0]
             assert "decision_reason" in args[0] and "evidence_refs" in args[0]
             assert args[2].session_id.startswith("peer_game_color_")
@@ -368,9 +370,11 @@ def check_lamp_sets_color_after_acceptance() -> None:
               patch("cloud.esp32.service.get_agent", return_value=agent),
               patch("cloud.api.intents._dispatch_mqtt_task", side_effect=lambda *a, **k:
                     dispatches.append((a, k)) or "lamp_color_1"),
-              patch("cloud.space.activity.get_activity_store", return_value=activity)):
+              patch("cloud.space.activity.get_activity_store", return_value=activity),
+              patch("cloud.peers.games.color_hunt.run_device_task", side_effect=run_lamp)):
             _handle_color_hunt_acceptance(messenger, message, object())
-        assert len(dispatches) == 1 and setup_calls[0][1]["lighting_only"] is True
+        assert len(dispatches) == 1 and setup_calls[0][1]["allowed_tools"] == {
+            "set_led_state", "set_led_color"}
         assert receipts[-1] == ("result", ("accept_1", "ok"), {"task_id": "lamp_color_1"})
         assert events[-1][1]["decision_basis"] == basis
         assert events[-1][1]["trigger_message_id"] == "invite_1"

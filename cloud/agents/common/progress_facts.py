@@ -36,7 +36,7 @@ def resolve_public_decision(space: dict, reason: object, refs: object, *,
 _ID_FIELDS = ("event_id", "source_event_id", "trace_id", "run_id", "parent_run_id",
               "step_id", "tool_call_id", "task_id", "request_id", "agent_id",
               "target_unit_id", "trigger_message_id", "reply_to", "conversation_id",
-              "observation_event_id", "frame_id", "teaching_id", "training_ref", "activity_id", "question_id")
+              "observation_event_id", "frame_id", "teaching_id", "training_ref", "activity_id", "question_id", "game_instance_id")
 _RESULT_FIELDS = {
     "action": {"ism_state", "confirmation", "device_connected", "execution_phase",
                "completion_basis", "dispatch_only", "skipped", "goal_state",
@@ -240,7 +240,7 @@ def public_process_facts(value: dict) -> dict:
     result = {}
     for key in (*_ID_FIELDS, "skill_id", "tool", "action", "requested_text", "result_state",
                 "fact_kind", "result_kind", "status", "capability_name", "reason", "name",
-                "observation_summary", "media_ref", "stage", "reply_kind", "reply_source", "question"):
+                "observation_summary", "media_ref", "stage", "reply_kind", "reply_source", "question", "context_scope"):
         item = value.get(key)
         if isinstance(item, str) and item:
             result[key] = canonical_capability(item[:120]) if key in {"action", "tool"} else item[:400]

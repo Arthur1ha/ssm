@@ -47,14 +47,14 @@ def dialogue_bus(monkeypatch):
     bus.close()
 
 
-@pytest.mark.parametrize("status,task_id,is_game,ended", [
-    ("unknown", "delivery_task", True, True),
-    ("ok", "delivery_task", True, True),
-    ("cancelled", "delivery_task", True, True),
-    ("rejected", None, True, False),
-    ("ok", "chat_task", False, False),
+@pytest.mark.parametrize("status,task_id,is_game", [
+    ("unknown", "delivery_task", True),
+    ("ok", "delivery_task", True),
+    ("cancelled", "delivery_task", True),
+    ("rejected", None, True),
+    ("ok", "chat_task", False),
 ])
-def test_only_game_task_results_publish_game_end(dialogue_bus, status, task_id, is_game, ended):
+def test_transport_result_never_ends_game_before_owner_cleanup(dialogue_bus, status, task_id, is_game):
     h = dialogue_bus
     original = h.start()
     if is_game:
@@ -68,13 +68,8 @@ def test_only_game_task_results_publish_game_end(dialogue_bus, status, task_id, 
     h.deliver_last()
     rows = [call for call in h.store.record_event.call_args_list
             if call.args[1] == "game_ended"]
-    assert bool(rows) is ended
-    if ended:
-        assert len(rows) == 1
-        assert rows[0].kwargs["game_id"] == "push_delivery"
-        assert rows[0].kwargs["trigger_message_id"] == original["message_id"]
-        assert rows[0].kwargs["status"] == status
-        assert rows[0].kwargs["reason"] == "cargo_push_unconfirmed:control_error"
+    assert not rows
+    assert h.bus.get_status(original["message_id"])["state"] == status
 
 
 def test_pending_pair_blocks_new_topics_but_allows_same_thread_and_results(dialogue_bus):

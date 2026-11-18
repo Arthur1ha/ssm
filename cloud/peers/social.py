@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from cloud.space.activity import get_activity_store
+from cloud.space.activity import get_activity_store, activity_decision_context
 
 
 def activity_peers(unit_id: str, peers: list[dict[str, Any]]) -> tuple[dict | None, list[dict]]:
@@ -15,7 +15,7 @@ def activity_peers(unit_id: str, peers: list[dict[str, Any]]) -> tuple[dict | No
         return None, []
     joined = {name for name, status in (activity.get("devices") or {}).items()
               if status.get("status") == "joined"}
-    return activity, [peer for peer in peers if peer.get("unit_id") != unit_id
+    return activity_decision_context(activity), [peer for peer in peers if peer.get("unit_id") != unit_id
                       and peer.get("unit_id") in joined and peer.get("online")]
 
 
@@ -80,6 +80,7 @@ class SocialState:
         started_at = activity.get("started_at")
         request = activity.get("context") or activity.get("text")
         if (isinstance(request, str) and request.strip()
+                and not activity.get("request_consumed")
                 and isinstance(started_at, (int, float))
                 and self._born_at <= started_at <= instant
                 and request_id not in self.seen_discoveries):
@@ -90,7 +91,8 @@ class SocialState:
                     + ([idle_id] if idle_ready else []),
                     "summary": "用户刚为本次活动提出了目标，结合当前事实决定如何回应或协作；无需强制邀请。"}
         relevant = [row for row in discoveries if row.get("event_type") in
-                    {"observation", "person_identified", "action_result"}
+                    {"observation", "person_identified", "task_result"}
+                    and row.get("context_scope") != "process"
                     and not row.get("message_id") and row.get("event_id") not in self.seen_discoveries
                     and row.get("activity_id") == activity_id
                     and isinstance(row.get("ts"), (int, float))

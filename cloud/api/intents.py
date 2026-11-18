@@ -396,6 +396,13 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
         raise ValueError("invalid_event_scope")
     if event_type == "agent_reply" and not text.strip():
         return {}
+    from cloud.peers.games.scope import current_game_scope, game_scope_available
+    game = current_game_scope()
+    if game is not None:
+        if event_type in {"agent_reply", "reply_error"} and not game_scope_available():
+            return {}
+        facts = {**facts, "activity_id": game.activity_id,
+                 "game_instance_id": game.invitation_id, "context_scope": "process"}
     from cloud.space.user_goals import get_goal_registry
     goal_revision = facts.get("goal_revision", 0)
     if event_type in {"agent_reply", "reply_error"} and not get_goal_registry().is_current(goal_revision):

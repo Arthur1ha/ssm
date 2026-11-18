@@ -1,8 +1,8 @@
 """猜拳攻灯: role-owned choices, locked throws and receipt-gated progress.
 
-The graph below is the game protocol, not another agent runtime. Decisions use
-the existing role models through LangGraph; physical tools retain their normal
-policy, task ledgers, leases and hardware completion checks.
+The graph below only coordinates the game protocol. Each choice and execution
+subtask enters the device's existing Graph and retains its normal tool policy,
+task ledger, lease and hardware completion checks.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from cloud.agents.common.checkpoint import FileCheckpointSaver
-from cloud.agents.common.runner import invoke_blocking
 from .base import Game, activity_allows
+from .role_graph import run_device_task
 from .rps_decisions import Go2Setup, LampSetup, decide, gesture_options
 from .rps_lifecycle import on_acceptance, on_invitation
 
@@ -61,14 +61,10 @@ def _available(sender: str, target: str) -> bool:
     return {sender, target} == {LAMP, "go2"}
 
 
-async def _execute(drive, event: dict, task_id: str) -> None:
-    from cloud.agents.go2.workflows.search import search_request
-    from cloud.cards.registry import get_registry
+async def _execute(drive, event: dict, task_id: str) -> dict | None:
     from cloud.esp32.service import get_agent
-    from cloud.esp32.tool_executor import execute_physical
     from cloud.go2.connection import go2
     from cloud.go2.navigation.navigator import navigator
-    from cloud.go2.tools.executor import execute_tool
     from cloud.space.activity import get_activity_store
     from cloud.space.context import get_space_context
     from cloud.api.intents import _dispatch_mqtt_task
@@ -102,6 +98,9 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     lamp_off_confirmed = False
 
     def check():
+        from .scope import game_scope_available
+        if not game_scope_available():
+            raise GameStopped("game_ended")
         if time.time() >= deadline:
             raise GameStopped("game_expired")
         if (not activity_allows(activity_id, LAMP, "go2")
@@ -132,6 +131,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             unit_id=LAMP if role == "lamp" else "go2", text=text,
             **{"game_id": GAME_ID, "trigger_message_id": invitation_id,
                "task_id": task_id, "source_event_id": source_id,
+               "context_scope": "shared" if kind == "message" else "process",
                "fact_kind": fact_kind, "result_kind": "action", **facts})
 
     def facts(state=None, role="go2"):
@@ -149,9 +149,65 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         answer = await decide(role, phase, facts(state, role),
             thread_id=f"rps:{invitation_id}:{role}:{phase}:{(state or {}).get('round', 0)}",
-            deadline=deadline)
+            deadline=deadline, availability=available)
         check()
         return answer
+
+    def available():
+        try:
+            check()
+        except GameStopped:
+            return False
+        return True
+
+    async def dog_task(tool, params, request_id, *, observation_after=None):
+        """A locked game action still executes inside Go2's original Graph."""
+        check()
+
+        def guard(name, arguments):
+            check()
+            if name != tool or arguments != params:
+                return {"result": "rejected", "error": "game_action_changed"}
+            return None
+
+        attempts = 0
+        def options(_name, _arguments, step_id):
+            nonlocal attempts
+            values = {"request_id": request_id if attempts == 0 else
+                      request_id + "_" + uuid.uuid5(uuid.NAMESPACE_URL, step_id).hex}
+            attempts += 1
+            if observation_after is not None:
+                values["observation_after"] = observation_after
+            return values
+
+        def completion(name, arguments, receipt):
+            complete = receipt.get("result") == "ok"
+            if name == "go2_observe":
+                complete = complete and bool(str(receipt.get("message") or "").strip())
+            elif name == "go2_find_object":
+                complete = (complete and receipt.get("outcome") == "nearby"
+                    and receipt.get("found") is True
+                    and (receipt.get("stop") or {}).get("result") == "ok"
+                    and receipt.get("target") == arguments.get("target")
+                    and receipt.get("task_id") == request_id)
+            return {**receipt, "final": complete or receipt.get("result") == "cancelled"}
+
+        result = await run_device_task(
+            "go2", "执行本局已经锁定的动作；不改变本局约定或补充其他动作。",
+            context=context, run_id=request_id, deadline=deadline,
+            allowed_tools=frozenset({tool}), tool_guard=guard,
+            initial_tool=(tool, {**params, "final": True}),
+            execution_options=options, availability=available,
+            result_transform=completion,
+            parent_run_id=invitation_id,
+            share_result=False, reply_required=False,
+            instructions="内部失败在原任务中处理，未知物理结果不得重发；过程无需向同伴报幕。")
+        steps = result.get("tool_results") or result.get("steps") or []
+        receipt = next((step.get("result") for step in reversed(steps)
+                        if step.get("tool") == tool), None)
+        check()
+        return receipt or {"result": result.get("result", "unknown"),
+                           "error": result.get("error", "game_subtask_unconfirmed")}
 
     async def physical(action, params, step):
         nonlocal lamp_off_confirmed
@@ -166,11 +222,27 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 {"session_id": ctx.session_id, "actor": ctx.actor, "persist": False,
                  "expires_at": ctx.expires_at}, source="peer_autonomous", task_id=task_id)
 
-        result = await invoke_blocking(execute_physical, state=agent._state,
-            unit_id=LAMP, action=action, params=params, context=context,
-            dispatch=dispatch, source="peer_autonomous", task_id=physical_id,
-            card=get_registry().get_card(LAMP),
-            timeout=min(20, max(0.1, deadline - time.time())))
+        tool = {"SET_STATE": "set_led_state", "SET_COLOR": "set_led_color"}[action]
+        def guard(name, arguments):
+            check()
+            if name != tool or arguments != params:
+                return {"result": "rejected", "error": "game_action_changed"}
+            return None
+        outcome = await run_device_task(
+            "lamp", "执行本局已经锁定的灯光动作，不改变已确认的映射。",
+            context=context, run_id=physical_id, deadline=deadline,
+            allowed_tools=frozenset({tool}), tool_guard=guard,
+            initial_tool=(tool, {**params, "final": True}), dispatch=dispatch,
+            result_transform=lambda _name, _params, receipt: {
+                **receipt, "final": receipt.get("result") in {"ok", "cancelled"}},
+            availability=available, parent_run_id=invitation_id,
+            share_result=False, reply_required=False,
+            instructions="内部失败在原任务内处理，未知结果不得重复派发；无需逐步发言。")
+        steps = outcome.get("steps") or outcome.get("tool_results") or []
+        result = next((entry.get("result") for entry in reversed(steps)
+                       if entry.get("tool") == tool), None) or {
+            "result": outcome.get("result", "unknown"),
+            "error": outcome.get("error", "game_subtask_unconfirmed")}
         record("action_result", "", public_result=result,
                role="lamp", action=action, arguments=params, status=result.get("result", "unknown"),
                task_id=result.get("task_id", physical_id))
@@ -195,7 +267,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     async def recognize(state):
         check()
         cue = state["identification"]
-        observation = await execute_tool("go2_observe", {
+        observation = await dog_task("go2_observe", {
             "question": "用户提供的外形线索：灯是蓝紫色球体，用户会放在狗的视野内；这不是已看见的证明。"
                         "参与游戏的圆球灯已经确认亮出识别色。它告诉你："
                         + cue["speech"] + "。已确认的RGB颜色为" + str(cue["color"]) + "。"
@@ -205,7 +277,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                         "找不到、外形证据不足或有多个无法区分的候选就明确说明。"
                         "同伴自述不是观察事实，不能把其他同色物品当成灯。"
                         "后续灯会为出拳变色，请同时描述不依赖当前颜色的固定特征。"},
-            context=context, observation_after=cue["confirmed_at"])
+            "rps_" + invitation_id + "_recognize",
+            observation_after=cue["confirmed_at"])
         if observation.get("result") != "ok":
             raise GameStopped("game_observation_unavailable")
         text = str(observation.get("message") or "").strip()
@@ -248,8 +321,9 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", state),
                                          decision("go2", "agree", state))
         for role, answer in (("lamp", lamp), ("go2", dog)):
-            record("message", answer.get("speech"), emotion=answer.get("emotion"), role=role, stage="agreement",
-                   status="accepted" if answer["accepted"] else "rejected")
+            if not answer["accepted"]:
+                record("message", answer.get("speech"), emotion=answer.get("emotion"),
+                       role=role, stage="agreement", status="rejected")
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "game_terms_not_agreed"}
         record("action_result", "", stage="terms_confirmed", fact_kind="result", result_kind="query",
@@ -275,8 +349,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         command = terms["go2_mapping"][choices["go2"]["choice"]]
         async def dog_gesture():
             check()
-            result = await execute_tool("go2_sport", {"cmd": command}, context=context,
-                                       request_id=f"rps_{invitation_id}_{number}_gesture")
+            result = await dog_task("go2_sport", {"cmd": command},
+                                    f"rps_{invitation_id}_{number}_gesture")
             record("action_result", "", public_result=result,
                    action="go2_sport", arguments={"cmd": command}, status=result.get("result", "unknown"),
                    task_id=result.get("command_request_id") or task_id)
@@ -317,9 +391,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         target = state["target_identification"]["target"]
         search_id = "rps_" + invitation_id + "_lamp"
         record("action", "", action="go2_find_object", arguments={"target": target}, task_id=search_id)
-        with search_request(search_id, deadline):
-            result = await execute_tool("go2_find_object",
-                {"target": target}, context=context)
+        result = await dog_task("go2_find_object", {"target": target}, search_id)
         record("action_result", str(result.get("message") or result.get("reason") or result.get("result")),
                action="go2_find_object", public_result=result, status=result.get("result", "unknown"),
                task_id=result.get("task_id") or search_id)
@@ -337,8 +409,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             raise GameStopped("arrival_not_confirmed")
         gesture_id = f"rps_{invitation_id}_switch_off_gesture"
         record("action", "", action="go2_sport", arguments={"cmd": "Hello"}, task_id=gesture_id)
-        result = await execute_tool("go2_sport", {"cmd": "Hello"}, context=context,
-                                    request_id=gesture_id)
+        result = await dog_task("go2_sport", {"cmd": "Hello"}, gesture_id)
         record("action_result", "", public_result=result,
                action="go2_sport", arguments={"cmd": "Hello"}, status=result.get("result", "unknown"),
                task_id=result.get("command_request_id") or gesture_id)
@@ -353,8 +424,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         record("message", answer.get("speech"), emotion=answer.get("emotion"))
         record("action", "", action="go2_sport", arguments={"cmd": answer["command"]})
-        result = await execute_tool("go2_sport", {"cmd": answer["command"]}, context=context,
-            request_id=f"rps_{invitation_id}_performance")
+        result = await dog_task("go2_sport", {"cmd": answer["command"]},
+                               f"rps_{invitation_id}_performance")
         record("action_result", "", public_result=result,
                action="go2_sport", status=result.get("result", "unknown"),
                task_id=result.get("command_request_id") or task_id)
@@ -427,6 +498,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         logger.exception("RPS game failed invitation=%s", invitation_id)
         status, reason = "unknown", "game_error:" + type(exc).__name__
     finally:
+        from .scope import begin_game_close
+        begin_game_close()
         if graph_task is not None and not graph_task.done():
             graph_task.cancel()
             await asyncio.gather(graph_task, return_exceptions=True)
@@ -449,6 +522,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     record("action_result", "", stage="settlement", reason=reason, status=status,
            public_result={"result": status, "reason": reason})
     messenger.send_result(event["message_id"], status, task_id=task_id, reason=reason)
+    return {"result": status, "reason": reason, "game_winner": adjudicated_winner}
 
 
 GAME = Game(

@@ -25,7 +25,7 @@ def reverse(monkeypatch, tmp_path):
     monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready", lambda *_: True)
     monkeypatch.setattr(color_hunt, "activity_allows", lambda *_: True)
     monkeypatch.setattr("cloud.esp32.service.get_agent", lambda: SimpleNamespace())
-    decision = Mock(return_value={"event_decision": "accept", "decision_reason": "我想出个颜色题，看看你能找到什么。"})
+    decision = Mock(return_value={"event_decision": "accept", "decision_speech": "我想出个颜色题，看看你能找到什么。"})
     monkeypatch.setattr(color_hunt, "_lamp_invitation_decision", decision)
 
     def setup(recorder, _message, _state):
@@ -45,7 +45,7 @@ def test_lamp_prepares_real_color_before_accepting_dog_invitation(reverse):
     color_hunt._handle_color_hunt_invitation(reverse.messenger, reverse.message, None)
     assert sequence == ["physical_setup", "accepted"]
     args, kwargs = reverse.messenger.send_message.call_args
-    assert args == (LAMP, DOG, reverse.decision.return_value["decision_reason"])
+    assert args == (LAMP, DOG, reverse.decision.return_value["decision_speech"])
     assert kwargs == {"reply_to": "invite_dog", "reply_kind": "accepted", "deadline": reverse.message["deadline"],
                       "emotion": "neutral"}
     reverse.messenger.send_result.assert_not_called()  # Preparation is not game completion.
@@ -53,7 +53,7 @@ def test_lamp_prepares_real_color_before_accepting_dog_invitation(reverse):
 
 @pytest.mark.parametrize("choice", ["decline", "defer"])
 def test_lamp_can_decline_or_defer_without_lighting_action(reverse, choice):
-    reverse.decision.return_value = {"event_decision": choice, "decision_reason": "我现在想先休息一下。"}
+    reverse.decision.return_value = {"event_decision": choice, "decision_speech": "我现在想先休息一下。"}
     color_hunt._handle_color_hunt_invitation(reverse.messenger, reverse.message, None)
     reverse.prepare.assert_not_called()
     assert reverse.messenger.send_message.call_args.args == (LAMP, DOG, "我现在想先休息一下。")
@@ -66,7 +66,7 @@ def test_arbitration_failure_stays_a_result_without_fabricated_lamp_speech(rever
     color_hunt._handle_color_hunt_invitation(reverse.messenger, reverse.message, None)
     reverse.prepare.assert_not_called()
     reverse.messenger.send_message.assert_not_called()
-    assert reverse.messenger.send_result.call_args.kwargs["reason"] == reason
+    assert reverse.messenger.send_result.call_args.kwargs["reason"] == "invitation_declined"
 
 
 def test_old_invitation_never_runs_lamp_graph_or_setup(reverse):

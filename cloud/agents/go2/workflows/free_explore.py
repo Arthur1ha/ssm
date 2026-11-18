@@ -127,6 +127,8 @@ def build_motivation_graph(*, profile_loader, checkpointer: Any = None, model: A
                                 "只有当前目标和事实需要探索时才选择 explore。"
                                 "没有必要先绕房间一圈才能交流。观察不足时可先 observe；"
                                 "收到真实观察后重新判断，不把历史信息当当前事实。"
+                                "activity_request.request_consumed=true表示此前游戏要求已经结束，"
+                                "现在自由活动，不再讨论、解释失败或执行旧局目标；想再玩须重新邀请。"
                                 "不执行设备、不自行编造游戏步骤或宣称物理成功。")),
                             HumanMessage(content=json.dumps({
                                 "activity_request": state.get("activity_request") or {},

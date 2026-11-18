@@ -1,24 +1,11 @@
-"""Role-owned decisions for 指挥官与送货员, using the shared model framework.
-
-The delivery coordinator owns stage ordering and real execution receipts. This
-module only makes one checkpointed, typed decision at the requested stage.
-"""
+"""Delivery stage contracts supplied to each device's existing role Graph."""
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
-import time
-from typing import Literal, TypedDict
+from typing import Literal
 
-from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
-from cloud.agents.common.messages import role_messages
-from cloud.agents.common.models import async_model_clients
-from cloud.personality.store import render_identity
 
 
 class DecisionModel(BaseModel):
@@ -134,12 +121,6 @@ class CompletionDecision(NextDecision):
         return value.strip()
 
 
-class DecisionState(TypedDict, total=False):
-    input_signature: str
-    facts: dict
-    decision: dict
-
-
 def _schema(role: str, phase: str, stage: str = ""):
     if phase == "invite":
         return InvitationDecision
@@ -152,23 +133,6 @@ def _schema(role: str, phase: str, stage: str = ""):
     if phase == "next" and role == "go2":
         return CompletionDecision if stage in {"delivered", "directional_push_completed"} else NextDecision
     raise ValueError("invalid_delivery_role_or_phase")
-
-
-def _role_model(role: str):
-    if role == "lamp":
-        from cloud.agents.lamp.personality.profile import get_profile
-        from cloud.esp32.service import get_agent
-
-        agent = get_agent()
-        if agent is None:
-            raise ValueError("lamp_agent_unavailable")
-        model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
-    else:
-        from cloud.agents.go2.personality.profile import get_profile
-        from cloud.go2.models import get_text_llm
-
-        model = get_text_llm()
-    return model, get_profile()
 
 
 def _instructions(phase: str) -> str:
@@ -248,45 +212,11 @@ def _instructions(phase: str) -> str:
 
 
 async def decide(role: str, phase: str, facts: dict, *, thread_id: str,
-                 deadline: float) -> dict:
-    """Run one typed role decision, retaining a completed ID's exact result."""
-    if role not in {"lamp", "go2"}:
-        raise ValueError("unknown_delivery_role")
-    if not isinstance(facts, dict) or not isinstance(thread_id, str) or not thread_id:
-        raise ValueError("invalid_delivery_decision_context")
-    schema = _schema(role, phase, facts.get("stage", ""))
-    remaining = deadline - time.time()
-    if remaining <= 0:
-        raise TimeoutError("delivery_decision_expired")
-    signature = hashlib.sha256(json.dumps(
-        {"role": role, "phase": phase, "facts": facts},
-        sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
-    config = {"configurable": {"thread_id": f"delivery:{thread_id}:{role}:{phase}"}}
+                 deadline: float, availability=None) -> dict:
+    """Submit the stage contract to the lamp/Go2 brain, never a game model."""
+    from .role_graph import decide as role_decide
 
-    async with asyncio.timeout(remaining), async_model_clients():
-        saver = FileCheckpointSaver()
-        model, profile = _role_model(role)
-        structured = model.with_structured_output(schema, method="function_calling")
-
-        async def choose(state: DecisionState) -> DecisionState:
-            messages = role_messages(
-                render_identity(profile) + "\n" + _instructions(phase),
-                "请作出当前配送游戏阶段的决定。", context=state["facts"])
-            raw = await structured.ainvoke(messages)
-            return {"decision": schema.model_validate(raw).model_dump()}
-
-        builder = StateGraph(DecisionState)
-        builder.add_node("choose", choose)
-        builder.add_edge(START, "choose")
-        builder.add_edge("choose", END)
-        graph = builder.compile(checkpointer=saver)
-        async with saver.async_run_lock(config["configurable"]["thread_id"]):
-            previous = await graph.aget_state(config)
-            if previous.values:
-                if previous.values.get("input_signature") != signature:
-                    raise ValueError("delivery_decision_context_changed")
-                if previous.values.get("decision"):
-                    return schema.model_validate(previous.values["decision"]).model_dump()
-            result = await graph.ainvoke(
-                {"facts": facts, "input_signature": signature}, config, durability="sync")
-            return schema.model_validate(result["decision"]).model_dump()
+    return await role_decide(role, phase, facts,
+        schema=_schema(role, phase, facts.get("stage", "")),
+        instructions=_instructions(phase), thread_id=thread_id,
+        deadline=deadline, availability=availability)

@@ -33,7 +33,7 @@ from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
 from cloud.agents.common.conversation import dialogue_turn, legacy_dialogue, trim_dialogue
 from cloud.agents.common.messages import context_message, observed_tool_messages
 from cloud.agents.common.outcomes import completed_status, outcome_summary
-from cloud.agents.common.tool_results import UNCERTAIN, task_result
+from cloud.agents.common.tool_results import SUCCESS, UNCERTAIN, prior_tool_step, task_result
 from cloud.observability import emit_agent_event
 
 @dataclass
@@ -147,23 +147,34 @@ async def run_role_graph(
     resume_value: str | None = None,
     initial_tool: tuple[str, dict] | None = None,
     terminal_tools: frozenset[str] = frozenset(),
+    once_per_run_tools: frozenset[str] = frozenset(),
 ) -> GraphRun:
     """Run a role's model and domain executor through a durable StateGraph.
 
     `build_messages` reads current personality and device state each turn.
     `execute` alone owns authorization and actual device receipts. The native
     AIMessage tool call ID is the stable task/step ID for resume reconciliation.
+    `once_per_run_tools` declares effects with one business identity per run.
+    Their committed steps are reused across new model call IDs; queries and
+    repeatable actions must not be declared here.
     """
     if not run.agent_id:
         raise ValueError("GraphRun.agent_id is required")
     tools = [_schema(name, value) for name, value in tool_schemas.items()]
-    bound_model = model.bind_tools(tools, parallel_tool_calls=False) if tools else model
+    if not once_per_run_tools <= tool_schemas.keys() or any(
+            not effectful(name) for name in once_per_run_tools):
+        raise ValueError("once_per_run_tools must name declared effectful tools")
     # Request JSON mode and let LangChain validate structured decisions.
     # OpenAI-compatible providers may still return ordinary final prose.
     # Passing this through the SDK's auto-parser would require strict schemas
     # for every business tool, changing their existing optional parameters.
-    if hasattr(bound_model, "bind"):
-        bound_model = bound_model.bind(extra_body={"response_format": {"type": "json_object"}})
+    def bind_model(available_tools):
+        bound = model.bind_tools(available_tools, parallel_tool_calls=False) if available_tools else model
+        if hasattr(bound, "bind"):
+            bound = bound.bind(extra_body={"response_format": {"type": "json_object"}})
+        return bound
+
+    bound_model = bind_model(tools)
     response_parser = PydanticOutputParser(pydantic_object=DialogueResponse)
     text_parser = StrOutputParser()
     response_policy = SystemMessage(content=(
@@ -242,13 +253,22 @@ async def run_role_graph(
         outcomes = outcome_summary(current.steps)
         if outcomes["recovered_attempts"]:
             messages.append(context_message({"outcomes": outcomes}))
-        messages.extend(observed_tool_messages(step for step in current.steps[-8:]
-                                              if step.get("dispatch_status") == "observed"))
+        used = {name for name in once_per_run_tools if prior_tool_step(current.steps, name)}
+        # A once-only tool may stay unavailable longer than the ordinary eight
+        # receipts. Keep its original evidence available, with original IDs.
+        messages.extend(observed_tool_messages(step for index, step in enumerate(current.steps)
+            if step.get("dispatch_status") == "observed"
+            and (index >= len(current.steps) - 8 or step.get("tool") in used)))
+        planner = (bind_model([tool for tool in tools if tool["function"]["name"] not in used])
+                   if used else bound_model)
+        if used:
+            messages.append(context_message({"unavailable_tools": sorted(used),
+                "reason": "本次运行已执行过这些一次性操作；沿用原回执，不重复执行。"}))
         messages.insert(0, response_policy)
         emit("model.request", turn=turns, input=messages)
         started = time.monotonic()
         try:
-            response = await asyncio.wait_for(bound_model.ainvoke(messages),
+            response = await asyncio.wait_for(planner.ainvoke(messages),
                                               timeout=max(0.1, current.deadline - time.time()))
         except Exception as exc:
             emit("model.error", turn=turns, error=type(exc).__name__, message=str(exc),
@@ -266,7 +286,7 @@ async def run_role_graph(
                 and time.time() < current.deadline - 1):
             emit("model.empty_retry", turn=turns)
             try:
-                response = await asyncio.wait_for(bound_model.ainvoke(messages + [SystemMessage(
+                response = await asyncio.wait_for(planner.ainvoke(messages + [SystemMessage(
                     content="上一轮没有返回内容或工具调用。请依据已有结果回答；"
                             "目标尚未完成时才调用必要工具，不重复已成功的动作。"
                 )]), timeout=max(0.1, current.deadline - time.time()))
@@ -412,11 +432,37 @@ async def run_role_graph(
                 args = declaration.model_validate(args).model_dump(exclude_none=True)
             except ValidationError:
                 return stop("rejected", "工具参数未通过校验，未执行新动作。")
-        if effectful(name) and max_effects is not None and state["effects"] >= max_effects:
-            return stop("blocked", "任务动作次数已达上限；其余步骤未执行。")
         execute_params = args
         params = {key: value for key, value in args.items()
                   if key not in {"decision_reason", "evidence_refs"}}
+        reconciling_step = None
+        previous = prior_tool_step(current.steps, name) if name in once_per_run_tools else None
+        if (previous is not None and previous.get("step_id") == call["id"]
+                and (previous.get("result") or {}).get("result") not in SUCCESS
+                and params == previous.get("params", {})
+                and ledger.read(current.agent_id, thread_id, current.run_id, call["id"]) is not None):
+            # Reconcile the original reservation below. Missing ledger state
+            # cannot authorize another dispatch of an uncertain effect.
+            reconciling_step = previous
+            previous = None
+        if previous is not None:
+            receipt = previous.get("result") or {"result": "unknown"}
+            # Unknown effects are never retried under a fresh call ID, even
+            # when the model changes arguments. Preserve their original state.
+            if receipt.get("result") not in SUCCESS:
+                return stop(receipt.get("result", "unknown"), "原操作的结果尚未确认；未重复执行。")
+            if params != previous.get("params", {}):
+                return stop("rejected", "本次运行的一次性操作已完成，不能更换参数再次执行。")
+            emit("effect.reused", tool=name, tool_call_id=call["id"],
+                 step_id=previous.get("step_id"), status="observed", result=receipt)
+            # Reusing a receipt is not another action, failure or UI step. A
+            # queued new operation may continue; a repeat-only turn closes.
+            if remaining and not final and name not in terminal_tools and not receipt.get("final"):
+                return {"run": asdict(current), "decision": {"kind": "tool"},
+                        "pending_calls": remaining}
+            return stop(completed_status(current.steps), receipt.get("message") or "已沿用原操作结果。")
+        if effectful(name) and max_effects is not None and state["effects"] >= max_effects:
+            return stop("blocked", "任务动作次数已达上限；其余步骤未执行。")
         step_id = call["id"]
         emit("graph.node", node="tool", phase="entered", step_id=step_id, tool=name)
         is_effect = effectful(name)
@@ -428,7 +474,11 @@ async def run_role_graph(
                 "ts": time.time()}
         if basis:
             step["decision_basis"] = basis
-        current.steps.append(step)
+        if reconciling_step is not None:
+            reconciling_step.update(step)
+            step = reconciling_step
+        else:
+            current.steps.append(step)
         sync_outer(current)
         if record:
             record(current, step)

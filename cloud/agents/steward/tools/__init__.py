@@ -10,6 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ConfigDict
 from cloud.agents.common.runner import invoke_blocking
+from cloud.agents.common.tool_results import prior_tool_step
 from cloud.observability import current_event_context, emit_agent_event
 from cloud.agents.steward.tools.coordination import allows_step
 from cloud.agents.steward.tools.card import validate_public_skill
@@ -228,6 +229,9 @@ STEWARD_TOOL_SCHEMAS = {
     "clear_space_constraints": ClearSpaceConstraints,
 }
 
+# One lifecycle operation per trusted user goal; other tools remain repeatable.
+ONCE_PER_RUN_TOOLS = frozenset({"start_activity"})
+
 
 def make_executor(run, context: dict, resume: bool = False):
     """Bind the trusted context and domain services to one Graph tool call."""
@@ -286,9 +290,10 @@ def make_executor(run, context: dict, resume: bool = False):
                     or context.get("peer_request_id") or not context.get("event_id")
                     or type(context.get("user_revision")) is not int):
                 return {"result": "rejected", "error": "verified_current_user_intent_required"}
-            if any(step.get("tool") == "start_activity" and step.get("step_id") != step_id
-                   for step in run.steps):
-                return {"result": "rejected", "error": "activity_already_started_for_intent"}
+            previous = prior_tool_step(
+                (step for step in run.steps if step.get("step_id") != step_id), name)
+            if previous is not None:
+                return deepcopy(previous.get("result") or {"result": "unknown"})
             try:
                 started = await invoke_blocking(
                     transport.do_start_activity, context, run.goal,
@@ -296,7 +301,9 @@ def make_executor(run, context: dict, resume: bool = False):
                     min(12.0, max(1.0, run.deadline - time.time())))
             except Exception as exc:
                 logger.warning("activity start failed run=%s error=%s", run_id, type(exc).__name__)
-                return {"result": "rejected", "error": "activity_start_unavailable_or_stale"}
+                # A lost HTTP receipt does not prove the lifecycle operation
+                # failed; a new model call must not start it again.
+                return {"result": "unknown", "error": "activity_start_unavailable_or_stale"}
             return {"result": "ok", "activity": started["activity"]}
         if name == "send_message":
             started = next((step.get("result") or {} for step in run.steps

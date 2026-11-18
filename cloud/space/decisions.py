@@ -83,7 +83,7 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
     activity = space.get("activity") or {}
     activity_id = activity.get("activity_id")
     if activity_id:
-        add(f"activity:{activity_id}", "activity", "user", activity.get("started_at"),
+        add(f"activity:{activity_id}", "activity", "system" if activity.get("context_source") == "runtime" else "user", activity.get("started_at"),
             str(activity.get("context") or "当前空间活动正在进行"))
 
     for peer in space.get("peers") or []:
@@ -118,10 +118,7 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
                 or not _fresh(discovery.get("ts"), instant, _DISCOVERY_MAX_AGE_S)):
             continue
         kind = discovery.get("event_type")
-        if kind not in {"observation", "person_identified", "action_result", "message", "response"}:
-            continue
-        if kind == "action_result" and discovery.get("status") not in {
-                "ok", "blocked", "rejected", "cancelled", "error"}:
+        if kind not in {"observation", "person_identified", "task_result", "message"}:
             continue
         if discovery.get("event_id"):
             add(discovery["event_id"], kind,

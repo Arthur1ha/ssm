@@ -9,7 +9,8 @@ from typing import Any
 from cloud.cards.registry import CardRegistry, get_registry
 from cloud.peers.view import list_peers
 from cloud.space.constraints import ConstraintStore, get_constraint_store
-from cloud.space.activity import get_activity_store
+from cloud.space.activity import (get_activity_store, activity_game_context,
+                                  activity_decision_context, shared_context_events)
 from cloud.space.freshness import state_validity
 
 _VALUES = ("connection_state", "activity_state", "life_state", "body_state",
@@ -80,14 +81,20 @@ def get_space_context(
     # observation evidence or confirmation of current physical state.
     events = (activity_store.events(activity["activity_id"])
               if activity and callable(getattr(activity_store, "events", None)) else [])
+    if activity is not None:
+        activity.update({key: current[key] for key in ("request_consumed", "phase", "game") if key in current}
+                        if "phase" in current else activity_game_context(events))
+        activity = activity_decision_context(activity)
+        context["activity"] = activity
     context["interaction_history"] = {
         "kind": "history",
         "events": [{key: row[key] for key in (
             "event_id", "event_type", "ts", "unit_id", "target_unit_id", "text",
             "message_id", "reply_to", "reply_kind", "interaction_kind", "game_id",
-            "status", "result", "task_id") if key in row}
-            for row in events if row.get("activity_id") == activity["activity_id"]
-            and row.get("event_type") in {"message", "response", "action_result"}][-12:]
+            "status", "result", "task_id", "game_instance_id", "run_id") if key in row}
+            for row in shared_context_events(events, closed_instances=(current or {}).get("closed_game_instances", []))
+            if row.get("activity_id") == activity["activity_id"]
+            and row.get("event_type") in {"message", "question", "task_result"}][-12:]
     }
     from cloud.space.decisions import decision_evidence
     context["decision_evidence"] = decision_evidence(context, now=instant)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from copy import deepcopy
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -134,7 +134,8 @@ async def delivery_harness(monkeypatch):
 
     def resolve_decision(space, reason, refs, **_kwargs):
         available = {entry["ref"]: entry for entry in space["decision_evidence"]}
-        assert refs and all(ref in available for ref in refs)
+        if not refs or not all(ref in available for ref in refs):
+            raise ValueError("decision_evidence_unavailable")
         return {"reason": reason, "evidence": [available[ref] for ref in refs]}
 
     async def decide(role, phase, facts, **_kwargs):
@@ -146,7 +147,7 @@ async def delivery_harness(monkeypatch):
             return {"accepted": True, "cargo": "地上的小纸盒", "speech": "请先找地上的小纸盒。"}
         if phase == "destination":
             assert facts["cargo_receipt"]["found"] is True
-            assert facts["courier_report"]["action"] == "question"
+            assert facts["courier_report"]["found"] is True
             return {"accepted": True, "destination": config.destination, "color_name": "红色",
                     "color": {"r": 255, "g": 0, "b": 0, "brightness": 160},
                     "evidence_refs": [facts["observation"]["ref"]],
@@ -219,6 +220,35 @@ async def delivery_harness(monkeypatch):
     async def invoke_blocking(callback, *args, **kwargs):
         return callback(*args, **kwargs)
 
+    async def run_device_task(role, goal, *, context, run_id, allowed_tools,
+                              tool_context=None, result_transform=None, tool_guard=None, **_kwargs):
+        trace.append(("brain_task", role, run_id))
+        if role == "lamp":
+            color = _kwargs["task_context"]()["order"]["color"]
+            assert allowed_tools == frozenset({"set_led_state", "set_led_color"})
+            assert tool_guard("set_led_color", color) is None
+            receipt = execute_physical(action="SET_COLOR", params=color, task_id=run_id)
+            return {"result": "ok", "tool_results": [{"tool": "set_led_color", "result": receipt}]}
+        name = ("go2_push_cargo" if "go2_push_cargo" in allowed_tools else
+                "go2_find_object" if "go2_find_object" in allowed_tools else "go2_observe")
+        if name == "go2_push_cargo":
+            params = dict(_kwargs["task_context"]()["parameters"])
+            response = ("我已经朝指定标识的方向尝试推了一下并停稳，还没有确认货物送达。"
+                        if config.directional else "同一货物已确认在指定标识附近，这单大致送到了。")
+        elif name == "go2_find_object":
+            params = {"target": _kwargs["task_context"]()["cargo"]}
+            response = "我找到货物了，这单送去哪里？"
+        else:
+            params, response = {"question": goal}, ""
+        assert tool_guard is None or tool_guard(name, params) is None
+        manager = tool_context(name, params, run_id + ":step") if tool_context else nullcontext()
+        with manager:
+            receipt = await execute_tool(name, params, context=context)
+        if result_transform:
+            receipt = result_transform(name, params, receipt)
+        return {"result": receipt["result"], "response": response,
+                "tool_results": [{"tool": name, "result": receipt}]}
+
     stubs = {
         "cloud.api.intents": {"_dispatch_mqtt_task": Mock()},
         "cloud.cards.registry": {"get_registry": lambda: SimpleNamespace(get_card=lambda _uid: {})},
@@ -232,9 +262,11 @@ async def delivery_harness(monkeypatch):
         "cloud.go2.tools.executor": {"execute_tool": execute_tool},
         "cloud.space.activity": {"get_activity_store": lambda: SimpleNamespace(record_event=record)},
         "cloud.space.context": {"get_space_context": space_context},
-        "cloud.space.decisions": {"resolve_decision": resolve_decision},
+        "cloud.space.decisions": {"resolve_decision": resolve_decision,
+                                  "decision_evidence": lambda space: space.get("decision_evidence", [])},
         "cloud.agents.go2.workflows.search": {"search_request": search_request},
         "cloud.peers.games.color_hunt": {"live_lamp_color": lambda _uid: deepcopy(lamp_color)},
+        "cloud.peers.games.role_graph": {"run_device_task": run_device_task},
     }
     for name, attributes in stubs.items():
         _stub_module(monkeypatch, name, **attributes)
@@ -242,7 +274,6 @@ async def delivery_harness(monkeypatch):
     monkeypatch.setattr(base, "activity_allows", lambda *_args: True)
     monkeypatch.setattr(push_delivery, "decide", decide)
     monkeypatch.setattr(push_delivery, "FileCheckpointSaver", _MemorySaver)
-    monkeypatch.setattr(push_delivery, "invoke_blocking", invoke_blocking)
     event = {"message_id": "msg_delivery", "messenger": messenger,
              "activity_id": "act_delivery", "deadline": time.time()+60,
              "message": {"sender": push_delivery.LAMP, "content": "来玩指挥官与送货员。"},
@@ -272,17 +303,19 @@ async def test_delivery_orders_find_report_destination_signal_and_real_push(deli
     h.config.destination = destination
     await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
     ordered = [("decision", "lamp", "cargo", "cargo"), ("tool", "go2_find_object"),
-               ("decision", "go2", "next", "waiting_destination"),
                ("decision", "lamp", "destination", "destination"),
-               ("physical", "SET_COLOR"), ("tool", "go2_push_cargo"),
-               ("decision", "go2", "next", "delivered")]
+               ("physical", "SET_COLOR"), ("tool", "go2_push_cargo")]
     assert [h.trace.index(step) for step in ordered] == sorted(h.trace.index(step) for step in ordered)
     assert [(name, params) for name, params in h.calls if name == "go2_push_cargo"] == [
         ("go2_push_cargo", {"cargo": "地上的小纸盒", "destination": destination, "distance_m": 0.15})]
     assert h.cargo_contexts == [{
         "reference": {"cargo": "地上的小纸盒", "destination": destination,
                       "search_evidence": h.search_evidence},
-        "request_id": "delivery_msg_delivery_push_0", "signal_rgb": (255, 0, 0)}]
+        "request_id": "delivery_msg_delivery_push_0:step", "signal_rgb": (255, 0, 0)}]
+    assert not any(row[:3] == ("decision", "go2", "next") and row[-1] in {
+        "waiting_destination", "delivered"} for row in h.trace)
+    assert len([row for row in h.trace if row[:2] == ("brain_task", "go2")
+                and row[-1] == "delivery_msg_delivery_push_0"]) == 1
     h.messenger.send_result.assert_called_once_with(
         "msg_delivery", "ok", task_id="task_delivery", reason="cargo_near_destination_confirmed")
     assert h.agent._peer_game_id is None
@@ -292,8 +325,8 @@ async def test_game_finishes_a_directional_attempt_without_claiming_delivery(del
     h = delivery_harness
     h.config.directional = True
     await push_delivery.GAME.execute(h.drive, h.event, 'task_delivery')
-    assert ('decision', 'go2', 'next', 'directional_push_completed') in h.trace
-    assert ('decision', 'go2', 'next', 'delivered') not in h.trace
+    assert not any(row[:3] == ('decision', 'go2', 'next') and row[-1] in {
+        'directional_push_completed', 'delivered'} for row in h.trace)
     assert len([name for name, _ in h.calls if name == 'go2_push_cargo']) == 1
     h.messenger.send_result.assert_called_once_with(
         'msg_delivery', 'ok', task_id='task_delivery', reason='directional_push_attempt_completed')
@@ -317,8 +350,7 @@ async def test_silent_delivery_steps_keep_calls_receipts_and_necessary_conversat
     await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
     messages = [event["text"] for event in h.events if event["event_type"] == "message"]
     assert messages == ["请先找地上的小纸盒。", "我找到货物了，这单送去哪里？",
-                        "送到红色地垫附近，这单约定用红光表示。",
-                        "同一货物已确认在指定标识附近，这单大致送到了。"]
+                        "送到红色地垫附近，这单约定用红光表示。"]
     action = next(event for event in h.events if event.get("action") == "go2_push_cargo"
                   and event["event_type"] == "action")
     receipt = next(event for event in h.events if event.get("action") == "go2_push_cargo"
@@ -329,7 +361,8 @@ async def test_silent_delivery_steps_keep_calls_receipts_and_necessary_conversat
     assert action["decision_basis"]["reason"] not in messages
     assert action["decision_basis"]["evidence"][0]["ref"] in {
         event["event_id"] for event in h.events if event["event_type"] == "observation"}
-    assert action["task_id"] == receipt["task_id"] and receipt["public_result"]["delivered"] is True
+    assert receipt["task_id"] == action["task_id"] + ":step"
+    assert receipt["public_result"]["delivered"] is True
 
 
 async def test_delivery_question_is_spoken_once_and_new_reply_is_preserved(delivery_harness, monkeypatch):
@@ -353,8 +386,28 @@ async def test_delivery_question_is_spoken_once_and_new_reply_is_preserved(deliv
     assert messages.count("指的是盒子后面的红垫吗？") == 1
     assert "我来复述一下我的疑问。" not in messages
     assert "对，就是你刚看到的那块红垫。" in messages
-    assert messages[-1] == "同一货物已确认在指定标识附近，这单大致送到了。"
+    assert "同一货物已确认在指定标识附近，这单大致送到了。" not in messages
     assert len([name for name, _ in h.calls if name == "go2_push_cargo"]) == 1
+
+
+async def test_optional_display_reference_cannot_abort_delivery(delivery_harness, monkeypatch):
+    h = delivery_harness
+    decide = push_delivery.decide
+
+    async def malformed_explanation(role, phase, facts, **kwargs):
+        answer = await decide(role, phase, facts, **kwargs)
+        if phase == "next":
+            answer.update(decision_reason="本单可以继续执行。",
+                          evidence_refs=["cargo_receipt:unregistered"])
+        return answer
+
+    monkeypatch.setattr(push_delivery, "decide", malformed_explanation)
+    await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
+    h.messenger.send_result.assert_called_once_with(
+        "msg_delivery", "ok", task_id="task_delivery", reason="cargo_near_destination_confirmed")
+    assert len([name for name, _ in h.calls if name == "go2_push_cargo"]) == 1
+    assert all(event.get("context_scope") == "process" for event in h.events
+               if event["event_type"] in {"action", "action_result", "observation"})
 
 
 @pytest.mark.parametrize('change', ['missing_stop', 'wrong_confirmation', 'unknown'])

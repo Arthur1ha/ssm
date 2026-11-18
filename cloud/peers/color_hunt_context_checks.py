@@ -36,12 +36,15 @@ def hunt(monkeypatch):
     monkeypatch.setattr(drive, "_activity_event", lambda *args, **kwargs:
         events.append((current[0], args, kwargs)) or {"event_id": "evt_observed", "ts": time.time()})
     robot = SimpleNamespace(is_connected=True, send_command=AsyncMock(return_value={"result": "ok"}))
-    nav = SimpleNamespace(_snapshot=lambda: (({}, object()), None), stop=Mock(return_value=False))
+    nav = SimpleNamespace(_snapshot=lambda: (({}, object()), None), stop=Mock(return_value=False),
+                          stop_and_confirm=AsyncMock(return_value={"result": "ok"}))
     monkeypatch.setattr(free_explore, "go2", robot)
     monkeypatch.setattr(free_explore, "runtime_for", lambda _robot: None)
     monkeypatch.setattr("cloud.go2.connection.go2", robot)
     monkeypatch.setattr("cloud.go2.navigation.navigator.navigator", nav)
     monkeypatch.setattr("cloud.agents.common.checkpoint.FileCheckpointSaver", lambda: saver)
+    monkeypatch.setattr("cloud.space.activity.get_activity_store", lambda: SimpleNamespace(
+        record_event=Mock(), current=lambda **_kw: None))
     monkeypatch.setattr(color_hunt, "activity_allows", lambda aid, *_args: aid == current[0])
     color = {"rgb": (255, 0, 0), "source": "esp32_desk_led", "as_of": time.time()}
     monkeypatch.setattr(color_hunt, "live_lamp_color", lambda _source: color)
@@ -103,7 +106,7 @@ async def test_late_graph_and_observation_keep_original_task_owner(hunt, monkeyp
         assert kwargs["tool_guard"]("go2_observe", {})["error"] == "activity_ended"
         return {"result": "blocked", "error": "old_graph_blocked", "tool_results": []}
 
-    monkeypatch.setattr("cloud.agents.go2.graph.run_go2_loop", graph)
+    monkeypatch.setattr(color_hunt, "run_device_task", graph)
     task = asyncio.create_task(color_hunt._run_color_hunt(hunt.drive, hunt.event, "peer_A"))
     await asyncio.wait_for(entered.wait(), timeout=5)
     hunt.switch(new_goal=new_goal, same_owner=same_owner)
@@ -112,23 +115,36 @@ async def test_late_graph_and_observation_keep_original_task_owner(hunt, monkeyp
     await task
     assert hunt.drive._active_goal is expected
     assert hunt.drive._last_tool_result is None
-    assert (await old_receipt(hunt))["reason"] == "activity_ended"
+    assert (await old_receipt(hunt))["reason"] == "stop_unconfirmed:activity_ended"
     assert not hunt.events
     hunt.robot.send_command.assert_not_called()
+    hunt.nav.stop_and_confirm.assert_not_called()
 
 
 async def test_current_color_hunt_preserves_real_confirmed_result(hunt, monkeypatch):
     async def graph(_session, _goal, **kwargs):
         assert kwargs["tool_guard"]("go2_observe", {}) is None
+        assert kwargs["result_transform"]("go2_observe", {}, {
+            "result": "ok", "message": "看到红色盒子"})["final"] is False
         kwargs["on_step"]({"tool": "go2_observe", "result": {
             "result": "ok", "message": "地面有一个红色盒子"}})
         assert kwargs["tool_guard"]("go2_navigate_to_visible_target", {
             "target": "红色盒子", "decision_reason": "刚看见的红盒子与题目颜色一致。"}) is None
+        transform = kwargs["result_transform"]
+        assert transform("go2_navigate_to_visible_target", {"target": "红色盒子"}, {
+            "result": "ok", "target": "红色盒子", "progress": "approached"})["final"] is False
+        assert transform("go2_navigate_to_visible_target", {"target": "红色盒子"}, {
+            "result": "blocked", "reason": "path_blocked"})["final"] is False
+        assert transform("go2_navigate_to_visible_target", {"target": "红色盒子"}, {
+            "result": "unknown"})["final"] is False
+        assert transform("go2_navigate_to_visible_target", {"target": "红色盒子"}, {
+            "result": "ok", "target": "红色盒子",
+            "confirmation": "odom_stopped_and_visual_recheck"})["final"] is True
         return {"result": "ok", "response": "这局找到了。", "emotion": "happy",
             "tool_results": [{"tool": "go2_navigate_to_visible_target",
             "result": {"result": "ok", "target": "红色盒子", "confirmation": "odom_stopped_and_visual_recheck"}}]}
 
-    monkeypatch.setattr("cloud.agents.go2.graph.run_go2_loop", graph)
+    monkeypatch.setattr(color_hunt, "run_device_task", graph)
     await color_hunt._run_color_hunt(hunt.drive, hunt.event, "peer_A")
     assert hunt.drive._last_tool_result["reason"] == "candidate_reached"
     assert (await old_receipt(hunt))["result"] == "ok"

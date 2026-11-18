@@ -24,9 +24,71 @@ CURRENT_ACTIVITY_TOPIC = f"ssm/space/{DEFAULT_SPACE_ID}/activity/current"
 _DATA_PATH = Path(__file__).parent / "data" / "activity.json"
 _MAX_ACTIVITIES = 4
 _MAX_DETAIL_EVENTS = 100
-_KEY_EVENTS = {"started", "ended", "game_started", "game_ended", "device_joined", "device_left", "question"}
+_KEY_EVENTS = {"started", "ended", "game_started", "game_closing", "game_ended", "device_joined", "device_left", "question"}
 _STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state",
                  "body_confirmation", "body_telemetry_fresh", "autonomy_mode", "ism", "r", "g", "b", "brightness")
+
+
+def game_instance_id(event: dict) -> str:
+    """Read trusted correlation, including journals written before scoping."""
+    return str(event.get("game_instance_id") or
+               (event.get("trigger_message_id") if event.get("game_id") else "") or
+               (event.get("message_id") if event.get("interaction_kind") == "game_invite" else "") or "")
+
+
+def shared_context_events(events: list[dict], *, closed_instances=()) -> list[dict]:
+    """Project collaboration facts, never raw tool or transport diagnostics.
+
+    Closed games stay in the user timeline. Their goals, dialogue and results
+    must not become new topics in an agent's current decision context.
+    """
+    closed = {game_instance_id(row) for row in events
+              if row.get("event_type") in {"game_closing", "game_ended"}}
+    closed.update(closed_instances)
+    closed.discard("")
+    spoken_results = {(row.get("reply_to"), row.get("text")) for row in events
+                      if row.get("event_type") == "message" and row.get("reply_to")}
+    result = []
+    for row in events:
+        kind = row.get("event_type")
+        if row.get("context_scope") == "process" or game_instance_id(row) in closed:
+            continue
+        if kind == "task_result" and (row.get("message_id"), row.get("text")) in spoken_results:
+            continue
+        if kind in {"message", "proposal", "question", "observation", "person_identified", "task_result"}:
+            result.append(row)
+    return result
+
+
+def activity_game_context(events: list[dict]) -> dict:
+    closed = {game_instance_id(row) for row in events
+              if row.get("event_type") in {"game_closing", "game_ended"}}
+    consumed = bool(closed - {""})
+    active = [row for row in events if row.get("event_type") == "game_started"
+              and game_instance_id(row) not in closed]
+    result = {"request_consumed": consumed,
+              "closed_game_instances": sorted(closed - {""}),
+              "ended_game_instances": sorted({game_instance_id(row) for row in events
+                  if row.get("event_type") == "game_ended"} - {""}),
+              "phase": "game" if active else "free_activity" if consumed else "starting"}
+    if active:
+        result["game"] = {"game_id": active[-1].get("game_id"),
+                          "game_instance_id": game_instance_id(active[-1])}
+    return result
+
+
+def activity_decision_context(activity: dict) -> dict:
+    """Keep the user's original request as history once its game is closed."""
+    result = deepcopy(activity)
+    if result.get("request_consumed"):
+        result["initial_request"] = {"kind": "history", "status": "completed",
+                                     "text": result.get("context") or result.get("text") or ""}
+        result["context"] = ("当前参与新邀请且已接受的本局游戏，仅按本局约定协作，旧局不再讨论或执行。"
+                             if result.get("phase") == "game" else
+                             "自由活动；此前游戏已结束，旧局不再讨论或执行，再玩须重新邀请并接受。")
+        result.pop("text", None)
+        result["context_source"] = "runtime"
+    return result
 
 
 def _decision_basis_snapshot(value: Any) -> dict[str, Any] | None:
@@ -173,7 +235,7 @@ class ActivityStore:
     def _publish_locked(self) -> None:
         if self._publisher is not None:
             self._publisher({"space_id": DEFAULT_SPACE_ID, "revision": self._revision,
-                             "activity": deepcopy(self._current), "ts": time.time()})
+                             "activity": self.current(), "ts": time.time()})
 
     def current(self, space_id: str = DEFAULT_SPACE_ID) -> dict[str, Any] | None:
         if space_id != DEFAULT_SPACE_ID:
@@ -181,7 +243,9 @@ class ActivityStore:
         with self._lock:
             if self._current is None or self._current.get("status") not in {"starting", "active", "partial", "ending"}:
                 return None
-            return deepcopy(self._current)
+            events = self._events.get(self._current["activity_id"], [])
+            return {**deepcopy(self._current),
+                    **(activity_game_context(events) if "phase" not in self._current else {})}
 
     def latest_id(self) -> str | None:
         with self._lock:
@@ -197,6 +261,23 @@ class ActivityStore:
             return [{**deepcopy(event), **public_process_facts(event)}
                     for event in self._events.get(activity_id, [])]
 
+    def game_allows(self, activity_id: str, invitation_id: str) -> bool:
+        """The existing journal owns whether this invitation can still act."""
+        with self._lock:
+            if (not invitation_id or not self._current
+                    or self._current.get("activity_id") != activity_id
+                    or self._current.get("status") not in {"starting", "active", "partial"}):
+                return False
+            if invitation_id in self._current.get("closed_game_instances", []):
+                return False
+            return not any(game_instance_id(row) == invitation_id
+                           and row.get("event_type") in {"game_closing", "game_ended"}
+                           for row in self._events.get(activity_id, []))
+
+    def shared_events(self, activity_id: str) -> list[dict[str, Any]]:
+        return shared_context_events(self.events(activity_id),
+            closed_instances=(self.current() or {}).get("closed_game_instances", []))
+
     def recent_discoveries(self, receiver_unit_id: str, *, now: float | None = None,
                            limit: int = 6, max_age_s: float = 600) -> list[dict[str, Any]]:
         """Fresh, bounded evidence for an activity member, never replayed after end."""
@@ -210,7 +291,8 @@ class ActivityStore:
                     or (current.get("devices") or {}).get(receiver_unit_id, {}).get("status") != "joined"):
                 return []
             activity_id = current["activity_id"]
-            rows = self._events.get(activity_id, [])
+            rows = shared_context_events(self._events.get(activity_id, []),
+                closed_instances=current.get("closed_game_instances", []))
             found, seen = [], set()
             for event in reversed(rows):
                 source = event.get("unit_id")
@@ -219,9 +301,7 @@ class ActivityStore:
                         or not 0 <= instant - ts <= max_age_s):
                     continue
                 event_type = event.get("event_type")
-                if event_type not in {"observation", "person_identified", "action_result", "message", "response"}:
-                    continue
-                if event_type == "action_result" and event.get("status") not in {"ok", "blocked", "rejected", "cancelled", "error"}:
+                if event_type not in {"observation", "person_identified", "task_result", "message"}:
                     continue
                 if event_type == "message" and not event.get("reply_to"):
                     continue
@@ -234,7 +314,8 @@ class ActivityStore:
                 seen.add(dedupe)
                 found.append({key: event[key] for key in
                               ("event_id", "activity_id", "unit_id", "event_type", "ts",
-                               "source", "confidence", "status", "message_id", "conversation_id", "reply_to")
+                               "source", "confidence", "status", "message_id", "conversation_id", "reply_to",
+                               "game_id", "game_instance_id", "run_id", "result_kind")
                               if key in event})
                 found[-1]["source_unit_id"] = source
                 found[-1]["summary"] = summary
@@ -362,6 +443,25 @@ class ActivityStore:
         with self._lock:
             if not self._current or self._current["activity_id"] != activity_id or self._current["status"] == "ending":
                 return None
+            from cloud.peers.games.scope import current_game_scope, current_terminal_scope, terminal_scope_available
+            scope = current_game_scope()
+            if scope is not None and scope.activity_id == activity_id:
+                facts.setdefault("game_instance_id", scope.invitation_id)
+                facts.setdefault("game_id", scope.game_id)
+            instance = game_instance_id(facts)
+            terminal = current_terminal_scope()
+            final_speech = bool(event_type == "message" and facts.get("stage") == "game_final"
+                                and terminal is not None and terminal.invitation_id == instance
+                                and terminal.activity_id == activity_id and terminal_scope_available())
+            if (instance and event_type in {"message", "proposal", "question", "game_started"}
+                    and not final_speech and not self.game_allows(activity_id, instance)):
+                return None
+            if instance and event_type in {"game_closing", "game_ended"}:
+                existing = next((row for row in self._events.get(activity_id, [])
+                                 if row.get("event_type") == event_type
+                                 and game_instance_id(row) == instance), None)
+                if existing is not None:
+                    return deepcopy(existing)
             if source_event_id:
                 for old in self._events.get(activity_id, []):
                     if old.get("source_event_id") == source_event_id:
@@ -373,7 +473,7 @@ class ActivityStore:
     def _record_event_locked(self, activity_id: str, event_type: str, *, unit_id: str = "",
                              text: str = "", **facts: Any) -> dict[str, Any]:
         allowed = {"message", "proposal", "response", "observation", "person_identified", "search_progress", "action", "action_progress",
-                   "action_result", "question", "game_started", "game_ended",
+                   "action_result", "task_result", "question", "game_started", "game_closing", "game_ended",
                    "started", "ended", "device_joined", "device_left"}
         if event_type not in allowed:
             raise ValueError("invalid_activity_event")
@@ -384,9 +484,14 @@ class ActivityStore:
         event.update({key: value for key, value in facts.items()
                       if key in {"target_unit_id", "message_id", "conversation_id", "task_id",
                                  "status", "mode", "media_ref", "reply_to", "reply_kind",
-                                 "interaction_kind", "game_id",
+                                 "interaction_kind", "game_id", "game_instance_id", "context_scope",
                                  "question_id", "action", "physical_stop", "reason",
                                  "source", "confidence", "source_event_id", "display", "stage"}})
+        event["context_scope"] = ("shared" if facts.get("context_scope") == "shared"
+                                  else "process" if facts.get("context_scope") == "process"
+                                  else "shared" if event_type in {
+                                      "message", "proposal", "question", "observation", "person_identified", "task_result"}
+                                  else "process")
         projected = public_process_facts({**facts, "unit_id": unit_id})
         # Journal rows have their own identity. Keep the source identity for
         # SSE/history reconciliation without replacing the journal event id.
@@ -425,10 +530,16 @@ class ActivityStore:
             event.pop("confidence")
         rows = self._events.setdefault(activity_id, [])
         rows.append(event)
+        if event_type in {"game_started", "game_closing", "game_ended"} and self._current:
+            self._current.update(activity_game_context(rows))
+            self._current["revision"] = self._bump_locked()
+            self._records[activity_id] = deepcopy(self._current)
         details = [index for index, item in enumerate(rows) if item["event_type"] not in _KEY_EVENTS]
         if len(details) > _MAX_DETAIL_EVENTS:
             rows.pop(details[0])
         self._save_locked()
+        if event_type in {"game_started", "game_closing", "game_ended"}:
+            self._publish_locked()
         if self._event_sink is not None:
             self._event_sink(deepcopy(event))
         return deepcopy(event)

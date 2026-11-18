@@ -195,7 +195,8 @@ class ESP32Agent(ReactiveMind):
                       run_id: str | None = None, resume: bool = False,
                       trace_id: str | None = None,
                       parent_run_id: str | None = None,
-                      deadline: float | None = None, selection: dict | None = None) -> dict:
+                      deadline: float | None = None, selection: dict | None = None,
+                      task_adapter=None) -> dict:
         """Run the active lamp conversation loop."""
         from cloud.agents.lamp.graph import run_lamp_loop
         with self._conversation_lock:
@@ -204,7 +205,8 @@ class ESP32Agent(ReactiveMind):
             return run_lamp_loop(self, text, unit_id, context, dispatch,
                                  lighting_only=lighting_only, run_id=run_id,
                                  resume=resume, trace_id=trace_id,
-                                 parent_run_id=parent_run_id, deadline=deadline, selection=selection)
+                                 parent_run_id=parent_run_id, deadline=deadline, selection=selection,
+                                 **({"task_adapter": task_adapter} if task_adapter is not None else {}))
         finally:
             with self._conversation_lock:
                 self._conversations -= 1

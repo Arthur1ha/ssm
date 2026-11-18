@@ -9,6 +9,14 @@ UNCERTAIN = {"executing", "timeout", "unknown"}
 FAILURE = {"blocked", "rejected", "cancelled", "error", "partial", "needs_clarification"}
 
 
+def prior_tool_step(steps, name: str) -> dict | None:
+    """Find an effect that completed or still needs reconciliation, not a failed attempt."""
+    return next((step for step in reversed(list(steps))
+                 if step.get("tool") == name
+                 and ((step.get("result") or {}).get("result") in SUCCESS | UNCERTAIN
+                      or step.get("dispatch_status") in {"pending", "unknown"})), None)
+
+
 def model_error_details(exc: Exception) -> dict:
     """Keep provider diagnostics, without copying request bodies or response IDs."""
     from openai import APIError

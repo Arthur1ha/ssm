@@ -6,6 +6,12 @@ from typing import Awaitable, Callable
 
 
 GAME_CONTEXT_GUIDANCE = (
+    "每局以邀请ID独立归属，游戏结束后不再讨论、重试或执行旧局目标，恢复自由活动；"
+    "想再玩必须发送新的结构化game_invite并等待接受。"
+    "activity.request_consumed=true表示活动原话中的游戏要求已经处理，原话仅为历史背景；"
+    "activity.phase=free_activity时根据新的真实环境自主活动，不续写旧游戏。"
+    "工具错误、内部重试和消息送达回执仅是设备内部过程，不是向同伴发信的理由；"
+    "只交流必要约定、确实需要对方决定的问题及协作子任务的最终结果。"
     "game_catalog（games）是已注册游戏概览，保留暂时不能开局的玩法；"
     "ready=false 或当前可玩列表为空不表示没有这些游戏。"
     "只邀请 ready=true 的玩法，发送和接受仍须通过实时门禁。"
@@ -26,7 +32,7 @@ class Game:
     description: str
     participants: tuple[str, str]
     available: Callable[[str, str], bool]
-    execute: Callable[[object, dict, str], Awaitable[None]]
+    execute: Callable[[object, dict, str], Awaitable[dict | None]]
     invitation: str = ""
     rules: str = ""
     strategy: str = ""
@@ -60,7 +66,8 @@ def activity_allows(activity_id: str | None, sender: str, target: str) -> bool:
 
     activity = get_activity_store().current()
     members = (activity or {}).get("devices") or {}
-    return bool(activity_id and activity and activity.get("activity_id") == activity_id
+    from .scope import game_scope_available
+    return bool(game_scope_available() and activity_id and activity and activity.get("activity_id") == activity_id
                 and activity.get("status") in {"starting", "active", "partial"}
                 and members.get(sender, {}).get("status") == "joined"
                 and members.get(target, {}).get("status") == "joined")

@@ -216,13 +216,19 @@ Go2 加入活动后仍配置为 `free_explore`，启动事件及活动原话从�
 
 活动与聊天的公开过程使用同一投影：`run_id/parent_run_id/step_id` 关联原 Graph 运行及步骤，`tool/action`、`target_unit_id`、`skill_id`、`arguments`、`requested_text`、`result_state` 保留有界公开事实。`arguments` 最多 32 个标量参数，不含上下文、凭据、模型提示或私有推理；标识最多 120 字。灯能力统一使用模型工具名 `set_led_state/set_led_color/blink_led`；活动写入、SSE 与历史读取均从 `LAMP_SKILLS` 归一化，旧文件不迁移、硬件 MQTT 命令不改变。`capability_name` 从既有灯能力声明或目标 Card 派生；同任务合并只依赖真实 task/run/step 身份，不按名称或相邻时间猜测关联。`state_at_event` 仍是当时最近反馈，不证明当前动作造成该状态。详情缺字段时保持缺失，不能补造原因或观测。
 
-猜拳的 `type=activity,event_type=message,stage=rps_result` 事件在双方展示动作回执确认后附 `game_round={round,choices,mapping,winner}`：`choices` 以真实 unit_id 为键，值为 `rock|scissors|paper`；`mapping` 保存该轮对应的灯 `color={r,g,b,brightness?}` 与中文 `label`，狗的 `action=go2_sport,arguments={cmd},label`，各项同时含 `choice`；`winner` 为获胜 unit_id 或 `draw`。出拳台词在公开展示开始后、判决之前发布；秘密选拳与未确认回合不发布结构化选择/胜负。前端仅据该公开结果绘制历史虚拟形象，不将其当作当前物理姿态；旧游戏记录没有结构化结果时不解析自由文本补造。
+猜拳的 `type=activity,event_type=action_result,stage=rps_result` 事件在双方展示动作回执确认后附 `game_round={round,choices,mapping,winner}`：`choices` 以真实 unit_id 为键，值为 `rock|scissors|paper`；`mapping` 保存该轮对应的灯 `color={r,g,b,brightness?}` 与中文 `label`，狗的 `action=go2_sport,arguments={cmd},label`，各项同时含 `choice`；`winner` 为获胜 unit_id 或 `draw`。出拳台词在公开展示开始后、判决之前发布；秘密选拳与未确认回合不发布结构化选择/胜负。前端仅据该公开结果绘制历史虚拟形象，不将其当作当前物理姿态；旧游戏记录没有结构化结果时不解析自由文本补造。
 
 灯的 MQTT 状态回执确认了持续照明设置后，在线期间以 `validity=until_changed` 表示颜色／亮度有效直到新的物理状态覆盖；不按通用观察的 60 秒时效撤销该设置。`as_of` 保留原始回执时间，retained 回放不刷新时间，离线撤销连接确认，重连须有新的实际状态。该语义贯通同伴视图、空间环境、决策依据及 `state_at_event`，不放宽传感器、Go2 定位或障碍地图的观测时效。
 
-游戏执行器接受本局任务后发送活动事件 `game_started`；原邀请关联的任务最终回执投影为 `game_ended`。二者均保留 `game_id`、`trigger_message_id`、`task_id` 和真实 `status`，结束事件保留 `reason`。PWA 显示“本局游戏已开始／本局游戏已结束”，异常结束另列原因；邀请送达不代表已开局，动作成功不代表已送达。公共事实的 `capability_name` 优先采用已有 Card 名称，内部工具的名称由其声明模块统一解析；这不会将内部工具新增为公开可调用技能。历史读取同样投影名称，不改写原文件，前端不以原始工具 ID 作为展示兜底。
+所有游戏的角色决策与执行均进入灯、Go2 的原 Graph；游戏模块仅协调规则、阶段、约定与真实结果。游戏执行器接受本局任务后发送 `game_started`；清理前以 `game_closing` 撤销普通发言和动作资格。清理后双方各产生一条 `stage=game_final` 的简短终局发言，仅供展示、不发送为需继续处理的同伴消息；执行归属方最后发布一次 `game_ended`。消息或单个子任务的最终回执不能提前结束整局。生命周期保留 `game_id`、原邀请 ID `game_instance_id`、`trigger_message_id`、`task_id` 和真实 `status`，结束事件保留 `reason`。PWA 显示“本局游戏已开始／本局游戏已结束”，异常结束另列原因；邀请送达不代表已开局，动作成功不代表已送达。
+
+内部模型错误、工具尝试和传输回执以 `context_scope=process` 保留在同一活动时间线，供用户查看过程，不进入同伴模型历史或社交发现。一个协作子任务在原设备 Graph 内处理明确失败的恢复，只以一次 `event_type=task_result,context_scope=shared` 共享最终结果；未知物理结果仍按原任务核对，不能换 ID 重做。共享结果不自动要求回复，必要约定与问题才发送定向消息。旧局关闭后，其对白和结果退出当前决策上下文；活动快照携带 `phase`、`request_consumed`、已关闭／结束的游戏实例 ID，按活动 `revision` 同步 retained 状态。设备回到自由活动，不再讨论或继续旧局，再次玩必须新邀请并接受；停止未确认保留运动限制。历史原话与过程仍可在用户时间线查看。
+
+公共事实的 `capability_name` 优先采用已有 Card 名称，内部工具的名称由其声明模块统一解析；这不会将内部工具新增为公开可调用技能。历史读取同样投影名称，不改写原文件，前端不以原始工具 ID 作为展示兜底。
 
 ### 智能体定向消息（内部，非 retained）
+
+游戏邀请的 `game_instance_id` 固定为其自身 `message_id`；相关回复、进度和结果继承该实例身份，普通消息不能自行声明玩法或更换本局身份。接收端及执行前复核活动和该局尚未关闭；关闭后的消息不能重新触发模型协作或物理动作。原任务的真实迟到回执仍允许保存，不因此重开游戏。
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|

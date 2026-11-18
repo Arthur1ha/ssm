@@ -13,7 +13,7 @@ from cloud.agents.common.effects import FileEffectLedger
 from cloud.agents.common.messages import role_messages
 from cloud.agents.common.runner import GraphRun, run_role_graph
 from cloud.agents.steward.replies import finalize_steward_reply
-from cloud.agents.steward.tools import STEWARD_TOOL_SCHEMAS, make_executor, transport
+from cloud.agents.steward.tools import ONCE_PER_RUN_TOOLS, STEWARD_TOOL_SCHEMAS, make_executor, transport
 
 
 @pytest.fixture
@@ -54,6 +54,7 @@ async def test_first_handoff_passes_after_graph_appends_current_pending_step(han
 
     model = Model()
     await run_role_graph(h.run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
+        once_per_run_tools=ONCE_PER_RUN_TOOLS,
         build_messages=lambda current: role_messages("回应本轮结果", current.goal),
         execute=make_executor(h.run, h.context),
         checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
@@ -66,6 +67,64 @@ async def test_first_handoff_passes_after_graph_appends_current_pending_step(han
         "result": "ok", "device_result": "accepted", "message_id": "handoff_message", "final": True}
     assert h.run.status == "ok"
     assert "还未确认" in h.run.response
+
+
+async def test_duplicate_start_reuses_activity_without_another_start_or_failure(handoff, tmp_path):
+    h = handoff
+
+    class Model(JsonReplyModel):
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, *_args, **_kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            if self.calls <= 2:
+                return AIMessage(content="", tool_calls=[{"name": "start_activity",
+                    "args": {"final": False}, "id": f"start-{self.calls}"}])
+            return AIMessage(content="活动安排已交给参与设备。")
+
+    model = Model()
+    await run_role_graph(h.run, model=model, tool_schemas=STEWARD_TOOL_SCHEMAS,
+        once_per_run_tools=ONCE_PER_RUN_TOOLS,
+        build_messages=lambda current: role_messages("回应本轮结果", current.goal),
+        execute=make_executor(h.run, h.context),
+        checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
+        effect_ledger=FileEffectLedger(tmp_path / "effects"),
+        finalize=lambda current: finalize_steward_reply(
+            current, model=model, instructions="简短报告本轮结果。"))
+
+    transport.do_start_activity.assert_called_once()
+    assert h.run.status == "ok" and len(h.run.steps) == 1
+    assert h.run.steps[0]["result"]["activity"] == h.activity
+    assert model.calls == 3  # Two decisions, then one closing reply without tools.
+
+
+async def test_start_exception_remains_unknown_and_new_call_cannot_redispatch(handoff, tmp_path, monkeypatch):
+    h = handoff
+    monkeypatch.setattr(transport, "do_start_activity", Mock(side_effect=TimeoutError))
+
+    class Model:
+        def bind_tools(self, *_args, **_kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            return AIMessage(content="", tool_calls=[{
+                "name": "start_activity", "args": {"final": False}, "id": "start"}])
+
+    execute = make_executor(h.run, h.context)
+    await run_role_graph(h.run, model=Model(), tool_schemas=STEWARD_TOOL_SCHEMAS,
+        once_per_run_tools=ONCE_PER_RUN_TOOLS,
+        build_messages=lambda current: role_messages("回应本轮结果", current.goal),
+        execute=execute, checkpointer=FileCheckpointSaver(tmp_path / "checkpoints"),
+        effect_ledger=FileEffectLedger(tmp_path / "effects"))
+
+    assert h.run.status == "unknown" and len(h.run.steps) == 1
+    repeated = await execute("start_activity", {}, "new-call")
+    assert repeated["result"] == "unknown"
+    transport.do_start_activity.assert_called_once()
 
 
 async def test_signed_user_intent_can_handoff_after_starting_activity(handoff, tmp_path, monkeypatch):

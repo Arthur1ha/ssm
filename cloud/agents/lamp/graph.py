@@ -77,7 +77,8 @@ def run_lamp_loop(agent, text: str, unit_id: str, context: ExecutionContext,
                   run_id: str | None = None, resume: bool = False,
                   trace_id: str | None = None,
                   parent_run_id: str | None = None,
-                  deadline: float | None = None, selection: dict | None = None) -> dict:
+                  deadline: float | None = None, selection: dict | None = None,
+                  task_adapter=None) -> dict:
     """Run one lamp Graph thread against observed ESP32 and peer results."""
     if (context.space_id != "main"
             or context.origin_kind not in {"user_delegated", "agent_autonomous"}
@@ -90,14 +91,16 @@ def run_lamp_loop(agent, text: str, unit_id: str, context: ExecutionContext,
         return _run_lamp_loop_locked(
             agent, text, unit_id, context, dispatch, index=index,
             lighting_only=lighting_only, run_id=run_id, resume=resume,
-            trace_id=trace_id, parent_run_id=parent_run_id, deadline=deadline, selection=selection)
+            trace_id=trace_id, parent_run_id=parent_run_id, deadline=deadline, selection=selection,
+            task_adapter=task_adapter)
 
 
 def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionContext,
                           dispatch, *, index: FileRunIndex, lighting_only: bool,
                           run_id: str | None, resume: bool,
                           trace_id: str | None, parent_run_id: str | None,
-                          deadline: float | None, selection: dict | None) -> dict:
+                          deadline: float | None, selection: dict | None,
+                          task_adapter=None) -> dict:
     saver = FileCheckpointSaver()
     thread_id = thread_id_for(unit_id, context.session_id)
     previous = (load_run(run_id, context.session_id, unit_id,
@@ -153,17 +156,29 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     run_model = None
 
     def progress(phase, step):
+        # Typed stage submissions are internal decisions, not device actions.
+        # The common runner retains their diagnostic/checkpoint events.
+        if task_adapter is not None and task_adapter.decision_schema is not None:
+            return
         publish_agent_event("agent_progress", session_id=event_session,
             scope="space" if autonomous else "session", space_id=context.space_id,
             source=event_source,
             trigger_message_id=run.run_id if context.session_id.startswith("peer_") else None,
-            **progress_event_facts(run, phase, step))
+            **{**progress_event_facts(run, phase, step),
+               **(task_adapter.event_fields() if task_adapter is not None else {})})
 
     training_attempt_start = len(run.steps)
 
     async def execute(name, params, step_id):
         from cloud.space.user_goals import get_goal_registry
         get_goal_registry().check(context.goal_revision)
+        if task_adapter is not None:
+            blocked = task_adapter.guard(name, params)
+            if blocked is not None:
+                return blocked
+            submitted = task_adapter.submit(name, params)
+            if submitted is not None:
+                return submitted
         if name == "apply_training":
             from cloud.agents.common.training.tools import prepare_training_application
             from cloud.agents.lamp.workflows.runtime import run_training_behavior
@@ -183,10 +198,15 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             return await execute_training(name, params, {**asdict(context), "run_id": run.run_id,
                                                         "source_text": text, "selection": selection,
                                                         "proposal_attempts": run.steps[training_attempt_start:-1]})
-        return execute_lamp_tool(name, params, step_id, agent=agent, unit_id=unit_id,
-                                 context=context, dispatch=dispatch,
-                                 lighting_only=lighting_only, run_id=run.run_id,
-                                 decision_space=run.decision_space)
+        from contextlib import nullcontext
+        with (task_adapter.execution_context(name, params, step_id)
+              if task_adapter is not None else nullcontext()):
+            receipt = execute_lamp_tool(name, params, step_id, agent=agent, unit_id=unit_id,
+                                        context=context, dispatch=dispatch,
+                                        lighting_only=lighting_only, run_id=run.run_id,
+                                        decision_space=run.decision_space)
+        return (task_adapter.transform(name, params, receipt)
+                if task_adapter is not None else receipt)
 
     def reconcile(name, params, step_id):
         if name in READ_ONLY_TOOLS:
@@ -195,19 +215,28 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                  unit_id=unit_id, session_id=context.session_id)
 
     async def finalize(current: GraphRun) -> GraphRun:
+        if task_adapter is not None:
+            if not task_adapter.available():
+                current.status, current.response = "cancelled", ""
+                current.reply_ready = True
+                return current
+            task_adapter.settle_status(current)
+            if task_adapter.finish_decision(current):
+                return current
         if current.parent_run_id and context.origin_kind == "user_delegated":
             current.response = current.decision_draft
             current.reply_source = "decision_model" if current.response else "runtime"
             current.reply_ready = True
             return current
         await finalize_reply(current, model=run_model,
-                             instructions=lambda value: persona_reply_prompt(value, get_profile()),
+                             instructions=lambda value: persona_reply_prompt(value, get_profile())
+                                 + ("\n" + task_adapter.instructions if task_adapter is not None else ""),
                              validate=valid_reply_format)
         if current.parent_run_id and time.time() >= current.deadline:
             current.response = ""
             current.reply_source = "runtime"
         current.reply_ready = True
-        if not context.session_id.startswith("peer_"):
+        if task_adapter is None and not context.session_id.startswith("peer_"):
             if current.response:
                 current.reply_event_id = stable_reply_event_id(
                     current, _public_status(current)) or ""
@@ -237,11 +266,11 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                      lighting_only=lighting_only)
         if selection:
             messages.insert(1, context_message({"training_selection": selection}))
-        return messages
+        return task_adapter.messages(messages, current) if task_adapter is not None else messages
 
     def prepare_emotion(current: GraphRun):
         # A fixed lighting/training task must not gain an unrelated expression.
-        if lighting_only or context.training_ref or selection:
+        if lighting_only or context.training_ref or selection or task_adapter is not None:
             return None
         from cloud.agents.common.training.context import emotion_training_call
         return emotion_training_call(current, space_id=context.space_id,
@@ -255,6 +284,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                                       card=cards.get_registry().get_card(unit_id),
                                       user_delegated=context.origin_kind == "user_delegated",
                                       game_setup=context.session_id.startswith("peer_game_color_"))
+        if task_adapter is not None:
+            declarations = task_adapter.declarations(declarations)
         return await run_role_graph(
             run, model=run_model,
             tool_schemas=declarations,
@@ -262,13 +293,16 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             execute=execute, reconcile_effect=reconcile,
             prepare_emotion=prepare_emotion,
             finalize=finalize, checkpointer=saver, on_progress=progress,
-            effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
+            effectful=lambda name: name not in READ_ONLY_TOOLS and name not in {"list_training", "submit_game_decision"},
             resume=resume, resume_value=text if resume else None,
             initial_tool=(('apply_training', {
                 'unit_id': unit_id, 'teaching_id': context.training_ref,
                 'revision': context.training_revision,
                 'overrides': context.training_overrides or {}})
-                if context.training_ref and context.training_step_index is None else None),
+                if context.training_ref and context.training_step_index is None else
+                task_adapter.initial_tool if task_adapter is not None else None),
+            terminal_tools=frozenset({"submit_game_decision"}) if task_adapter is not None
+                           and task_adapter.decision_schema is not None else frozenset(),
         )
 
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
@@ -284,7 +318,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     progress("finished", None)
     status = _public_status(run)
     reply = run.response
-    if context.session_id.startswith("peer_"):
+    if task_adapter is not None or context.session_id.startswith("peer_"):
         published = {}
     elif not run.parent_run_id and run.status == "needs_clarification" and reply:
         run.reply_event_id = stable_reply_event_id(run, status) or ""

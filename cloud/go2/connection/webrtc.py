@@ -702,17 +702,23 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         result["body_state"] = stopped_state
         return result
 
-    async def stop_and_confirm_motion(self, *, timeout_s: float = 2.0, can_continue=None) -> dict:
+    async def stop_and_confirm_motion(self, *, timeout_s: float = 2.0, can_continue=None,
+                                      preserve_remote_control: bool = False) -> dict:
         """Confirm a stop from new measured linear and angular velocities.
 
         This evidence is independent of posture and RPC acceptance. It neither
         invents standing nor completes another action's correlated receipt.
+        A joystick handoff stops motion without exiting an explicitly entered
+        remote mode; it must never enable that mode on its own.
         """
         if not self.is_connected:
             return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'disconnected'}
         started = time.monotonic()
         self._motion_stationary_samples = 0
-        self.stop_velocity()
+        if preserve_remote_control:
+            self.move_velocity(0, 0, 0)
+        else:
+            self.stop_velocity()
         epoch, connection = self._motion_epoch, self._conn
         while time.monotonic() - started < timeout_s:
             if can_continue is not None and not can_continue():

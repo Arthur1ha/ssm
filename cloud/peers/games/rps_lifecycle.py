@@ -42,11 +42,16 @@ def on_invitation(messenger, message: dict, state) -> None:
             messenger.send_result(message['message_id'], 'unknown',
                                   reason='prior_game_execution_unconfirmed')
             return
+        epochs = (getattr(agent, '_autonomy_epoch', None), getattr(agent, '_command_epoch', None))
         decision = asyncio.run(decide('lamp', 'invite', {
             'game': GAME.metadata(), 'message': message.get('content', ''),
             'space': get_space_context(LAMP, state=agent._state)},
             thread_id='lamp:rps:invite:' + message['message_id'],
-            deadline=message['deadline']))
+            deadline=message['deadline'], availability=lambda: (
+                time.time() < message['deadline']
+                and activity_allows(activity_id, DOG, LAMP)
+                and epochs == (getattr(agent, '_autonomy_epoch', None),
+                               getattr(agent, '_command_epoch', None)))))
         if (time.time() >= message['deadline']
                 or not game_invitation_ready(activity_id, DOG, LAMP)):
             messenger.send_result(message['message_id'], 'cancelled',

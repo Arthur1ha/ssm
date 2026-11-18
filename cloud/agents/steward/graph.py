@@ -12,7 +12,7 @@ from pathlib import Path
 from cloud.agents.common.runner import GraphRun as Run, run_role_graph
 from cloud.agents.steward.state import build_intent_run_context
 from cloud.agents.steward.prompts import build_messages, reply_prompt
-from cloud.agents.steward.tools import STEWARD_TOOL_SCHEMAS, make_executor
+from cloud.agents.steward.tools import ONCE_PER_RUN_TOOLS, STEWARD_TOOL_SCHEMAS, make_executor
 from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.context import thread_id_for
 from cloud.agents.common.run_index import FileRunIndex
@@ -164,6 +164,7 @@ async def _run_intent_loop(context: dict, *, llm, resume: bool,
             build_messages=messages_for, execute=execute,
             on_progress=on_progress, checkpointer=saver,
             finalize=finalize,
+            once_per_run_tools=ONCE_PER_RUN_TOOLS,
             effectful=lambda name: name in {"invoke_skill", "apply_training", "propose_training", "send_message", "start_activity",
                                               "set_space_constraint", "clear_space_constraints"},
             resume=resume, resume_value=supplemental)

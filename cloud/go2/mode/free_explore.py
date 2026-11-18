@@ -128,6 +128,7 @@ class Drive:
             "source": message.get("sender"), "content": message.get("content", ""),
             "interaction_kind": message.get("interaction_kind", "message"),
             "game_id": message.get("game_id"),
+            "game_instance_id": message.get("game_instance_id"),
             "reply_to": message.get("reply_to"), "reply_kind": message.get("reply_kind"),
             "ts": time.time(), "deadline": message["deadline"],
             "activity_id": message.get("activity_id"),
@@ -728,6 +729,43 @@ class Drive:
                  "reason": "activity_ended", "action": "none"}
         if not current():
             return stale
+        if event.get("interaction_kind") == "game_invite":
+            from cloud.agents.go2.workflows.free_explore import EventDecision
+            from cloud.peers.games import get_game
+            from cloud.peers.games.base import game_invitation_ready
+            from cloud.peers.games.role_graph import decide
+            from cloud.space.context import get_space_context
+            from cloud.api.main import _esp32_state
+            game = get_game(event.get("game_id"))
+            if not game_invitation_ready(activity_id, event.get("source"), "go2"):
+                return stale
+
+            def available():
+                return (current() and event.get("deadline", 0) > time.time()
+                        and not self.user_interrupt and not self._pending_question_id
+                        and go2.is_connected)
+
+            try:
+                decision = await decide("go2", "invitation", {
+                    "game": game.metadata() if game else None,
+                    "invitation": event.get("content", ""),
+                    "space": get_space_context("go2", state=_esp32_state)},
+                    schema=EventDecision,
+                    instructions=("结合本次邀请、游戏规则、自己的人格和当前事实，决定accept、decline或defer。"
+                                  "接受仅允许进入玩法准备，不证明已经执行或完成；尚未开始的准备不必提前完成。"
+                                  "speech只简短表达本次接受、拒绝或暂缓，不复述完整分工、规则或执行流程。"
+                                  "reason仅供过程详情，不作为发言。"),
+                    thread_id="game:invite:" + event["event_id"],
+                    deadline=event["deadline"], availability=available)
+            except (ValueError, TimeoutError):
+                return {**stale, "reason": "invitation_decision_unavailable"}
+            if not available() or not game_invitation_ready(activity_id, event.get("source"), "go2"):
+                return stale
+            self._last_decision = {"event_id": event["event_id"],
+                "choice": decision["choice"], "reason": decision.get("reason", ""),
+                "speech": decision.get("speech", ""), "emotion": decision.get("emotion", "neutral"),
+                "action": "run_peer_task" if decision["choice"] == "accept" else "none"}
+            return self._last_decision
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.go2.workflows.free_explore import build_motivation_graph
         saver = saver or FileCheckpointSaver()
@@ -753,7 +791,10 @@ class Drive:
             if activity.get("activity_id") == self._activity_id():
                 activity_request = {"activity_id": activity["activity_id"],
                                     "source_event_id": activity.get("source_event_id"),
-                                    "content": activity.get("context") or activity.get("text") or ""}
+                                    "request_consumed": bool(activity.get("request_consumed")),
+                                    "phase": activity.get("phase"),
+                                    "content": ("" if activity.get("request_consumed") else
+                                                activity.get("context") or activity.get("text") or "")}
         space_summary = prompt_space_context()
         opportunity = None
         if event.get("kind") in {"activity_started", "activity_observed", "activity_progress"}:
@@ -887,7 +928,7 @@ class Drive:
             if stage == 'start':
                 if runtime.active_reason():
                     return {'current_goal': {}, 'result': {'result': 'blocked', 'error': runtime.active_reason()}}
-                if goal.get('kind') == 'game' and goal.get('game_id') == 'rps_siege':
+                if goal.get('kind') == 'game':
                     goal.update(activity_id=self._activity_id(), generation=generation)
                 self._life_task_tokens[event_id] = runtime.begin_life('play', self.owner_session_id, event_id)
             elif stage == 'finish':
@@ -897,10 +938,9 @@ class Drive:
                     life_owner = runtime.data['life_owner']
                     finished = runtime.finish_life(token)
                     if (finished and activity_id and life_owner == activity_id
-                            and goal.get('kind') == 'game' and goal.get('game_id') == 'rps_siege'
+                            and goal.get('kind') == 'game'
                             and goal.get('activity_id') == activity_id
-                            and goal.get('generation') == generation
-                            and (result or {}).get('result') == 'ok'):
+                            and goal.get('generation') == generation):
                         completed_activity = activity_id
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.go2.workflows.free_explore import build_motivation_graph
@@ -926,7 +966,10 @@ class Drive:
 
     def _queue_completed_game(self, goal: dict, result: dict, activity_id: str,
                               generation: int) -> None:
-        """Return the completed game's agreed continuation to activity arbitration."""
+        """Resume free activity without reopening or discussing the old goal."""
+        reason = str(result.get("reason") or result.get("error") or "")
+        if any(code in reason for code in ("stop_unconfirmed", "cleanup_unconfirmed", "control_lease_changed")):
+            return
         runtime = runtime_for(go2)
         if (runtime is None or generation != self._generation
                 or activity_id != self._activity_id() or self.user_interrupt
@@ -936,19 +979,15 @@ class Drive:
                 or runtime.data['exploration_owner'] != activity_id
                 or not runtime.life_task_available):
             return
-        event_id = 'activity_game_result:' + goal['event_id']
+        event_id = 'activity_free:' + goal['event_id']
         if event_id in self._seen_events:
             return
-        from cloud.peers.games import get_game
-        game = get_game(goal['game_id'])
         self._seen_events.add(event_id)
         # Append behind already received collaboration events. The Graph, not
         # a finished game, decides whether exploration is appropriate now.
         self._events.append({'event_id': event_id, 'kind': 'activity_progress',
             'source': 'go2.execution', 'activity_id': activity_id,
-            'game_id': goal['game_id'],
-            'content': json.dumps({'game': game.metadata(), 'result': result},
-                                  ensure_ascii=False, default=str),
+            'content': '本局已结束，恢复自由活动。只依据当前新鲜环境决定观察、探索、交流或等待；旧局不再讨论或重试，再玩须重新邀请。',
             'ts': time.time(), 'deadline': time.time() + 90})
 
     async def _handle_event(self, event: dict, graph, saver, thread_id) -> None:
@@ -979,7 +1018,7 @@ class Drive:
                     or (not current() and self.owner_session_id is not None)):
                 return False
             try:
-                receipt = await go2.send_command("StopMove", completion_timeout=5.0)
+                receipt = await navigator.stop_and_confirm(owner_session_id=owner)
                 return receipt.get("result") == "ok"
             except Exception:
                 return False
@@ -989,6 +1028,11 @@ class Drive:
             if event.get('kind') == 'peer_message':
                 event['messenger'].send_result(event['message_id'], 'cancelled', reason='device_rest_or_offline')
             return
+        if event.get("kind") == "peer_message":
+            from cloud.peers.inbound import message_activity_allows
+            if not message_activity_allows(event.get("message") or {}):
+                event["messenger"].send_result(event["message_id"], "cancelled", reason="activity_or_game_ended")
+                return
         if event.get("deadline", 0) <= time.time():
             if event.get("kind") == "peer_message":
                 event["messenger"].send_result(event["message_id"], "cancelled", reason="message_expired")
@@ -1087,22 +1131,87 @@ class Drive:
             # The original receiver (lamp) will relay the final real result.
             messenger.send_progress(event["original_invitation_id"], task_id)
         if game is not None:
+            from cloud.peers.games.scope import game_scope, begin_game_close
+            from cloud.space.activity import get_activity_store
+            invitation_id = event.get("original_invitation_id") or event["message_id"]
+            outcome = {}
             try:
-                await game.execute(self, event, task_id)
+                with game_scope(activity_id, invitation_id, game.game_id):
+                    returned = await game.execute(self, event, task_id)
+                    outcome = returned if isinstance(returned, dict) else {}
             except asyncio.CancelledError:
+                with game_scope(activity_id, invitation_id, game.game_id):
+                    begin_game_close()
                 stopped = await stop_original_motion()
                 messenger.send_result(event["message_id"],
                                       "cancelled" if stopped else "unknown", task_id=task_id,
                                       reason="autonomy_stopped" if stopped else "stop_unconfirmed")
                 raise
             except Exception as exc:
+                with game_scope(activity_id, invitation_id, game.game_id):
+                    begin_game_close()
                 logger.exception("[Drive] game failed game_id=%s", game.game_id)
                 await stop_original_motion()
                 messenger.send_result(event["message_id"], "unknown", task_id=task_id,
                                       reason="game_error:" + type(exc).__name__)
             finally:
+                # The journal closes the original invitation even when a
+                # transport result cannot be delivered. Never turn cleanup
+                # or a late result into another conversational turn.
+                with game_scope(activity_id, invitation_id, game.game_id):
+                    begin_game_close()
+                terminal = messenger.get_received_result(event["message_id"])
+                terminal = {**outcome, **(terminal if isinstance(terminal, dict) else {})}
+                store = get_activity_store()
+                started = any(row.get("event_type") == "game_started"
+                              and (row.get("game_instance_id") or row.get("trigger_message_id")) == invitation_id
+                              for row in store.events(activity_id))
+                if started and current() and not self.user_interrupt and not asyncio.current_task().cancelling():
+                    from cloud.peers.games.role_graph import final_responses
+                    from cloud.peers.games.scope import terminal_game_scope
+                    # This allowance is expression-only. It cannot extend the
+                    # expired game's action deadline or grant movement.
+                    try:
+                        replies = await final_responses(game, activity_id=activity_id,
+                            invitation_id=invitation_id, context=self._context,
+                            result=terminal, deadline=time.time() + 35)
+                        with terminal_game_scope(activity_id, invitation_id, game.game_id):
+                            for reply in replies:
+                                role = reply["role"]
+                                store.record_event(activity_id, "message",
+                                    unit_id="go2" if role == "go2" else "esp32_desk_led",
+                                    text=reply["speech"], emotion=reply.get("emotion", "neutral"),
+                                    stage="game_final", game_id=game.game_id,
+                                    game_instance_id=invitation_id, trigger_message_id=invitation_id,
+                                    context_scope="process",
+                                    source_event_id="game:final:" + invitation_id + ":" + role)
+                    except Exception as exc:
+                        logger.warning("[Drive] game final expression unavailable: %s", type(exc).__name__)
+                get_activity_store().record_event(activity_id, "game_ended", unit_id="go2",
+                    game_id=game.game_id, game_instance_id=invitation_id,
+                    trigger_message_id=invitation_id, task_id=task_id,
+                    status=terminal.get("result", "unknown"), reason=terminal.get("reason"),
+                    context_scope="process", source_event_id="game:ended:" + invitation_id)
+                messenger.close_game(invitation_id, result=terminal, task_id=task_id)
+                # Keep only unrelated collaboration work. A task's real
+                # receipt still belongs to its original ledger/checkpoint.
+                remaining = deque(maxlen=self._events.maxlen)
+                for queued in self._events:
+                    msg = queued.get("message") or {}
+                    if (queued.get("game_instance_id") or msg.get("game_instance_id")) == invitation_id:
+                        if queued.get("kind") == "peer_message":
+                            queued["messenger"].send_result(queued["message_id"], "cancelled", reason="game_ended")
+                    else:
+                        remaining.append(queued)
+                self._events = remaining
                 if current():
                     self._active_goal = None
+                    self._last_tool_result = None
+                    self._last_decision = None
+                    self._last_observation = None
+                    self._social_state.seen_discoveries.add("activity_request:" + activity_id)
+                    self._queue_completed_game(
+                        {**goal, "game_id": game.game_id}, terminal, activity_id, generation)
             return
         from cloud.agents.go2.graph import run_go2_loop
         from cloud.peers.inbound import _peer_input
@@ -1110,7 +1219,12 @@ class Drive:
         context = replace(self._context, actor="visitor", persist=False,
                           origin_kind="agent_autonomous",
                           expires_at=int(min(event["deadline"], time.time() + 90)))
-        with peer_turn(messenger, message) as turn:
+        from contextlib import nullcontext
+        from cloud.peers.games.scope import game_scope
+        instance = message.get("game_instance_id")
+        scoped = game_scope(activity_id, instance, message.get("game_id") or "") if instance else nullcontext()
+        with scoped, peer_turn(messenger, message,
+                               availability=lambda: current() and message_activity_allows(message)) as turn:
             # create_task copies the correlation context; the caller is reset
             # immediately so unrelated autonomous/user work cannot inherit it.
             task = asyncio.create_task(run_go2_loop("peer_" + message["conversation_id"],
@@ -1140,6 +1254,8 @@ class Drive:
             logger.exception("[Drive] peer task failed")
             result = {"result": "unknown", "error": type(exc).__name__}
         await self._advance_task(goal, stage="finish", result=result)
+        from cloud.peers.inbound import record_peer_task_result
+        record_peer_task_result(message, result)
         if current():
             self._active_goal = None
         status = result.get("result", "unknown")

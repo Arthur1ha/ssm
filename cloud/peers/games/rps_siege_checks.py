@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from copy import deepcopy
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -218,6 +218,22 @@ async def game_harness(monkeypatch):
             await reveal_release["lamp"].wait()
         return result
 
+    async def run_device_task(role, _goal, **kwargs):
+        name, arguments = kwargs["initial_tool"]
+        arguments = {key: value for key, value in arguments.items() if key != "final"}
+        assert kwargs["tool_guard"](name, arguments) is None
+        if role == "lamp":
+            receipt = await invoke_blocking(execute_physical,
+                action={"set_led_state": "SET_STATE", "set_led_color": "SET_COLOR"}[name],
+                params=arguments, task_id=kwargs["run_id"])
+        else:
+            options = kwargs["execution_options"](name, arguments, "locked_action")
+            with (search_request(kwargs["run_id"], kwargs["deadline"])
+                  if name == "go2_find_object" else nullcontext()):
+                receipt = await execute_tool(name, arguments, context=kwargs["context"], **options)
+        return {"result": receipt["result"],
+                "tool_results": [{"tool": name, "params": arguments, "result": receipt}]}
+
     store = SimpleNamespace(record_event=lambda _activity, kind, **kwargs:
                             timeline.append({"event_type": kind, **kwargs}))
     stubs = {
@@ -238,7 +254,7 @@ async def game_harness(monkeypatch):
         module.__dict__.update(attributes)
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(rps_siege, "decide", decide)
-    monkeypatch.setattr(rps_siege, "invoke_blocking", invoke_blocking)
+    monkeypatch.setattr(rps_siege, "run_device_task", run_device_task)
     monkeypatch.setattr(rps_siege, "FileCheckpointSaver", _MemorySaver)
     monkeypatch.setattr(rps_siege, "activity_allows", lambda *_args: True)
     event = {"message_id": "msg_test_rps", "messenger": messenger,
@@ -430,7 +446,9 @@ async def test_public_mapping_is_complete_before_agreement_even_with_vague_model
     h = game_harness
     await rps_siege.GAME.execute(h.drive, h.event, "task_test_rps")
     stages = [row.get("stage") for row in h.timeline]
-    assert stages.index("mapping_proposal") < stages.index("agreement") < stages.index("terms_confirmed")
+    assert stages.index("mapping_proposal") < stages.index("terms_confirmed")
+    assert not any(row.get("stage") == "agreement" and row["event_type"] == "message"
+                   for row in h.timeline), "Internal acceptance must not repeat the public agreement"
     assert stages.index("terms_confirmed") < stages.index("identification") < stages.index("recognition")
     assert stages.index("recognition") < stages.index("reveal") < stages.index("rps_result")
     proposals = [row for row in h.timeline if row.get("stage") == "mapping_proposal"]

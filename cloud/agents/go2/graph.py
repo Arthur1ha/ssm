@@ -65,7 +65,8 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                        trace_id: str | None = None, parent_run_id: str | None = None,
                        allowed_tools: frozenset[str] | None = None,
                        tool_guard=None, task_context=None,
-                       publish_reply: bool = True, selection: dict | None = None) -> dict:
+                       publish_reply: bool = True, selection: dict | None = None,
+                       task_adapter=None) -> dict:
     view = get_store()
     async with view.index.async_session_lock("go2", session_id, goal_revision=context.goal_revision):
         return await _run_go2_loop_locked(
@@ -74,7 +75,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
             on_step=on_step, resume=resume, trace_id=trace_id,
             parent_run_id=parent_run_id, allowed_tools=allowed_tools,
             tool_guard=tool_guard, task_context=task_context,
-            publish_reply=publish_reply, selection=selection)
+            publish_reply=publish_reply, selection=selection, task_adapter=task_adapter)
 
 
 @async_model_clients()
@@ -84,10 +85,13 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                                deadline: float | None, on_step, resume: bool,
                                trace_id: str | None, parent_run_id: str | None,
                                allowed_tools: frozenset[str] | None,
-                               tool_guard, task_context, publish_reply: bool, selection: dict | None) -> dict:
+                               tool_guard, task_context, publish_reply: bool, selection: dict | None,
+                               task_adapter=None) -> dict:
     # Resolve public requests before registering a run or claiming device work.
     # CHAT is an explicit conversation entry, not a missing hardware tool.
-    initial_tool = None
+    initial_tool = task_adapter.initial_tool if task_adapter is not None else None
+    if task_adapter is not None:
+        allowed_tools = task_adapter.allowed_tools
     if skill_id:
         from cloud.go2.tools.registry import get_card_skill
         from cloud.go2.tools.executor import validate_params
@@ -183,7 +187,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                          revision=profile.get("revision"),
                          content_hash=hashlib.sha256(profile["prompt"].encode()).hexdigest(),
                          prompt_trimmed=False)
-        return messages
+        return task_adapter.messages(messages, current) if task_adapter is not None else messages
 
     def prepare_emotion(current: GraphRun):
         # Public actions and restricted tasks retain their exact tool scope.
@@ -236,6 +240,17 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         get_goal_registry().check(context.goal_revision)
         nonlocal interaction_token, motion_unconfirmed
         execution_context = context
+        if name not in READ_ONLY_TOOLS and name != "submit_game_decision":
+            from cloud.peers.turns import peer_turn_available
+            if not peer_turn_available():
+                return {"result": "cancelled", "error": "peer_context_superseded", "final": True}
+        if task_adapter is not None:
+            blocked = task_adapter.guard(name, arguments)
+            if blocked is not None:
+                return blocked
+            submitted = task_adapter.submit(name, arguments)
+            if submitted is not None:
+                return submitted
         if name == "apply_training":
             if allowed_tools is not None or tool_guard is not None or skill_id not in (None, 'go2_chat'):
                 return {'result': 'rejected', 'error': 'training_not_allowed_for_restricted_task'}
@@ -292,8 +307,13 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         from cloud.go2.perception.cargo import cargo_request
         from contextlib import nullcontext
         original_target = cargo_request(run.goal) if name == 'go2_push_cargo' else nullcontext()
-        with search_request(run.run_id, run.deadline), original_target:
-            result = await execute_tool(name, arguments, context=execution_context)
+        with search_request(run.run_id, run.deadline), original_target, (
+                task_adapter.execution_context(name, arguments, step_id)
+                if task_adapter is not None else nullcontext()):
+            options = task_adapter.options(name, arguments, step_id) if task_adapter is not None else {}
+            result = await execute_tool(name, arguments, context=execution_context, **options)
+        if task_adapter is not None:
+            result = task_adapter.transform(name, arguments, result)
         if TOOL_REGISTRY[name].motion:
             motion_unconfirmed = (result.get("result") in {"accepted", "executing", "unknown", "timeout"}
                                   or result.get("reason") == "stop_unconfirmed")
@@ -319,12 +339,25 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         event_source = "autonomous" if autonomous else (
             "delegated_skill" if run.parent_run_id else "device_chat")
         def progress(phase, step):
+            # Stage submissions have no physical effect or public tool step.
+            # Their internal runner events remain available for diagnostics.
+            if task_adapter is not None and task_adapter.decision_schema is not None:
+                return
             from cloud.agents.common.progress_facts import progress_event_facts
             publish_agent_event("agent_progress", session_id=event_session,
                 scope="space" if autonomous else "session", space_id=context.space_id,
-                source=event_source, **progress_event_facts(run, phase, step))
+                source=event_source,
+                **{**progress_event_facts(run, phase, step),
+                   **(task_adapter.event_fields() if task_adapter is not None else {})})
         async def finalize(current: GraphRun) -> GraphRun:
             """Validate facts, speak as Go2 and checkpoint the user-visible reply."""
+            if task_adapter is not None:
+                if not task_adapter.available():
+                    current.status, current.response = "cancelled", ""
+                    return current
+                task_adapter.settle_status(current)
+                if task_adapter.finish_decision(current):
+                    return current
             if delegated:
                 current.response = public_reply_text(current.decision_draft) if initial_tool is None else ""
                 current.reply_source = "decision_model" if current.response else "runtime"
@@ -356,7 +389,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                     reply_kind='final')
             else:
                 await finalize_reply(current, model=get_text_llm,
-                                     instructions=lambda value: persona_reply_prompt(value, get_profile()),
+                                     instructions=lambda value: persona_reply_prompt(value, get_profile())
+                                         + ("\n" + task_adapter.instructions if task_adapter is not None else ""),
                                      fallback=fallback)
             publish_allowed = not current.parent_run_id or time.time() < current.deadline
             if not publish_allowed:
@@ -394,6 +428,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         if allowed_tools is not None:
             declarations = {name: schema for name, schema in declarations.items()
                             if name in allowed_tools}
+        if task_adapter is not None:
+            declarations = task_adapter.declarations(declarations)
         try:
             await run_role_graph(
                 run, model=get_text_llm(), tool_schemas=declarations,
@@ -401,9 +437,11 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 build_messages=build_messages, execute=execute, finalize=finalize,
                 prepare_emotion=prepare_emotion,
                 on_step=on_step, on_progress=progress,
-                effectful=lambda name: name not in READ_ONLY_TOOLS and name != "list_training",
+                effectful=lambda name: name not in READ_ONLY_TOOLS and name not in {"list_training", "submit_game_decision"},
                 initial_tool=initial_tool, resume=resume,
-                terminal_tools=frozenset({initial_tool[0]} if delegated and initial_tool else set()),
+                terminal_tools=(frozenset({"submit_game_decision"}) if task_adapter is not None
+                                and task_adapter.decision_schema is not None else
+                                frozenset({initial_tool[0]} if delegated and initial_tool else set())),
                 resume_value=message if resume else None, checkpointer=view.checkpointer)
         except asyncio.CancelledError:
             await view.reconcile_interrupted(session_id, cancelled=run)

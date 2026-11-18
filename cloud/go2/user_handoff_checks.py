@@ -93,6 +93,7 @@ async def test_new_goal_waits_old_finally_and_then_fresh_stop_before_release(han
     stationary(h.robot)
     result = await new
     assert result['physical_stop'] == 'confirmed'
+    assert not h.robot._move_control_active  # A different task exits remote mode.
     assert h.lease.snapshot() is None
     current = h.lease.acquire(context)
     assert h.lease.release(context.session_id, generation=old_lease.generation) is False
@@ -107,16 +108,19 @@ async def test_new_goal_waits_old_finally_and_then_fresh_stop_before_release(han
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('telemetry', [None, {'yaw_speed': .3}, {'yaw_speed': None}, {'velocity': [.1, 0, 0]}])
-async def test_accepted_standing_and_old_samples_do_not_release_control(handoff, telemetry):
+@pytest.mark.parametrize('manual_control', [False, True])
+async def test_accepted_standing_and_old_samples_do_not_release_control(handoff, telemetry, manual_control):
     h = handoff
     old = h.lease.acquire(ExecutionContext('old-user', 'visitor', False))
+    h.robot._move_control_active = manual_control
     stationary(h.robot)  # Cached stationary telemetry predates this stop.
-    task = asyncio.create_task(h.service.prepare_user_goal(next_goal()))
+    task = asyncio.create_task(h.service.prepare_user_goal(next_goal(), manual_control=manual_control))
     await asyncio.sleep(.02)
     if telemetry is not None:
         stationary(h.robot, **telemetry)
     result = await task
     assert result['physical_stop'] == 'unknown'
+    assert not h.robot._velocity_command_active
     assert h.lease.snapshot().generation == old.generation
     assert not h.lease.release('old-user', generation=old.generation)
     # Waiting for the old TTL cannot manufacture completion.
@@ -215,6 +219,8 @@ async def test_first_velocity_goal_confirms_stop_and_preserves_explicit_remote_e
     monkeypatch.setattr(router, '_cancel_pending_peer_requests', lambda _: None)
     monkeypatch.setattr(executor, 'go2', h.robot)
     monkeypatch.setattr(executor, 'control_lease', h.lease)
+    states = asyncio.Queue()
+    h.robot._state_queues.append(states)
     context = next_goal()
     first = asyncio.create_task(router.go2_velocity(router.VelocityRequest(
         vx=.1, controller_id='gesture', sequence=1), context))
@@ -223,7 +229,43 @@ async def test_first_velocity_goal_confirms_stop_and_preserves_explicit_remote_e
     stationary(h.robot)
     assert (await first)['result'] == 'accepted'
     assert h.robot._move_control_active and h.robot._velocity_command_active
-    h.robot.stop_velocity()
+    try:
+        published = []
+        while not states.empty():
+            published.append(states.get_nowait())
+        assert published
+        assert all(state['control_mode'] == 'remote' for state in published), (
+            'A transient remote exit disables the held browser joystick and sends a stop',
+            [state['control_mode'] for state in published])
+        assert all(state['body_state'] in {'standing', 'moving'}
+                   and 'Move' in state['available_actions'] for state in published)
+        # Heartbeats from the same held pointer must keep the stream alive.
+        await router.go2_velocity(router.VelocityRequest(
+            vx=.2, controller_id='gesture', sequence=2), context)
+        await asyncio.sleep(.05)
+        assert h.robot._manual_velocity_handle is not None
+        await router.go2_velocity(router.VelocityRequest(
+            controller_id='gesture', sequence=3), context)
+        assert h.robot._move_control_active and not h.robot._velocity_command_active
+    finally:
+        h.robot.stop_velocity()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('initial_remote,exit_during_wait', [(False, False), (True, True)])
+async def test_manual_handoff_cannot_enable_or_restore_exited_remote_mode(
+        handoff, initial_remote, exit_during_wait):
+    h = handoff
+    h.lease.acquire(ExecutionContext('user', 'visitor', False))
+    h.robot._move_control_active = initial_remote
+    task = asyncio.create_task(h.service.prepare_user_goal(next_goal(), manual_control=True))
+    await asyncio.sleep(.02)
+    if exit_during_wait:
+        h.robot._move_control_active = False
+    stationary(h.robot)
+    assert (await task)['physical_stop'] == 'confirmed'
+    assert not h.robot._move_control_active
+    assert not h.robot._velocity_command_active
 
 
 @pytest.mark.asyncio

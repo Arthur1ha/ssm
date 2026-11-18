@@ -420,7 +420,10 @@ async def _settle_owned_motion(context: ExecutionContext, *, owner: str | None =
         try:
             if go2.is_connected:
                 try:
-                    go2.stop_velocity()
+                    if manual_control:
+                        go2.move_velocity(0, 0, 0)
+                    else:
+                        go2.stop_velocity()
                 except (ValueError, RuntimeError):
                     pass  # Cleanup and subsequent fresh proof still decide handoff.
             interrupt_training_behavior(context)
@@ -445,7 +448,8 @@ async def _settle_owned_motion(context: ExecutionContext, *, owner: str | None =
             if not go2.is_connected:
                 return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'disconnected'}
             try:
-                stopped = await go2.stop_and_confirm_motion(can_continue=owns_scope)
+                stopped = await go2.stop_and_confirm_motion(
+                    can_continue=owns_scope, preserve_remote_control=manual_control)
             except (ValueError, RuntimeError) as exc:
                 logging.warning('[Go2/Handoff] stop failed: %s', type(exc).__name__)
                 return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'stop_unconfirmed'}
@@ -456,8 +460,6 @@ async def _settle_owned_motion(context: ExecutionContext, *, owner: str | None =
                 return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'control_owner_changed'}
             if supersede:
                 _prepared_goal_revision = context.goal_revision
-            if manual_control and runtime is not None and not (runtime.active_reason() or go2.body_ready_reason()):
-                go2._move_control_active = True
             return stopped
         finally:
             drive._user_handoff_in_progress = False

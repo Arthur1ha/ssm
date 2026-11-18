@@ -7,10 +7,27 @@ import logging
 import time
 from dataclasses import replace
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 from .base import Game, activity_allows
+from .role_graph import run_device_task
+from cloud.agents.common.emotions import EmotionModel
 from cloud.space.execution import ExecutionContext
 
 logger = logging.getLogger(__name__)
+
+
+class InvitationDecision(EmotionModel, BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    accepted: bool
+    speech: str = Field(min_length=1, max_length=300)
+
+    @field_validator("speech")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("invitation_response_required")
+        return value.strip()
 
 def live_lamp_color(source: str) -> dict | None:
     from cloud.api.main import _esp32_state
@@ -32,6 +49,15 @@ def live_lamp_color(source: str) -> dict | None:
 
 def _color_hunt_available(sender: str, target: str) -> bool:
     return {sender, target} == {"esp32_desk_led", "go2"}
+
+
+def _task_result(tool: str, params: dict, receipt: dict) -> dict:
+    """Only confirmed arrival satisfies this device's color-hunt subtask."""
+    from cloud.go2.tools.registry import target_navigation_complete
+
+    complete = (tool == "go2_navigate_to_visible_target"
+                and target_navigation_complete(receipt, str(params.get("target") or "")))
+    return {**receipt, "final": complete or receipt.get("result") == "cancelled"}
 
 
 def _color_name(rgb: tuple[int, int, int]) -> str | None:
@@ -98,9 +124,8 @@ async def _wait_for_lamp_color(event: dict, drive: object) -> tuple[dict | None,
     return None, "lamp_color_timeout"
 
 
-async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
+async def _run_color_hunt(drive: object, event: dict, task_id: str) -> dict | None:
     """Let Go2's existing graph choose observations and visual navigation."""
-    from cloud.agents.go2.graph import run_go2_loop
     from cloud.go2.connection import go2
     from cloud.go2.navigation.navigator import navigator
 
@@ -117,17 +142,30 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
     task_goal.setdefault("owner_session_id", owner)
     task_goal.setdefault("activity_id", activity_id)
 
-    def current():
+    def current(*, include_game=True):
+        from .scope import game_scope_available
         return (generation == getattr(drive, "_generation", 0)
                 and owner == getattr(drive, "owner_session_id", None)
                 and drive._activity_id() == activity_id
-                and activity_allows(activity_id, message["sender"], "go2"))
+                and (not include_game or activity_allows(activity_id, message["sender"], "go2"))
+                and (not include_game or game_scope_available()))
 
     async def finish(status, reason, **facts):
+        from .scope import begin_game_close
+        begin_game_close()
         # Keep the original task even if a newer activity has replaced the
         # Drive's shared goal while we waited for the lamp/model/device.
         await drive._advance_task(task_goal, stage="finish",
                                   result={"result": status, "reason": reason, **facts})
+
+    async def stop_original():
+        """A stop request is not fresh evidence that the body has stopped."""
+        if not current(include_game=False) or not go2.is_connected:
+            return {"result": "unknown", "reason": "control_context_changed"}
+        try:
+            return await navigator.stop_and_confirm(owner_session_id=context.session_id)
+        except Exception as exc:
+            return {"result": "unknown", "reason": type(exc).__name__}
 
     if not activity_allows(activity_id, message["sender"], "go2"):
         messenger.send_result(event["message_id"], "cancelled", task_id=task_id,
@@ -215,9 +253,6 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
                         "message": "我还没说明这次为什么选择这个候选，先不开始导航。"}
             announced_target = target
             candidate_basis = {"reason": reason.strip(), "evidence": [observed_evidence]}
-            drive._activity_event("message", reason.strip(),
-                                  game_id="color_hunt", trigger_message_id=event["message_id"],
-                                  decision_basis=candidate_basis)
         return None
 
     def on_step(step: dict) -> None:
@@ -235,6 +270,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
                     and isinstance(observation_text, str) and observation_text.strip()):
                 observation = drive._activity_event("observation", observation_text[:500],
                     source="go2.camera", game_id="color_hunt", action=tool,
+                    context_scope="process",
                     trigger_message_id=event["message_id"])
                 if observation and observation.get("event_id"):
                     observed_rgb = pending_observe_rgb
@@ -244,6 +280,7 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         drive._activity_event("action_result", str(receipt.get("message") or
                               receipt.get("error") or receipt.get("result"))[:500],
                               action=tool, task_id=task_id, game_id="color_hunt",
+                              context_scope="process",
                               trigger_message_id=event["message_id"],
                               **({"decision_basis": candidate_basis}
                                  if tool == "go2_navigate_to_visible_target" and candidate_basis else {}),
@@ -260,15 +297,17 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         "不要使用盲走或坐标导航代替视觉目标导航。"
         "本局须工具确认已在同一目标附近并停稳才算完成，不能把仅看见或推进一段当成完成。"
     )
-    graph_task = asyncio.create_task(run_go2_loop(
-        "peer_" + event["message_id"], goal, context=context,
+    graph_task = asyncio.create_task(run_device_task(
+        "go2", goal, context=context,
         run_id=event["message_id"], deadline=event["deadline"],
         allowed_tools=frozenset({"go2_observe", "go2_navigate_to_visible_target",
                                  "get_space_context"}),
         tool_guard=tool_guard, task_context=task_context, on_step=on_step,
-        publish_reply=False))
+        result_transform=_task_result,
+        availability=current, parent_run_id=invitation_id, share_result=False))
     graph_result = None
     stop_reason = None
+    stop_receipt = None
     try:
         while not graph_task.done():
             if not current():
@@ -278,17 +317,12 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
             elif time.time() >= event["deadline"]:
                 stop_reason = "game_expired"
             if stop_reason:
+                from .scope import begin_game_close
+                begin_game_close()
                 graph_task.cancel()
                 await asyncio.gather(graph_task, return_exceptions=True)
-                navigator.stop(owner_session_id=context.session_id)
-                stopped = False
-                if current() and go2.is_connected:
-                    try:
-                        stopped = (await go2.send_command(
-                            "StopMove", completion_timeout=5.0)).get("result") == "ok"
-                    except Exception:
-                        pass
-                if not stopped:
+                stop_receipt = await stop_original()
+                if stop_receipt.get("result") != "ok":
                     stop_reason = "stop_unconfirmed"
                 break
             await asyncio.sleep(0.2)
@@ -301,20 +335,17 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
             elif time.time() >= event["deadline"]:
                 stop_reason = "game_expired"
     except asyncio.CancelledError:
+        from .scope import begin_game_close
+        begin_game_close()
         graph_task.cancel()
         await asyncio.gather(graph_task, return_exceptions=True)
         raise
     except Exception as exc:
+        from .scope import begin_game_close
+        begin_game_close()
         logger.exception("color_hunt graph failed message=%s", event["message_id"])
-        navigator.stop(owner_session_id=context.session_id)
-        stopped = False
-        if current() and go2.is_connected:
-            try:
-                stopped = (await go2.send_command(
-                    "StopMove", completion_timeout=5.0)).get("result") == "ok"
-            except Exception:
-                pass
-        stop_reason = "game_graph_error" if stopped else "stop_unconfirmed"
+        stop_receipt = await stop_original()
+        stop_reason = "game_graph_error" if stop_receipt.get("result") == "ok" else "stop_unconfirmed"
         graph_result = {"result": "unknown", "error": type(exc).__name__}
 
     steps = (graph_result or {}).get("tool_results") or []
@@ -341,14 +372,27 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         reason = (last_receipt.get("error") or last_receipt.get("reason") or
                   (graph_result or {}).get("error") or "no_confirmed_color_match")
         reply = str((graph_result or {}).get("response") or "").strip()[:1000]
+    if status != "ok" and stop_receipt is None:
+        from .scope import begin_game_close
+        begin_game_close()
+        stop_receipt = await stop_original()
+        if stop_receipt.get("result") != "ok":
+            status, reason = "unknown", "stop_unconfirmed:" + reason
+    if reply:
+        get_activity_store().record_event(activity_id, "task_result", unit_id="go2",
+            text=reply, game_id="color_hunt", trigger_message_id=invitation_id,
+            task_id=task_id, context_scope="shared",
+            status=status, public_result={"result": status, "reason": reason},
+            emotion=(graph_result or {}).get("emotion", "neutral"),
+            source_event_id="game:final:" + invitation_id)
     await finish(status, reason, target_color=color,
-                 graph_run_id=(graph_result or {}).get("run_id"), tool_results=steps)
+                 graph_run_id=(graph_result or {}).get("run_id"), tool_results=steps,
+                 **({"stop": stop_receipt} if stop_receipt is not None else {}))
     messenger.send_result(event["message_id"], status, task_id=task_id,
                           reason=reason)
-    if reply:
-        messenger.send_message("go2", message["sender"], reply,
-            reply_to=event["message_id"], reply_kind="reply",
-            emotion=(graph_result or {}).get("emotion", "neutral"))
+    return {"result": status, "reason": reason,
+            "role_replies": {"go2": {"speech": reply, "status": status, "terminal": status == "ok",
+                "emotion": (graph_result or {}).get("emotion", "neutral")}} if reply else {}}
 
 
 def _handle_color_hunt_acceptance(messenger, message: dict, state) -> None:
@@ -441,11 +485,10 @@ def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
             return
         decision = _lamp_invitation_decision(agent, message)
         if decision.get("event_decision") != "accept":
-            reason = str(decision.get("decision_reason") or "decision_unavailable")[:200]
-            messenger.send_result(message["message_id"], "rejected", reason=reason)
-            if (reason not in {"decision_unavailable", "invalid_arbitration_choice"}
-                    and not reason.startswith("arbitration_")):
-                messenger.send_message("esp32_desk_led", "go2", reason,
+            messenger.send_result(message["message_id"], "rejected", reason="invitation_declined")
+            speech = str(decision.get("decision_speech") or "").strip()
+            if speech:
+                messenger.send_message("esp32_desk_led", "go2", speech,
                                        reply_to=message["message_id"], reply_kind="declined",
                                        emotion=decision.get("decision_emotion", "neutral"))
             return
@@ -474,7 +517,7 @@ def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
                 or not game_invitation_ready(activity_id, "go2", "esp32_desk_led")):
             messenger.send_result(message["message_id"], "cancelled", reason="activity_ended_or_expired")
             return
-        response = str(decision.get("decision_reason") or "").strip()
+        response = str(decision.get("decision_speech") or "").strip()
         if not response:
             messenger.send_result(message["message_id"], "unknown", reason="acceptance_response_unavailable")
             return
@@ -490,30 +533,26 @@ def _handle_color_hunt_invitation(messenger, message: dict, state) -> None:
 
 
 def _lamp_invitation_decision(agent, message: dict) -> dict:
-    """Reuse the checkpointed arbitration Graph with the lamp's own persona."""
-    from cloud.agents.common.checkpoint import FileCheckpointSaver
-    from cloud.agents.common.models import async_model_clients
-    from cloud.agents.go2.workflows.free_explore import build_motivation_graph
-    from cloud.agents.lamp.personality.profile import get_profile
+    """Ask the lamp's own Graph whether it wants to play this invitation."""
     from cloud.space.context import get_space_context
+    from .role_graph import decide
 
-    saver = FileCheckpointSaver()
-    thread_id = "lamp:game:" + message["message_id"]
-
-    @async_model_clients()
-    async def decide():
-        model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
-        graph = build_motivation_graph(profile_loader=get_profile, model=model,
-                                       checkpointer=saver, role_name="灯")
-        async with saver.async_run_lock(thread_id):
-            return await graph.ainvoke({"connected": agent._device_online(),
-                "pending_event": {"kind": "peer_message", "event_id": message["message_id"],
-                    "content": message.get("content", ""), "deadline": message["deadline"],
-                    "interaction_kind": "game_invite", "game": GAME.metadata()},
-                "space_summary": json.dumps(get_space_context("esp32_desk_led", state=agent._state),
-                                            ensure_ascii=False)},
-                {"configurable": {"thread_id": thread_id}}, durability="sync")
-    return asyncio.run(decide())
+    epochs = (getattr(agent, "_autonomy_epoch", None), getattr(agent, "_command_epoch", None))
+    result = asyncio.run(decide("lamp", "invite", {
+        "game": GAME.metadata(), "message": message.get("content", ""),
+        "space": get_space_context("esp32_desk_led", state=agent._state)},
+        schema=InvitationDecision, instructions=(
+            "依据自身人格、当前事实和邀请，自主决定现在是否愿意玩寻找同色物品。"
+            "接受仅代表参与本局准备；接受后再根据真实观察选择颜色。"
+            "愿意返回accepted=true，否则false；speech只自然回答邀请，不复述规则或内部回执。"),
+        thread_id="lamp:color:invite:" + message["message_id"],
+        deadline=message["deadline"], availability=lambda: (
+            time.time() < message["deadline"]
+            and activity_allows(message.get("activity_id"), "go2", "esp32_desk_led")
+            and epochs == (getattr(agent, "_autonomy_epoch", None),
+                           getattr(agent, "_command_epoch", None)))))
+    return {"event_decision": "accept" if result["accepted"] else "decline",
+            "decision_speech": result["speech"], "decision_emotion": result.get("emotion", "neutral")}
 
 
 def _prepare_lamp_color(messenger, message: dict, state) -> None:
@@ -575,25 +614,24 @@ def _prepare_lamp_color(messenger, message: dict, state) -> None:
             "Go2 已接受寻找同色物品。请依据当前共享上下文中的真实环境观察，"
             "自行选择观察中确实存在、清楚可辨认的物品颜色作为题目，不指定狗必须找哪个物品。"
             "用 set_led_color 设置所选颜色，并用 decision_reason 简短说明为何选择它，"
-            "这句话会作为你自己的发言展示在动作前：按你的性格用第一人称自然说出打算与依据，"
+            "依据只保留在过程详情，不作为同伴发言：按你的性格用第一人称简短记录选择依据，"
             "把视觉发现归于实际观察者，不声称自己看到了同伴的画面；不写内部字段或工具名。"
             "evidence_refs 必须引用 space.decision_evidence 中相关 observation 的 ref。"
             "没有相关观察或观察不能支持所选颜色时，如实说明并结束，不猜颜色或编造物品。"
-            "若灯尚未开启，先用 set_led_state 开灯并等待回执；开灯也必须附上本次选色的理由和观察引用。"
+            "若灯尚未开启，先用 set_led_state 开灯并等待回执，开灯调用声明final=false继续原目标；"
+            "开灯也必须附上本次选色的理由和观察引用。"
             "等待设备真实回执。只执行一次设色，不发送同伴消息，不预设之后变色或其他剧情。")
-        result = agent.run_user_loop(
-            setup_goal, "esp32_desk_led", context, dispatch,
-            lighting_only=True, run_id=message["message_id"])
-        if (result.get("result") == "error" and not result.get("steps")
-                and not dispatched_power and not dispatched_color
-                and time.time() + 10 < message["deadline"]):
-            # A model connection error before the first tool has no physical
-            # side effect; a fresh graph run may safely retry the decision.
-            logger.warning("color hunt setup model failed before action; retrying id=%s",
-                           message["message_id"])
-            result = agent.run_user_loop(
-                setup_goal, "esp32_desk_led", context, dispatch,
-                lighting_only=True, run_id="retry_" + message["message_id"])
+        result = asyncio.run(run_device_task(
+            "lamp", setup_goal, context=context, dispatch=dispatch,
+            run_id=message["message_id"], deadline=message["deadline"],
+            allowed_tools=frozenset({"set_led_state", "set_led_color"}),
+            result_transform=lambda name, _params, receipt: {
+                **receipt, "final": receipt.get("result") == "cancelled"
+                or name == "set_led_color" and receipt.get("result") == "ok"},
+            parent_run_id=message["reply_to"], share_result=False,
+            availability=lambda: (agent._should_act() and agent._device_online()
+                and activity_allows(activity_id, "esp32_desk_led", "go2")
+                and time.time() < message["deadline"])))
         color_step = next((step for step in reversed(result.get("steps") or [])
                            if step.get("tool") == "set_led_color"
                            and (step.get("result") or {}).get("result") == "ok"), None)

@@ -1,26 +1,16 @@
-"""Checkpointed role decisions for 猜拳攻灯; no device execution lives here.
+"""Stage contracts for 猜拳攻灯, interpreted by each device's own Graph.
 
-Each call is one structured LangGraph decision using the existing role model
-and personality. The game adapter supplies public facts and owns execution,
-commit/reveal ordering and physical-result verification.
+This module declares game rules and validates a role's submitted choice. It
+does not construct a model or a separate decision Graph.
 """
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
-import time
-from typing import Literal, TypedDict
+from typing import Literal
 
-from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cloud.agents.common.checkpoint import FileCheckpointSaver
 from cloud.agents.common.emotions import EmotionModel, EMOTION_INSTRUCTIONS
-from cloud.agents.common.messages import role_messages
-from cloud.agents.common.models import async_model_clients
 from cloud.go2.actions import ACTIONS, TRANSIENT_STATES
-from cloud.personality.store import render_identity
 
 CHOICES = ("rock", "scissors", "paper")
 
@@ -190,12 +180,6 @@ class ThrowDecision(EmotionModel, DecisionModel):
                         description="不透露本轮出拳的简短发言；双方锁定前不对外展示")
 
 
-class DecisionState(TypedDict, total=False):
-    input_signature: str
-    facts: dict
-    decision: dict
-
-
 def _schema(role: str, phase: str):
     if phase == "identify":
         return LampIdentification if role == "lamp" else Go2Identification
@@ -210,23 +194,6 @@ def _schema(role: str, phase: str):
     if phase == "performance" and role == "go2":
         return PerformanceDecision
     raise ValueError("unknown_game_decision_phase")
-
-
-def _role_model(role: str):
-    if role == "lamp":
-        from cloud.agents.lamp.personality.profile import get_profile
-        from cloud.esp32.service import get_agent
-
-        agent = get_agent()
-        if agent is None:
-            raise ValueError("lamp_agent_unavailable")
-        model = agent._llm_for_run() if hasattr(agent, "_llm_for_run") else agent._llm
-    else:
-        from cloud.agents.go2.personality.profile import get_profile
-        from cloud.go2.models import get_text_llm
-
-        model = get_text_llm()
-    return model, get_profile()
 
 
 def _instructions(role: str, phase: str) -> str:
@@ -302,53 +269,19 @@ def _instructions(role: str, phase: str) -> str:
 
 
 async def decide(role: str, phase: str, facts: dict, *, thread_id: str,
-                 deadline: float) -> dict:
-    """Make or retrieve one immutable role decision within the game deadline.
+                 deadline: float, availability=None) -> dict:
+    """Ask the existing device Graph to submit this stage's validated choice."""
+    from .role_graph import decide as device_decide
 
-    The caller uses a separate thread ID for every game/round decision and
-    never passes the opponent's current private choice into ``facts``. Reusing
-    a completed ID returns its saved decision instead of rerolling a throw.
-    """
     if role not in {"lamp", "go2"}:
         raise ValueError("unknown_game_role")
     schema = _schema(role, phase)
     if not isinstance(facts, dict) or not isinstance(thread_id, str) or not thread_id:
         raise ValueError("invalid_game_decision_context")
-    remaining = deadline - time.time()
-    if remaining <= 0:
-        raise TimeoutError("game_decision_expired")
-    signature = hashlib.sha256(json.dumps(
-        {"role": role, "phase": phase, "facts": facts},
-        sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
-    config = {"configurable": {"thread_id": f"rps:{thread_id}:{role}:{phase}"}}
-
-    async with asyncio.timeout(remaining), async_model_clients():
-        saver = FileCheckpointSaver()
-        model, profile = _role_model(role)
-        structured = model.with_structured_output(schema, method="function_calling")
-
-        async def choose(state: DecisionState) -> DecisionState:
-            context = state["facts"]
-            if role == "go2" and phase in {"setup", "performance"}:
-                context = {**context, "available_gestures": gesture_options()}
-            messages = role_messages(
-                render_identity(profile) + "\n" + _instructions(role, phase),
-                "请作出当前游戏阶段的决定。", context=context)
-            raw = await structured.ainvoke(messages)
-            return {"decision": schema.model_validate(raw).model_dump()}
-
-        builder = StateGraph(DecisionState)
-        builder.add_node("choose", choose)
-        builder.add_edge(START, "choose")
-        builder.add_edge("choose", END)
-        graph = builder.compile(checkpointer=saver)
-        async with saver.async_run_lock(config["configurable"]["thread_id"]):
-            previous = await graph.aget_state(config)
-            if previous.values:
-                if previous.values.get("input_signature") != signature:
-                    raise ValueError("game_decision_context_changed")
-                if previous.values.get("decision"):
-                    return schema.model_validate(previous.values["decision"]).model_dump()
-            result = await graph.ainvoke(
-                {"facts": facts, "input_signature": signature}, config, durability="sync")
-            return schema.model_validate(result["decision"]).model_dump()
+    context = dict(facts)
+    if role == "go2" and phase in {"setup", "performance"}:
+        context["available_gestures"] = gesture_options()
+    return await device_decide(
+        role, phase, context, schema=schema, instructions=_instructions(role, phase),
+        thread_id="rps:" + thread_id + ":" + role + ":" + phase,
+        deadline=deadline, availability=availability)

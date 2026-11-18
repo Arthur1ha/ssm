@@ -38,7 +38,8 @@ def peer_turn_available() -> bool:
     a callback never grants permissions or revives an expired activity.
     """
     turn = _current_turn.get()
-    return turn is None or turn.availability is None or turn.availability()
+    from cloud.peers.games.scope import game_scope_available
+    return game_scope_available() and (turn is None or turn.availability is None or turn.availability())
 
 
 @contextmanager

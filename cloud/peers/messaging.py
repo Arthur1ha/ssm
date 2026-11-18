@@ -79,11 +79,42 @@ class AgentMessenger:
             while len(table) > _MAX_PENDING:
                 table.pop(next(iter(table)))
 
+    @staticmethod
+    def _game_closed(row: dict) -> bool:
+        instance = row.get("game_instance_id")
+        if not instance:
+            return False
+        from cloud.space.activity import get_activity_store
+        return not get_activity_store().game_allows(row.get("activity_id"), instance)
+
+    def close_game(self, instance: str, *, result: dict | None = None, task_id: str | None = None) -> None:
+        """Release only this journal-closed game's transient message slots."""
+        with self._lock:
+            status = (result or {}).get("result")
+            original = self._inbound.get(instance)
+            if status in _TERMINAL and original is not None and original.get("state") != status:
+                # Outbound invitations execute through the acceptance message.
+                # Settle the original invitation too before releasing slots;
+                # its delayed relay must not turn a real success into cancel.
+                self._send_update(instance, kind="result", result=status,
+                                  task_id=task_id or original.get("task_id"),
+                                  reason=(result or {}).get("reason"))
+            for table in (self._outgoing, self._inbound):
+                for row in table.values():
+                    if row.get("message_id") == instance and status in _TERMINAL:
+                        row["state"] = status
+                        row["result"] = {"result": status, "reason": (result or {}).get("reason")}
+                        if task_id:
+                            row["task_id"] = task_id
+                    elif row.get("game_instance_id") == instance and row.get("state") not in _TERMINAL:
+                        row["state"] = "cancelled"
+
     def _game_pair_pending(self, sender: str, target: str, *, exclude: str | None = None) -> bool:
         """Reuse existing message reservations to serialize crossed invitations."""
         pair = {sender, target}
         now = self._now()
         return any(row.get("interaction_kind") == "game_invite"
+                   and not self._game_closed(row)
                    and row.get("message_id") != exclude
                    and {row.get("sender"), row.get("target")} == pair
                    and row.get("deadline", 0) > now
@@ -95,6 +126,7 @@ class AgentMessenger:
         with self._lock:
             self._trim(self._now())
             return any(unit_id in {row.get("sender"), row.get("target")}
+                       and not self._game_closed(row)
                        and row.get("interaction_kind") == "game_invite"
                        and row.get("deadline", 0) > self._now()
                        and row.get("state") in {"waiting_reply", "waiting_start", "waiting_result"}
@@ -117,6 +149,7 @@ class AgentMessenger:
                 for row in table.values():
                     pair = {row.get("sender"), row.get("target")}
                     if (unit_id in pair and (target is None or target in pair)
+                            and not self._game_closed(row)
                             and row.get("message_id") != exclude
                             and row.get("activity_id") == activity_id
                             and row.get("deadline", 0) > now and row.get("state") in pending):
@@ -127,6 +160,11 @@ class AgentMessenger:
         """Read the receiver's existing reservation for terminal/error paths."""
         with self._lock:
             return (self._inbound.get(message_id) or {}).get("task_id")
+
+    def get_received_result(self, message_id: str) -> dict | None:
+        with self._lock:
+            result = (self._inbound.get(message_id) or {}).get("result")
+            return dict(result) if isinstance(result, dict) else None
 
     def _message_ttl(self, payload: dict) -> int:
         """A registered game's lifetime also covers its correlated replies.
@@ -253,6 +291,13 @@ class AgentMessenger:
                 "sender": sender, "target": target, "content": content.strip(),
                 "deadline": expires, "round": round_number,
             }
+            from cloud.peers.games.scope import current_game_scope
+            scope = current_game_scope()
+            instance = (message_id if interaction_kind == "game_invite" else
+                        parent.get("game_instance_id") if parent else
+                        scope.invitation_id if scope is not None else None)
+            if instance:
+                payload["game_instance_id"] = instance
             from cloud.agents.common.emotions import normalize_emotion
             payload["emotion"] = normalize_emotion(emotion)
             from cloud.space.activity import get_activity_store
@@ -270,6 +315,8 @@ class AgentMessenger:
                 payload["activity_id"] = activity_id
             elif current_activity_id:
                 payload["activity_id"] = current_activity_id
+            if instance and self._game_closed(payload):
+                return {"result": "blocked", "error": "game_ended"}
             if interaction_kind == "game_invite":
                 from cloud.peers.games import game_is_playable, get_game
                 if not game_is_playable(payload.get("activity_id"), sender, target, game_id):
@@ -317,6 +364,7 @@ class AgentMessenger:
                     conversation_id=payload["conversation_id"],
                     reply_to=reply_to, reply_kind=reply_kind,
                     interaction_kind=interaction_kind, game_id=game_id,
+                    game_instance_id=payload.get("game_instance_id"), context_scope="shared",
                     **({"decision_basis": payload["decision_basis"]}
                        if "decision_basis" in payload else {}))
             if activity_event is None and self._on_visible_message is not None:
@@ -348,6 +396,8 @@ class AgentMessenger:
             }
             if task_id:
                 payload["task_id"] = task_id
+            if original.get("game_instance_id"):
+                payload["game_instance_id"] = original["game_instance_id"]
             if result:
                 payload["result"] = result
             if reason:
@@ -359,6 +409,7 @@ class AgentMessenger:
                 original["state"] = "waiting_result"
             elif kind == "result":
                 original["state"] = result
+                original["result"] = {"result": result, "reason": reason}
         return {"result": "accepted", "message_id": message_id}
 
     def send_progress(self, message_id: str, task_id: str) -> dict:
@@ -393,7 +444,7 @@ class AgentMessenger:
                 "message_id", "conversation_id", "sender", "target", "state", "received",
                 "task_id", "result", "deadline", "updated_at",
                 "interaction_kind", "game_id", "activity_id", "decision_basis",
-                "reply_to", "reply_kind", "content")}
+                "reply_to", "reply_kind", "content", "game_instance_id")}
 
     def handle_message(self, topic: str, raw: bytes | str) -> bool:
         """Return whether this topic is an agent message, even if rejected."""
@@ -441,15 +492,20 @@ class AgentMessenger:
                 round_number = payload.get("round")
                 interaction_kind = payload.get("interaction_kind", "message")
                 game_id = payload.get("game_id")
+                instance = payload.get("game_instance_id")
                 if (not isinstance(content, str) or not content.strip() or len(content) > _MAX_CONTENT
                         or payload.get("reply_kind") not in _REPLY_KINDS
                         or type(round_number) is not int or not 1 <= round_number <= _MAX_ROUNDS
                         or (reply_to is not None and (not isinstance(reply_to, str) or not _ID.fullmatch(reply_to)))
                         or not isinstance(interaction_kind, str)
                         or interaction_kind not in {"message", "game_invite"}
-                        or (interaction_kind == "message" and game_id is not None)):
+                        or (interaction_kind == "message" and game_id is not None)
+                        or (instance is not None and (not isinstance(instance, str) or not _ID.fullmatch(instance)))):
                     return True
                 if interaction_kind == "game_invite":
+                    if instance not in {None, message_id}:
+                        return True
+                    payload["game_instance_id"] = message_id
                     from cloud.peers.games import activity_allows, get_game
                     game = get_game(game_id)
                     if (reply_to is not None or payload.get("reply_kind") != "reply"
@@ -482,11 +538,18 @@ class AgentMessenger:
                             or prior.get("activity_id") != payload.get("activity_id")
                             or round_number != prior["round"] + 1):
                         return True
+                    expected_instance = prior.get("game_instance_id")
+                    if instance not in {None, expected_instance}:
+                        return True
+                    if expected_instance:
+                        payload["game_instance_id"] = expected_instance
                     if prior["state"] not in _TERMINAL:
                         prior["state"] = {"accepted": "waiting_start", "declined": "rejected"}.get(
                             payload["reply_kind"], "answered")
                     prior["updated_at"] = now
                 elif round_number != 1 or conversation_id != message_id:
+                    return True
+                if self._game_closed(payload):
                     return True
                 self._seen[message_id] = now
                 self._inbound[message_id] = {**payload, "state": "queued"}
@@ -502,6 +565,7 @@ class AgentMessenger:
                         conversation_id=conversation_id,
                         reply_to=reply_to, reply_kind=payload["reply_kind"],
                         interaction_kind=interaction_kind, game_id=game_id,
+                        game_instance_id=payload.get("game_instance_id"), context_scope="shared",
                         **({"decision_basis": payload["decision_basis"]}
                            if "decision_basis" in payload else {}))
                 if (sender not in self._local_ids and activity_event is None
@@ -560,15 +624,8 @@ class AgentMessenger:
                         task_id=task_id or prior["task_id"],
                         message_id=message_id, status=result, fact_kind="result", result_kind="message",
                         source_event_id="peer:result:" + message_id + ":" + result)
-                    if (prior.get("interaction_kind") == "game_invite"
-                            and (task_id or prior["task_id"])):
-                        get_activity_store().record_event(
-                            prior["activity_id"], "game_ended", unit_id=sender,
-                            game_id=prior["game_id"], trigger_message_id=message_id,
-                            task_id=task_id or prior["task_id"], message_id=message_id,
-                            status=result, reason=payload.get("reason"),
-                            fact_kind="result", result_kind="message",
-                            source_event_id="peer:game-ended:" + message_id + ":" + result)
+                    # A transport result settles this message, not the whole
+                    # game. Its owner closes after cleanup and final replies.
             prior["updated_at"] = now
             if kind in {"progress", "result"}:
                 self._workers.submit(self._on_message, dict(payload))
