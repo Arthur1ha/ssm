@@ -36,22 +36,35 @@ class FileRunIndex:
         return self.root / f"{name}.admission.lock"
 
     @contextmanager
-    def session_lock(self, agent_id: str, session_id: str):
+    def session_lock(self, agent_id: str, session_id: str, *, goal_revision: int = 0):
         """Serialize admission and resume checks for one role/session."""
         fd = os.open(self._admission_path(agent_id, session_id), os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if goal_revision:
+                from cloud.space.user_goals import get_goal_registry
+                while True:
+                    get_goal_registry().check(goal_revision)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(.05)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
     @asynccontextmanager
-    async def async_session_lock(self, agent_id: str, session_id: str):
+    async def async_session_lock(self, agent_id: str, session_id: str, *, goal_revision: int = 0):
         """Wait for the same cross-process lock without blocking the event loop."""
         fd = os.open(self._admission_path(agent_id, session_id), os.O_CREAT | os.O_RDWR, 0o600)
         try:
             while True:
+                if goal_revision:
+                    from cloud.space.user_goals import get_goal_registry
+                    get_goal_registry().check(goal_revision)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break

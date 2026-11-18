@@ -62,11 +62,14 @@ function projectActivityEvents(events) {
     if (event.display === false || event.event_type === 'started' || event.stage === 'narrated') return false;
     const identity = event.source_event_id || event.event_id;
     if (identity && seen.has(identity)) return false;
+    if (activityGameEnd(event) && event.event_type !== 'game_ended'
+      && events.some(other => other.event_type === 'game_ended' && other.game_id === event.game_id
+        && other.trigger_message_id === event.trigger_message_id)) return false;
     if (event.event_type === 'observation' && event.observation_event_id
       && events.some(other => other.event_type === 'search_progress' && other.display !== false
         && other.observation_event_id === event.observation_event_id && other.unit_id === event.unit_id)) return false;
     if (identity) seen.add(identity);
-    return !(event.event_type === 'response' && (event.status === 'ok'
+    return Boolean(activityGameEnd(event)) || !(event.event_type === 'response' && (event.status === 'ok'
       || event.result_kind === 'message' && ['received','accepted'].includes(event.status)));
   });
 }
@@ -98,8 +101,11 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
   getName=getAgentDisplayName}) {
   const [expanded,setExpanded] = React.useState(false);
   const [hasNewEvents,setHasNewEvents] = React.useState(false);
+  const [latestOutside,setLatestOutside] = React.useState(false);
   const [windowStart,setWindowStart] = React.useState(null);
   const timelineRef = React.useRef(null);
+  const latestRef = React.useRef(null);
+  const lastArrival = React.useRef(null);
   const activityId = activity?.activity_id || events[0]?.activity_id || '';
   const visibleEvents = projectActivityEvents(events);
   const allRows = activityProcessRows(visibleEvents);
@@ -115,7 +121,10 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
   // every arrival would move the text under the user's eyes even without scrolling.
   const startIndex = windowStart?.activityId === activityId
     ? allRows.findIndex(row => row.key === windowStart.key) : -1;
-  const windowRows = allRows.slice(startIndex >= 0 ? startIndex : -16);
+  const windowIndex = startIndex >= 0 ? startIndex : Math.max(0,allRows.length-16);
+  const windowRows = allRows.slice(windowIndex);
+  const priorGameEnd = allRows.slice(0,windowIndex).reverse().find(row => row.kind==='game_end');
+  if (priorGameEnd) windowRows.unshift(priorGameEnd);
   const rows = expanded || hasQuestion || hasAttention ? allRows : windowRows;
   const latestId = visibleEvents[visibleEvents.length - 1]?.event_id;
   const context = activity?.context || activity?.user_text || activity?.text || events.find(event => event.event_type === 'started')?.text || '';
@@ -126,14 +135,37 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
   React.useEffect(() => {
     if (startIndex < 0 && windowRows.length) setWindowStart({activityId,key:windowRows[0].key});
   },[activityId,startIndex,windowRows[0]?.key]);
-  // Position the timeline once when opened; incoming messages never move it.
-  React.useLayoutEffect(() => {
-    if (showTimeline && timelineRef.current) timelineRef.current.scrollTop=timelineRef.current.scrollHeight;
-  },[activityId,showTimeline]);
+  // Activity content shares the chat's scrollport. Observe the latest anchor
+  // without moving the reader when messages, disclosures or photos change size.
   React.useEffect(() => {
-    if (!showTimeline || !timelineRef.current) return;
-    const el=timelineRef.current;
-    setHasNewEvents(el.scrollHeight-el.scrollTop-el.clientHeight>1);
+    if (!showTimeline || !latestRef.current) return;
+    const anchor=latestRef.current;
+    const scroller=anchor.closest('.chat-panel__scroll');
+    const viewport=() => scroller?.getBoundingClientRect() || {top:0,bottom:window.innerHeight};
+    const latestVisible=() => {
+      const position=anchor.getBoundingClientRect(), bounds=viewport();
+      return position.top>=bounds.top && position.bottom<=bounds.bottom+1;
+    };
+    const arrival=lastArrival.current;
+    if (arrival?.activityId===activityId && arrival.latestId!==latestId && !latestVisible()) setHasNewEvents(true);
+    lastArrival.current={activityId,latestId};
+    const markRead=() => {
+      const visible=latestVisible();
+      setLatestOutside(!visible);
+      if (visible) setHasNewEvents(false);
+    };
+    const target=scroller || window;
+    target.addEventListener('scroll',markRead,{passive:true});
+    window.addEventListener('resize',markRead);
+    const observer=typeof ResizeObserver==='function' ? new ResizeObserver(markRead) : null;
+    observer?.observe(timelineRef.current);
+    if (scroller) observer?.observe(scroller);
+    markRead();
+    return () => {
+      target.removeEventListener('scroll',markRead);
+      window.removeEventListener('resize',markRead);
+      observer?.disconnect();
+    };
   },[activityId,latestId,showTimeline]);
   if (!activity && !events.length && !error) return null;
   return <section className={`space-activity${isActive || isEnding ? ' space-activity--live' : ' space-activity--ended'}`} aria-label="空间活动">
@@ -146,20 +178,21 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
     {error && <div className="space-activity__error" role="status">{processErrorText(error)}</div>}
     {!showTimeline && !isEnded && <div className="space-activity__summary"><p>{latestSpeech
       ? `${getName(latestSpeech.event.unit_id)}：${processUserText(latestSpeech.event.text) || processErrorText(latestSpeech.event.text)}` : '正在等待设备动态'}</p></div>}
-    {showTimeline && <div className="space-activity__timeline" ref={timelineRef} onScroll={event => {
-      const el=event.currentTarget;
-      if (el.scrollHeight-el.scrollTop-el.clientHeight<=1) setHasNewEvents(false);
-    }}>
+    {showTimeline && <div className="space-activity__timeline" ref={timelineRef}>
       {rows.map((row,index) => {
         const event=row.event, unit=event.agent_id || event.unit_id || 'cloud_orchestrator';
-        const previousSpeech = rows.slice(0,index).reverse().find(item => ['message','question','status','result'].includes(item.kind));
+        const gameEnd=activityGameEnd(event);
+        const previousSpeech = rows.slice(0,index).reverse().find(item => ['message','question','status','result','game_start','game_end'].includes(item.kind));
         const showName = !previousSpeech || !['message','question'].includes(previousSpeech.kind)
           || (previousSpeech.event.agent_id || previousSpeech.event.unit_id) !== unit
           || previousSpeech.event.target_unit_id !== event.target_unit_id;
         const name=getName(unit), receipt=row.kind==='message' ? activityMessageReceipt(event,events) : '';
         return <div key={row.key} className={`space-activity__item space-activity__item--${row.kind}`}>
           <time className="space-activity__time">{timeLabel(event.ts)}</time><div className="space-activity__content">
-            {row.kind==='result' ? <>
+            {['game_start','game_end'].includes(row.kind) ? <div className="space-activity__game-end" role="status">
+              <strong>{row.kind==='game_start' ? '本局游戏已开始' : '本局游戏已结束'}</strong>
+              {gameEnd?.reason && <p>结束原因：{gameEnd.reason}</p>}
+            </div> : row.kind==='result' ? <>
               <ActivityGameRound event={event} getName={getName}/>
               {(row.process.length>0 || activityDecisionBasis(event)) && <RunProcess events={[...row.process,...(activityDecisionBasis(event) ? [event] : [])]}
                 allEvents={events} agents={agents} getName={getName} finished/>}
@@ -179,11 +212,14 @@ function SpaceActivityFeed({activity,events,ending,error,onEnd,onAnswer,agents=[
           </div>
         </div>;
       })}
+      <div ref={latestRef} className="space-activity__latest" aria-hidden="true"/>
     </div>}
-    {hasNewEvents && showTimeline && <button type="button" className="space-activity__new" onClick={() => {
+    {(hasNewEvents || latestOutside) && showTimeline && <button type="button" className="space-activity__new" onClick={() => {
       setHasNewEvents(false);
-      if (timelineRef.current) timelineRef.current.scrollTop=timelineRef.current.scrollHeight;
-    }}>有新动态 · 回到最新 ↓</button>}
+      const anchor=latestRef.current, scroller=anchor?.closest('.chat-panel__scroll');
+      if (scroller) scroller.scrollTop+=anchor.getBoundingClientRect().bottom-scroller.getBoundingClientRect().bottom+12;
+      else anchor?.scrollIntoView({block:'end'});
+    }}>{hasNewEvents ? '有新动态 · ' : ''}回到最新 ↓</button>}
     {allRows.length>0 && !hasQuestion && (!isActive || allRows.length>rows.length || expanded) && <button type="button"
       className="space-activity__toggle" aria-label={expanded ? '收起活动详情' : '展开活动详情'} aria-expanded={expanded}
       onClick={() => setExpanded(value => !value)}>

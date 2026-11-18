@@ -6,7 +6,7 @@ from typing import Awaitable, Callable
 
 
 GAME_CONTEXT_GUIDANCE = (
-    "game_catalog（games）是已注册游戏目录，保留暂时不能开局的玩法与规则；"
+    "game_catalog（games）是已注册游戏概览，保留暂时不能开局的玩法；"
     "ready=false 或当前可玩列表为空不表示没有这些游戏。"
     "只邀请 ready=true 的玩法，发送和接受仍须通过实时门禁。"
     "阻塞原因以 reason 为准：go2_remote_control 表示仍处于遥控模式，"
@@ -48,6 +48,11 @@ class Game:
         return {"game_id": self.game_id, "name": self.name,
                 "description": self.description, "rules": self.rules,
                 "strategy": self.strategy}
+
+    def catalog_entry(self) -> dict:
+        """Invitation choices need a premise, not the selected game's manual."""
+        return {"game_id": self.game_id, "name": self.name,
+                "description": self.description}
 
 
 def activity_allows(activity_id: str | None, sender: str, target: str) -> bool:

@@ -702,6 +702,33 @@ class Go2Connection(ManualVelocityControl, Go2FSM, Go2Sensors, Go2Video):
         result["body_state"] = stopped_state
         return result
 
+    async def stop_and_confirm_motion(self, *, timeout_s: float = 2.0, can_continue=None) -> dict:
+        """Confirm a stop from new measured linear and angular velocities.
+
+        This evidence is independent of posture and RPC acceptance. It neither
+        invents standing nor completes another action's correlated receipt.
+        """
+        if not self.is_connected:
+            return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'disconnected'}
+        started = time.monotonic()
+        self._motion_stationary_samples = 0
+        self.stop_velocity()
+        epoch, connection = self._motion_epoch, self._conn
+        while time.monotonic() - started < timeout_s:
+            if can_continue is not None and not can_continue():
+                return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'control_owner_changed'}
+            if not self.is_connected or self._conn is not connection:
+                return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'disconnected'}
+            if self._motion_epoch != epoch:
+                return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'motion_changed'}
+            if (getattr(self, '_motion_stationary_samples', 0) >= 3
+                    and (self._sport_state_observed_at or 0) > started
+                    and not self.pending_action and not self._command_lock.locked()):
+                return {'result': 'ok', 'physical_stop': 'confirmed',
+                        'confirmation': 'fresh_velocity_samples'}
+            await asyncio.sleep(.05)
+        return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'stop_unconfirmed'}
+
     def _expire_velocity(self):
         self._velocity_timer = None
         try:

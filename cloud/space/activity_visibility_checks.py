@@ -37,6 +37,22 @@ def test_action_feedback_is_bounded_and_preserved_across_reload(tmp_path, monkey
     assert loaded.events(activity_id)[-1]["state_at_event"] == result["state_at_event"]
 
 
+def test_game_end_survives_followup_chat_and_history_reload(tmp_path):
+    store, activity_id = start(tmp_path)
+    started = store.record_event(activity_id, "game_started", unit_id="go2", status="executing",
+                                 game_id="push_delivery", trigger_message_id="invite_one")
+    ended = store.record_event(activity_id, "game_ended", unit_id="go2", status="unknown",
+                               game_id="push_delivery", trigger_message_id="invite_one",
+                               task_id="delivery_task", reason="cargo_push_unconfirmed:control_error",
+                               source_event_id="peer:result:invite_one:unknown")
+    for _ in range(105):
+        store.record_event(activity_id, "message", unit_id="go2", text="后续交流")
+    reloaded = ActivityStore(tmp_path / "activity.json")
+    assert ended in reloaded.events(activity_id)
+    assert started in reloaded.events(activity_id)
+    assert reloaded.current()["status"] != "ended"
+
+
 def test_old_or_missing_feedback_remains_unconfirmed(tmp_path, monkeypatch):
     state = {"ism": "ON", "ts": 1}
     monkeypatch.setattr("cloud.cards.registry.get_registry",
@@ -154,6 +170,21 @@ def test_go2_process_uses_existing_card_names_and_only_declared_arguments(tmp_pa
     assert event['arguments'] == {'cmd': 'Hello'}
     assert event['status'] == 'accepted'
     assert event['state_at_event'] == {'status': 'unknown'}
+
+
+def test_internal_go2_tool_gets_public_name_in_live_and_legacy_history(tmp_path):
+    store, activity_id = start(tmp_path)
+    event = store.record_event(activity_id, 'action_result', unit_id='go2', action='go2_push_cargo',
+                               status='ok', capability_name='go2_push_cargo',
+                               arguments={'cargo': '近处扁盒', 'destination': '蓝块'})
+    assert event['capability_name'] == '推送货物'
+    path = tmp_path / 'activity.json'
+    data = json.loads(path.read_text())
+    data['events'][activity_id][-1].pop('capability_name')
+    path.write_text(json.dumps(data))
+    original = path.read_bytes()
+    assert ActivityStore(path).events(activity_id)[-1]['capability_name'] == '推送货物'
+    assert path.read_bytes() == original
 
 
 def test_autonomous_go2_keeps_run_step_and_photo_in_activity_projection(monkeypatch):

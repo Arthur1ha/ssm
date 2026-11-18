@@ -75,7 +75,17 @@ async def test_native_tools_carry_usage_and_parameters(role, tmp_path, monkeypat
         assert "distance_m" in move["parameters"]["properties"]
         assert "stop.result" in move["description"]
         assert "seen_not_reached" in tools["go2_find_object"]["description"]
-        assert "盲走" in tools["go2_navigate_to_visible_target"]["description"]
+        from cloud.go2.tools.registry import get_tool_spec
+        navigation = tools["go2_navigate_to_visible_target"]
+        assert navigation["description"] == get_tool_spec("go2_navigate_to_visible_target").description
+        assert "target" in navigation["parameters"]["required"]
+        assert "max_advance_m" in navigation["parameters"]["properties"]
+        push = tools["go2_push_cargo"]
+        assert push["description"] == get_tool_spec("go2_push_cargo").description
+        assert "cargo" in push["parameters"]["required"]
+        assert {"destination", "distance_m"} <= push["parameters"]["properties"].keys()
+        assert all(field in push["description"] for field in (
+            "directional_move_and_stop", "delivered=true", "motion_performed=false"))
     elif role == "lamp":
         assert "持续闪烁" in tools["blink_led"]["description"]
         assert "game_invite" in tools["send_message"]["description"]

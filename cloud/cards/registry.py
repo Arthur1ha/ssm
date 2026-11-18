@@ -78,6 +78,7 @@ class CardRegistry:
             if not isinstance(state, dict):
                 return
             state.pop("_received_at", None)
+            state.pop("_connection_confirmed", None)
             if not retained:
                 state["_received_at"] = time.time() if received_at is None else received_at
             unit_id = parts[2]
@@ -122,6 +123,11 @@ class CardRegistry:
             with self._lock:
                 self._statuses[device_id] = online
                 self._status_seen_at[device_id] = time.time()
+                if not online:
+                    for uid, card in self._cards.items():
+                        if ((uid == device_id or card.get("device_id") == device_id)
+                                and self._states.get(uid, {}).get("ism") in ("OFF", "ON", "BLINKING")):
+                            self._states[uid]["_connection_confirmed"] = False
             logger.info("[CardRegistry] %s → online=%s", device_id, online)
             return
 

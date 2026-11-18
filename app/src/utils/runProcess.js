@@ -3,7 +3,7 @@ function processRecord(event = {}) {
   const keys = ['event_id', 'source_event_id', 'event_type', 'agent_id', 'run_id', 'parent_run_id', 'step_id', 'task_id', 'trace_id',
     'sequence', 'model_turn', 'tool_call_id', 'fact_kind', 'result_kind', 'public_result', 'dispatch_only', 'observation_event_id', 'frame_id', 'as_of', 'conversation_id', 'reply_to', 'teaching_id', 'version', 'name', 'step_number', 'tool', 'action', 'target_unit_id', 'unit_id', 'skill_id', 'capability_name', 'arguments',
     'request_id','activity_id','question_id','observation','observation_summary','training_ref','revision','training_revision','step_index','reply_source','requested_text', 'result_state', 'status', 'reason', 'stage', 'ts', 'media_ref', 'media_url',
-    'decision_basis', 'state_at_event', 'trigger_message_id', 'message_id', 'game_round'];
+    'decision_basis', 'state_at_event', 'trigger_message_id', 'message_id', 'game_round', 'game_id'];
   return Object.fromEntries(keys.filter(key => event[key] !== undefined).map(key => [key, event[key]]));
 }
 function processGroupKey(event) {
@@ -15,24 +15,11 @@ function processCapability(event, agents = []) {
   const id = event.tool || event.action || event.skill_id;
   const card = agents.find(item => item.unit_id === (event.target_unit_id || event.unit_id || event.agent));
   const skill = card?.skills?.find(item => item.id === event.skill_id || item.id === id);
-  return event.capability_name || skill?.name || agentCapabilityLabel(id);
+  return processUserText(publicCapabilityText(event.capability_name || skill?.name || agentCapabilityLabel(id))) || '设备操作';
 }
 function processFactTitle(event, agents = []) {
   const id = event.skill_id || event.tool || event.action;
-  const shortNames = {
-    set_led_color:'调整灯光',set_light_color:'调整灯光',SET_COLOR:'调整灯光',
-    set_led_state:'调整灯光',set_light_state:'调整灯光',SET_STATE:'调整灯光',
-    blink_led:'灯光闪烁',blink_light:'灯光闪烁',BLINK:'灯光闪烁',
-    go2_sport:'姿态动作',go2_move:'移动',go2_observe:'观察周围',
-    go2_find_object:'寻找目标',go2_navigate_to_visible_target:'靠近目标',
-    go2_status:'查看设备状态',read_state:'查看环境',get_space_context:'查看空间',
-    list_peers:'查找同伴',list_agents:'查看设备',start_activity:'安排空间活动',
-    send_message:'发送消息',request_peer_skill:'请求同伴协作',invoke_skill:'调用设备',
-    apply_training:'应用教导',propose_training:'整理教导',list_training:'查看教导',
-    await_result:'核对执行结果',set_space_constraint:'保存空间要求',clear_space_constraints:'撤销空间要求',
-  };
-  if (shortNames[id]) return shortNames[id];
-  if (id) return processUserText(processCapability(event,agents)) || '设备操作';
+  if (id) return processCapability(event,agents);
   if (event.public_result?.game_rules) return processUserText(event.public_result.game_rules.name) || '游戏规则';
   if (activityMediaUrl(event)) return '观察照片';
   if (activityDecisionBasis(event) || event.fact_kind === 'decision') return '';
@@ -59,7 +46,7 @@ function processErrorText(value) {
 }
 function processUserText(value) {
   if (typeof value !== 'string') return '';
-  let text = processStripIds(value.trim());
+  let text = publicCapabilityText(processStripIds(value.trim()));
   let diagnostic = false;
   text = text.replace(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g, payload => {
     if (!/["'](?:error|error_code|status_code|error_type)["']\s*:/.test(payload)) return payload;
@@ -98,8 +85,10 @@ function processActionDetail(event, agents = []) {
     if (Number.isInteger(args.count) && args.count > 0) parts.push(`闪烁 ${args.count} 次`);
     else if (args.count === 0) parts.push('持续闪烁');
   }
-  const target = processUserText(args.target || args.object_name || args.query);
+  const target = processUserText(args.target || args.object_name || args.query || args.cargo);
   if (target) parts.push(`目标：${target}`);
+  const destination = processUserText(args.destination);
+  if (destination) parts.push(`目的地：${destination}`);
   const direction = {forward:'向前',backward:'向后',left:'向左',right:'向右'}[args.direction] || '';
   if (Number.isFinite(args.distance_m)) parts.push(`${direction}移动 ${args.distance_m} 米`);
   if (Number.isFinite(args.angle_deg)) parts.push(`${direction}转动 ${args.angle_deg}°`);
@@ -309,24 +298,36 @@ function processResultNotes(event) {
 }
 function activityProcessRows(events) {
   const rows = [], groups = new Map();
+  let section = 0;
   events.filter(event => event.display !== false && event.event_type !== 'started' && event.stage !== 'narrated').forEach((event,index) => {
+    if (activityGameStart(event)) {
+      rows.push({key:event.event_id || `event:${index}`,event,kind:'game_start',process:[],section});
+      section++;
+      return;
+    }
+    if (activityGameEnd(event)) {
+      rows.push({key:event.event_id || `event:${index}`,event,kind:'game_end',process:[],section});
+      section++;
+      return;
+    }
     const kind = activityEventKind(event);
     const isSpeech = ['message','question'].includes(kind);
     const result = Boolean(event.game_round);
     const lifecycle = ['device_joined','device_left','ended'].includes(event.event_type);
     if (event.event_type === 'response' && (event.status === 'ok'
       || event.result_kind === 'message' && ['received','accepted'].includes(event.status))) return;
-    if (isSpeech || lifecycle || result) { rows.push({key:event.event_id || `event:${index}`,event,kind:result ? 'result' : isSpeech ? kind : 'status',process:[]}); return; }
+    if (isSpeech || lifecycle || result) { rows.push({key:event.event_id || `event:${index}`,event,kind:result ? 'result' : isSpeech ? kind : 'status',process:[],section}); return; }
     if (!processHasContent(event)) return;
-    const key = processGroupKey(event) || `record:${event.event_id || index}`;
+    const key = `${section}:${processGroupKey(event) || `record:${event.event_id || index}`}`;
     let group = groups.get(key);
-    if (!group) { group = {key,event,kind:'process',process:[]}; groups.set(key,group); rows.push(group); }
+    if (!group) { group = {key,event,kind:'process',process:[],section}; groups.set(key,group); rows.push(group); }
     group.process.push(event);
   });
   // Attach a process once to the final explicit same-run/task speech. A shared
   // invitation is context, never proof that every reply owns every game action.
   groups.forEach(group => {
     const owner = [...rows].reverse().find(row => ['message','question','result'].includes(row.kind)
+      && row.section === group.section
       && processGroupKey(row.event) && processGroupKey(row.event) === processGroupKey(group.event));
     if (owner) { owner.process.push(...group.process); group.attached = true; }
   });

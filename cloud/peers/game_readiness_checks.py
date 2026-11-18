@@ -71,7 +71,7 @@ def test_busy_dog_prevents_either_side_from_inviting(idle, changes, reason):
         catalog = game_catalog("act_idle", sender, target)
         assert {row['game_id'] for row in catalog} == {'color_hunt', 'push_delivery', 'rps_siege'}
         assert all(row['ready'] is False and row['reason'] == reason for row in catalog)
-        assert all(row['rules'] for row in catalog)
+        assert all(row['description'] and 'rules' not in row and 'strategy' not in row for row in catalog)
 
 
 def test_exploration_between_tasks_can_invite_but_live_goal_cannot(idle):

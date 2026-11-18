@@ -43,7 +43,7 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
                 <div style={{ fontSize: 10, paddingRight: 4, color: 'var(--color-accent)',
                   opacity: 0.75, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>你</div>
                 <div style={{
-                  padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
+                  padding: '10px 14px', fontSize: 14, lineHeight: 1.5, overflowWrap: 'anywhere',
                   borderRadius: 'var(--radius-card)',
                   background: 'var(--color-accent)', color: 'var(--color-bg)',
                 }}>{e.text}</div>

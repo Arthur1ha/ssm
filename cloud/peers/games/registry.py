@@ -12,7 +12,7 @@ def get_game(game_id: str) -> Game | None:
 
 
 def game_catalog(activity_id: str | None, sender: str, target: str) -> list[dict]:
-    """Keep registered rules visible even when this pair cannot start now.
+    """Keep registered premises visible even when this pair cannot start now.
 
     Readiness is a current execution constraint, not a capability declaration
     or permission. Sending and accepting still recheck the live gate.
@@ -30,7 +30,7 @@ def game_catalog(activity_id: str | None, sender: str, target: str) -> list[dict
                    None if activity_allows(activity_id, sender, target) else "activity_not_joined")
         if not available:
             blocked = "game_capability_unavailable"
-        entries.append({**game.metadata(), "ready": blocked is None, "reason": blocked})
+        entries.append({**game.catalog_entry(), "ready": blocked is None, "reason": blocked})
     return entries
 
 
@@ -47,7 +47,7 @@ def playable_games(activity_id: str | None, sender: str, target: str) -> list[di
         except Exception:
             ready = False
         if ready:
-            available.append(game.metadata())
+            available.append(game.catalog_entry())
     return available
 
 

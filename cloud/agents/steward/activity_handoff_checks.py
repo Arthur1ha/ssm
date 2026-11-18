@@ -68,14 +68,17 @@ async def test_first_handoff_passes_after_graph_appends_current_pending_step(han
     assert "还未确认" in h.run.response
 
 
-async def test_signed_user_intent_can_handoff_after_starting_activity(handoff):
+async def test_signed_user_intent_can_handoff_after_starting_activity(handoff, tmp_path, monkeypatch):
     from cloud.mqtt_signing import sign_message
     from cloud.orchestrator.trusted_context import parse_trusted_intent
 
     h = handoff
+    monkeypatch.setenv("SSM_USER_GOALS_DIR", str(tmp_path / "goals"))
+    from cloud.space.user_goals import get_goal_registry
+    revision = get_goal_registry().advance("session", "evt_handoff")
     now = time.time()
     payload = sign_message('ssm/intent/session', {
-        'text': h.run.goal, 'event_id': 'evt_handoff', 'user_revision': 1,
+        'text': h.run.goal, 'event_id': 'evt_handoff', 'user_revision': 1, 'goal_revision': revision,
         'origin_kind': 'untrusted_value',
         'context': {'session_id': 'session', 'actor': 'admin', 'persist': False,
                     'space_id': 'main', 'issued_at': now, 'expires_at': now + 60}},

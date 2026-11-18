@@ -40,6 +40,10 @@ function useSendIntent() {
       if (!payload.trace_id) return;
       const request=active?.traceId === payload.trace_id ? active : completedRef.current.get(payload.trace_id);
       if (!request) return;
+      // A replaced goal may still receive a physical receipt. Keep that fact
+      // on its original request, without reviving its plans or final speech.
+      if (request.superseded && !(['run_stage','agent_progress'].includes(payload.type)
+          && (payload.fact_kind === 'result' || payload.public_result))) return;
       const source=payload.source_event_id || payload.event_id;
       const identity=source ? `${payload.trace_id}:${source}` : '';
       if (identity && seenRef.current.has(identity)) return;
@@ -71,11 +75,22 @@ function useSendIntent() {
       }
     };
     apiClient.addEventListener('server-event',onEvent);
-    return () => apiClient.removeEventListener('server-event',onEvent);
+    return () => {
+      apiClient.removeEventListener('server-event',onEvent);
+      clearTimeout(activeRef.current?.timeoutId);
+      completedRef.current.forEach(request=>clearTimeout(request.timeoutId));
+    };
   },[finish,resetTimeout]);
 
   const send=useCallback(async (text,callbacks={}) => {
-    if (!text.trim() || activeRef.current) return;
+    if (!text.trim()) return;
+    const previous=activeRef.current;
+    if (previous) {
+      previous.superseded=true;
+      previous.callbacks.onSuperseded?.();
+      finish(previous);
+      pendingRunRef.current=null;
+    }
     const request={callbacks,timeoutId:null,traceId:null,pendingEvents:[]};
     activeRef.current=request;latestRef.current=request;setThinking(true);
     resetTimeout(request);
@@ -86,16 +101,19 @@ function useSendIntent() {
     if (callbacks.intentHint) body.intent_hint=callbacks.intentHint;
     try {
       const accepted=await apiClient.request('/api/intents',{method:'POST',body});
-      if (activeRef.current !== request) return;
       request.traceId=accepted.trace_id || null;
       if (request.traceId) {
+        if (request.superseded) {
+          completedRef.current.set(request.traceId,request);
+          while (completedRef.current.size > 20) completedRef.current.delete(completedRef.current.keys().next().value);
+        }
         callbacks.onTraceId?.(request.traceId,accepted.event_id);
         const buffered=request.pendingEvents.splice(0);
         buffered.forEach(payload=>apiClient.dispatchEvent(Object.assign(new Event('server-event'),{detail:payload})));
       }
     } catch(error) {
       finish(request);
-      callbacks.onStatus?.(apiErrorText(error,'命令没有送达，请稍后再试'));
+      if (!request.superseded) callbacks.onStatus?.(apiErrorText(error,'命令没有送达，请稍后再试'));
     }
   },[finish,resetTimeout]);
   return {thinking,send};

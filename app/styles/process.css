@@ -1,6 +1,6 @@
 /* Quiet execution rails share the existing mobile type scale and color tokens. */
 .agent-speech { --speaker-color:var(--color-accent); max-width:88%; min-width:0; margin-bottom:8px; }
-.agent-speech__name { color:var(--speaker-color); opacity:.8; font:10px var(--font-mono); padding:0 4px 4px; }
+.agent-speech__name { color:var(--speaker-color); opacity:.8; font:10px var(--font-mono); padding:0 4px 4px; overflow-wrap:anywhere; }
 .agent-speech__bubble { color:var(--color-text); background:color-mix(in srgb,var(--speaker-color) 6%,transparent); border:1px solid color-mix(in srgb,var(--speaker-color) 15%,transparent); border-radius:var(--radius-card); padding:10px 14px; font-size:14px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
 .agent-speech--compact { max-width:100%; }
 .agent-speech--compact .agent-speech__bubble { font-size:13px; padding:9px 12px; }
@@ -36,7 +36,7 @@
 .run-process__feedback { color:var(--color-feedback); }
 .run-process__snapshot { color:var(--color-text-dim); font-size:11px; }
 .process-photo { display:flex; flex-direction:column; gap:4px; width:fit-content; max-width:100%; margin-top:9px; color:var(--color-text-muted); text-decoration:none; font-size:10px; }
-.process-photo img { display:block; width:180px; max-width:100%; max-height:150px; object-fit:cover; border-radius:8px; }
+.process-photo img { display:block; width:180px; max-width:100%; aspect-ratio:16 / 9; object-fit:contain; border-radius:8px; background:var(--color-surface-2); }
 .space-activity__toggle { display:flex; align-items:center; justify-content:center; gap:8px; }
 .activity-game-round { margin:4px 0 9px; padding:10px; border-radius:10px; background:var(--color-surface-2); }
 .activity-game-round > small { font-size:10px; color:var(--color-text-dim); }.activity-game-round p { font-size:12px; text-align:center; margin:8px 0 0; }

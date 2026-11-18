@@ -42,13 +42,14 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       apiClient.request = async () => ({records:[],proposals:[],edge_annotations:[]});
       window.apiErrorText = error => error.message;
       window.sent = [];
+      window.finishCommands = new Map();
       window.commandBus = {describe: result => result.result, command: async (_unit, _action, params) => {
         sent.push(params);
         const runId = params.run_id || params.task_id;
         companionPresentation.beginRequest(_unit, runId, {kind:'chat',behavior:'thinking'});
         return new Promise(resolve => { window.finishCommand = result => {
           companionPresentation.finishRequest(_unit, runId, result); resolve(result);
-        }; });
+        }; finishCommands.set(runId,window.finishCommand); });
       }};
       window.DeviceStateBoard = () => React.createElement('div', {style:{height:120}}, '设备状态');
       window.lamp = {unit_id:'esp32_desk_led', name:'皮皮灯', _online:true, transport:{},
@@ -109,7 +110,8 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.type('.chat-panel input', '调成暖白色');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => sent.length === 1);
-    assert.equal(await page.$eval('input', node => node.disabled), true);
+    assert.equal(await page.$eval('input', node => node.disabled), false,
+      'A running goal must allow a new user request');
     await page.evaluate(() => {
       const event = detail => apiClient.dispatchEvent(new CustomEvent('server-event', {detail}));
       const run_id = sent[0].run_id;
@@ -208,6 +210,57 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('此前搜索的补充回复'));
     assert.equal(await page.$eval('.chat-input__avatar .shape-face', el => el.dataset.emotion), 'relaxed',
       'A retained prior run must not override the latest request expression');
+    // A new request replaces an in-flight device conversation. Old HTTP/SSE
+    // replies cannot finish the new request; late physical receipts remain.
+    await page.type('.chat-panel input','旧的长任务');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>sent.length===4);
+    await page.type('.chat-panel input','改为新的任务');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>sent.length===5);
+    await page.evaluate(()=>{
+      const old=sent[3].run_id;
+      apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_reply',agent_id:lamp.unit_id,
+        source:'device_chat',run_id:old,event_id:'superseded-reply',text:'失效旧目标的回复'}}));
+      finishCommands.get(old)({result:'ok',reply:'失效旧目标的HTTP回复',event_id:'superseded-http'});
+      apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',agent_id:lamp.unit_id,
+        source:'device_chat',run_id:old,event_id:'superseded-result',fact_kind:'result',tool:'go2_move',
+        arguments:{distance_m:0.3},status:'ok',public_result:{result:'ok',motion_performed:true}}}));
+    });
+    await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('0.3'));
+    assert(!await page.$eval('.chat-messages',el=>el.textContent.includes('失效旧目标')));
+    assert.equal(await page.$eval('.chat-panel',el=>el.getAttribute('aria-busy')),'true',
+      'A superseded result ended the current device conversation');
+    await page.evaluate(()=>finishCommands.get(sent[4].run_id)({result:'ok',reply:'替换目标完成',event_id:'replacement-result'}));
+    await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('替换目标完成'));
+    assert.equal(await page.$eval('.chat-panel',el=>el.getAttribute('aria-busy')),'false');
+    // Long activity questions and teaching context must scroll with the device
+    // conversation, rather than consuming the composer's fixed available space.
+    await page.evaluate(()=>root.render(React.createElement(FsmDevicePage,{
+      key:'long-context',unitId:lamp.unit_id,device:lamp,liveState:{state:{ism:'ON',ts:Date.now()/1000}},
+      actor:'visitor',sessionId:'long-context',onBack(){},
+      activityQuestion:{text:'这是需要用户补充的完整活动问题。'.repeat(100)},
+      trainingLocation:{teaching_id:'long',summaryText:'这是完整的规则说明。'.repeat(80)},
+    })));
+    await page.waitForSelector('.device-activity-question');
+    await page.waitForSelector('.training-selection');
+    for(const [width,height] of [[320,568],[390,320],[844,390]]) {
+      await page.setViewport({width,height});
+      const view=await page.evaluate(()=>{
+        const scroller=document.querySelector('.device-page__chat .chat-panel__scroll');
+        const input=document.querySelector('.device-page__chat input').getBoundingClientRect();
+        return {scrollable:scroller.scrollHeight>scroller.clientHeight,
+          contained:[...document.querySelectorAll('.device-activity-question,.training-selection')].every(el=>scroller.contains(el)),
+          inputVisible:input.top>=0 && input.bottom<=innerHeight,
+          fits:document.documentElement.scrollWidth<=innerWidth};
+      });
+      assert.deepEqual(view,{scrollable:true,contained:true,inputVisible:true,fits:true},`Long device context clipped at ${width}×${height}`);
+    }
+    if(process.env.SCREENSHOT_DIR) {
+      await page.setViewport({width:390,height:320});
+      await page.$eval('.device-page__chat .chat-panel__scroll',el=>{el.scrollTop=0;});
+      await page.screenshot({path:process.env.SCREENSHOT_DIR+'/device-long-context-short.png'});
+    }
     // Ordinary chat has only original role speech, without a process or avatar.
     await page.evaluate(()=>root.render(React.createElement('div',{style:{display:'flex',height:'100dvh'}},React.createElement(ChatPanel,{
       messages:[{type:'user',text:'今天陪我聊聊吧',requestId:'ordinary'},
@@ -287,6 +340,16 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       }
     }
     assert.deepEqual(styles[0], styles[1]);
+    await page.evaluate(()=>{
+      rows.push({type:'user',requestId:'long-text',text:'https://example.test/'+ 'UnbrokenText'.repeat(100)});
+      root.render(React.createElement('div',{style:{display:'flex',height:'100dvh'}},React.createElement(ChatPanel,{
+        messages:rows,agents:[lamp],onSend:text=>sent.push(text),suggestions:['快捷测试'],
+      })));
+    });
+    for(const width of [320,390]) {
+      await page.setViewport({width,height:320});
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'A long user URL overflowed the conversation');
+    }
     await page.type('input', '组合输入');
     await page.$eval('input', input => input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',isComposing:true,bubbles:true})));
     assert.equal(await page.$eval('input', input => input.value), '组合输入', 'IME Enter prematurely sent the draft');
@@ -295,6 +358,61 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     assert.equal(await page.$eval('input', input => input.value), '');
     await page.click('.chat-suggestions button');
     await page.waitForFunction(() => sent.includes('快捷测试'));
+    // Exercise the real intent hook: replacement before/after HTTP acceptance,
+    // late replies versus receipts, and an actual clarification continuation.
+    await page.addScriptTag({content:compile('app/src/hooks/useSendIntent.js')});
+    await page.evaluate(()=>{
+      window.goalRequests=[]; window.goalReplies=[]; window.goalProgress=[]; window.goalReplaced=[];
+      apiClient.request=async (_path,options)=>new Promise(resolve=>goalRequests.push({body:options.body,resolve}));
+      function GoalProbe(){
+        const {thinking,send}=useSendIntent();
+        window.sendGoal=text=>send(text,{
+          onMessage:message=>goalReplies.push({goal:text,message}),
+          onProgress:event=>goalProgress.push({goal:text,event}),
+          onSuperseded:()=>goalReplaced.push(text),
+        });
+        return React.createElement(ChatPanel,{busy:thinking,onSend:sendGoal,messages:[]});
+      }
+      ReactDOM.flushSync(()=>root.render(React.createElement(GoalProbe)));
+      window.goalEvent=(trace_id,type,extra={})=>apiClient.dispatchEvent(new CustomEvent('server-event',{
+        detail:{trace_id,type,agent_id:'cloud_orchestrator',event_id:crypto.randomUUID(),...extra}}));
+    });
+    await page.type('input','原来的目标');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>goalRequests.length===1);
+    await page.evaluate(()=>goalRequests[0].resolve({trace_id:'goal-old'}));
+    await page.type('input','新的目标');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>goalRequests.length===2);
+    await page.evaluate(()=>{
+      goalRequests[1].resolve({trace_id:'goal-current'});
+      goalEvent('goal-old','agent_reply',{text:'不应出现的旧回复'});
+      goalEvent('goal-old','agent_progress',{fact_kind:'result',public_result:{result:'ok'},task_id:'old-effect'});
+    });
+    await page.waitForFunction(()=>goalProgress.length===1);
+    assert.deepEqual(await page.evaluate(()=>goalReplies),[]);
+    assert.equal(await page.evaluate(()=>goalProgress[0].goal),'原来的目标');
+    assert.equal(await page.$eval('.chat-panel',el=>el.getAttribute('aria-busy')),'true');
+    await page.evaluate(()=>goalEvent('goal-current','agent_reply',{text:'当前目标的回复'}));
+    await page.waitForFunction(()=>document.querySelector('.chat-panel').getAttribute('aria-busy')==='false');
+    await page.evaluate(()=>{sendGoal('尚未应答的旧提交');sendGoal('最后的新提交');});
+    await page.waitForFunction(()=>goalRequests.length===4);
+    await page.evaluate(()=>goalRequests[3].resolve({trace_id:'goal-fast-new'}));
+    await page.evaluate(()=>goalRequests[2].resolve({trace_id:'goal-slow-old'}));
+    await page.evaluate(()=>{
+      goalEvent('goal-slow-old','agent_reply',{text:'迟到提交的旧回复'});
+      goalEvent('goal-slow-old','agent_progress',{fact_kind:'result',public_result:{result:'unknown'},task_id:'old-slow-effect'});
+      goalEvent('goal-fast-new','run_stage',{stage:'question',status:'needs_clarification',run_id:'clarify-original'});
+    });
+    await page.waitForFunction(()=>goalProgress.some(item=>item.event.task_id==='old-slow-effect'));
+    assert.equal(await page.evaluate(()=>goalReplies.length),1);
+    assert.deepEqual(await page.evaluate(()=>goalReplaced),['原来的目标','尚未应答的旧提交']);
+    await page.evaluate(()=>{sendGoal('原问题的补充答案');});
+    await page.waitForFunction(()=>goalRequests.length===5);
+    assert.equal(await page.evaluate(()=>goalRequests[4].body.resume_run_id),'clarify-original');
+    await page.evaluate(()=>goalRequests[4].resolve({trace_id:'goal-fast-new'}));
+    await page.evaluate(()=>goalEvent('goal-fast-new','agent_reply',{text:'补充后完成'}));
+    await page.waitForFunction(()=>goalReplies.length===2);
     // Real reload: cookies survive; the nonce, SSE address and transcript do not.
     await page.addScriptTag({content:compile('app/src/ApiClient.js')});
     const before = await page.evaluate(async () => {
@@ -330,6 +448,6 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     assert.equal(apiHeaders.at(-2)['x-ssm-chat-id'], before.nonce);
     assert.equal(apiHeaders.at(-1)['x-ssm-chat-id'], after.nonce);
     assert.deepEqual(errors, []);
-    console.log('PASS: shared home/device styles, collapsed progress, device send/SSE/HTTP deduplication, media, fresh page history, navigation history, offline input, IME, suggestions, mobile layout and actual reload with a new API/SSE nonce while retaining login.');
+    console.log('PASS: shared home/device styles, goal replacement during execution and before HTTP acceptance, late reply/receipt isolation, clarification continuation, SSE/HTTP deduplication, media, fresh page history, offline input, IME, suggestions, mobile layout and reload with a new API/SSE nonce while retaining login.');
   } finally { await browser.close(); }
 })().catch(error => {console.error(error); process.exitCode=1;});

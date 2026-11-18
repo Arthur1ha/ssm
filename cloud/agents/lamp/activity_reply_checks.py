@@ -72,7 +72,7 @@ def test_busy_lamp_activity_final_text_reaches_existing_space_reply(activity_rep
         'emotion': 'neutral'})]
 
 
-def test_reactive_activity_keeps_delivery_rules_when_dog_is_remote(activity_reply, monkeypatch):
+def test_reactive_activity_keeps_game_choices_without_execution_manual_when_dog_is_remote(activity_reply, monkeypatch):
     import json
     from cloud.agents.lamp.workflows.reactive import _prompt
 
@@ -86,7 +86,8 @@ def test_reactive_activity_keeps_delivery_rules_when_dog_is_remote(activity_repl
     data = json.loads(next(message.content.split('\n', 1)[1]
                            for message in messages if message.name == 'context'))
     delivery = next(game for game in data['games'] if game['game_id'] == 'push_delivery')
-    assert delivery['rules'] and delivery['reason'] == 'go2_remote_control'
+    assert delivery['description'] and delivery['reason'] == 'go2_remote_control'
+    assert 'rules' not in delivery and 'strategy' not in delivery
     assert delivery['ready'] is False
     assert 'life_state=explore 本身不表示正在移动' in messages[0].content
 

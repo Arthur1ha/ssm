@@ -792,7 +792,7 @@ body {
 
 /* One activity is a continuous thread: messages, observations and confirmed state
  * share a time rail while retaining their distinct meanings. */
-.space-activity { margin: 8px 0 14px; overflow: hidden; border: 1px solid rgba(75,212,255,.2); border-radius: var(--radius-card); background: var(--color-surface-1); }
+.space-activity { margin: 8px 0 14px; border: 1px solid rgba(75,212,255,.2); border-radius: var(--radius-card); background: var(--color-surface-1); }
 .space-activity--live { border-left: 2px solid #4bd4ff; box-shadow: 0 12px 28px rgba(0,0,0,.12); }
 .space-activity--ended { border-color: var(--color-border-strong); }
 .space-activity__heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--color-border); background: linear-gradient(100deg, rgba(75,212,255,.075), transparent 70%); }
@@ -810,7 +810,6 @@ body {
 .space-activity__summary { padding: 11px 14px 9px; color: var(--color-text-muted); font-size: 11px; line-height: 1.5; }
 .space-activity__summary p { overflow-wrap: anywhere; }
 .space-activity__timeline { padding: 10px 14px 12px; }
-.space-activity--live .space-activity__timeline { max-height: min(45dvh, 380px); overflow-y: auto; }
 .space-activity--ended .space-activity__timeline { border-top: 1px solid var(--color-border); }
 .space-activity__item { display: grid; grid-template-columns: 36px minmax(0,1fr); gap: 9px; position: relative; }
 .space-activity__item + .space-activity__item { margin-top: 11px; }
@@ -819,7 +818,12 @@ body {
 .space-activity__time { color: var(--color-text-dim); font: 9px var(--font-mono); line-height: 1.6; white-space: nowrap; }
 .space-activity__content { min-width: 0; }
 
-.space-activity__status { padding: 1px 0; color: var(--color-text-dim); font-size: 10.5px; line-height: 1.5; }
+.space-activity__status { padding: 1px 0; color: var(--color-text-dim); font-size: 10.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.space-activity__item--game_start, .space-activity__item--game_end { margin-block: 18px; }
+.space-activity__game-end { padding: 12px 0; border-block: 1px solid var(--color-border-strong); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.space-activity__game-end strong { color: var(--color-text); font-weight: 650; }
+.space-activity__game-end p { margin: 4px 0; color: var(--color-text-muted); }
+.space-activity__game-end small { color: var(--color-text-dim); font-size: 11px; }
 
 .space-activity__answer { display: block; margin-top: 6px; padding: 5px 9px; border: 1px solid var(--color-accent-border); border-radius: 8px; background: var(--color-accent-dim); color: var(--color-accent); font: 11px var(--font-sans); cursor: pointer; }
 
@@ -829,7 +833,8 @@ body {
 .space-activity__heading > div { flex: 1; }
 .space-activity__receipt { display: block; margin: 5px 0 0 2px; color: var(--color-text-dim); font-size: 11px; }
 
-.space-activity__new { display: block; margin: 4px auto 12px; padding: 8px 14px; border: 1px solid var(--color-border-strong); border-radius: 999px; background: var(--color-surface-2); color: var(--color-text); font: 12px var(--font-sans); cursor: pointer; }
+.space-activity__new { display: block; position: sticky; bottom: 12px; z-index: 1; margin: 4px auto 12px; padding: 8px 14px; max-width: calc(100% - 28px); border: 1px solid var(--color-border-strong); border-radius: 999px; background: var(--color-surface-2); color: var(--color-text); font: 12px var(--font-sans); cursor: pointer; }
+.space-activity__latest { height: 1px; }
 
 .activity-members { padding: 20px 14px 12px; border-bottom: 1px solid var(--color-border); }
 .activity-members__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; }
@@ -848,7 +853,6 @@ body {
 .space-activity__item::before { display: none; }
 .space-activity__item + .space-activity__item { margin-top: 15px; }
 .space-activity__end { min-height: 38px; }
-.space-activity__timeline { max-height: min(45dvh, 380px); overflow-y: auto; overscroll-behavior: contain; }
 .space-activity button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
 .device-activity-question { margin: 0 12px 8px; padding: 9px 11px; display: flex; flex-wrap: wrap; gap: 5px; border: 1px solid rgba(75,212,255,.2); border-radius: 10px; background: rgba(75,212,255,.06); color: var(--color-text); font-size: 11px; line-height: 1.5; }
 .device-activity-question strong { color: #9de8ff; font-weight: 600; }

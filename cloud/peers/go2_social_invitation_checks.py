@@ -128,7 +128,9 @@ def test_new_activity_can_discuss_pending_lamp_receipt_without_starting_game(soc
             h.prompts.extend(messages)
             assert "当前可玩玩法：[]" in messages[-1].content
             assert '"game_id": "push_delivery"' in messages[-1].content
-            assert '"rules":' in messages[-1].content
+            assert '"description":' in messages[-1].content
+            assert '"rules":' not in messages[-1].content
+            assert '"strategy":' not in messages[-1].content
             assert '"ready": false' in messages[-1].content
             assert "lamp_result_unconfirmed" in messages[-1].content
             return {"decision": "send_message", "target": LAMP,

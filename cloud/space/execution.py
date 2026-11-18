@@ -42,6 +42,8 @@ class ExecutionContext:
     training_step_index: int | None = None
     trigger_step_index: int | None = None
     training_run_id: str | None = None
+    # Issued by the authenticated user gateway, inherited by child tools.
+    goal_revision: int = 0
 
 
 SYSTEM_CONTEXT = ExecutionContext("system", "admin", True, origin_kind="system")
@@ -86,6 +88,7 @@ async def require_service_context(
     x_ssm_space_id: str = Header(default="main"),
     x_ssm_origin_kind: str = Header(default="user_delegated"),
     x_ssm_expires_at: str | None = Header(default=None),
+    x_ssm_goal_revision: str | None = Header(default=None),
 ) -> ExecutionContext:
     """Authenticate an internal call and normalize its trusted context."""
     expected = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
@@ -111,14 +114,26 @@ async def require_service_context(
         expires_at = int(x_ssm_expires_at or 0)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid session expiry") from exc
+    try:
+        goal_revision = int(x_ssm_goal_revision) if isinstance(x_ssm_goal_revision, str) else 0
+        if goal_revision < 0:
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid goal revision") from exc
+    if goal_revision:
+        from cloud.space.user_goals import get_goal_registry
+        if not get_goal_registry().is_current(goal_revision):
+            raise HTTPException(status_code=409, detail="user_goal_superseded")
 
     requested_persist = str(x_ssm_persist or "").lower() in {"1", "true", "yes"}
     # Role is authoritative: a compromised/buggy caller cannot make a visitor
     # persistent merely by toggling one header.
     persist = x_ssm_actor == "admin" and requested_persist
     if x_ssm_origin_kind == "agent_autonomous":
-        return ExecutionContext(x_ssm_session_id, "visitor", False, "main", "agent_autonomous", expires_at)
-    return ExecutionContext(x_ssm_session_id, x_ssm_actor, persist, "main", "user_delegated", expires_at)
+        return ExecutionContext(x_ssm_session_id, "visitor", False, "main", "agent_autonomous", expires_at,
+                                goal_revision=goal_revision)
+    return ExecutionContext(x_ssm_session_id, x_ssm_actor, persist, "main", "user_delegated", expires_at,
+                            goal_revision=goal_revision)
 
 
 async def require_authenticated_read(request: Request):
@@ -132,6 +147,7 @@ async def require_authenticated_read(request: Request):
             x_ssm_space_id=request.headers.get("X-SSM-Space-Id", "main"),
             x_ssm_origin_kind=request.headers.get("X-SSM-Origin-Kind", "user_delegated"),
             x_ssm_expires_at=request.headers.get("X-SSM-Expires-At"),
+            x_ssm_goal_revision=request.headers.get("X-SSM-Goal-Revision"),
         )
     from cloud.api.auth import require_session
     return await require_session(request)

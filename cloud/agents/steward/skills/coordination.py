@@ -21,6 +21,7 @@ def run_peer_loop(trusted: dict) -> dict:
                "origin_kind": trusted["origin_kind"],
                "origin_session_id": trusted.get("origin_session_id"),
                "peer_request_id": request_id,
+               "goal_revision": trusted.get("goal_revision", 0),
                "trace_id": trusted.get("trace_id"),
                "parent_run_id": trusted.get("parent_run_id"),
                "expires_at": trusted["expires_at"],

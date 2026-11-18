@@ -35,7 +35,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
       assert(file, 'Set SSM_CHECK_REACT and SSM_CHECK_REACT_DOM to local React scripts');
       await page.addScriptTag({ path: file });
     }
-    for (const file of ['ApiClient.js', 'components/Icon.jsx', 'components/SessionGate.jsx',
+    for (const file of ['ApiClient.js', 'hooks/useTraining.js', 'pages/TransitionInspector.jsx', 'components/Icon.jsx', 'components/SessionGate.jsx',
       'components/SpaceMenu.jsx', 'components/TrainingDrawer.jsx', 'components/AdminSpaceDrawer.jsx',
       'components/OrchestratorSettingsDrawer.jsx', 'components/SpacePeopleDrawer.jsx']) {
       await page.addScriptTag({ content: compile(`app/src/${file}`) });

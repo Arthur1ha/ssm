@@ -45,9 +45,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec("go2_tag_location", "保存当前地点名称", _schema({"name": _string(minLength=1)}, ("name",)), persists=True, timeout_s=5),
         ToolSpec("go2_navigate_to", "导航到已保存的命名地点", _schema({"name": _string(minLength=1)}, ("name",)), motion=True, timeout_s=70, result_rule="device"),
         ToolSpec("go2_navigate_to_coordinate", "导航到当前 odom 会话内的临时坐标", _schema({"x": {"type": "number"}, "y": {"type": "number"}}, ("x", "y")), motion=True, timeout_s=70, result_rule="device"),
-        ToolSpec("go2_navigate_to_visible_target", "朝当前画面中的目标接近，target 传自然语言描述。视觉识别后与雷达点云配对，规划停靠点，停稳后复核；仅 ok 且复核通过表示安全接近，不代表触碰或精确到达。可选 max_advance_m 限制本次沿已知可通行路径推进的米数；此时 arrived=false 只表示已推进，arrived=true 才确认抵达。decision_reason可用第一人称简短说明依据刚才观察为何选择这个候选，不声称已经到达；游戏中必须提供。目标雷达测距或地面关联不可用时，确认停稳后自动调用go2_find_object，使用视觉模型估算的建议距离接近，不设置固定步长；保留原始失败与找物回执，outcome=nearby、found=true且stop.result=ok才确认已在附近，不代表精确测距。目标未识别、视觉格式错误、动作失败、权限异常、取消、超时或运动结果未知不转找物；控制权、定位会话和原任务期限必须仍有效。显式max_advance_m也可进入视觉降级，沿用本次剩余距离要求；完全缺失避障地图或自身定位时不能移动。不用相对移动或坐标导航盲走替代", _schema({"target": _string(minLength=1, maxLength=100), "decision_reason": _string(minLength=1, maxLength=300), "max_advance_m": _number(exclusiveMinimum=0)}, ("target",)), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
-        ToolSpec("go2_find_object", "在室内寻找地面物品并走到附近；用户任务默认搜索当前定位会话地图的可达区域，已有矩形边界则遵守边界，无需用户提供房间名称或坐标。未发现时换观察点；发现后由视觉模型估算大致距离及本次建议靠近距离，沿可通行路径走到建议位置，停稳后再看；不设置固定步长、导航段数或累计里程上限。连续画面粗略判断已在附近并停稳即完成，不要求精确目标坐标或测距。结果不代表可直接触碰目标；未检查区域不代表目标不存在。仅用户明确指定且无法确定房间时澄清。outcome 区分未启动 not_started、暂未识别 not_seen、见过但未接近 seen_not_reached、已接近 nearby；按 message 保留受阻原因。内部范围配置或定位会话问题不要求用户补填房间；终态后不承诺自动继续搜索", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
-        ToolSpec("go2_push_cargo", "对同一地面货物执行一次调整位置、对齐、接近或普通步态推送尝试。cargo保留位置和外观特征；distance_m可省略，显式提供时为任意有限正数，省略时使用本次视觉建议advance_distance_m，不用固定步长。基础测试可省略destination；有目的地时必须保留指定色块、小地面标记或物体标识。先根据同一画面的货物和目的地估算方向，调整到货物背向目的地的一侧，使机器狗、货物、目的地大致共线再前进，不是仅朝盒子走。positioned、aligned、approached仅表示前置调整或接近，应final=false继续。directional_push_attempted=true且confirmation=directional_move_and_stop、stop.result=ok表示已完成朝指定方向的推送尝试，可结束推送目标；不要求精确到位或接触后仍看见货物，不额外后退复查，不重复推送追求送达。该结果不证明货物实际位移，delivered仍为false；只有cargo_near_destination_and_stopped且delivered=true才是观察确认已在附近。视觉估距不要求特定货物高度或地面投影，未能辨认货物、目的地或估算方向时停止。完整地图、控制租约、教导、运动账本和真实停稳保持有效；雷达接触许可只用于当前货物，视觉路线不申请障碍豁免，不用普通移动绕过。未知结果按原request_id核对，不换ID盲目重发。", _schema({"cargo": _string(minLength=1, maxLength=150), "destination": _string(minLength=1, maxLength=150), "distance_m": _number(exclusiveMinimum=0)}, ("cargo",)), motion=True, timeout_s=240, result_rule="device"),
+        ToolSpec("go2_navigate_to_visible_target", "接近当前画面中的目标，target保留具体物品及位置特征。工具自行定位、导航、停稳并复核；仅ok且复核通过才确认安全接近，不表示触碰或精确到达。max_advance_m可限制本次推进米数，arrived=false仅是进展，arrived=true才表示抵达。目标测距不可用时工具可自行降级找物并保留原始回执；outcome=nearby、found=true且stop.result=ok确认已在附近，不表示精确测距。decision_reason可说明本轮观察为何支持候选，游戏中须提供，依据进过程详情，无需额外发言。未知或受阻结果不通过其他移动工具绕过，按原任务查询。", _schema({"target": _string(minLength=1, maxLength=100), "decision_reason": _string(minLength=1, maxLength=300), "max_advance_m": _number(exclusiveMinimum=0)}, ("target",)), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
+        ToolSpec("go2_find_object", "在当前定位会话地图的可达范围内寻找target所述地面物品并走到附近，遵守已有范围边界。工具自行选择观察点、靠近和停稳复核，无需用户提供房间名称、坐标或执行步长；仅用户明确指定且无法确定房间时澄清。outcome区分未启动not_started、暂未识别not_seen、见过但未接近seen_not_reached、已接近nearby；nearby且found=true、stop.result=ok表示已在同一目标附近，不代表精确测距或可以触碰。未检查区域不能据此断言没有目标。按message报告实际受阻原因，终态后不承诺自动继续搜索。", _schema({"target": _string(minLength=1, maxLength=100)}, ("target",)), roles=("admin", "visitor"), motion=True, timeout_s=SEARCH_TOOL_TIMEOUT_S, result_rule="device"),
+        ToolSpec("go2_push_cargo", "对同一地面货物执行一次必要的站位、接近或普通步态推送；工具自行调整到适合朝目的地方向推进的位置，无需逐步指挥或口述站位。cargo保留位置和外观特征；基础推动测试可省略destination，用户指定目的地时必须传入对应色块、地面标记或物体描述。distance_m省略时使用当前视觉建议；明确提供时为任意有限正数。positioned、aligned、approached仅为前置进展，final=false继续。directional_push_attempted=true且confirmation=directional_move_and_stop、stop.result=ok表示本单方向推送尝试完成，应结束，不追加后退复查或重复推送；这不证明货物实际移动或送达。只有delivered=true且confirmation=cargo_near_destination_and_stopped才确认货物已在目的地附近；motion_performed=false表示本次没有运动。受阻时保留真实原因，不用其他移动工具绕过；未知结果按原request_id核对，不换ID重发。", _schema({"cargo": _string(minLength=1, maxLength=150), "destination": _string(minLength=1, maxLength=150), "distance_m": _number(exclusiveMinimum=0)}, ("cargo",)), motion=True, timeout_s=240, result_rule="device"),
         ToolSpec("go2_list_locations", "列出已保存地点", _schema({}), timeout_s=5),
         ToolSpec("go2_set_led", "设置机身灯颜色和时长", led_tool_schema(), timeout_s=8, result_rule="device"),
         ToolSpec("go2_recognize_person", "识别当前面前的人；匹配分达到80且对应已登记人员才确认身份。status=unknown 表示未匹配登记人员，称为陌生人或其他人；无脸、图像不合格或服务失败按错误说明，不推断身份", _schema({}), timeout_s=32, result_rule="identity"),
@@ -66,7 +66,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                               "items": _string(minLength=1, maxLength=200),
                               "description": "游戏邀请必填：仅引用当前 space.decision_evidence 中真实存在的 ref"},
         }, ("target", "content")), timeout_s=5),
-        ToolSpec("request_peer_skill", "请求同伴执行公开技能，等待最终结果；只有 ok 表示目标完成，失败后不要执行依赖动作。请求前先 list_peers；超时只用原 request_id 查询，不换新 ID 重发物理动作", _schema({
+        ToolSpec("request_peer_skill", "请求同伴执行公开技能并等待真实结果；执行是否成功按该技能回执契约判断，消息投递不表示动作完成。失败或结果未知时不执行依赖动作。请求前先 list_peers；超时只用原 request_id 查询，不换新 ID 重发物理动作", _schema({
             "target_unit_id": _string(minLength=1),
             "skill_id": _string(minLength=1),
             "params": {"type": "object"},
@@ -218,3 +218,16 @@ def card_skills() -> list[dict]:
         {key: value for key, value in get_card_skill(skill_id).items() if key != "tool_name"}
         for skill_id in CARD_SKILLS
     ]
+
+
+def tool_display_name(name: str) -> str | None:
+    """Resolve public names without advertising internal tools as Card skills."""
+    entry = CARD_SKILLS.get(name) or next(
+        (skill for skill in CARD_SKILLS.values() if skill.get("tool_name") == name), None)
+    if entry:
+        return entry["name"]
+    return {
+        "go2_push_cargo": "推送货物",
+        "go2_navigate_to_coordinate": "前往指定位置",
+        "go2_list_people": "查看空间人员",
+    }.get(name)

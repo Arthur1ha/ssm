@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from cloud.go2.connection.manual_velocity import slew_velocity
 from cloud.go2.move_control_checks import robot_at_stand
 from cloud.space.execution import ExecutionContext
+from cloud.space.user_goals import get_goal_registry
 
 
 def test_ramp_brakes_before_reversing_and_zero_axes_stop_immediately():
@@ -121,14 +122,19 @@ async def test_intentional_disconnect_sends_stop_before_closing_the_transport():
 
 
 @pytest.fixture
-def velocity_endpoint(monkeypatch):
+def velocity_endpoint(monkeypatch, tmp_path):
     from cloud.go2 import router
+    from cloud.go2 import service
     robot, _, packets = robot_at_stand()
     robot._move_control_active = True
-    context = ExecutionContext('manual-user', 'visitor', False, expires_at=int(time.time()) + 60)
-    lease = SimpleNamespace(owner_session_id=context.session_id)
+    monkeypatch.setenv('SSM_USER_GOALS_DIR', str(tmp_path / 'goals'))
+    context = ExecutionContext('manual-user', 'visitor', False, expires_at=int(time.time()) + 60,
+                               goal_revision=get_goal_registry().advance('manual-user'))
+    lease = SimpleNamespace(owner_session_id=context.session_id, generation=1)
     monkeypatch.setattr(router, 'go2', robot)
-    monkeypatch.setattr(router, 'control_lease', SimpleNamespace(snapshot=lambda: lease))
+    monkeypatch.setattr(router, 'control_lease', SimpleNamespace(snapshot=lambda: lease,
+        allows=lambda owner, generation: (owner, generation)==(lease.owner_session_id, lease.generation)))
+    monkeypatch.setattr(service, 'prepare_user_goal', AsyncMock(return_value={'result':'ok','physical_stop':'confirmed'}))
     check = MagicMock()
     monkeypatch.setattr(router, '_check_direct_motion', check)
     monkeypatch.setattr(router, '_cancel_pending_peer_requests', lambda _: None)
@@ -141,7 +147,7 @@ def velocity_endpoint(monkeypatch):
 async def test_late_or_duplicate_movement_cannot_override_release(velocity_endpoint):
     router, robot, packets, context, _, check = velocity_endpoint
     req = router.VelocityRequest
-    await router.go2_velocity(req(vx=.3, controller_id='page', sequence=2), context)
+    await router.go2_velocity(req(vx=.3, controller_id='page', sequence=1), context)
     await router.go2_velocity(req(controller_id='page', sequence=4), context)
     count = packets.call_count
     for sequence in (1, 2, 3, 4):
@@ -152,14 +158,16 @@ async def test_late_or_duplicate_movement_cannot_override_release(velocity_endpo
     assert check.call_count == 2  # Old writes cannot reacquire the motion lease.
     assert not robot._velocity_command_active
     await router.go2_velocity(req(vx=.1, controller_id='page', sequence=5), context)
-    assert robot._velocity_command_active  # A deliberate new gesture is accepted.
+    assert not robot._velocity_command_active  # Even a higher old sequence stays retired.
+    await router.go2_velocity(req(vx=.1, controller_id='new-gesture', sequence=1), context)
+    assert robot._velocity_command_active
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('loss', ['lease', 'session'])
 async def test_http_stream_rechecks_lease_and_session_expiry(velocity_endpoint, loss):
     router, robot, packets, context, lease, _ = velocity_endpoint
-    await router.go2_velocity(router.VelocityRequest(vx=.3), context)
+    await router.go2_velocity(router.VelocityRequest(vx=.3, controller_id='gesture', sequence=1), context)
     if loss == 'lease':
         lease.owner_session_id = 'new-owner'
     else:
@@ -173,8 +181,25 @@ async def test_http_stream_rechecks_lease_and_session_expiry(velocity_endpoint, 
 @pytest.mark.parametrize('params', [{'sequence': 1}, {'controller_id': 'page'}])
 async def test_incomplete_ordering_metadata_is_rejected_before_motion(velocity_endpoint, params):
     router, _, packets, context, _, check = velocity_endpoint
-    with pytest.raises(HTTPException) as exc:
-        await router.go2_velocity(router.VelocityRequest(vx=.3, **params), context)
-    assert exc.value.status_code == 400
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        router.VelocityRequest(vx=.3, **params)
     packets.assert_not_called()
     check.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('vx', [0, .3])
+async def test_old_controller_cannot_borrow_the_next_goal_even_for_stop(velocity_endpoint, vx):
+    from dataclasses import replace
+    router, robot, packets, context, _, _ = velocity_endpoint
+    await router.go2_velocity(router.VelocityRequest(vx=.2,controller_id='old',sequence=1),context)
+    next_revision=get_goal_registry().advance(context.session_id)
+    current=replace(context,goal_revision=next_revision)
+    await router.go2_velocity(router.VelocityRequest(vx=.1,controller_id='new',sequence=1),current)
+    count=packets.call_count
+    with pytest.raises(HTTPException) as exc:
+        await router.go2_velocity(router.VelocityRequest(vx=vx,controller_id='old',sequence=99),current)
+    assert exc.value.status_code==409
+    assert packets.call_count==count
+    assert robot._velocity_command_active

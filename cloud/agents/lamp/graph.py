@@ -86,7 +86,7 @@ def run_lamp_loop(agent, text: str, unit_id: str, context: ExecutionContext,
             or context.expires_at <= time.time()):
         return {"result": "rejected", "error": "invalid_context", "reply": ""}
     index = FileRunIndex()
-    with index.session_lock(unit_id, context.session_id):
+    with index.session_lock(unit_id, context.session_id, goal_revision=context.goal_revision):
         return _run_lamp_loop_locked(
             agent, text, unit_id, context, dispatch, index=index,
             lighting_only=lighting_only, run_id=run_id, resume=resume,
@@ -131,6 +131,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
         run.parent_run_id = parent_run_id or ""
         run.agent_id = unit_id
         run.origin_kind = context.origin_kind
+        run.goal_revision = context.goal_revision
         try:
             index.put_if_absent(run.run_id, unit_id, context.session_id, thread_id)
         except ValueError:
@@ -161,6 +162,8 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     training_attempt_start = len(run.steps)
 
     async def execute(name, params, step_id):
+        from cloud.space.user_goals import get_goal_registry
+        get_goal_registry().check(context.goal_revision)
         if name == "apply_training":
             from cloud.agents.common.training.tools import prepare_training_application
             from cloud.agents.lamp.workflows.runtime import run_training_behavior
@@ -215,11 +218,13 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
                     trace_id=current.trace_id or current.run_id,
                     parent_run_id=current.parent_run_id, source=event_source,
                     text=current.response, emotion=current.emotion, reply_kind="final",
+                    goal_revision=current.goal_revision,
                         reply_source=current.reply_source,
                     event_id=current.reply_event_id)
             else:
                 publish_agent_event(
                     "reply_error", agent_id=unit_id, session_id=event_session,
+                    goal_revision=current.goal_revision,
                     scope="space" if autonomous else "session", space_id=context.space_id,
                     status=current.status, run_id=current.run_id,
                     trace_id=current.trace_id or current.run_id,
@@ -273,6 +278,9 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
     if run.status != "needs_clarification":
         pin_completed_run(run.run_id, context.session_id, unit_id,
                           index=index, checkpointer=saver)
+    from cloud.space.user_goals import get_goal_registry
+    if not get_goal_registry().is_current(run.goal_revision):
+        run.status, run.response, run.question = "cancelled", "", ""
     progress("finished", None)
     status = _public_status(run)
     reply = run.response
@@ -286,6 +294,7 @@ def _run_lamp_loop_locked(agent, text: str, unit_id: str, context: ExecutionCont
             status=status, run_id=run.run_id, trace_id=run.trace_id or run.run_id,
             parent_run_id=run.parent_run_id, source=event_source, text=reply, emotion=run.emotion,
             reply_kind="clarification", event_id=run.reply_event_id,
+            goal_revision=run.goal_revision,
         )
     if reply and not run.parent_run_id:
         emit_agent_event("reply.emitted", trace_id=run.trace_id or run.run_id,

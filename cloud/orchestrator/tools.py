@@ -53,6 +53,9 @@ def do_publish_ui_event(session_id: str, event_type: str, *, run_id: str,
                         reply_kind: str = "final", **facts) -> None:
     if _peer_request.get():
         return
+    from cloud.space.user_goals import get_goal_registry
+    if event_type in {"agent_reply", "reply_error"} and not get_goal_registry().is_current(facts.get("goal_revision", 0)):
+        return
     if _mqtt is None:
         return
     payload = {"type": event_type, "agent_id": "cloud_orchestrator",
@@ -82,6 +85,8 @@ def do_publish_task(
     topic 一律用 unit_id（传输层唯一标识），不用 slug。见 protocol/identifiers.md。
     """
     execution_context = context or {}
+    from cloud.space.user_goals import get_goal_registry
+    get_goal_registry().check(execution_context.get("goal_revision", 0))
     correlation = current_event_context()
     emit_agent_event("device.command", task_id=task_id, target_unit_id=unit_id,
                      action=action, params=params, transport="mqtt", status="pending_publish")
@@ -106,6 +111,8 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
     与 GO2_API_BASE 拼接成完整 URL。超时由调用方按 skill tag 决定。
     抛出的异常由调用方（Dispatcher）捕获并记为 timeout/error。
     """
+    from cloud.space.user_goals import get_goal_registry
+    get_goal_registry().check(body.get("goal_revision", 0))
     if endpoint.startswith("http"):
         target = urlparse(endpoint)
         trusted = urlparse(GO2_API_BASE)
@@ -127,6 +134,7 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
         "X-SSM-Actor": str(actor),
         "X-SSM-Persist": "true" if persist is True else "false",
         "X-SSM-Space-Id": str(body.get("space_id", "main")),
+        "X-SSM-Goal-Revision": str(body.get("goal_revision", 0)),
     }
     if body.get("origin_kind") in {"user_delegated", "agent_autonomous"}:
         headers["X-SSM-Origin-Kind"] = body["origin_kind"]
@@ -188,6 +196,8 @@ def do_http_dispatch(endpoint: str, body: dict, timeout: float) -> dict:
 def do_start_activity(context: dict, text: str, source_event_id: str,
                       user_revision: int, timeout: float = 12.0) -> dict:
     """Send one authenticated user activity request to the API's state owner."""
+    from cloud.space.user_goals import get_goal_registry
+    get_goal_registry().check(context.get("goal_revision", 0))
     token = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
     if len(token) < 16:
         raise RuntimeError("SSM_INTERNAL_SERVICE_TOKEN is not configured")
@@ -199,6 +209,7 @@ def do_start_activity(context: dict, text: str, source_event_id: str,
         "X-SSM-Space-Id": str(context["space_id"]),
         "X-SSM-Origin-Kind": "user_delegated",
         "X-SSM-Expires-At": str(int(context["expires_at"])),
+        "X-SSM-Goal-Revision": str(context.get("goal_revision", 0)),
     }
     response = requests.post(
         f"{GO2_API_BASE}/api/internal/activity/start",

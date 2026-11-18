@@ -97,6 +97,9 @@ def parse_trusted_intent(
     user_revision = unsigned.get("user_revision")
     if user_revision is not None and (type(user_revision) is not int or user_revision < 1):
         raise TrustedContextError("invalid user_revision")
+    goal_revision = unsigned.get("goal_revision")
+    if type(goal_revision) is not int or goal_revision < 1:
+        raise TrustedContextError("invalid goal_revision")
 
     return {
         "session_id": session_id,
@@ -115,6 +118,7 @@ def parse_trusted_intent(
         "device_hint": unsigned.get("device_hint", ""),
         "event_id": unsigned.get("event_id", ""),
         "user_revision": user_revision,
+        "goal_revision": goal_revision,
         "trace_id": trace_id or unsigned.get("event_id", ""),
         "resume_run_id": resume_run_id,
     }
@@ -230,6 +234,9 @@ def parse_trusted_peer_request(
     if parent_run_id is not None and (not isinstance(parent_run_id, str)
                                       or _REQUEST_ID.fullmatch(parent_run_id) is None):
         raise TrustedContextError("invalid parent_run_id")
+    goal_revision = unsigned.get("goal_revision", 0)
+    if type(goal_revision) is not int or goal_revision < 0:
+        raise TrustedContextError("invalid goal_revision")
     return {
         "request_id": topic_request_id,
         "initiator_unit_id": initiator,
@@ -245,6 +252,7 @@ def parse_trusted_peer_request(
         "expires_at": float(expires_at),
         "trace_id": trace_id,
         "parent_run_id": parent_run_id,
+        "goal_revision": goal_revision,
     }
 
 

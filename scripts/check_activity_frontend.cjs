@@ -125,6 +125,32 @@ assert.equal(context.avatarEventPresentation({...explicitRound,stage:'throw_anno
 assert.equal(context.avatarEventPresentation({...explicitRound,game_round:undefined,text:'狗出剪刀'},'go2'),null);
 console.log('PASS: explicit message/task relationships, physical freshness, action grouping and unconfirmed results.');
 
+const legacyGameEnd=event('delivery-ended','response',{game_id:'push_delivery',status:'unknown',
+  trigger_message_id:'delivery-invite',task_id:'delivery-task',reason:'cargo_push_unconfirmed:control_error',
+  text:'本次配送已结束，尚未确认货物送达指定区域。'});
+const gameEnd={...legacyGameEnd,event_id:'game-ended',event_type:'game_ended'};
+const followup=event('after-game','message',{task_id:planned.task_id,text:'再看看蓝块的位置。'});
+for(const boundary of [legacyGameEnd,gameEnd]) {
+  const rows=activityProcessRows(projectActivityEvents([planned,result,boundary,followup]));
+  assert.deepEqual(Array.from(rows,row=>row.kind),['process','game_end','message']);
+  assert.equal(rows[2].process.length,0,'Earlier game actions crossed the explicit game ending');
+}
+assert.equal(context.activityGameEnd({...result,game_id:'push_delivery'}),null,
+  'An intermediate action failure incorrectly ended the game');
+assert.equal(projectActivityEvents([legacyGameEnd,gameEnd]).length,1,
+  'Legacy terminal response and signed final result duplicated the game ending');
+assert.equal(context.activityGameEnd({...gameEnd,status:'ok',reason:''}).reason,'');
+assert.match(context.activityGameEnd({...gameEnd,reason:'delivery_signal_changed_or_stale'}).reason,/灯光信号.*过期/);
+const gameStart={...gameEnd,event_id:'game-started',event_type:'game_started',status:'executing'};
+assert.deepEqual(Array.from(activityProcessRows([gameStart,gameEnd]),row=>row.kind),['game_start','game_end']);
+assert.equal(context.activityGameStart(invite),false,'An invitation is not an actual game start');
+assert.equal(context.agentCapabilityLabel('go2_push_cargo'),'推送货物');
+assert.equal(context.agentCapabilityLabel('go2_unknown_private_tool'),'设备操作');
+assert.equal(context.processFactTitle({tool:'go2_push_cargo',capability_name:'go2_push_cargo'}),'推送货物');
+assert.equal(context.processUserText('我准备调用 go2_push_cargo。'),'我准备调用 推送货物。');
+assert.equal(context.activityDecisionEvidence({kind:'environment',as_of:now-3600,validity:'until_changed',summary:'蓝灯'},gameEnd,[],now).notice,'');
+console.log('PASS: explicit game endings divide later chat without inferring an ending from failed actions.');
+
 async function browserChecks() {
   const puppeteer = require('puppeteer');
   if(process.env.SCREENSHOT_DIR) fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
@@ -273,6 +299,21 @@ async function browserChecks() {
       if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`activity-process-${width}.png`),fullPage:true});
       await page.click('.run-process-summary summary');
     }
+    // The original game is over while the surrounding space activity remains live.
+    await page.evaluate(({events,start,boundary,followup})=>__render({events:[start,...events,boundary,followup]}),
+      {events,start:gameStart,boundary:legacyGameEnd,followup});
+    await page.waitForSelector('.space-activity__game-end');
+    assert.equal(await page.$eval('.space-activity__item--game_start strong',el=>el.textContent),'本局游戏已开始');
+    assert.equal(await page.$eval('.space-activity__item--game_end strong',el=>el.textContent),'本局游戏已结束');
+    assert.match(await page.$eval('.space-activity__item--game_end',el=>el.textContent),/结束原因/);
+    assert.doesNotMatch(await page.$eval('.space-activity__item--game_end',el=>el.textContent),/本局已取消|后续为|活动交流/);
+    assert.equal(await page.$eval('.space-activity__live',el=>el.textContent),'进行中');
+    assert.equal(await page.$eval('.space-activity__item--game_end',el=>el.nextElementSibling.textContent.includes('再看看蓝块')),true);
+    for(const width of [320,390,1280]) {
+      await page.setViewport({width,height:900});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      if(process.env.SCREENSHOT_DIR) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`game-ended-${width}.png`),fullPage:true});
+    }
     // Public rationale belongs inside the same disclosure, never a second bubble.
     await page.evaluate(({invite,basis})=>__render({events:[{...invite,decision_basis:basis}]}),
       {invite:groundedInvite,basis:decisionBasis});
@@ -326,38 +367,44 @@ async function browserChecks() {
     }
     await page.evaluate(({activity,events})=>__render({activity,events}),{activity,events});
     await page.waitForSelector('.run-process-summary');
-    // Append while reading old messages: badge appears and scroll is not forced down.
+    // Read the card through the same single scrollport as the real chat.
+    await page.addStyleTag({content:'.test-shell{height:100dvh;overflow-y:auto;box-sizing:border-box}'});
+    await page.$eval('.test-shell',el=>el.classList.add('chat-panel__scroll'));
     await page.evaluate(()=>{
       const lots=Array.from({length:25},(_,i)=>({event_id:'chat'+i,event_type:'message',unit_id:'go2',
-        text:'第'+i+'条观察后的交流。',ts:Date.now()/1000+i}));
+        text:'第'+i+'条观察后的交流。'.repeat(8),ts:Date.now()/1000+i}));
       __render({events:lots});
     });
-    await page.waitForFunction(()=>document.querySelector('.space-activity__timeline').scrollHeight>500);
-    await page.$eval('.space-activity__timeline',el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll',{bubbles:true}));});
-    const oldFirst=await page.$eval('.space-activity__timeline',el=>el.firstElementChild.textContent);
-    await page.evaluate(()=>__render({events:[...__props.events,{event_id:'new',event_type:'message',unit_id:'go2',text:'这里有一条新发现。',ts:Date.now()/1000+30}]}));
+    await page.waitForFunction(()=>document.querySelector('.test-shell').scrollHeight>1500);
+    assert.equal(await page.$eval('.space-activity__timeline',el=>el.scrollHeight<=el.clientHeight+1),true,
+      'An activity timeline acquired a second vertical scrollport');
     await page.waitForSelector('.space-activity__new');
-    assert.equal(await page.$eval('.space-activity__timeline',e=>e.scrollTop),0);
-    assert.equal(await page.$eval('.space-activity__timeline',el=>el.firstElementChild.textContent),oldFirst,
-      'Incoming messages replaced the text being read');
+    assert.equal(await page.$eval('.space-activity__new',el=>el.textContent),'有新动态 · 回到最新 ↓');
+    const oldFirst=await page.$eval('.space-activity__timeline',el=>el.firstElementChild.textContent);
+    const readingTop=await page.$eval('.test-shell',el=>{el.scrollTop=350;return el.scrollTop;});
+    await page.evaluate(()=>__render({events:[...__props.events,{event_id:'new',event_type:'message',unit_id:'go2',text:'这里有一条新发现。',ts:Date.now()/1000+30}]}));
+    await page.waitForFunction(()=>document.querySelector('.space-activity__timeline').textContent.includes('这里有一条新发现'));
+    assert.equal(await page.$eval('.test-shell',el=>el.scrollTop),readingTop,'A new arrival moved the reader');
+    assert.equal(await page.$eval('.space-activity__timeline',el=>el.firstElementChild.textContent),oldFirst);
     await page.click('.space-activity__new');
     await page.waitForFunction(()=>!document.querySelector('.space-activity__new'));
-    // Even at (or just above) the bottom, arrivals must leave the viewport still.
+    assert.equal(await page.$eval('.space-activity__latest',el=>{
+      const r=el.getBoundingClientRect(),v=el.closest('.chat-panel__scroll').getBoundingClientRect();
+      return r.top>=v.top && r.bottom<=v.bottom+1;
+    }),true,'Return to latest did not reveal the latest activity through the outer scrollport');
+    // Arrivals never force scrolling, including when the user was at the bottom.
     for (const offset of [0,35,180]) {
-      const before=await page.$eval('.space-activity__timeline',(el,offset)=>{
+      const before=await page.$eval('.test-shell',(el,offset)=>{
         el.scrollTop=el.scrollHeight-el.clientHeight-offset;
-        el.dispatchEvent(new Event('scroll',{bubbles:true}));
-        return {top:el.scrollTop,first:el.firstElementChild.textContent};
+        el.dispatchEvent(new Event('scroll'));
+        return el.scrollTop;
       },offset);
       await page.evaluate(offset=>__render({events:[...__props.events,
         {event_id:'stationary-'+offset,event_type:'message',unit_id:'go2',
           text:'更新消息时保留阅读位置 '+offset,ts:Date.now()/1000+40+offset}]}),offset);
       await page.waitForFunction(offset=>document.querySelector('.space-activity__timeline')
         .textContent.includes('更新消息时保留阅读位置 '+offset),{},offset);
-      assert.equal(await page.$eval('.space-activity__timeline',el=>el.scrollTop),before.top,
-        'A message arrival moved the timeline');
-      assert.equal(await page.$eval('.space-activity__timeline',el=>el.firstElementChild.textContent),before.first,
-        'A message arrival shifted the visible history window');
+      assert.equal(await page.$eval('.test-shell',el=>el.scrollTop),before,'A message arrival moved the page');
     }
     // Unknown feedback must not display old physical facts as current.
     await page.evaluate(()=>__render({connected:false}));
@@ -388,11 +435,13 @@ async function browserChecks() {
     // Mount the unchanged home route with its real components and the same
     // simulated API, verifying that the enhancement stays inside its old card.
     const home=await browser.newPage();
+    let delayedPhotoRequest;
     home.on('pageerror',error=>errors.push(error.message));
     await home.setRequestInterception(true);
     home.on('request',request=>{
       if(request.isNavigationRequest() && request.url()==='http://ssm.test/') request.respond({status:200,
         contentType:'text/html',body:'<html lang="zh-CN"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div></body></html>'});
+      else if(new URL(request.url()).pathname==='/api/activity-photo-delayed')delayedPhotoRequest=request;
       else if(new URL(request.url()).pathname.startsWith('/api/activity-photo-'))request.respond({status:200,
         contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#475569"/></svg>'});
       else if(request.url().startsWith('data:'))request.continue();
@@ -484,6 +533,57 @@ async function browserChecks() {
     console.log('PASS: outer page and timeline stay still on arrivals, including at or near the bottom.');
     assert.equal(await home.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-activity-390.png')});
+    // A delayed or unusually shaped image must not change the space reserved
+    // for an observation, move the reading position, or crop the full image.
+    await home.$eval('.space-activity img',img=>{
+      for(let parent=img.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
+      img.scrollIntoView({block:'center'});
+    });
+    const photoBefore=await home.$eval('.space-activity img',img=>({height:img.getBoundingClientRect().height,
+      top:document.querySelector('.chat-panel__scroll').scrollTop}));
+    const photoPending=home.waitForRequest(request=>new URL(request.url()).pathname==='/api/activity-photo-delayed');
+    await home.$eval('.space-activity img',img=>{img.loading='eager';img.src='/api/activity-photo-delayed';});
+    await photoPending;
+    await delayedPhotoRequest.respond({status:200,contentType:'image/svg+xml',
+      body:'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="800"><rect width="100" height="800" fill="#475569"/></svg>'});
+    await home.waitForFunction(()=>document.querySelector('.space-activity img').complete);
+    const photoAfter=await home.$eval('.space-activity img',img=>({height:img.getBoundingClientRect().height,
+      top:document.querySelector('.chat-panel__scroll').scrollTop,fit:getComputedStyle(img).objectFit}));
+    assert(photoBefore.height>0);
+    assert.equal(photoAfter.height,photoBefore.height,'Loading the photo shifted its reserved frame');
+    assert.equal(photoAfter.top,photoBefore.top,'Loading the photo moved the reader');
+    assert.equal(photoAfter.fit,'contain','An observation photo was cropped');
+    await home.evaluate(activity=>{
+      for(let i=0;i<30;i++)apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{
+        type:'activity',activity_id:activity.activity_id,event_id:'long-scroll-'+i,event_type:'message',unit_id:'go2',
+        text:`完整活动消息 ${i}：`+'这段较长的活动交流需要完整显示并允许连续滚动。'.repeat(12),ts:Date.now()/1000+i}}));
+    },activity);
+    await home.waitForFunction(()=>document.querySelector('.space-activity__timeline').textContent.includes('完整活动消息 29'));
+    for(const [width,height] of [[320,568],[390,844],[390,320],[844,390],[1280,800]]) {
+      await home.setViewport({width,height});
+      const pointer=await home.evaluate(()=>{
+        const s=document.querySelector('.chat-panel__scroll'),t=document.querySelector('.space-activity__timeline');
+        s.scrollTop+=t.getBoundingClientRect().top-s.getBoundingClientRect().top+40;
+        const r=s.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2,top:s.scrollTop};
+      });
+      await home.mouse.move(pointer.x,pointer.y);
+      await home.mouse.wheel({deltaY:240});
+      await home.waitForFunction(top=>document.querySelector('.chat-panel__scroll').scrollTop>top+100,{},pointer.top);
+      assert.equal(await home.evaluate(()=>{
+        const t=document.querySelector('.space-activity__timeline'),input=document.querySelector('.chat-panel input').getBoundingClientRect();
+        return t.scrollHeight<=t.clientHeight+1 && document.documentElement.scrollWidth<=innerWidth
+          && input.top>=0 && input.bottom<=innerHeight;
+      }),true,`Activity content or composer was clipped at ${width}×${height}`);
+      await home.click('.space-activity__new');
+      await home.waitForFunction(()=>{
+        const a=document.querySelector('.space-activity__latest'),r=a.getBoundingClientRect(),v=a.closest('.chat-panel__scroll').getBoundingClientRect();
+        return r.top>=v.top && r.bottom<=v.bottom+1;
+      });
+    }
+    await home.setViewport({width:390,height:320});
+    await home.focus('.chat-panel input');
+    if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-long-activity-short.png')});
+    console.log('PASS: continuous outer wheel scrolling, latest anchor, long activity and composer at 320px/short/landscape/desktop; delayed photos preserve size and reading position.');
     assert.deepEqual(errors,[]);
     // The production activity result shape keeps partial joins visible even
     // though the start_activity tool itself returned ok.

@@ -153,7 +153,7 @@ async def test_emergency_stop_cancels_preparation_and_prevents_target(robot, mon
     record = await start(robot, 'Hello')
     await emergency_stop(USER)
     await chat_tasks.wait(record, 1)
-    assert record.task.cancelled()
+    assert record.task.cancelled(), record.result
     assert robot.sent == [ACTIONS['RiseSit'].api_id]
 
 
@@ -162,9 +162,14 @@ async def test_gateway_forwards_preparation_as_request_metadata(monkeypatch):
     from cloud.api import intents
     dispatch = AsyncMock(return_value={'result':'executing','task_id':'body_test'})
     monkeypatch.setattr(intents, '_internal_request', dispatch)
-    session = {'actor':'visitor','session_id':'body-test-session'}
+    session = {'actor':'visitor','session_id':'body-test-session',
+               'expires_at': int(time.time()) + 60}
+    trusted = {**session, 'goal_revision': 1}
+    admit = AsyncMock(return_value=trusted)
+    monkeypatch.setattr(intents, 'begin_user_goal', admit)
     await intents._dispatch_go2('SPORT', {'cmd':'StandDown','prepare_standing':True}, session)
-    dispatch.assert_awaited_once_with('/api/go2/commands','POST',session,
+    admit.assert_awaited_once()
+    dispatch.assert_awaited_once_with('/api/go2/commands','POST',trusted,
                                      {'cmd':'StandDown','params':{},'prepare_standing':True})
 
 

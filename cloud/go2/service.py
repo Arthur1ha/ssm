@@ -203,42 +203,16 @@ async def set_activity_mode(mode: str, activity_id: str) -> dict:
     if mode == "manual":
         if _activity_mode_owner != activity_id:
             return {"ok": False, "mode": get_autonomy_mode(), "reason": "not_activity_owned"}
-        _activity_mode_owner = None
-        try:
-            _configure_vision_consumers("manual")
-        except Exception:
-            logging.exception("[Go2/Activity] failed to stop autonomous consumers")
-            drive.user_interrupt = True
-            try:
-                drive.stop()
-            except Exception:
-                logging.exception("[Go2/Activity] drive stop failed")
+        context = ExecutionContext(activity_id, 'visitor', False, origin_kind='agent_autonomous')
+        stopped = await _settle_owned_motion(context, owner=activity_id)
+        if _activity_mode_owner == activity_id:
+            _activity_mode_owner = None
+            _configure_vision_consumers('manual')
         from cloud.peers.gateway import cancel_pending
-        cancel_pending(initiator_unit_id="go2", origin_kind="agent_autonomous",
-                       reason="activity_ended")
-        if not go2.is_connected:
-            control_lease.release(activity_id)
-            return {"ok": True, "mode": "manual", "physical_stop": "unknown"}
-        try:
-            # End the local velocity stream before handing the lease to a new activity.
-            go2.stop_velocity()
-        except Exception as exc:
-            logging.warning("[Go2/Activity] zero velocity not confirmed: %s", exc)
-        try:
-            stop = await go2.send_command("StopMove", completion_timeout=5.0)
-        except Exception as exc:
-            logging.warning("[Go2/Activity] stop not confirmed: %s", exc)
-            return {"ok": True, "mode": "manual", "physical_stop": "unknown"}
-        # StopMove normally returns "accepted" after its Sport RPC response;
-        # it has no completion waiter. Once the autonomous task is cancelled and
-        # the stop request is accepted, its old software lease must not block
-        # the next activity. A rejected RPC still keeps the lease until expiry.
-        if (stop.get("result") == "ok" or
-                (stop.get("result") == "accepted" and
-                 stop.get("request_status_code") in (None, 0))):
-            control_lease.release(activity_id)
-        return {"ok": True, "mode": "manual",
-                "physical_stop": "confirmed" if stop.get("result") == "ok" else "unknown"}
+        cancel_pending(initiator_unit_id='go2', origin_kind='agent_autonomous', reason='activity_ended')
+        return {'ok': True, 'mode': get_autonomy_mode(),
+                'physical_stop': stopped.get('physical_stop', 'unknown'),
+                **({'reason': stopped['reason']} if stopped.get('reason') else {})}
     if not go2.is_connected:
         return {"ok": False, "mode": get_autonomy_mode(), "reason": "offline"}
     if get_autonomy_mode() != "manual" and _activity_mode_owner != activity_id:
@@ -246,6 +220,8 @@ async def set_activity_mode(mode: str, activity_id: str) -> dict:
     lease = control_lease.snapshot()
     if lease is not None and lease.owner_session_id != activity_id:
         return {"ok": False, "mode": get_autonomy_mode(), "reason": "motion_busy"}
+    if lease is not None and not control_lease.allows(activity_id, lease.generation):
+        return {"ok": False, "mode": get_autonomy_mode(), "reason": "stop_unconfirmed"}
     if _activity_mode_owner == activity_id and get_autonomy_mode() == mode:
         return {"ok": True, "mode": mode, "owner": activity_id}
     activity_context = ExecutionContext(activity_id, "visitor", False,
@@ -373,66 +349,132 @@ def _configure_vision_consumers(mode: str, owner_session_id: str = "system", con
         vision_loop.stop()
 
 
-async def prepare_user_interaction(context: ExecutionContext):
-    interrupt_training_behavior(context)
-    """Cancel owned motion, finish its cleanup, then observe a fresh stop."""
-    person_teachings.interrupt()
-    runtime = runtime_for(go2)
-    if runtime is None:
-        return
-    from cloud.go2.navigation.navigator import navigator
-    current_task = asyncio.current_task()
-    drive_task = getattr(drive, '_task', None)
-    nav_task = getattr(navigator, '_task', None)
-    def active(task):
-        return isinstance(task, asyncio.Task) and task is not current_task and not task.done()
-    exploring = runtime.data['life_state'] == 'explore' or (runtime.exploration_enabled and active(drive_task))
-    navigation = active(nav_task)
-    if not exploring and not navigation:
-        return
-    owner = (runtime.data['life_owner'] if runtime.data['life_state'] == 'explore' else
-             getattr(navigator, 'owner_session_id', None) if navigation else drive.owner_session_id)
-    if owner not in (None, context.session_id) and context.actor != 'admin':
-        raise ValueError('exploration_owned_by_another_session')
-    owned_tasks = [task for task, task_owner in (
-        (drive_task, getattr(drive, 'owner_session_id', None)),
-        (nav_task, getattr(navigator, 'owner_session_id', None)))
-        if task_owner == owner and active(task)]
-    moving = (go2.body_state == 'moving' or navigation
-              or getattr(go2, '_velocity_command_active', False)
-              or go2._command_lock.locked())
-    drive._user_handoff_in_progress = True
-    try:
-        if exploring:
-            pause = getattr(drive, 'pause_for_user', None)
-            if pause is not None:
-                pause(owner_session_id=owner)
-            else:
-                drive.stop(owner_session_id=owner)
-        navigator.stop(owner_session_id=owner)
-        if owned_tasks:
-            try:
-                await asyncio.wait_for(asyncio.gather(*owned_tasks, return_exceptions=True), timeout=2)
-            except asyncio.TimeoutError as exc:
-                raise ValueError('exploration_cancellation_unconfirmed') from exc
-        if moving:
-            sent_at = time.monotonic()
-            if not go2.pending_action and go2.body_state in {'standing', 'moving'} and go2.body_confirmation == 'observed':
-                go2._motion_observation_enabled = True
-            go2._stationary_samples = 0
-            go2.stop_velocity()
-            for _ in range(20):
-                if (go2.body_state == 'standing' and go2.body_confirmation == 'observed'
-                        and go2._stationary_samples >= 3
-                        and (getattr(go2, '_sport_state_observed_at', None) or 0) > sent_at):
-                    break
-                await asyncio.sleep(.1)
-            else:
-                go2.runtime.body(None, confirmation='unknown')
-                raise ValueError('exploration_stop_unconfirmed')
-    finally:
-        drive._user_handoff_in_progress = False
+_motion_handoff_lock = asyncio.Lock()
+_prepared_goal_revision = 0
 
+
+def _goal_current(context: ExecutionContext) -> bool:
+    from cloud.space.user_goals import get_goal_registry
+    return get_goal_registry().is_current(context.goal_revision)
+
+
+async def _settle_owned_motion(context: ExecutionContext, *, owner: str | None = None,
+                               supersede: bool = False, manual_control: bool = False) -> dict:
+    """Drain old cleanup before releasing the exact lease that was stopped."""
+    from cloud.go2.control import session_tasks
+    from cloud.go2.navigation.navigator import navigator
+    global _prepared_goal_revision
+    async with _motion_handoff_lock:
+        if not _goal_current(context):
+            return {'result': 'cancelled', 'physical_stop': 'unknown', 'reason': 'user_goal_superseded'}
+        if supersede and _prepared_goal_revision == context.goal_revision:
+            return {'result': 'ok', 'physical_stop': 'not_required'}
+        lease = control_lease.snapshot()
+        if owner and lease and lease.owner_session_id != owner:
+            return {'result': 'ok', 'physical_stop': 'unknown', 'reason': 'control_lease_transferred'}
+        runtime = runtime_for(go2)
+        prior_owner = (lease.owner_session_id if lease else owner
+                       or getattr(navigator, 'owner_session_id', None)
+                       or getattr(drive, 'owner_session_id', None)
+                       or (runtime.data.get('life_owner') if runtime is not None else None))
+        if (not supersede and prior_owner not in (None, context.session_id)
+                and context.actor != 'admin'):
+            raise ValueError('exploration_owned_by_another_session')
+        current_task = asyncio.current_task()
+        owners = {prior_owner} if prior_owner else set()
+        if supersede:
+            owners.update(value for value in (getattr(drive, 'owner_session_id', None),
+                          getattr(navigator, 'owner_session_id', None),
+                          runtime.data.get('life_owner') if runtime is not None else None) if value)
+        # A child tool runs beneath its session's current Graph task. Only a
+        # newly admitted goal may cancel that parent; an in-goal preflight must
+        # drain navigation/drive cleanup without cancelling its own caller.
+        tasks = ({task for previous in owners for task in session_tasks.owned(previous)}
+                 if supersede else set())
+        for controller in (drive, navigator):
+            task = getattr(controller, '_task', None)
+            if (getattr(controller, 'owner_session_id', None) in owners
+                    and isinstance(task, asyncio.Task) and task is not current_task and not task.done()):
+                tasks.add(task)
+        if (not supersede and owner is None and not tasks
+                and not (runtime and (runtime.exploration_enabled or runtime.data.get('life_state') == 'explore'))):
+            return {'result': 'ok', 'physical_stop': 'not_required'}
+        moving = (getattr(go2, 'body_state', None) == 'moving'
+                  or getattr(go2, '_velocity_command_active', False)
+                  or getattr(go2, '_manual_velocity_handle', None) is not None
+                  or bool(getattr(go2, 'pending_action', None))
+                  or bool(runtime and runtime.data.get('control_mode') == 'remote'))
+        if not lease and not tasks and not moving and not getattr(drive, 'owner_session_id', None):
+            if supersede:
+                _prepared_goal_revision = context.goal_revision
+            return {'result': 'ok', 'physical_stop': 'not_required'}
+        if lease is None:
+            lease = control_lease.acquire(context)
+        if not control_lease.hold_for_handoff(lease):
+            return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'control_owner_changed'}
+        def owns_scope():
+            current = control_lease.snapshot()
+            return bool(current and (current.owner_session_id, current.generation) ==
+                        (lease.owner_session_id, lease.generation) and _goal_current(context))
+        drive._user_handoff_in_progress = True
+        try:
+            if go2.is_connected:
+                try:
+                    go2.stop_velocity()
+                except (ValueError, RuntimeError):
+                    pass  # Cleanup and subsequent fresh proof still decide handoff.
+            interrupt_training_behavior(context)
+            person_teachings.interrupt()
+            for previous in owners:
+                drive.stop(owner_session_id=previous)
+                navigator.stop(owner_session_id=previous)
+                if supersede:
+                    session_tasks.cancel(previous)
+            for task in tasks:
+                if not task.cancelling():
+                    task.cancel()
+            if supersede and runtime is not None:
+                runtime.commit('user_goal_intervention', autonomy_mode='manual',
+                               exploration_enabled=False, exploration_owner=None)
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=2.0)
+                if pending:
+                    return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'motion_cleanup_unconfirmed'}
+            if not owns_scope():
+                return {'result': 'cancelled', 'physical_stop': 'unknown', 'reason': 'user_goal_superseded'}
+            if not go2.is_connected:
+                return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'disconnected'}
+            try:
+                stopped = await go2.stop_and_confirm_motion(can_continue=owns_scope)
+            except (ValueError, RuntimeError) as exc:
+                logging.warning('[Go2/Handoff] stop failed: %s', type(exc).__name__)
+                return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'stop_unconfirmed'}
+            if stopped.get('physical_stop') != 'confirmed' or not owns_scope():
+                return {**stopped, 'result': 'blocked', 'physical_stop': 'unknown'}
+            if not control_lease.release(lease.owner_session_id, generation=lease.generation,
+                                         stop_confirmed=True):
+                return {'result': 'blocked', 'physical_stop': 'unknown', 'reason': 'control_owner_changed'}
+            if supersede:
+                _prepared_goal_revision = context.goal_revision
+            if manual_control and runtime is not None and not (runtime.active_reason() or go2.body_ready_reason()):
+                go2._move_control_active = True
+            return stopped
+        finally:
+            drive._user_handoff_in_progress = False
+
+
+async def prepare_user_goal(context: ExecutionContext, *, manual_control: bool = False) -> dict:
+    """A new API-issued goal may stop previous control across user sessions."""
+    if context.origin_kind != 'user_delegated' or context.goal_revision <= 0:
+        raise ValueError('trusted_user_goal_required')
+    return await _settle_owned_motion(context, supersede=True, manual_control=manual_control)
+
+
+async def prepare_user_interaction(context: ExecutionContext):
+    """Within a goal, keep the same owner and real-stop handoff contract."""
+    result = await _settle_owned_motion(context)
+    if result.get('result') != 'ok':
+        raise ValueError(result.get('reason') or 'stop_unconfirmed')
 
 
 async def perform_life_control(action: str, context: ExecutionContext, *, request_id: str | None = None):

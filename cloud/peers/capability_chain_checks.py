@@ -285,9 +285,10 @@ async def test_page_lamp_retry_and_rejection_do_not_cancel_new_activity(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_page_go2_forwards_correlation_without_early_takeover(monkeypatch):
+async def test_page_go2_forwards_correlation_without_early_takeover(monkeypatch, tmp_path):
     from fastapi import Response
     from cloud.api import intents, activity
+    monkeypatch.setenv("SSM_USER_GOALS_DIR", str(tmp_path / "goals"))
     forwarded = []
     async def dispatch(path, method, session, body=None):
         forwarded.append((path, method, body))
@@ -300,7 +301,8 @@ async def test_page_go2_forwards_correlation_without_early_takeover(monkeypatch)
     request = intents.CommandRequest(action="SPORT", params={"cmd": "Hello"},
                                      request_id="button-one", trace_id="tr_" + "a" * 32,
                                      deadline=time.time() + 30)
-    result = await intents.create_command("go2", request, Response(), {"session_id": "page", "actor": "visitor"})
+    result = await intents.create_command("go2", request, Response(), {
+        "session_id": "page", "actor": "visitor", "expires_at": time.time() + 60})
     assert result["result"]["command_request_id"] == "button-one"
     assert forwarded == [("/api/go2/commands", "POST", {
         "cmd": "Hello", "params": {}, "request_id": "button-one",

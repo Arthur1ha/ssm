@@ -33,6 +33,7 @@ class ControlLease:
         self._owner_actor = ""
         self._expires_at = 0.0
         self._generation = 0
+        self._handoff_generation: int | None = None
         self._lock = threading.RLock()
 
     @property
@@ -44,7 +45,8 @@ class ControlLease:
             return 30.0
 
     def _expire_unlocked(self, now: float) -> None:
-        if self._owner_session_id and self._expires_at <= now:
+        if (self._owner_session_id and self._expires_at <= now
+                and self._handoff_generation != self._generation):
             self._owner_session_id = ""
             self._owner_actor = ""
             self._expires_at = 0.0
@@ -53,6 +55,8 @@ class ControlLease:
         now = time.time() if now is None else now
         with self._lock:
             self._expire_unlocked(now)
+            if self._handoff_generation == self._generation:
+                raise LeaseConflict(self._owner_session_id, self._expires_at)
             same_owner = self._owner_session_id == context.session_id
             admin_preempts = context.actor == "admin"
             if self._owner_session_id and not same_owner and not admin_preempts:
@@ -67,7 +71,8 @@ class ControlLease:
         now = time.time() if now is None else now
         with self._lock:
             self._expire_unlocked(now)
-            if self._owner_session_id != context.session_id:
+            if (self._owner_session_id != context.session_id
+                    or self._handoff_generation == self._generation):
                 raise LeaseConflict(self._owner_session_id, self._expires_at)
             self._expires_at = now + self.ttl_s
             return self._snapshot_unlocked()
@@ -79,26 +84,45 @@ class ControlLease:
         with self._lock:
             self._expire_unlocked(now)
             if (not session_id or self._owner_session_id != session_id
+                    or self._handoff_generation == self._generation
                     or generation is not None and generation != self._generation):
                 raise LeaseConflict(self._owner_session_id, self._expires_at)
             self._expires_at = now + self.ttl_s
             return self._snapshot_unlocked()
 
-    def release(self, session_id: str, *, generation: int | None = None) -> bool:
+    def hold_for_handoff(self, expected: LeaseSnapshot) -> bool:
+        """A timer cannot stand in for proof that the previous motion stopped."""
+        with self._lock:
+            if (self._owner_session_id, self._generation) != (expected.owner_session_id, expected.generation):
+                return False
+            self._handoff_generation = expected.generation
+            return True
+
+    def release(self, session_id: str, *, generation: int | None = None,
+                stop_confirmed: bool = False) -> bool:
         with self._lock:
             self._expire_unlocked(time.time())
             if (self._owner_session_id != session_id
                     or generation is not None and generation != self._generation):
                 return False
+            if self._handoff_generation == self._generation and not stop_confirmed:
+                return False
             self._owner_session_id = ""
             self._owner_actor = ""
             self._expires_at = 0.0
+            self._handoff_generation = None
             return True
 
     def snapshot(self) -> LeaseSnapshot | None:
         with self._lock:
             self._expire_unlocked(time.time())
             return self._snapshot_unlocked() if self._owner_session_id else None
+
+    def allows(self, session_id: str, generation: int) -> bool:
+        with self._lock:
+            self._expire_unlocked(time.time())
+            return (self._owner_session_id == session_id and self._generation == generation
+                    and self._handoff_generation != generation)
 
     def _snapshot_unlocked(self) -> LeaseSnapshot:
         return LeaseSnapshot(self._owner_session_id, self._owner_actor, self._expires_at,
@@ -124,11 +148,19 @@ class SessionTasks:
         return task
 
     def cancel(self, session_id: str) -> int:
-        tasks = tuple(self._tasks.pop(session_id, ()))
+        tasks = self.owned(session_id)
         for task in tasks:
-            if not task.done():
+            if not task.done() and not task.cancelling():
                 task.cancel()
         return len(tasks)
+
+    def owned(self, session_id: str) -> tuple[asyncio.Task, ...]:
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        return tuple(task for task in self._tasks.get(session_id, ())
+                     if not task.done() and task is not current)
 
 
 control_lease = ControlLease()

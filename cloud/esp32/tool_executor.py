@@ -65,6 +65,8 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                        origin_kind=context.origin_kind)
         if previous is not None:
             return {**previous, "action": action}
+        from cloud.space.user_goals import get_goal_registry
+        get_goal_registry().check(context.goal_revision)
         if card is not None:
             from cloud.agents.common.training.service import load_runtime
             load_runtime(card, context)
@@ -120,6 +122,7 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                         return {"result": "blocked", "error": block}
                 if current != (state.actuator_snapshot().get(unit_id, {}).get("state") or {}):
                     return {"result": "blocked", "error": "state_changed_before_dispatch"}
+                get_goal_registry().check(context.goal_revision)
                 first = reserve(task_id, unit_id=unit_id, session_id=context.session_id,
                                 action=action, params=params, request_params=request_params,
                                 origin_kind=context.origin_kind,
@@ -136,6 +139,10 @@ def execute_physical(*, state, unit_id: str, action: str, params: dict,
                 if not first:
                     return {**get(task_id, unit_id=unit_id, session_id=context.session_id), "action": action}
             reserved_here = True
+            if not get_goal_registry().is_current(context.goal_revision):
+                record_result(task_id, unit_id, {"result": "cancelled", "error": "newer_user_goal",
+                    "dispatch_status": "not_dispatched"})
+                get_goal_registry().check(context.goal_revision)
             dispatched = dispatch(unit_id, action, params, context, source, task_id=task_id)
             if dispatched != task_id:
                 raise ValueError("physical_dispatch_id_mismatch")

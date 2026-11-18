@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from cloud.go2.actions import ACTIONS, BODY_STATES, SPORT_COMMANDS
 from cloud.go2.connection.webrtc import Go2Connection
-from cloud.go2.control import control_lease
+from cloud.go2.control import ControlLease, control_lease
 from cloud.space.execution import ExecutionContext
 
 
@@ -30,9 +30,10 @@ def robot(monkeypatch, tmp_path):
     from cloud.go2 import service
     from cloud.api import policy
 
-    owner = control_lease.snapshot()
-    if owner is not None:
-        control_lease.release(owner.owner_session_id)
+    lease = ControlLease()
+    monkeypatch.setitem(globals(), 'control_lease', lease)
+    for module in (router, executor, service):
+        monkeypatch.setattr(module, 'control_lease', lease)
     connection = Go2Connection()
     connection.is_connected = True
     connection.runtime.body("standing", confirmation="observed")
@@ -202,12 +203,21 @@ async def test_emergency_stop_remains_reachable_with_uninterruptible_pending_act
 
 
 @pytest.mark.asyncio
-async def test_joystick_zero_keeps_stop_wire_params_empty(robot):
-    from cloud.go2.router import VelocityRequest, go2_velocity
+async def test_joystick_zero_keeps_stop_wire_params_empty(robot, monkeypatch, tmp_path):
+    from dataclasses import replace
+    from cloud.go2 import router
+    from cloud.space.user_goals import get_goal_registry
 
     robot.runtime.body("moving", confirmation="observed")
     robot.manual_velocity = MagicMock(return_value={"result": "accepted"})
-    result = await go2_velocity(VelocityRequest(vx=0, vy=0, vyaw=0), context=VISITOR)
+    monkeypatch.setenv('SSM_USER_GOALS_DIR', str(tmp_path / 'goals'))
+    context = replace(VISITOR, goal_revision=get_goal_registry().advance(VISITOR.session_id),
+                       expires_at=int(time.time())+60)
+    controller = router.VelocityController(context.goal_revision, context.expires_at, True,
+                                          sequence=1, prepared=True)
+    monkeypatch.setattr(router, '_velocity_sequences', {(context.session_id,'gesture'):controller})
+    result = await router.go2_velocity(router.VelocityRequest(vx=0, vy=0, vyaw=0,
+        controller_id='gesture',sequence=2), context=context)
     assert result["result"] == "accepted"
     args, kwargs = robot.manual_velocity.call_args
     assert args == (0, 0, 0)
@@ -222,6 +232,7 @@ async def test_gateway_forwards_new_command_with_original_identity(monkeypatch, 
     session = {"actor": "visitor", "session_id": "trusted-action-session"}
     dispatch = AsyncMock(return_value={"result": "accepted", "confirmation_scope": "request"})
     monkeypatch.setattr(intents, "_internal_request", dispatch)
+    monkeypatch.setattr(intents, 'begin_user_goal', AsyncMock(return_value=session))
     result = await intents._dispatch_go2(command, {}, session)
     assert result["result"] == "accepted"
     dispatch.assert_awaited_once_with(

@@ -78,6 +78,8 @@ def validate_execution_context(context: ExecutionContext) -> None:
         raise ValueError("invalid_execution_context")
     if context.expires_at and context.expires_at <= time.time():
         raise ValueError("execution_context_expired")
+    from cloud.space.user_goals import get_goal_registry
+    get_goal_registry().check(context.goal_revision)
 
 
 def _check_motion_owner(command: str | None, context: ExecutionContext):
@@ -278,6 +280,7 @@ async def execute_action(command: str, params: dict | None = None, *,
     if not checked['allowed']:
         return {'result': 'blocked', 'error': 'training_blocked', **_training_result(checked)}
     params = checked['params']
+    validate_execution_context(context)
     runtime = runtime_for(go2)
     token = None
     if command != "StopMove" and runtime is not None and runtime.life_task_available:

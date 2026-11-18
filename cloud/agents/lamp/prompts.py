@@ -19,7 +19,8 @@ def lamp_observation(agent, unit_id: str) -> dict:
     """Project one cached physical observation with its original freshness."""
     snapshot = getattr(getattr(agent, "_state", None), "actuator_snapshot", None)
     entries = snapshot() if callable(snapshot) else {}
-    return _summarize(unit_id, entries.get(unit_id), time.time())
+    from cloud.cards.registry import get_registry
+    return _summarize(unit_id, entries.get(unit_id), time.time(), card=get_registry().get_card(unit_id))
 
 
 def capture_lamp_baseline(run, *, agent, unit_id: str) -> None:
@@ -35,8 +36,8 @@ def capture_lamp_baseline(run, *, agent, unit_id: str) -> None:
 def planning_prompt(*, include_social: bool = True) -> str:
     """Role instructions; request and live data use separate messages."""
     instructions = (
-        "完成本次照明目标即结束。单次调整以执行前的灯光为基准，"
-        "成功后不把原请求当成新的反馈反复调节；明确要求多个先后动作时才逐步执行。"
+        "完成本次照明目标即结束，不把原请求当成新的反馈反复调节；"
+        "明确要求多个先后动作时才逐步执行。"
         "lamp_before 是本次执行前的观察，lamp 是当前缓存观察；比较前后只用各自新鲜的事实。"
         "执行后达到目标不能说明执行前已经如此；执行前观察过期或未知时不推断原先颜色。"
         "教学只引用当前真实灯光；用户已明确的适用情境无需再增加触发方式或限制。"
@@ -51,6 +52,8 @@ def planning_prompt(*, include_social: bool = True) -> str:
         "邀请正文自然简短，只说邀请和对方参与所需的玩法与输赢约定，通常两三句即可；"
         "不逐条复述完整规则、策略、权限、安全校验或回执流程，也不解释邀请原因。"
         "同伴观察要说成它分享的发现，不编造自己的视觉或同伴完整任务情况。"
+        "协作只交流对方此刻需要的目标、约定、问题和新结果，"
+        "设备怎样站位、导航或核验由它自己的工具负责，不把执行手册写成指挥台词。"
         "缺少事实时先询问或观察，不补造同伴的发现或意愿。"
     )
 

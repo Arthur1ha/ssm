@@ -147,6 +147,8 @@ ESP32 的 `ts` 为 Unix 秒。上电后先通过 NTP 校准 RTC，并按 MicroPy
 
 三类用户入口返回可信 `trace_id`；任务查询、继续和 SSE 反馈沿用原 ID。`ssm/intent/{session_id}` 的签名正文带 `trace_id`；同伴 `request/result` 带 `trace_id` 与 `parent_run_id`，HTTP 内部任务正文带同样字段。浏览器可显示该 ID 供排查，但不能用它声明角色或权限。
 
+新的外部用户目标由 API 签发正整数 `goal_revision`，经签名意图和认证内部 HTTP 的 `X-SSM-Goal-Revision` 传播。新目标使旧排队意图和旧 Graph 失效，模型返回、工具派发及公开回复前均复核代次；原任务的真实回执仍可补齐，不能据此恢复旧目标的后续动作。明确的 `resume_run_id` 续接只接受当前代次的原运行，缺少代次的历史用户运行只能查询。该字段不由模型或浏览器声明；`user_revision` 仍单独保护活动启动请求。摇杆每个新手势用新的 `controller_id`、从 1 开始的 `sequence` 绑定代次，后续帧沿用；失效手势的迟到零速度不能停止新目标。
+
 ### 对话过程的公开事实
 
 运行展示沿用 `agent_progress`、`agent_reply`、`run_stage` 和 `reply_error`，通过既有 `ssm/feedback/{session_id}` 与 `/api/events` 传输；活动事实还进入既有有界时间线。`stage` 是忙碌、追问或终结控制信号，不对应一句聊天记录；没有调用、观察或实际结果时不创建过程面板。
@@ -183,7 +185,7 @@ PWA 为新回复播放短暂情绪动画，日常眨眼和起伏在客户端运�
 
 | Topic | 发布者 | 格式 |
 |-------|--------|------|
-| `ssm/intent/{session_id}` | FastAPI（内部） | `{"text":"...","context":{...},"_mqtt_auth":{"alg":"HMAC-SHA256","timestamp":...,"nonce":"...","signature":"..."}}`；签名绑定完整 topic 与规范化 payload，编排器校验时间窗并拒绝 nonce 重放 |
+| `ssm/intent/{session_id}` | FastAPI（内部） | `{"text":"...","context":{...},"goal_revision":123,"_mqtt_auth":{"alg":"HMAC-SHA256","timestamp":...,"nonce":"...","signature":"..."}}`；代次由 API 签发，签名绑定完整 topic 与规范化 payload，编排器校验时间窗并拒绝 nonce 重放 |
 | `ssm/session/{session_id}/ended` | FastAPI（内部） | `{"context":{...},"reason":"logout\|expired\|revoked","_mqtt_auth":{...}}`；与 intent 使用相同 HMAC 验证，触发会话历史、任务结果与 Go2 资源清理 |
 | `ssm/feedback/{session_id}` | Cloud | `{"type":"run_stage\|agent_progress\|agent_reply\|reply_error","session_id":"...","agent_id":"...","stage":"...","status":"...","run_id":"...","trace_id":"...","step_id":"...","event_id":"...","sequence":1,"text":"...","ts":...}`；过程字段由上面的公开事实投影提供。`run_stage` 只承担忙碌、追问及终结控制，原始人格发言只在 `agent_reply`，生成失败和请求拒绝用 `reply_error`。`question` 暂停原 `run_id`。API/SSE 只向同一会话转发，委托设备发言保留原设备 `agent_id`。 |
 | `ssm/decision/active` | Cloud | `"true"` 或 `"false"`；编排器兼容在线标记，当前 ESP32 固件不订阅它 |
@@ -215,6 +217,10 @@ Go2 加入活动后仍配置为 `free_explore`，启动事件及活动原话从�
 活动与聊天的公开过程使用同一投影：`run_id/parent_run_id/step_id` 关联原 Graph 运行及步骤，`tool/action`、`target_unit_id`、`skill_id`、`arguments`、`requested_text`、`result_state` 保留有界公开事实。`arguments` 最多 32 个标量参数，不含上下文、凭据、模型提示或私有推理；标识最多 120 字。灯能力统一使用模型工具名 `set_led_state/set_led_color/blink_led`；活动写入、SSE 与历史读取均从 `LAMP_SKILLS` 归一化，旧文件不迁移、硬件 MQTT 命令不改变。`capability_name` 从既有灯能力声明或目标 Card 派生；同任务合并只依赖真实 task/run/step 身份，不按名称或相邻时间猜测关联。`state_at_event` 仍是当时最近反馈，不证明当前动作造成该状态。详情缺字段时保持缺失，不能补造原因或观测。
 
 猜拳的 `type=activity,event_type=message,stage=rps_result` 事件在双方展示动作回执确认后附 `game_round={round,choices,mapping,winner}`：`choices` 以真实 unit_id 为键，值为 `rock|scissors|paper`；`mapping` 保存该轮对应的灯 `color={r,g,b,brightness?}` 与中文 `label`，狗的 `action=go2_sport,arguments={cmd},label`，各项同时含 `choice`；`winner` 为获胜 unit_id 或 `draw`。出拳台词在公开展示开始后、判决之前发布；秘密选拳与未确认回合不发布结构化选择/胜负。前端仅据该公开结果绘制历史虚拟形象，不将其当作当前物理姿态；旧游戏记录没有结构化结果时不解析自由文本补造。
+
+灯的 MQTT 状态回执确认了持续照明设置后，在线期间以 `validity=until_changed` 表示颜色／亮度有效直到新的物理状态覆盖；不按通用观察的 60 秒时效撤销该设置。`as_of` 保留原始回执时间，retained 回放不刷新时间，离线撤销连接确认，重连须有新的实际状态。该语义贯通同伴视图、空间环境、决策依据及 `state_at_event`，不放宽传感器、Go2 定位或障碍地图的观测时效。
+
+游戏执行器接受本局任务后发送活动事件 `game_started`；原邀请关联的任务最终回执投影为 `game_ended`。二者均保留 `game_id`、`trigger_message_id`、`task_id` 和真实 `status`，结束事件保留 `reason`。PWA 显示“本局游戏已开始／本局游戏已结束”，异常结束另列原因；邀请送达不代表已开局，动作成功不代表已送达。公共事实的 `capability_name` 优先采用已有 Card 名称，内部工具的名称由其声明模块统一解析；这不会将内部工具新增为公开可调用技能。历史读取同样投影名称，不改写原文件，前端不以原始工具 ID 作为展示兜底。
 
 ### 智能体定向消息（内部，非 retained）
 

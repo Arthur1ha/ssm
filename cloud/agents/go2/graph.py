@@ -67,7 +67,7 @@ async def run_go2_loop(session_id: str, message: str, *, context: ExecutionConte
                        tool_guard=None, task_context=None,
                        publish_reply: bool = True, selection: dict | None = None) -> dict:
     view = get_store()
-    async with view.index.async_session_lock("go2", session_id):
+    async with view.index.async_session_lock("go2", session_id, goal_revision=context.goal_revision):
         return await _run_go2_loop_locked(
             session_id, message, context=context, view=view,
             skill_id=skill_id, params=params, run_id=run_id, deadline=deadline,
@@ -143,6 +143,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
         run.parent_run_id = parent_run_id or ""
         run.agent_id = "go2"
         run.origin_kind = context.origin_kind
+        run.goal_revision = context.goal_revision
         supplemental = ""
         try:
             created = view.register(run.run_id, session_id)
@@ -231,6 +232,8 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
     training_attempt_start = len(run.steps)
 
     async def execute(name: str, arguments: dict, step_id: str) -> dict:
+        from cloud.space.user_goals import get_goal_registry
+        get_goal_registry().check(context.goal_revision)
         nonlocal interaction_token, motion_unconfirmed
         execution_context = context
         if name == "apply_training":
@@ -413,6 +416,9 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
                 from cloud.go2.mode.free_explore import drive
                 drive.resume_after_user()
 
+    from cloud.space.user_goals import get_goal_registry
+    if not get_goal_registry().is_current(run.goal_revision):
+        run.status, run.response, run.question = "cancelled", "", ""
     progress("finished", None)
     if (run.status == "needs_clarification" and publish_reply
             and not context.session_id.startswith("peer_")):
@@ -425,6 +431,7 @@ async def _run_go2_loop_locked(session_id: str, message: str, *, context: Execut
             status=run.status, run_id=run.run_id, trace_id=run.trace_id or run.run_id,
             parent_run_id=run.parent_run_id, source=event_source,
             text=run.response, emotion=run.emotion, reply_kind="clarification",
+            goal_revision=run.goal_revision,
             event_id=run.reply_event_id)
     if run.status != "needs_clarification":
         if run.response and not context.session_id.startswith("peer_"):

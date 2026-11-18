@@ -20,7 +20,7 @@ def run(**fields):
                     agent_id="esp32_desk_led", **fields)
 
 
-@pytest.mark.parametrize("role", ["lamp", "steward", "go2"])
+@pytest.mark.parametrize("role", ["lamp", "steward", "go2", "go2_json"])
 def test_role_decisions_separate_instructions_request_and_live_facts(role, monkeypatch):
     from cloud.agents.lamp import prompts as lamp
     from cloud.agents.steward import prompts as steward
@@ -37,7 +37,7 @@ def test_role_decisions_separate_instructions_request_and_live_facts(role, monke
     monkeypatch.setattr(lamp, "get_space_context", lambda *a, **k: space)
     monkeypatch.setattr(steward, "get_space_context", lambda *a, **k: space)
     monkeypatch.setattr(steward, "emit_agent_event", lambda *a, **k: None)
-    monkeypatch.setattr(robot, "prompt_space_context", lambda: space)
+    monkeypatch.setattr(robot, "prompt_space_context", lambda: json.dumps(space) if role == "go2_json" else space)
     monkeypatch.setattr(robot.go2, "state_snapshot", lambda: {"body_state": "standing"})
     current = run()
     if role == "lamp":
@@ -59,6 +59,7 @@ def test_role_decisions_separate_instructions_request_and_live_facts(role, monke
             and message.name is None] == [current.goal, "就用上次那档"]
     contexts = [message for message in messages if message.name == "context"]
     assert len(contexts) == 1
+    assert current.decision_space == space
     assert "上下文数据" in contexts[0].content
     assert not any("recent_dialogue" in message.content for message in messages)
 

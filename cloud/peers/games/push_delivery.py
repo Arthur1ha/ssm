@@ -111,13 +111,17 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             raise DeliveryStopped("control_lease_changed")
         if expected_color is not None:
             current = live_lamp_color(LAMP)
-            if (not current or current["rgb"] != expected_color["rgb"]
+            if not current:
+                raise DeliveryStopped("delivery_signal_unconfirmed")
+            if (current["rgb"] != expected_color["rgb"]
                     or current["brightness"] != expected_color["brightness"]):
-                raise DeliveryStopped("delivery_signal_changed_or_stale")
+                raise DeliveryStopped("delivery_signal_changed")
 
     event_counts = {}
 
     def record(kind, text, *, role=DOG, **details):
+        if kind == "message" and not str(text or "").strip():
+            return None
         identity = (kind, role, details.get("task_id", task_id), details.get("stage", ""), details.get("action", ""))
         ordinal = event_counts.get(identity, 0)
         event_counts[identity] = ordinal + 1
@@ -129,8 +133,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 "task_id": task_id, "source_event_id": source_id,
                 "fact_kind": fact_kind, "result_kind": "action", **details})
 
-    def facts(state, role):
-        return {"game": GAME.metadata(), "stage": state.get("stage", ""),
+    def facts(state, role, phase):
+        data = {"game": GAME.metadata(), "stage": state.get("stage", ""),
                 "roles": {"lamp": "指挥官", "go2": "送货员"},
                 "invitation": event["message"].get("content", ""),
                 "space": get_space_context(LAMP if role == "lamp" else DOG, state=agent._state),
@@ -140,12 +144,24 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                 "canonical_terms": state.get("order"),
                 "destination_confirmed": expected_color is not None,
                 "latest_push": state.get("push_receipt"), "sequence": state.get("sequence", 0)}
+        if role == "go2" and phase == "next":
+            from cloud.go2.tools.registry import get_tool_spec
+            data["push_contract"] = get_tool_spec("go2_push_cargo").description
+        return data
 
     async def decision(role, phase, state):
         check()
-        return await decide(role, phase, facts(state, role),
+        return await decide(role, phase, facts(state, role, phase),
             thread_id=f"delivery:{invitation_id}:{role}:{phase}:{state.get('stage', '')}:{state.get('sequence', 0)}",
             deadline=deadline)
+
+    def decision_basis(answer, role=DOG):
+        from cloud.agents.common.progress_facts import resolve_public_decision
+
+        if not answer.get("decision_reason"):
+            return None
+        return resolve_public_decision(get_space_context(role, state=agent._state),
+            answer["decision_reason"], answer.get("evidence_refs") or [])
 
     async def observe(question):
         check()
@@ -187,7 +203,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", {"stage": "roles"}),
                                          decision("go2", "agree", {"stage": "roles"}))
         for role, answer in ((LAMP, lamp), (DOG, dog)):
-            record("message", answer["speech"], emotion=answer.get("emotion"), role=role)
+            record("message", answer.get("speech"), emotion=answer.get("emotion"), role=role)
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "delivery_roles_not_agreed"}
         return {"sequence": 0}
@@ -222,7 +238,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
 
     async def report(state):
         answer = await decision("go2", "next", {**state, "stage": "waiting_destination"})
-        record("message", answer["speech"], emotion=answer.get("emotion"))
+        record("message", answer.get("question") if answer["action"] == "question" else answer.get("speech"),
+               emotion=answer.get("emotion"))
         if answer["action"] == "stop":
             return {"result": "cancelled", "reason": "courier_declined"}
         # No tool chosen by the courier can run before a real destination.
@@ -239,7 +256,9 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         if not observed.get("ref") or observed["ref"] not in answer["evidence_refs"]:
             raise DeliveryStopped("destination_current_observation_required")
         space = get_space_context(LAMP, state=agent._state)
-        basis = resolve_decision(space, answer["speech"], answer["evidence_refs"], require_observation=True)
+        basis = resolve_decision(space, answer.get("decision_reason") or
+                                 f"选择{answer['destination']}作为本单目的地。",
+                                 answer["evidence_refs"], require_observation=True)
         return {"order": {"cargo": state["cargo"], "destination": answer["destination"],
                            "color": answer["color"], "color_name": answer["color_name"]},
                 "decision_basis": basis, "observation": observed}
@@ -248,7 +267,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", {**state, "stage": "order"}),
                                          decision("go2", "agree", {**state, "stage": "order"}))
         for role, answer in ((LAMP, lamp), (DOG, dog)):
-            record("message", answer["speech"], emotion=answer.get("emotion"), role=role)
+            record("message", answer.get("speech"), emotion=answer.get("emotion"), role=role)
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "delivery_order_not_agreed"}
         return {}
@@ -278,8 +297,9 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     async def plan(state):
         check()
         answer = await decision("go2", "next", {**state, "stage": "delivery"})
-        if answer.get("speech"):
+        if answer.get("speech") and answer["action"] != "question":
             record("message", answer["speech"], emotion=answer.get("emotion"))
+        answer["decision_basis"] = decision_basis(answer)
         action = answer["action"]
         if action == "finish":
             if not _push_completed(state.get("push_receipt") or {}):
@@ -295,7 +315,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
             record("message", question["question"], emotion=question.get("emotion"))
         answer = await decision("lamp", "agree", {
             **state, "stage": "clarification", "courier_report": question})
-        record("message", answer["speech"], emotion=answer.get("emotion"), role=LAMP)
+        record("message", answer.get("speech"), emotion=answer.get("emotion"), role=LAMP)
         if not answer["accepted"]:
             return {"result": "blocked", "reason": "courier_question_unresolved"}
         # The answer can explain this order, but cannot replace its cargo,
@@ -313,19 +333,21 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         check()
         order, answer = state["order"], state["next_action"]
         push_id = "delivery_" + invitation_id + "_push_" + str(state["sequence"])
-        record("action", answer["speech"], action="go2_push_cargo", task_id=push_id)
+        params = {"cargo": state["cargo"], "destination": order["destination"]}
+        if answer.get("distance_m") is not None:
+            params["distance_m"] = answer["distance_m"]
+        record("action", "", action="go2_push_cargo", arguments=params, task_id=push_id,
+               decision_basis=answer.get("decision_basis"))
         reference = state.get("cargo_reference") or {
             "cargo": state["cargo"], "destination": order["destination"],
             "search_evidence": state["cargo_receipt"].get("evidence")}
         with expect_cargo(reference, request_id=push_id,
                           signal_rgb=expected_color["rgb"]), search_request(push_id, deadline):
-            params = {"cargo": state["cargo"], "destination": order["destination"]}
-            if answer.get("distance_m") is not None:
-                params["distance_m"] = answer["distance_m"]
             receipt = await execute_tool("go2_push_cargo", params, context=context)
         record("action_result", receipt.get("message") or "", public_result=receipt,
                action="go2_push_cargo", status=receipt.get("result", "unknown"),
-               task_id=receipt.get("task_id") or push_id)
+               task_id=receipt.get("task_id") or push_id,
+               decision_basis=answer.get("decision_basis"))
         check()
         if receipt.get("result") != "ok":
             raise DeliveryStopped("cargo_push_unconfirmed:" + str(receipt.get("reason") or receipt.get("error") or receipt.get("result")))
@@ -388,6 +410,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         started = await drive._advance_task(goal, stage="start")
         if (started.get("result") or {}).get("result") == "blocked":
             raise DeliveryStopped("go2_activity_unavailable")
+        record("game_started", "", status="executing")
         saver, thread = FileCheckpointSaver(), "delivery:game:" + invitation_id
         async with saver.async_run_lock(thread):
             work = asyncio.create_task(graph.compile(checkpointer=saver).ainvoke({},
@@ -445,8 +468,7 @@ GAME = Game(
     game_id=GAME_ID,
     name="指挥官与送货员",
     description=("灯与狗任一方都可自主邀请对方，确认指挥官与送货员角色后公布货物特征；"
-                 "狗先找货，找到后等待目的地指令，再按约定灯色和目的地描述推送货物。"
-                 "狗先调整到货物后方，与目的地方向大致共线再尝试推送；真实停稳后即可完成本单尝试，不要求精确送到或接触后重新识别。"),
+                 "灯负责选择货物、目的地和指令灯色，狗负责找货并朝目的地方向尝试推送，再报告真实结果。"),
     participants=("esp32_desk_led", "go2"),
     bidirectional=True,
     requires_idle=True,
@@ -458,50 +480,14 @@ GAME = Game(
     invitation="",
     acceptance="",
     rules=(
-        "准备：不要求安装推板；允许机器狗在既有运动门禁和避障校验内以短距离行走尝试用腿推动地面货物。"
-        "没有专用踢腿动作，不用挥手、伸展或跳跃冒充受控推送；具体货物是否能推动由真实实机反馈决定。"
-        "场地布置可识别的货物和目的地；目的地可以是一片色块、小地面标记或物体标识，不要求完整区域边界。"
-        "货物需要狗根据特征寻找和核对，可以已经在狗附近，不要求固定摆放位置。"
-        "邀请与角色：灯与狗须处于同一个有效空间活动内，任一方均可结合当前任务和观察自主邀请对方；"
-        "邀请及接受开局前须确认双方当前没有正在执行或等待确认的任务，任意一方忙碌时延后；空闲不等于愿意接受。"
-        "不固定发起方，不用随机定时器强制邀请。对方自主决定是否接受，邀请送达不等于接受。"
-        "接受后双方确认本局角色和职责：灯负责指挥与颜色信号，狗负责找货与配送；"
-        "邀请方不默认成为指挥官，角色扮演不授予设备控制权限。"
-        "公布货物：角色确认后，灯作为指挥官依据用户提供的信息或真实观察直接决定货物并公布可辨认特征，"
-        "不向狗征求选货意见；狗负责提供真实观察并按指令找货。用户未指定时，灯综合观察优先选离狗较近、"
-        "容易接近、看起来方便推动且有一定体积的独立物品，不设固定距离、尺寸门槛或物品种类。"
-        "区分货物与站点标记，地面色块、贴纸及用于标识目的地的小标记留作目的地，"
-        "不因颜色鲜明就选作货物；不凭外观保证货物能推动。"
-        "不固定货物、特征或描述句式，不编造尚未观察到的货物事实。"
-        "找货：狗依据公布的特征自主观察、搜索并核对货物身份；特征不清或存在歧义时自主询问、复查。"
-        "仅看见相似物或口头声称找到不算确认，须保留真实观察依据。"
-        "等待指令：狗确认找到货物后报告结果并等待目的地指令，不能自行猜测或提前开始配送；"
-        "等待期间可以自主问答、询问目的地或补充观察，不强制固定对白、问答轮次或等待时长。"
-        "目的地：找到货物后，指挥官依据当前站点事实自主决定送往哪个区域，通过灯色给出指令；"
-        "灯设置本单约定的指令色并等待物理回执，狗结合真实灯色、目的地描述和当前观察确认站点，"
-        "物体标识不必与灯同色，指令色不冒充目标的观察颜色；不凭历史摘要编造站点。"
-        "指令或目标不清时先澄清、观察，不盲推。"
-        "配送：狗在目标明确且执行条件满足后，自主选择本次推送行动，根据当前视觉估算决定本次距离，不使用固定步长，"
-        "先调整到机器狗、货物和目的地大致共线，站在货物背向目的地的一侧，再朝目的地方向尝试用腿推动；"
-        "positioned、aligned、approached仅表示调整位置或接近，须继续原目标。"
-        "directional_push_attempted=true且directional_move_and_stop表示已完成朝目的地方向的推送尝试并停稳，本单即可结束；"
-        "推送后货物进入固定前置摄像头盲区时不强制后退或重新识别，不重复推送以追求精确到位。"
-        "机器人自身移动不等于货物移动，单纯画面框变化不算推送成功。"
-        "执行器仅在本步受控接触范围内允许接触刚确认的同一货物，雷达接触路线持续核对货物簇，视觉估距路线不申请障碍豁免，"
-        "保留共享地图和其他障碍检查；不能用普通移动、清空地图或关闭避障替代。"
-        "货物偏离、卡住、丢失或通路受阻时停止，根据真实情况决定询问、复查或报告受阻，"
-        "不凭移动距离猜测货物位置。"
-        "送达：只有同一目标货物到达本单指定目的地附近、狗停稳已由真实反馈确认，"
-        "且停稳后用一张新鲜画面复核货物已到指定标识附近，才算大致送达；"
-        "不要求货物完全覆盖标记、完整区域边界或精确对位。"
-        "狗自身到站、普通导航成功、请求 accepted、模型描述或消息送达都不能替代。"
-        "送达不等于签收，取件或签收由人完成并另行确认。"
-        "中断：用户介入、活动结束、配送中目标灯色改变、设备断连、定位会话改变、观测过期或任务期限结束时停止并核验结果；"
-        "停止未确认则报告结果未知，不宣称已停稳或送达。失败、超时按原任务查询，"
-        "不改用普通导航冒充推货、不盲目重发动作，重启不重放旧配送。"
-        "交流与结束：全过程的邀请、接受、角色确认、问答、回复、决策和具体行动由现有角色 Graph"
-        "结合人格、当前观察、任务与真实结果自主判断；只约束上述先后依赖和完成判据，不预排对白与行动剧本。"
-        "如实报告结果，后续交流、庆祝或再次提议由设备自主决定，并继续遵循当前活动、权限及真实反馈约束。"
+        "双方在同一活动中自主商量是否参与；接受后灯为指挥官、狗为送货员，邀请方向不改变分工。"
+        "灯依据用户要求或真实观察公布一件可辨认货物，狗先寻找并核对它；"
+        "确认找到后等待灯指定目的地和约定指令灯色，不提前猜测目的地。"
+        "目的地可以是色块、小地面标记或物体，灯色用于本单指令，不要求与目的地外观同色。"
+        "目标不清时可以询问或观察。狗使用已有推物工具尝试朝指定方向推送，不要求安装推板，"
+        "不能凭外观保证物品能推动；具体动作和完成判据由工具核验。"
+        "本单完成方向推送尝试并停稳即可结束；推送尝试、实测货物位移、大致送达及人工签收分别说明。"
+        "只交流新约定、必要疑问、真实发现和结果，不预排对白，也不为每步动作复述执行流程。"
     ),
     strategy=(
         "结合人格 traits、活动要求、货物与配送区域的新鲜观察决定是否游玩；"
@@ -510,7 +496,6 @@ GAME = Game(
         "灯自主决定货物，优先考虑较近、容易接近和推动且有一定体积的物品；站点标记留作目的地。"
         "双方用自己的口吻交流，依据真实观察选择问题、回应、搜索、等待和配送行动；"
         "不预设货物特征、站点颜色顺序、固定延时、固定问答或成功剧情。"
-        "模型决定目标、交流与下一步策略，具体推送、停止和送达判定由已有可信执行链及实机适配核验。"
-        "货物、区域或接触路径不明确就复查或提问，不盲推；不能声称所有货物都可被腿推动。"
+        "模型决定目标、交流与下一步策略，运动由设备工具负责。"
     ),
 )

@@ -32,7 +32,8 @@ def test_emotion_does_not_relax_game_business_validation():
     with pytest.raises(ValueError):
         ThrowDecision(choice='invalid', emotion='happy')
     with pytest.raises(ValueError):
-        NextDecision(action='push', speech='试试。', distance_m=100, emotion='happy')
+        NextDecision(action='push', speech='试试。', distance_m=-1, emotion='happy')
+    assert NextDecision(action='push', distance_m=100, emotion='happy').distance_m == 100
     with pytest.raises(ValueError):
         RpsAgreement(accepted='yes', speech='同意。', emotion=None)
 

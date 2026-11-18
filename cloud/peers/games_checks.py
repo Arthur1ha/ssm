@@ -17,7 +17,7 @@ from cloud.peers.messaging import AgentMessenger
 from cloud.space.execution import ExecutionContext
 
 
-def test_registry_exposes_each_games_rules_and_strategy():
+def test_registry_exposes_game_choices_and_keeps_selected_rules_separate():
     """A new game needs no role-specific catalogue or prompt branch."""
     from cloud.peers.games import get_game
 
@@ -32,8 +32,11 @@ def test_registry_exposes_each_games_rules_and_strategy():
           patch.dict(GAMES, {game.game_id: game}, clear=True)):
         assert get_game("example") is game
         items = playable_games("act_test", *game.participants)
-        assert items == [game.metadata()]
-        items[0]["rules"] = "changed by caller"
+        assert items == [game.catalog_entry()]
+        assert 'rules' not in items[0] and 'strategy' not in items[0]
+        assert get_game("example").metadata()['rules'] == "示例规则"
+        items[0]["description"] = "changed by caller"
+        assert game.description == "示例玩法"
         assert game.rules == "示例规则"
         assert playable_games("act_test", *reversed(game.participants)) == []
         assert playable_games("expired", *game.participants) == []
@@ -99,7 +102,9 @@ def test_rps_invitation_arbitration_receives_preparation_order_and_preserves_wil
 
         async def ainvoke(self, messages):
             prompts.extend(messages)
-            return {"choice": choice, "reason": "我先考虑是否参与准备。"}
+            return {"choice": choice, "reason": "当前空闲，可以自主决定是否参与准备。",
+                    "speech": {"accept": "好呀，来玩！", "defer": "我等会儿再来。",
+                               "decline": "这次我先不玩。"}[choice]}
 
     graph = build_motivation_graph(profile_loader=lambda: {"revision": 1, "traits": {}}, model=Model())
     result = asyncio.run(graph.ainvoke({"connected": True,
@@ -108,6 +113,7 @@ def test_rps_invitation_arbitration_receives_preparation_order_and_preserves_wil
         "pending_event": {"kind": "peer_message", "interaction_kind": "game_invite",
                           "game": GAME.metadata(), "content": "来玩猜拳攻灯？"}}))
     assert result["event_decision"] == choice
+    assert result["decision_speech"] != result["decision_reason"]
     assert "接受参与→公开双方映射→确认规则→认灯定位→秘密选拳并同时展示" in prompts[1].content
     assert "不要把尚未进行的准备当作接受邀请的前提" in prompts[0].content
     assert "game_target_not_visible" in prompts[1].content

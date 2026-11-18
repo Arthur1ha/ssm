@@ -714,3 +714,27 @@ async def test_unknown_throw_never_publishes_structured_choices(game_harness):
     h.config.gesture_result = 'unknown'
     await rps_siege.GAME.execute(h.drive, h.event, 'task_test_rps')
     assert all('game_round' not in row for row in h.timeline)
+
+
+async def test_silent_game_decisions_keep_public_mapping_and_real_round_result(game_harness, monkeypatch):
+    h = game_harness
+    decide = rps_siege.decide
+
+    async def silent_internal_choices(role, phase, facts, **kwargs):
+        answer = await decide(role, phase, facts, **kwargs)
+        if phase in {"setup", "agree", "throw", "performance"}:
+            answer.pop("speech", None)
+        return answer
+
+    monkeypatch.setattr(rps_siege, "decide", silent_internal_choices)
+    await rps_siege.GAME.execute(h.drive, h.event, 'task_test_rps')
+    proposals = [row for row in h.timeline if row.get('stage') == 'mapping_proposal']
+    assert len(proposals) == 2
+    assert all(row['event_type'] == 'action_result' and not row['text'] for row in proposals)
+    assert all(len(row['public_result']['game_rules']['mapping']) == 3 for row in proposals)
+    assert not any(row['event_type'] == 'message' and row.get('stage') in {
+        'mapping_proposal', 'agreement', 'throw_announcement'} for row in h.timeline)
+    verdict = next(row for row in h.timeline if row.get('stage') == 'rps_result')
+    assert verdict['game_round']['winner'] == 'go2'
+    assert any(row['event_type'] == 'action_result' and row.get('action') == 'go2_sport'
+               and row.get('status') == 'ok' for row in h.timeline)

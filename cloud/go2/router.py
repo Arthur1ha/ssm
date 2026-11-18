@@ -12,7 +12,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -298,12 +298,23 @@ class VelocityRequest(BaseModel):
     vx: float = 0.0
     vy: float = 0.0
     vyaw: float = 0.0
-    controller_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,64}$')
-    sequence: int | None = Field(default=None, strict=True, ge=1, le=9007199254740991)
+    controller_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    sequence: int = Field(strict=True, ge=1, le=9007199254740991)
 
 
-# Page-scoped ordering survives a stop, so a late HTTP write cannot restart it.
-_velocity_sequences: dict[tuple[str, str], tuple[int, float]] = {}
+@dataclass
+class VelocityController:
+    goal_revision: int
+    expires_at: float
+    manual_control: bool
+    sequence: int = 0
+    closed: bool = False
+    prepared: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+# A completed gesture stays retired for its authenticated context's lifetime.
+_velocity_sequences: dict[tuple[str, str], VelocityController] = {}
 
 
 @router.post("/commands")
@@ -314,6 +325,8 @@ async def go2_command(req: CommandRequest, context: ExecutionContext = Depends(r
     if not cmd:
         raise HTTPException(status_code=400, detail="cmd or action required")
     context = _normalize_context(context)
+    from cloud.go2.tools.executor import validate_execution_context
+    validate_execution_context(context)
     if req.prepare_standing:
         from cloud.agents.go2.workflows.body_action import start_body_action
         return await start_body_action(cmd, req.params, context=context, request_id=req.request_id,
@@ -386,40 +399,64 @@ async def go2_command_result(request_id: str, context: ExecutionContext = Depend
 
 @router.post("/velocity")
 async def go2_velocity(req: VelocityRequest, context: ExecutionContext = Depends(require_service_context)):
-    """Latest manual target; hardware resampling does not renew user ownership."""
+    """Bind one gesture to one goal, then resample only its authorized targets."""
+    from cloud.go2.service import prepare_user_goal
+    from cloud.go2.tools.executor import validate_execution_context
+    from cloud.space.user_goals import get_goal_registry
     if not go2.is_connected:
         raise HTTPException(status_code=503, detail="Go2 未连接")
     context = _normalize_context(context)
-    if (req.controller_id is None) != (req.sequence is None):
-        raise HTTPException(status_code=400, detail='controller_id and sequence must be supplied together')
-    key = (context.session_id, req.controller_id) if req.controller_id is not None else None
-    if key is not None:
-        now = time.monotonic()
-        for expired in [item for item, (_, seen) in _velocity_sequences.items() if now - seen > 60]:
-            del _velocity_sequences[expired]
-        previous = _velocity_sequences.get(key)
-        if previous is not None and req.sequence <= previous[0]:
-            return {'result': 'accepted', 'ignored': True, 'reason': 'superseded_velocity'}
-        if previous is None and len(_velocity_sequences) >= 256:
+    validate_execution_context(context)
+    if context.goal_revision <= 0:
+        raise HTTPException(status_code=400, detail='trusted_user_goal_required')
+    key = (context.session_id, req.controller_id)
+    now = time.time()
+    for expired in [item for item, scope in _velocity_sequences.items() if scope.expires_at <= now]:
+        del _velocity_sequences[expired]
+    controller = _velocity_sequences.get(key)
+    if controller is None:
+        if req.sequence != 1:
+            raise HTTPException(status_code=409, detail='controller_not_current')
+        if not any((req.vx, req.vy, req.vyaw)):
+            return {'result': 'accepted', 'ignored': True, 'reason': 'unknown_controller_stop'}
+        if len(_velocity_sequences) >= 1024:
             raise HTTPException(status_code=429, detail='too many active controllers')
-    command = "Move" if any((req.vx, req.vy, req.vyaw)) else "StopMove"
-    _check_direct_motion(command, {"x": req.vx, "y": req.vy, "z": req.vyaw}
-                         if command == "Move" else {}, context)
-    _cancel_pending_peer_requests(context)
-    def can_continue():
-        lease = control_lease.snapshot()
-        return (lease is not None and lease.owner_session_id == context.session_id
-                and (not context.expires_at or context.expires_at > time.time()))
-    try:
-        result = go2.manual_velocity(req.vx, req.vy, req.vyaw, can_continue=can_continue)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logging.error("[Go2/Velocity] move_velocity 异常: %s", exc)
-        raise HTTPException(status_code=503, detail=str(exc))
-    if key is not None:
-        _velocity_sequences[key] = (req.sequence, time.monotonic())
-    return result
+        controller = VelocityController(context.goal_revision, context.expires_at,
+                                        bool(getattr(go2, '_move_control_active', False)))
+        _velocity_sequences[key] = controller
+    async with controller.lock:
+        validate_execution_context(context)
+        if controller.goal_revision != context.goal_revision:
+            raise HTTPException(status_code=409, detail='controller_goal_mismatch')
+        if controller.closed or req.sequence <= controller.sequence:
+            return {'result': 'accepted', 'ignored': True, 'reason': 'superseded_velocity'}
+        if not controller.prepared:
+            result = await prepare_user_goal(context, manual_control=controller.manual_control)
+            validate_execution_context(context)
+            if result.get('result') != 'ok':
+                raise HTTPException(status_code=409, detail={'code':'go2_stop_unconfirmed', **result})
+            controller.prepared = True
+        command = 'Move' if any((req.vx, req.vy, req.vyaw)) else 'StopMove'
+        _check_direct_motion(command, {'x':req.vx,'y':req.vy,'z':req.vyaw} if command=='Move' else {}, context)
+        _cancel_pending_peer_requests(context)
+        accepted_lease = control_lease.snapshot()
+        def can_continue():
+            return (not controller.closed and _velocity_sequences.get(key) is controller
+                    and accepted_lease is not None
+                    and control_lease.allows(context.session_id, accepted_lease.generation)
+                    and get_goal_registry().is_current(controller.goal_revision)
+                    and context.expires_at > time.time())
+        try:
+            result = go2.manual_velocity(req.vx, req.vy, req.vyaw, can_continue=can_continue)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logging.error('[Go2/Velocity] move_velocity 异常: %s', exc)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        controller.sequence = req.sequence
+        if command == 'StopMove':
+            controller.closed = True
+        return result
 
 
 class ChatRequest(BaseModel):
@@ -448,6 +485,9 @@ def _training_context(req: ChatRequest, context: ExecutionContext) -> ExecutionC
 
 async def _stop_task_motion(context: ExecutionContext) -> dict:
     """Stop only motion still owned by this task's trusted session."""
+    from cloud.space.user_goals import get_goal_registry
+    if not get_goal_registry().is_current(context.goal_revision):
+        return {'result': 'cancelled', 'error': 'user_goal_superseded'}
     lease = control_lease.snapshot()
     if lease is not None and lease.owner_session_id != context.session_id:
         return {"result": "accepted", "error": "control_lease_transferred",

@@ -560,6 +560,15 @@ class AgentMessenger:
                         task_id=task_id or prior["task_id"],
                         message_id=message_id, status=result, fact_kind="result", result_kind="message",
                         source_event_id="peer:result:" + message_id + ":" + result)
+                    if (prior.get("interaction_kind") == "game_invite"
+                            and (task_id or prior["task_id"])):
+                        get_activity_store().record_event(
+                            prior["activity_id"], "game_ended", unit_id=sender,
+                            game_id=prior["game_id"], trigger_message_id=message_id,
+                            task_id=task_id or prior["task_id"], message_id=message_id,
+                            status=result, reason=payload.get("reason"),
+                            fact_kind="result", result_kind="message",
+                            source_event_id="peer:game-ended:" + message_id + ":" + result)
             prior["updated_at"] = now
             if kind in {"progress", "result"}:
                 self._workers.submit(self._on_message, dict(payload))

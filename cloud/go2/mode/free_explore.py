@@ -781,6 +781,7 @@ class Drive:
         self._last_decision = {"event_id": event["event_id"],
                                "choice": result.get("event_decision", "defer"),
                                "reason": result.get("decision_reason", ""),
+                               "speech": result.get("decision_speech", ""),
                                "emotion": result.get("decision_emotion", "neutral"),
                                "action": result.get("next_action", "none")}
         if event.get("kind") in {"peer_message", "activity_started", "activity_observed", "activity_progress"}:
@@ -1068,7 +1069,7 @@ class Drive:
                 # The arbitration Graph supplies the dog's own response;
                 # game metadata defines rules, not a fixed conversational line.
                 acceptance = messenger.send_message(
-                    "go2", message["sender"], str(decision.get("reason") or "decision_unavailable")[:1000],
+                    "go2", message["sender"], decision["speech"],
                     reply_to=event["message_id"], reply_kind="accepted", deadline=event["deadline"],
                     emotion=decision.get("emotion", "neutral"))
                 if acceptance.get("result") != "accepted":

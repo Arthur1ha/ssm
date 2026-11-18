@@ -140,9 +140,14 @@ async def user_intervention(source_event_id: str = "") -> int:
 
 
 async def start_activity(text: str, source_event_id: str, user_revision: int,
-                         source_session_id: str = "") -> dict[str, Any]:
+                         source_session_id: str = "", *, goal_revision: int = 0) -> dict[str, Any]:
     store = get_activity_store()
+    from cloud.space.user_goals import get_goal_registry
+    def check_goal():
+        if not get_goal_registry().is_current(goal_revision):
+            raise HTTPException(status_code=409, detail="user_goal_superseded")
     async with _transition_lock:
+        check_goal()
         if not store.matches_user_request(source_event_id, user_revision):
             raise HTTPException(status_code=409, detail="activity request was superseded by a newer user request")
         await _end_locked("new_activity")
@@ -157,6 +162,7 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
             await _end_locked("start_failed")
             raise
         for card in cards:
+            check_goal()
             if not store.matches_user_request(source_event_id, user_revision):
                 await _end_locked("superseded_user_request")
                 raise HTTPException(status_code=409, detail="activity request was superseded")
@@ -184,6 +190,7 @@ async def start_activity(text: str, source_event_id: str, user_revision: int,
         if not store.matches_user_request(source_event_id, user_revision):
             await _end_locked("superseded_user_request")
             raise HTTPException(status_code=409, detail="activity request was superseded")
+        check_goal()
         active = store.activate(activity_id) or store.get(activity_id) or record
         if (active.get("status") in {"active", "partial"}
                 and (active.get("devices") or {}).get(
@@ -220,8 +227,11 @@ async def end_activity(session: dict[str, Any] = Depends(require_csrf)):
 @router.post("/api/activity/start")
 async def browser_start_activity(req: BrowserStartRequest, session: dict[str, Any] = Depends(require_csrf)):
     source_event_id = "evt_" + uuid.uuid4().hex
+    from cloud.api.intents import begin_user_goal
+    session = await begin_user_goal(session, source_event_id)
     revision = await user_intervention(source_event_id)
-    activity = await start_activity(req.text, source_event_id, revision, session["session_id"])
+    activity = await start_activity(req.text, source_event_id, revision, session["session_id"],
+                                    goal_revision=session["goal_revision"])
     return {"ok": True, "activity": activity}
 
 
@@ -231,7 +241,8 @@ async def internal_start_activity(req: StartActivityRequest,
     if (context.origin_kind != "user_delegated" or context.expires_at <= time.time()
             or context.space_id != DEFAULT_SPACE_ID):
         raise HTTPException(status_code=403, detail="live delegated user request required")
-    activity = await start_activity(req.text, req.source_event_id, req.user_revision, context.session_id)
+    activity = await start_activity(req.text, req.source_event_id, req.user_revision, context.session_id,
+                                    goal_revision=context.goal_revision)
     return {"ok": True, "activity": activity}
 
 

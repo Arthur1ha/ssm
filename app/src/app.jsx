@@ -41,6 +41,7 @@ function App({ session, logout, refreshSession }) {
   const seenReplies = useRef(new Set());
   const seenPeerMessages = useRef(new Set());
   const completedRequests = useRef(new Set());
+  const supersededRequests = useRef(new Set());
   const traceRequests = useRef(new Map());
   const pendingReplies = useRef([]);
   const nextRequestId = useRef(Date.now());
@@ -132,6 +133,7 @@ function App({ session, logout, refreshSession }) {
   const appendReply = (item) => {
     if (!item?.text) return;
     const requestId = traceRequests.current.get(item.trace_id);
+    if (supersededRequests.current.has(requestId)) return;
     const replyIdentity = item.source_event_id || item.event_id;
     const replyKey = replyIdentity ? `${item.trace_id || 'space'}:${replyIdentity}` : '';
     if (replyKey && seenReplies.current.has(replyKey)) return;
@@ -173,7 +175,9 @@ function App({ session, logout, refreshSession }) {
       if (['agent_progress', 'run_stage'].includes(item.type) && item.trace_id
           && item.stage !== 'finished') {
         const requestId = traceRequests.current.get(item.trace_id);
-        if (requestId && completedRequests.current.has(requestId)) {
+        if (supersededRequests.current.has(requestId)
+            && item.fact_kind !== 'result' && !item.public_result) return;
+        if (requestId && (completedRequests.current.has(requestId) || supersededRequests.current.has(requestId))) {
           appendProcess(requestId, item.agent_id || 'cloud_orchestrator',
             item.stage === 'narrated' ? '' : item.text || '', item.event_id, item);
         }
@@ -197,13 +201,14 @@ function App({ session, logout, refreshSession }) {
 
   const handleSend = (text, options = {}) => {
     const t = text.trim();
-    if (!t || thinking) return;
+    if (!t) return;
     const requestId = ++nextRequestId.current;
     setActivityLog(prev => [...prev,
       { type: 'user', text: t, requestId },
     ]);
     setTrainingSelection(null);
     send(t, {
+      onSuperseded: () => supersededRequests.current.add(requestId),
       onMessage: (msg, agent, event) => appendReply({ ...event, text: msg,
         agent_id: agent || 'cloud_orchestrator' }),
       onProgress: event => {

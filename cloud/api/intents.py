@@ -34,6 +34,7 @@ device_chat_logger = logging.getLogger("cloud.esp32.chat")
 router = APIRouter(tags=["gateway"])
 
 _mqtt_client = None
+_velocity_goal_scopes: dict[tuple[str, str], tuple[int, float]] = {}
 def record_lamp_task_result(task_id: str, result: dict[str, Any]) -> bool:
     """Only an existing durable reservation can own a device receipt."""
     from cloud.esp32.physical_tasks import record_result
@@ -61,6 +62,7 @@ def _context(session: dict[str, Any]) -> dict[str, Any]:
         "space_id": DEFAULT_SPACE_ID,
         "issued_at": session["issued_at"],
         "expires_at": session["expires_at"],
+        "goal_revision": session.get("goal_revision", 0),
     }
 
 
@@ -100,7 +102,47 @@ def _internal_headers(session: dict[str, Any]) -> dict[str, str]:
         "X-SSM-Space-Id": context["space_id"],
         "X-SSM-Origin-Kind": "user_delegated",
         "X-SSM-Expires-At": str(context["expires_at"]),
+        "X-SSM-Goal-Revision": str(context["goal_revision"]),
     }
+
+
+async def begin_user_goal(session: dict[str, Any], run_id: str = "", *,
+                          resume_run=None, prepare: bool = True) -> dict[str, Any]:
+    """Bind a new authenticated external target, or continue its exact run.
+
+    Activity user_revision invalidates activity starts; goal_revision cancels
+    superseded Graph/tool work. Internal calls never advance either target.
+    """
+    from cloud.space.user_goals import get_goal_registry
+    from cloud.space.execution import ExecutionContext
+    registry = get_goal_registry()
+    current = registry.current()
+    if resume_run is not None:
+        revision = resume_run.goal_revision
+        if not revision or not registry.is_current(revision):
+            raise HTTPException(status_code=409, detail="user_goal_superseded")
+        return {**session, "goal_revision": revision}
+    if run_id and current.get("session_id") == session["session_id"] and current.get("run_id") == run_id:
+        return {**session, "goal_revision": current["revision"]}
+    from cloud.space.user_goals import GoalSuperseded
+    try:
+        revision = registry.advance(session["session_id"], run_id)
+    except GoalSuperseded as exc:
+        raise HTTPException(status_code=409, detail="user_goal_superseded") from exc
+    trusted = {**session, "goal_revision": revision}
+    if prepare:
+        from cloud.go2.service import prepare_user_goal
+        context = ExecutionContext(session["session_id"], session["actor"],
+            session["actor"] == "admin", DEFAULT_SPACE_ID, "user_delegated",
+            int(session["expires_at"]), goal_revision=revision)
+        receipt = await prepare_user_goal(context)
+        if not registry.is_current(revision):
+            raise HTTPException(status_code=409, detail="user_goal_superseded")
+        # A stop awaiting device evidence blocks that device's next movement,
+        # not a new conversation or work for the lamp. Its adapter keeps the
+        # old lease/hold and validates it again at the physical boundary.
+        trusted["go2_handoff"] = receipt
+    return trusted
 
 
 def _sync_internal_request(
@@ -354,6 +396,10 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
         raise ValueError("invalid_event_scope")
     if event_type == "agent_reply" and not text.strip():
         return {}
+    from cloud.space.user_goals import get_goal_registry
+    goal_revision = facts.get("goal_revision", 0)
+    if event_type in {"agent_reply", "reply_error"} and not get_goal_registry().is_current(goal_revision):
+        return {}
     stable_key = ":".join((event_type, scope, session_id or space_id, run_id,
                            agent_id, step_id, str(facts.get("reply_kind", "final")),
                            str(facts.get("stage", "")), str(facts.get("sequence", ""))))
@@ -363,6 +409,8 @@ def publish_agent_event(event_type: str, *, agent_id: str, status: str,
              "trace_id": trace_id or None, "parent_run_id": parent_run_id or None,
              "step_id": step_id or None, "source": source,
              "text": text.strip(), "ts": time.time()}
+    if goal_revision:
+        event["goal_revision"] = goal_revision
     if event_type == "agent_reply":
         from cloud.agents.common.emotions import normalize_emotion
         event["emotion"] = normalize_emotion(emotion)
@@ -558,6 +606,7 @@ async def create_intent(
     event_id = "evt_" + uuid.uuid4().hex
     trace_id = "tr_" + uuid.uuid4().hex
     resume_run_id = req.resume_run_id
+    graph_run = None
     if not resume_run_id:
         from cloud.agents.common.checkpoint import FileCheckpointSaver
         from cloud.agents.common.context import thread_id_for
@@ -566,15 +615,21 @@ async def create_intent(
         if latest:
             values = latest.checkpoint.get("channel_values", {})
             pending = values.get("run") or {}
+            from cloud.space.user_goals import get_goal_registry
             if (isinstance(pending, dict) and pending.get("session_id") == session["session_id"]
                     and (values.get("decision") or {}).get("kind") == "ask"
-                    and pending.get("status") == "executing"):
+                    and pending.get("status") == "executing"
+                    and type(pending.get("goal_revision")) is int and pending["goal_revision"] > 0
+                    and get_goal_registry().is_current(pending["goal_revision"])):
                 resume_run_id = pending.get("run_id")
     if resume_run_id:
         from cloud.agents.common.views import load_run
         graph_run = load_run(resume_run_id, session["session_id"], "cloud_orchestrator")
         if graph_run is not None and graph_run.trace_id:
             trace_id = graph_run.trace_id
+        if graph_run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+    session = await begin_user_goal(session, resume_run_id or event_id, resume_run=graph_run)
     from cloud.api.activity import user_intervention
     user_revision = await user_intervention(event_id)
     payload: dict[str, Any] = {
@@ -583,6 +638,7 @@ async def create_intent(
         "event_id": event_id,
         "trace_id": trace_id,
         "user_revision": user_revision,
+        "goal_revision": session["goal_revision"],
     }
     if selection:
         payload["selection"] = selection
@@ -598,7 +654,8 @@ async def create_intent(
                      entry="/api/intents", event_id=event_id)
     _mqtt_publish_signed(f"ssm/intent/{session['session_id']}", payload)
     return {"accepted": True, "event_id": event_id, "trace_id": trace_id,
-            "session_id": session["session_id"], "user_revision": user_revision}
+            "session_id": session["session_id"], "user_revision": user_revision,
+            "goal_revision": session["goal_revision"]}
 
 
 def _configured_card(unit_id: str) -> dict[str, Any] | None:
@@ -687,6 +744,7 @@ def _run_lamp_chat(agent, unit_id: str, message: str, session: dict[str, Any],
     context = ExecutionContext(
         session["session_id"], session["actor"], session["actor"] == "admin",
         DEFAULT_SPACE_ID, "user_delegated", int(session["expires_at"]),
+        goal_revision=session.get("goal_revision", 0),
     )
     def dispatch(uid, action, params, _context, source, *, task_id=None):
         return _dispatch_mqtt_task(uid, action, params, session, source=source,
@@ -712,6 +770,14 @@ async def execute_lamp_chat(unit_id: str, message: str, session: dict[str, Any],
     agent = get_agent()
     if agent is None:
         raise HTTPException(status_code=503, detail="ESP32 agent is unavailable")
+    run_id = run_id or "lamp_" + uuid.uuid4().hex
+    previous = None
+    if resume:
+        from cloud.agents.common.views import load_run
+        previous = load_run(run_id, session["session_id"], unit_id)
+        if previous is None:
+            raise HTTPException(status_code=404, detail="run not found")
+    session = await begin_user_goal(session, run_id, resume_run=previous)
     device_chat_logger.info(
         "[DeviceChat/User] unit=%s session=%s text=%s",
         unit_id, session["session_id"], json.dumps(message, ensure_ascii=False),
@@ -771,9 +837,37 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         if operation == "start_explore" and session["actor"] != "admin":
             raise HTTPException(status_code=403, detail="only an administrator may start exploration")
         ensure_go2_action("LIFE")
+        session = await begin_user_goal(session, request_id or "life_" + uuid.uuid4().hex)
         return await _internal_request("/api/go2/life", "POST", session, {"action": operation, **({"request_id": request_id} if request_id else {})})
     if normalized == "velocity":
         ensure_go2_action("VELOCITY")
+        from cloud.space.user_goals import get_goal_registry
+        controller = params.get("controller_id")
+        sequence = params.get("sequence")
+        if (not isinstance(controller, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", controller)
+                or type(sequence) is not int or sequence < 1):
+            raise HTTPException(status_code=400, detail="velocity requires controller_id and sequence")
+        now = time.time()
+        for key, (_, expires_at) in tuple(_velocity_goal_scopes.items()):
+            if expires_at <= now:
+                _velocity_goal_scopes.pop(key, None)
+        key = (session["session_id"], controller)
+        scope = _velocity_goal_scopes.get(key)
+        if scope is None:
+            if not any(params.get(axis, 0) for axis in ("vx", "vy", "vyaw")):
+                return {"result": "accepted", "ignored": True, "reason": "unknown_controller_stop"}
+            if sequence > 1:
+                raise HTTPException(status_code=409, detail="controller_not_current")
+            if len(_velocity_goal_scopes) >= 4096:
+                raise HTTPException(status_code=429, detail="too many controllers")
+            session = await begin_user_goal(session, "velocity:" + controller, prepare=False)
+            scope = (session["goal_revision"], float(session["expires_at"]))
+            _velocity_goal_scopes[key] = scope
+        revision = scope[0]
+        if not get_goal_registry().is_current(revision):
+            raise HTTPException(status_code=409, detail="user_goal_superseded")
+        _velocity_goal_scopes[key] = (revision, float(session["expires_at"]))
+        session = {**session, "goal_revision": revision}
         return await _internal_request("/api/go2/velocity", "POST", session, params)
     if normalized == "connect":
         return await _internal_request("/api/go2/connection", "POST", session, {})
@@ -795,6 +889,7 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
         task_id = str(params.get("task_id") or ("go2_" + uuid.uuid4().hex))
         if len(task_id) > 100 or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
             raise HTTPException(status_code=400, detail="invalid task_id")
+        session = await begin_user_goal(session, task_id)
         return await _internal_request("/api/go2/chat", "POST", session, {
             "message": message, "task_id": task_id,
             "selection": validate_training_selection(params.get("selection"), session, unit_id="go2"),
@@ -804,6 +899,8 @@ async def _dispatch_go2(action: str, params: dict[str, Any], session: dict[str, 
 
     canonical = action.upper() if action.upper() in {"SPORT", "NAVIGATE", "VISUAL_NAVIGATE", "FIND_OBJECT", "RECOGNIZE_PERSON", "STOP"} else action
     ensure_go2_action(canonical)
+    session = await begin_user_goal(session, request_id or "cmd_" + uuid.uuid4().hex,
+                                    prepare=canonical != "STOP")
     if canonical == "SPORT":
         return await _internal_request("/api/go2/commands", "POST", session, {"cmd": params.get("cmd", ""), "params": params.get("params", {}),
                                        **({"prepare_standing": params["prepare_standing"]} if "prepare_standing" in params else {}), **correlation})
@@ -880,6 +977,7 @@ async def create_command(
             raise HTTPException(status_code=503, detail="ESP32 agent is unavailable")
         if str(req.params["value"]) not in {"manual", "reactive"}:
             raise HTTPException(status_code=400, detail="invalid lamp autonomy mode")
+        session = await begin_user_goal(session, req.request_id or "mode_" + uuid.uuid4().hex)
         await take_over()
         try:
             agent.set_autonomy_mode(str(req.params["value"]))
@@ -902,9 +1000,11 @@ async def create_command(
     card = _configured_card(unit_id)
     if card is None:
         raise HTTPException(status_code=404, detail="unit is not available in the current space")
+    session = await begin_user_goal(session, req.request_id or "lamp_" + uuid.uuid4().hex)
     context = ExecutionContext(session["session_id"], session["actor"],
                                session["actor"] == "admin", DEFAULT_SPACE_ID,
-                               "user_delegated", session["expires_at"])
+                               "user_delegated", session["expires_at"],
+                               goal_revision=session.get("goal_revision", 0))
     loop = asyncio.get_running_loop()
     def dispatch(uid, action, params, _context, source, *, task_id):
         # execute_physical has validated and reserved this first dispatch.
@@ -976,6 +1076,11 @@ async def resume_go2_command_task(task_id: str, req: CommandRequest,
     message = str(req.params.get("message") or "")
     if req.action.lower() != "chat" or not message.strip():
         raise HTTPException(status_code=400, detail="chat requires message")
+    from cloud.agents.common.views import load_run
+    previous = load_run(task_id, session["session_id"], "go2")
+    if previous is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    session = await begin_user_goal(session, task_id, resume_run=previous)
     from cloud.api.activity import user_intervention
     await user_intervention()
     return await _internal_request(f"/api/go2/tasks/{task_id}/resume", "POST", session,
@@ -1009,6 +1114,7 @@ async def cancel_go2_command_task(task_id: str, session: dict[str, Any] = Depend
 
 @router.post("/api/emergency-stop")
 async def emergency_stop(session: dict[str, Any] = Depends(require_csrf)):
+    session = await begin_user_goal(session, "stop_" + uuid.uuid4().hex, prepare=False)
     from cloud.api.activity import user_intervention
     await user_intervention()
     from cloud.peers.gateway import cancel_pending

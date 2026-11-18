@@ -31,7 +31,7 @@ def device(monkeypatch, tmp_path):
         monkeypatch.setattr(module, 'go2', robot)
         monkeypatch.setattr(module, 'control_lease', lease)
     service = importlib.import_module('cloud.go2.service')
-    monkeypatch.setattr(service, 'drive', MagicMock(_task=None))
+    monkeypatch.setattr(service, 'drive', MagicMock(_task=None, owner_session_id=None))
     executor = importlib.import_module('cloud.go2.tools.executor')
     monkeypatch.setattr(executor, '_audit', lambda _name, _context, result, *_args: result)
     monkeypatch.setenv('SSM_EFFECT_LEDGER_DIR', str(tmp_path / 'effects'))
@@ -465,16 +465,22 @@ async def test_http_emergency_stop_precedes_blocked_activity_cleanup_without_pos
 
 
 @pytest.mark.asyncio
-async def test_http_velocity_packets_never_wait_for_global_activity_teardown(device, monkeypatch):
+async def test_http_velocity_packets_never_wait_for_global_activity_teardown(device, monkeypatch, tmp_path):
     import httpx
     from fastapi import FastAPI
     from cloud.go2 import router
     from cloud.api import activity
+    from cloud.go2 import service
+    from cloud.space.user_goals import get_goal_registry
     robot, lease = device
-    user = ExecutionContext('joystick-user', 'visitor', False, expires_at=int(time.time()) + 60)
+    monkeypatch.setenv('SSM_USER_GOALS_DIR', str(tmp_path / 'goals'))
+    user = ExecutionContext('joystick-user', 'visitor', False, expires_at=int(time.time()) + 60,
+                             goal_revision=get_goal_registry().advance('joystick-user'))
     never = asyncio.Event()
     intervention = AsyncMock(side_effect=never.wait)
     monkeypatch.setattr(activity, 'user_intervention', intervention)
+    monkeypatch.setattr(service, 'prepare_user_goal', AsyncMock(return_value={
+        'result':'ok', 'physical_stop':'confirmed'}))
     move = MagicMock(return_value={'result': 'accepted', 'confirmation_scope': 'request'})
     monkeypatch.setattr(robot, 'manual_velocity', move)
     lease.acquire(user)
@@ -484,7 +490,8 @@ async def test_http_velocity_packets_never_wait_for_global_activity_teardown(dev
         return user
     app.dependency_overrides[router.require_service_context] = verified_context
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-        for velocity in ({'vx': .1, 'vy': 0, 'vyaw': .2}, {'vx': 0, 'vy': 0, 'vyaw': 0}):
+        for sequence,velocity in enumerate(({'vx': .1, 'vy': 0, 'vyaw': .2}, {'vx': 0, 'vy': 0, 'vyaw': 0}),1):
+            velocity.update(controller_id='gesture', sequence=sequence)
             result = await asyncio.wait_for(client.post('/api/go2/velocity', json=velocity), timeout=.5)
             assert result.status_code == 200
     intervention.assert_not_awaited()

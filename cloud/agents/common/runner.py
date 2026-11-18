@@ -50,6 +50,7 @@ class GraphRun:
     parent_run_id: str = ""
     agent_id: str = ""
     origin_kind: str = ""
+    goal_revision: int = 0
     reply_source: str = "runtime"
     reply_ready: bool = True
     decision_draft: str = ""
@@ -188,6 +189,9 @@ async def run_role_graph(
     config = {"configurable": {"thread_id": thread_id_for(run.agent_id, run.session_id)},
               "recursion_limit": recursion_limit}
     thread_id = config["configurable"]["thread_id"]
+    from cloud.space.user_goals import get_goal_registry, run_for_goal
+    def check_goal():
+        get_goal_registry().check(run.goal_revision)
 
     def emit(event: str, **fields: object) -> None:
         emit_agent_event(event, trace_id=run.trace_id or run.run_id,
@@ -199,6 +203,7 @@ async def run_role_graph(
         run.__dict__.update(asdict(current))
 
     async def model_node(state: _State) -> dict:
+        check_goal()
         current = GraphRun(**state["run"])
         turns = state["turns"] + 1
         current.model_turn = turns
@@ -251,6 +256,7 @@ async def run_role_graph(
                  cause_message=str(exc.__cause__) if exc.__cause__ else None)
             current.status, current.response = "error", "暂时无法可靠理解下一步；已执行的动作不会重发。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
+        check_goal()
         calls = getattr(response, "tool_calls", None) or []
         content = getattr(response, "content", "")
         emit("model.response", turn=turns, output={"content": content, "tool_calls": calls},
@@ -344,6 +350,7 @@ async def run_role_graph(
         return state["decision"]["kind"]
 
     async def tool_node(state: _State) -> dict:
+        check_goal()
         current = GraphRun(**state["run"])
         pending = state.get("pending_calls") or []
         # Existing checkpoints may still contain a single prepared decision.
@@ -432,6 +439,7 @@ async def run_role_graph(
              dispatch_status="pending", effectful=is_effect)
         started = time.monotonic()
         try:
+            check_goal()
             if is_effect:
                 reservation = ledger.reserve(current.agent_id, thread_id, current.run_id,
                                              step_id, name, params)
@@ -458,7 +466,12 @@ async def run_role_graph(
         except asyncio.TimeoutError:
             result = {"result": "timeout", "error": "run_deadline_exceeded"}
         except asyncio.CancelledError:
-            step.update(dispatch_status="unknown", result={"result": "cancelled", "error": "execution_cancelled"})
+            observed = (ledger.read(current.agent_id, thread_id, current.run_id, step_id)
+                        if is_effect else None)
+            receipt = observed.get("result") if observed else None
+            step.update(dispatch_status="observed" if receipt else "unknown",
+                        result=receipt or {"result": "unknown", "error": "execution_cancelled"})
+            sync_outer(current)
             if record:
                 record(current, step)
             raise
@@ -482,6 +495,7 @@ async def run_role_graph(
             on_progress("observed", step)
         emit("tool.result", step_id=step_id, tool=name, status=result["result"], result=result,
              duration_ms=round((time.monotonic() - started) * 1000))
+        check_goal()
         if result["result"] in UNCERTAIN:
             current.status, current.response = result["result"], "请求已发送，但实际完成情况尚未确认；后续步骤已暂停。"
         elif result["result"] == "cancelled":
@@ -509,6 +523,7 @@ async def run_role_graph(
         return "tool" if state.get("decision", {}).get("kind") == "tool" else "model"
 
     async def finalize_node(state: _State) -> dict:
+        check_goal()
         current = GraphRun(**state["run"])
         sync_outer(current)
         emit("graph.node", node="finalize", phase="entered", status=current.status)
@@ -516,6 +531,7 @@ async def run_role_graph(
             updated = await _await(finalize(current))
             if isinstance(updated, GraphRun):
                 current = updated
+        check_goal()
         history = state.get("messages", [])
         if any((message.id or "").startswith(current.run_id + ":") for message in history):
             answer = current.response or current.decision_draft
@@ -559,29 +575,49 @@ async def run_role_graph(
     graph.add_edge("finalize", END)
     compiled = graph.compile(checkpointer=saver)
     emit("run.resumed" if resume else "run.started", goal=run.goal)
-    async with saver.async_run_lock(thread_id):
-        if resume:
-            output = await compiled.ainvoke(
-                Command(resume=resume_value if resume_value is not None else run.supplement),
-                config, durability="sync")
-        else:
-            first = {}
-            if initial_tool is not None:
-                name, params = initial_tool
-                if name not in tool_schemas:
-                    raise ValueError("initial_tool_not_allowed")
-                first = {"kind": "tool", "name": name, "params": params,
-                         "step_id": f"{run.run_id}:initial"}
+    lock = (saver.async_run_lock(thread_id, goal_revision=run.goal_revision)
+            if run.goal_revision else saver.async_run_lock(thread_id))
+    async with lock:
+        try:
+            if resume:
+                invocation = compiled.ainvoke(
+                    Command(resume=resume_value if resume_value is not None else run.supplement),
+                    config, durability="sync")
+            else:
+                first = {}
+                if initial_tool is not None:
+                    name, params = initial_tool
+                    if name not in tool_schemas:
+                        raise ValueError("initial_tool_not_allowed")
+                    first = {"kind": "tool", "name": name, "params": params,
+                             "step_id": f"{run.run_id}:initial"}
+                head = saver.get_tuple(config)
+                values = head.checkpoint.get("channel_values", {}) if head else {}
+                seed = (legacy_dialogue(saver, config, run.run_id)
+                        if "messages" not in values else [])
+                invocation = compiled.ainvoke({"run": asdict(run), "decision": first,
+                    "pending_calls": [], "messages": seed, "turns": len(run.steps),
+                    "effects": sum(bool(s.get("effectful")) for s in run.steps)},
+                    config, durability="sync")
+            output = await run_for_goal(invocation, run.goal_revision)
+        except asyncio.CancelledError:
+            superseded = bool(run.goal_revision and not get_goal_registry().is_current(run.goal_revision))
+            if not superseded:
+                # Device-specific interruption recovery still owns an ordinary
+                # external cancellation, including its saved physical receipts.
+                raise
+            # Keep observed effects and uncertain dispatched steps on their
+            # original run. Never convert cancelling a waiter into a device stop.
+            run.status, run.response, run.question = "cancelled", "", ""
+            run.reply_ready = False
             head = saver.get_tuple(config)
-            values = head.checkpoint.get("channel_values", {}) if head else {}
-            seed = (legacy_dialogue(saver, config, run.run_id)
-                    if "messages" not in values else [])
-            output = await compiled.ainvoke({"run": asdict(run), "decision": first,
-                                             "pending_calls": [],
-                                             "messages": seed,
-                                             "turns": len(run.steps),
-                                             "effects": sum(bool(s.get("effectful")) for s in run.steps)},
-                                            config, durability="sync")
+            if head and (head.checkpoint.get("channel_values", {}).get("run") or {}).get("run_id") == run.run_id:
+                await compiled.aupdate_state(config, {"run": asdict(run),
+                    "pending_calls": [], "decision": {"kind": "finish"}}, as_node="finalize")
+            emit("run.finished", status="cancelled", reason="newer_user_goal")
+            if record:
+                record(run, None)
+            return run
     if "__interrupt__" in output:
         run.__dict__.update(output["run"])
         payload = output["__interrupt__"][0].value

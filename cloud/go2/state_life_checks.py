@@ -289,6 +289,7 @@ async def test_explore_handoff_waits_old_navigation_cleanup_and_fresh_stop(monke
     drive = SimpleNamespace(_task=None, owner_session_id=owner, stop=stop_drive)
     monkeypatch.setattr(router, 'go2', robot)
     monkeypatch.setattr(router, 'drive', drive)
+    monkeypatch.setattr(router, 'control_lease', ControlLease())
     monkeypatch.setattr(nav_module, 'navigator', navigator)
     context = ExecutionContext(owner, 'visitor', False)
     handoff = asyncio.create_task(router.prepare_user_interaction(context))
@@ -300,7 +301,7 @@ async def test_explore_handoff_waits_old_navigation_cleanup_and_fresh_stop(monke
     assert old.done()
     assert not handoff.done()  # Cancellation alone is not a physical stop.
     for _ in range(3):
-        robot._on_state({'data': {'velocity': [0, 0, 0]}})
+        robot._on_state({'data': {'velocity': [0, 0, 0], 'yaw_speed': 0}})
     await asyncio.wait_for(handoff, timeout=1)
     assert robot.runtime.data['life_state'] == 'idle'
     assert robot.body_state == 'standing'

@@ -80,11 +80,14 @@ class FileCheckpointSaver(BaseCheckpointSaver):
             os.close(fd)
 
     @asynccontextmanager
-    async def async_run_lock(self, thread_id: str):
+    async def async_run_lock(self, thread_id: str, *, goal_revision: int = 0):
         """Nonblocking event-loop variant for ``async with`` graph runs."""
         fd = os.open(self._run_lock_path(thread_id), os.O_CREAT | os.O_RDWR, 0o600)
         try:
             while True:
+                if goal_revision:
+                    from cloud.space.user_goals import get_goal_registry
+                    get_goal_registry().check(goal_revision)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break

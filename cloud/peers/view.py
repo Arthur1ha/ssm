@@ -8,23 +8,19 @@ from typing import Any
 
 from cloud.cards.registry import CardRegistry
 from cloud.space.registry import SpaceRegistry, card_device_id, get_space_registry
-from cloud.space.freshness import state_observed_at
+from cloud.space.freshness import state_validity
 
-STATE_MAX_AGE_S = 60.0
 _STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state",
            "body_confirmation", "control_mode", "autonomy_mode", "epoch", "revision",
            "state_schema_version", "ism", "connected", "battery_soc", "brightness")
 
 
-def _state_summary(state: Any, now: float) -> dict[str, Any]:
+def _state_summary(state: Any, now: float, *, online: bool | None = None) -> dict[str, Any]:
     if not isinstance(state, dict):
         return {"status": "unknown"}
-    as_of = state_observed_at(state, now)
-    if as_of is None:
-        return {"status": "unknown"}
-    if now - as_of > STATE_MAX_AGE_S:
-        return {"status": "stale", "as_of": as_of}
-    summary = {"status": "current", "as_of": as_of}
+    summary = state_validity(state, now, online=online)
+    if summary["status"] != "current":
+        return summary
     for key in _STATE_FIELDS:
         value = state.get(key)
         if ((key in state and value is None and key in {"activity_state", "life_state"})
@@ -65,7 +61,7 @@ def list_peers(
             continue
         status_id = device_id if device_id in status_times else unit_id
         observed_at = status_times.get(status_id)
-        state_summary = _state_summary(card.get("state"), instant)
+        state_summary = _state_summary(card.get("state"), instant, online=bool(card.get("online")))
         connection_field = (card.get("state_machine") or {}).get("connection_field")
         device_connected = (
             state_summary.get(connection_field)

@@ -131,7 +131,7 @@ def test_delegated_lighting_keeps_game_instructions_out_of_simple_commands(facts
     assert "执行前" in messages[0].content
 
 
-def test_lamp_keeps_delivery_rules_while_remote_control_blocks_invitation(facts, monkeypatch):
+def test_lamp_keeps_game_choices_without_loading_execution_manual_while_blocked(facts, monkeypatch):
     agent, _, space = facts
     space['peers'] = [{'unit_id': 'go2'}]
     space['activity'] = {'activity_id': 'act_delivery'}
@@ -141,7 +141,10 @@ def test_lamp_keeps_delivery_rules_while_remote_control_blocks_invitation(facts,
     messages = prompts.decision_messages(run, agent=agent, unit_id=UNIT)
     data = context(messages)
     delivery = next(game for game in data['game_catalog'] if game['game_id'] == 'push_delivery')
-    assert delivery['rules'] and delivery['target'] == 'go2'
+    assert delivery['description'] and delivery['target'] == 'go2'
+    assert 'rules' not in delivery and 'strategy' not in delivery
+    from cloud.peers.games import get_game
+    assert get_game('push_delivery').metadata()['rules']
     assert delivery['ready'] is False and delivery['reason'] == 'go2_remote_control'
     assert data['playable_games'] == []
     assert '不表示没有这些游戏' in messages[0].content
@@ -155,7 +158,12 @@ def test_delegated_lamp_entry_dispatches_once_and_reuses_completed_run(facts, mo
     agent, physical, _ = facts
     for variable in ("SSM_CHECKPOINT_DIR", "SSM_EFFECT_LEDGER_DIR", "SSM_RUN_INDEX_DIR"):
         monkeypatch.setenv(variable, str(tmp_path / variable))
-    monkeypatch.setattr(graph.cards, "get_registry", lambda: SimpleNamespace(get_card=lambda _uid: card()))
+    def current_card(_uid):
+        current = card()
+        current["state"] = {**physical, "_received_at": physical["ts"]}
+        return current
+
+    monkeypatch.setattr(graph.cards, "get_registry", lambda: SimpleNamespace(get_card=current_card))
     monkeypatch.setattr(graph, "get_profile", prompts.get_profile)
     monkeypatch.setattr(graph, "emit_agent_event", lambda *_a, **_k: None)
     monkeypatch.setattr("cloud.api.intents.publish_agent_event", lambda *_a, **_k: {})
@@ -193,7 +201,7 @@ def test_delegated_lamp_entry_dispatches_once_and_reuses_completed_run(facts, mo
     trusted = ExecutionContext("session", "admin", False, "main", "user_delegated", time.time() + 60)
     arguments = dict(lighting_only=True, run_id="warm-entry", parent_run_id="steward")
     result = graph.run_lamp_loop(agent, "调成暖白色", UNIT, trusted, lambda *_a, **_k: None, **arguments)
-    assert result["result"] == "ok" and len(dispatched) == 1 and model.calls == 1
+    assert result["result"] == "ok" and len(dispatched) == 1 and model.calls == 1, result
     assert result["steps"][0]["result"]["final"] is True
     replay = graph.run_lamp_loop(agent, "调成暖白色", UNIT, trusted, lambda *_a, **_k: None, **arguments)
     assert replay["result"] == "ok" and replay["reply"] == result["reply"]

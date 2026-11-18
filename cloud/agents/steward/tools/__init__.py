@@ -84,6 +84,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
             context.get("space_id", "main"), context.get("origin_kind", "user_delegated"),
             context.get("expires_at") or 0,
             requester=context.get("requester"),
+            goal_revision=context.get("goal_revision", 0),
             training_ref=context.get("training_ref"),
             training_revision=context.get("training_revision"),
             training_overrides=context.get("training_overrides"))
@@ -92,7 +93,8 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
             transport.do_publish_task(uid, task_id, action, physical_params,
                                       trusted.session_id, context={
                                           "actor": trusted.actor, "persist": trusted.persist,
-                                          "space_id": trusted.space_id, "source": source})
+                                          "space_id": trusted.space_id, "source": source,
+                                          "goal_revision": trusted.goal_revision})
             return task_id
 
         result = execute_physical(
@@ -117,6 +119,7 @@ def _invoke_skill(context: dict, arguments: dict, step_id: str, deadline: float)
                 "persist": context.get("persist"), "space_id": context.get("space_id"),
                 "origin_kind": context.get("origin_kind") or "user_delegated",
                 "expires_at": context.get("expires_at"),
+                "goal_revision": context.get("goal_revision", 0),
                 "message": arguments.get("message") or params.get("message") or params.get("goal")
                            or f"请执行 {skill_id}：{json.dumps(params, ensure_ascii=False)}",
                 "goal": params.get("goal"), "skill_id": skill_id, "params": params,
@@ -231,6 +234,8 @@ def make_executor(run, context: dict, resume: bool = False):
     run_id, session_id = run.run_id, run.session_id
     training_attempt_start = len(run.steps)
     async def execute(name: str, args: dict, step_id: str) -> dict:
+        from cloud.space.user_goals import get_goal_registry
+        get_goal_registry().check(context.get("goal_revision", 0))
         if context.get("peer_request_id") and peer_coordination_cancelled(context["peer_request_id"]):
             return {"result": "cancelled", "error": "higher_priority_user_request"}
         if context.get("expires_at") and context["expires_at"] <= time.time():

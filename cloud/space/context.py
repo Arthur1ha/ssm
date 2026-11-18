@@ -7,10 +7,10 @@ import time
 from typing import Any
 
 from cloud.cards.registry import CardRegistry, get_registry
-from cloud.peers.view import STATE_MAX_AGE_S, list_peers
+from cloud.peers.view import list_peers
 from cloud.space.constraints import ConstraintStore, get_constraint_store
 from cloud.space.activity import get_activity_store
-from cloud.space.freshness import state_observed_at
+from cloud.space.freshness import state_validity
 
 _VALUES = ("connection_state", "activity_state", "life_state", "body_state",
            "body_confirmation", "control_mode", "autonomy_mode", "epoch", "revision",
@@ -19,21 +19,20 @@ _VALUES = ("connection_state", "activity_state", "life_state", "body_state",
 _MAX_UNITS = 24
 
 
-def _summarize(unit_id: str, entry: Any, now: float) -> dict[str, Any]:
+def _summarize(unit_id: str, entry: Any, now: float, *, card: dict | None = None) -> dict[str, Any]:
     state = entry.get("state") if isinstance(entry, dict) else None
     if not isinstance(state, dict):
         return {"source": unit_id, "status": "unknown"}
-    as_of = state_observed_at(state, now)
-    if as_of is None:
-        return {"source": unit_id, "status": "unknown"}
-    if now - as_of > STATE_MAX_AGE_S:
-        return {"source": unit_id, "status": "stale", "as_of": as_of}
+    validity = state_validity(state, now, online=card.get("online") if card else None,
+        connection_confirmed=bool(card and (card.get("state") or {}).get("_received_at")
+                                  and (card.get("state") or {}).get("_connection_confirmed", True)))
+    if validity["status"] != "current":
+        return {"source": unit_id, **validity}
     values = {key: state[key] for key in _VALUES if key in state and
               ((state[key] is None and key in {"activity_state", "life_state"}) or
                isinstance(state[key], (str, bool, int)) or
                (isinstance(state[key], float) and math.isfinite(state[key])))}
-    return {"source": unit_id, "status": "current", "as_of": as_of,
-            "values": values}
+    return {"source": unit_id, **validity, "values": values}
 
 
 def get_space_context(
@@ -63,7 +62,8 @@ def get_space_context(
         for source, entry in sorted(snapshot.items()):
             if len(environment) >= _MAX_UNITS:
                 break
-            environment.append(_summarize(source, entry, instant))
+            card = peer_cards.get_card(source) if callable(getattr(peer_cards, "get_card", None)) else None
+            environment.append(_summarize(source, entry, instant, card=card))
     activity_store = get_activity_store()
     current = activity_store.current(space_id="main")
     activity = None

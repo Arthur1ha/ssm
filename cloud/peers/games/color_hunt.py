@@ -174,6 +174,11 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         messenger.send_result(event["message_id"], "blocked", task_id=task_id,
                               reason=(started["result"].get("error") or "game_unavailable"))
         return
+    from cloud.space.activity import get_activity_store
+    invitation_id = event.get("original_invitation_id") or event["message_id"]
+    get_activity_store().record_event(activity_id, "game_started", unit_id="go2",
+        game_id="color_hunt", trigger_message_id=invitation_id, task_id=task_id,
+        status="executing", source_event_id="game:started:" + invitation_id)
     observed_rgb = None
     pending_observe_rgb = None
     announced_target = None
@@ -185,7 +190,6 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
                            "question_rgb": color["rgb"],
                            "lamp_color": live_lamp_color(source),
                            "latest_observation": observed_evidence,
-                           "decision_guidance": "选择候选时用decision_reason第一人称简短说明刚才观察中的哪些事实支持这个选择，不复述规则，不声称已到达。",
                            "activity_id": activity_id}, ensure_ascii=False)
 
     def tool_guard(name: str, _params: dict) -> dict | None:
@@ -250,13 +254,11 @@ async def _run_color_hunt(drive: object, event: dict, task_id: str) -> None:
         f"你已自主接受 color_hunt；本局已由真实回执确认出题颜色为{color_name}。"
         "先用 go2_observe 重新分析当前场景；依据真实观察自行选择清楚可辨认的同色静止候选；"
         f"自己选择 go2_navigate_to_visible_target，目标描述必须包含‘{color_name}’和具体物品名称。"
-        "在导航的decision_reason中以第一人称自然说明：刚才观察到了什么，以及为什么选择这个同色候选；"
-        "这是面向用户的简短发言，不复述内部字段或规则，不声称已经到达。"
+        "在导航的decision_reason中简短记录当前观察为何支持这个同色候选，依据留在过程详情，无需额外发言。"
         "视觉观察只能确认候选物可见，不能证明地图可达；"
         "无候选就如实结束；不要凭邀请、文字观察或模型回答宣称找到，"
         "不要使用盲走或坐标导航代替视觉目标导航。"
-        "本局须确认已在同一目标附近并停稳才算完成；目标定位失败时工具可自动转为分段找物，"
-        "以真实找物和停稳回执判断完成，不能把仅看见或推进一段当成完成。"
+        "本局须工具确认已在同一目标附近并停稳才算完成，不能把仅看见或推进一段当成完成。"
     )
     graph_task = asyncio.create_task(run_go2_loop(
         "peer_" + event["message_id"], goal, context=context,

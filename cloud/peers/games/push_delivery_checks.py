@@ -14,7 +14,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import ValidationError
 
 from cloud.peers.games import get_game, playable_games, push_delivery
-from cloud.peers.games.delivery_decisions import DestinationDecision, NextDecision
+from cloud.peers.games.delivery_decisions import (
+    Agreement, CompletionDecision, DestinationDecision, InvitationDecision, NextDecision,
+)
 from cloud.space.execution import ExecutionContext
 
 
@@ -44,7 +46,7 @@ def test_destination_and_push_decisions_reject_incomplete_or_invalid_parameters(
              "destination": "红色地垫", "color_name": "红色",
              "color": {"r": 255, "g": 0, "b": 0, "brightness": 160},
              "evidence_refs": ["evt_scene"]}
-    DestinationDecision.model_validate(valid)
+    assert DestinationDecision.model_validate(valid).model_dump()["color"] == valid["color"]
     for invalid in ({**valid, "destination": " "}, {**valid, "evidence_refs": []},
                     {**valid, "evidence_refs": [" "]}, {**valid, "color": None},
                     {**valid, "color": {"r": 256, "g": 0, "b": 0, "brightness": 160}},
@@ -54,6 +56,17 @@ def test_destination_and_push_decisions_reject_incomplete_or_invalid_parameters(
     for distance in (0, -1, float('inf'), float('nan')):
         with pytest.raises(ValidationError):
             NextDecision(action="push", speech="尝试短距推送。", distance_m=distance)
+
+
+def test_internal_delivery_choices_can_be_silent_but_invitation_and_final_need_a_response():
+    assert Agreement(accepted=True).speech == ""
+    assert NextDecision(action="observe").speech == ""
+    assert NextDecision(action="push", distance_m=.4).speech == ""
+    assert NextDecision(action="question", question="目的地是哪块？").question == "目的地是哪块？"
+    for model, params in ((InvitationDecision, {"accepted": True}),
+                          (CompletionDecision, {"action": "finish"})):
+        with pytest.raises(ValidationError):
+            model(**params)
 
 
 class _MemorySaver(InMemorySaver):
@@ -215,7 +228,7 @@ async def delivery_harness(monkeypatch):
         "cloud.go2.control": {"control_lease": SimpleNamespace(snapshot=lambda: None)},
         "cloud.go2.navigation.navigator": {"navigator": navigator},
         "cloud.go2.navigation.cargo_push": {"expect_cargo": expect_cargo},
-        "cloud.go2.tools.registry": {"get_tool_spec": lambda _name: object()},
+        "cloud.go2.tools.registry": {"get_tool_spec": lambda _name: SimpleNamespace(description="推物工具的当前契约")},
         "cloud.go2.tools.executor": {"execute_tool": execute_tool},
         "cloud.space.activity": {"get_activity_store": lambda: SimpleNamespace(record_event=record)},
         "cloud.space.context": {"get_space_context": space_context},
@@ -285,6 +298,63 @@ async def test_game_finishes_a_directional_attempt_without_claiming_delivery(del
     h.messenger.send_result.assert_called_once_with(
         'msg_delivery', 'ok', task_id='task_delivery', reason='directional_push_attempt_completed')
     assert h.agent._peer_game_id is None
+
+
+async def test_silent_delivery_steps_keep_calls_receipts_and_necessary_conversation(delivery_harness, monkeypatch):
+    h = delivery_harness
+    decide = push_delivery.decide
+
+    async def silent_steps(role, phase, facts, **kwargs):
+        answer = await decide(role, phase, facts, **kwargs)
+        if phase == "agree" or phase == "next" and facts["stage"] == "delivery":
+            answer.pop("speech", None)
+        if phase == "next" and facts["stage"] == "delivery":
+            answer.update(decision_reason="当前观察确认了本单货物和目的地。",
+                          evidence_refs=[facts["observation"]["ref"]])
+        return answer
+
+    monkeypatch.setattr(push_delivery, "decide", silent_steps)
+    await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
+    messages = [event["text"] for event in h.events if event["event_type"] == "message"]
+    assert messages == ["请先找地上的小纸盒。", "我找到货物了，这单送去哪里？",
+                        "送到红色地垫附近，这单约定用红光表示。",
+                        "同一货物已确认在指定标识附近，这单大致送到了。"]
+    action = next(event for event in h.events if event.get("action") == "go2_push_cargo"
+                  and event["event_type"] == "action")
+    receipt = next(event for event in h.events if event.get("action") == "go2_push_cargo"
+                   and event["event_type"] == "action_result")
+    assert action["text"] == ""
+    assert action["arguments"] == {"cargo": "地上的小纸盒", "destination": "红色地垫", "distance_m": .15}
+    assert action["decision_basis"] == receipt["decision_basis"]
+    assert action["decision_basis"]["reason"] not in messages
+    assert action["decision_basis"]["evidence"][0]["ref"] in {
+        event["event_id"] for event in h.events if event["event_type"] == "observation"}
+    assert action["task_id"] == receipt["task_id"] and receipt["public_result"]["delivered"] is True
+
+
+async def test_delivery_question_is_spoken_once_and_new_reply_is_preserved(delivery_harness, monkeypatch):
+    h = delivery_harness
+    decide = push_delivery.decide
+    asked = False
+
+    async def clarify_once(role, phase, facts, **kwargs):
+        nonlocal asked
+        if phase == "next" and facts["stage"] == "delivery" and not asked:
+            asked = True
+            return {"action": "question", "question": "指的是盒子后面的红垫吗？",
+                    "speech": "我来复述一下我的疑问。"}
+        if phase == "agree" and facts["stage"] == "clarification":
+            return {"accepted": True, "speech": "对，就是你刚看到的那块红垫。"}
+        return await decide(role, phase, facts, **kwargs)
+
+    monkeypatch.setattr(push_delivery, "decide", clarify_once)
+    await push_delivery.GAME.execute(h.drive, h.event, "task_delivery")
+    messages = [event["text"] for event in h.events if event["event_type"] == "message"]
+    assert messages.count("指的是盒子后面的红垫吗？") == 1
+    assert "我来复述一下我的疑问。" not in messages
+    assert "对，就是你刚看到的那块红垫。" in messages
+    assert messages[-1] == "同一货物已确认在指定标识附近，这单大致送到了。"
+    assert len([name for name, _ in h.calls if name == "go2_push_cargo"]) == 1
 
 
 @pytest.mark.parametrize('change', ['missing_stop', 'wrong_confirmation', 'unknown'])

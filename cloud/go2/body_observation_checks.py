@@ -6,7 +6,7 @@ record, and are not a claim that another physical action was executed.
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -100,6 +100,22 @@ def test_vertical_velocity_bias_is_not_planar_movement(observed):
     assert robot.body_state == 'standing'
     feed(velocity=[0, 0, 0], yaw=.2)
     assert robot.body_state == 'moving'
+
+
+def test_pause_is_confirmed_by_streaming_feedback_without_rpc_receipt(observed):
+    robot, feed, clock = observed
+    feed(count=7)
+    robot._publish_velocity = Mock()  # Transport stub; no physical commands.
+    robot._motion_observation_enabled = True
+    feed(velocity=[.2, 0, 0])
+    assert robot.body_state == 'moving'
+    robot.move_velocity(0, 0, 0)
+    assert robot.body_state is None and robot.body_confirmation == 'unknown'
+    stopped_at = clock[0]
+    feed(count=3, velocity=[0, 0, 0])
+    assert clock[0] - stopped_at < .4
+    assert robot.body_state == 'standing' and robot.body_confirmation == 'observed'
+    robot._conn.datachannel.pub_sub.publish_request_new.assert_not_called()
 
 
 @pytest.mark.asyncio

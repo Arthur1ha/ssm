@@ -91,6 +91,72 @@ async def test_distance_uses_projected_odometry_and_streams_until_stopped(moveme
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('recover', [True, False])
+async def test_pause_between_preflight_and_stream_waits_for_body_feedback(movement, monkeypatch, recover):
+    from cloud.go2.connection.fsm import CommandBlocked
+    from cloud.go2.navigation import navigator as nav_module
+    from cloud.go2.tools.tools import go2_move
+    original_move, original_tick = movement.robot.move_velocity, nav_module.asyncio.sleep
+    feedback = {'reason': None, 'active': 0, 'paused': False, 'ticks': 0}
+    monkeypatch.setattr(nav_module, 'TELEMETRY_RECOVERY_S', .03)
+    movement.robot.body_ready_reason = lambda: feedback['reason']
+
+    def move(vx, vy, yaw, **kwargs):
+        if any((vx, vy, yaw)):
+            feedback['active'] += 1
+            if feedback['active'] == 2:
+                # The planner/deadman sends StopMove after preflight; fresh
+                # body telemetry has not arrived when this stream update runs.
+                original_move(0, 0, 0)
+                feedback.update(reason='等待有效设备反馈', paused=True)
+                raise CommandBlocked(feedback['reason'])
+            assert feedback['reason'] is None, 'Motion resumed without real feedback'
+        return original_move(vx, vy, yaw, **kwargs)
+
+    async def tick(delay):
+        await original_tick(delay)
+        if feedback['reason']:
+            feedback['ticks'] += 1
+            if recover and feedback['ticks'] >= 2:
+                feedback['reason'] = None
+
+    movement.robot.move_velocity = move
+    monkeypatch.setattr(nav_module.asyncio, 'sleep', tick)
+    with use_context(movement.context):
+        result = await go2_move('forward', distance_m=.4)
+    assert feedback['paused'] and feedback['ticks'] >= 2
+    assert result['reason'] != 'control_error'
+    if recover:
+        assert result['result'] == 'ok', result
+        assert result['distance_m'] >= .35
+    else:
+        assert result['result'] == 'blocked', result
+        assert result['reason'] == 'posture_not_confirmed'
+        assert feedback['active'] == 2
+    assert movement.commands[-1] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_real_body_rejection_preserves_reason_instead_of_claiming_disconnect(movement):
+    from cloud.go2.connection.fsm import CommandBlocked
+    from cloud.go2.tools.tools import go2_move
+    original_move = movement.robot.move_velocity
+
+    def move(vx, vy, yaw, **kwargs):
+        if any((vx, vy, yaw)):
+            raise CommandBlocked('body_action_unconfirmed')
+        return original_move(vx, vy, yaw, **kwargs)
+
+    movement.robot.move_velocity = move
+    with use_context(movement.context):
+        result = await go2_move('forward', distance_m=.4)
+    assert result['result'] == 'blocked'
+    assert result['reason'] == 'body_action_unconfirmed'
+    assert '连接异常' not in result['message']
+    assert not any(any(command) for command in movement.commands)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('direction', ['turn_left', 'turn_right'])
 async def test_turn_uses_measured_angle_without_translation(movement, direction):
     from cloud.go2.tools.tools import go2_move

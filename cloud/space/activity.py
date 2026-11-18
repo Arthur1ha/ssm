@@ -24,7 +24,7 @@ CURRENT_ACTIVITY_TOPIC = f"ssm/space/{DEFAULT_SPACE_ID}/activity/current"
 _DATA_PATH = Path(__file__).parent / "data" / "activity.json"
 _MAX_ACTIVITIES = 4
 _MAX_DETAIL_EVENTS = 100
-_KEY_EVENTS = {"started", "ended", "device_joined", "device_left", "question"}
+_KEY_EVENTS = {"started", "ended", "game_started", "game_ended", "device_joined", "device_left", "question"}
 _STATE_FIELDS = ("connection_state", "activity_state", "life_state", "body_state",
                  "body_confirmation", "body_telemetry_fresh", "autonomy_mode", "ism", "r", "g", "b", "brightness")
 
@@ -55,6 +55,8 @@ def _decision_basis_snapshot(value: Any) -> dict[str, Any] | None:
             entry["as_of"] = as_of
         if item.get("status") in {"current", "stale", "unknown"}:
             entry["status"] = item["status"]
+        if item.get("validity") == "until_changed":
+            entry["validity"] = item["validity"]
         evidence.append(entry)
     return {"reason": reason, "evidence": evidence}
 
@@ -66,17 +68,17 @@ def _state_at_event(unit_id: str, now: float) -> dict[str, Any]:
     Missing or stale feedback remains explicitly unconfirmed in the journal.
     """
     from cloud.cards.registry import get_registry
-    from cloud.space.freshness import state_observed_at
+    from cloud.space.freshness import state_validity
 
-    state = (get_registry().get_card(unit_id) or {}).get("state") or {}
-    observed = state_observed_at(state, now)
-    if observed is None:
-        return {"status": "unknown"}
+    card = get_registry().get_card(unit_id) or {}
+    state = card.get("state") or {}
+    validity = state_validity(state, now, online=card.get("online"))
+    if validity["status"] == "unknown":
+        return validity
     values = {key: state[key] for key in _STATE_FIELDS if key in state
               and (state[key] is None or isinstance(state[key], (str, bool, int))
                    or isinstance(state[key], float) and math.isfinite(state[key]))}
-    return {"status": "current" if now - observed <= 60 else "stale",
-            "as_of": observed, "values": values}
+    return {**validity, "values": values}
 
 
 def _game_round_snapshot(value: Any) -> dict[str, Any] | None:
@@ -371,7 +373,7 @@ class ActivityStore:
     def _record_event_locked(self, activity_id: str, event_type: str, *, unit_id: str = "",
                              text: str = "", **facts: Any) -> dict[str, Any]:
         allowed = {"message", "proposal", "response", "observation", "person_identified", "search_progress", "action", "action_progress",
-                   "action_result", "question",
+                   "action_result", "question", "game_started", "game_ended",
                    "started", "ended", "device_joined", "device_left"}
         if event_type not in allowed:
             raise ValueError("invalid_activity_event")

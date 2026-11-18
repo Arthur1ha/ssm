@@ -104,6 +104,22 @@ function activityReasonText(event) {
     run_deadline_exceeded:'本次处理时间已用尽',
     cargo_search_unconfirmed:'本次找货尚未完成',
     cargo_push_unconfirmed:'本次推送尚未确认完成',
+    delivery_signal_changed:'约定的灯色或亮度发生变化，推送已停止',
+    delivery_signal_unconfirmed:'无法继续确认约定的灯光信号，推送已停止',
+    delivery_signal_changed_or_stale:'约定的灯光信号发生变化，或其状态被系统判为过期',
+    delivery_observation_unavailable:'未能取得所需的现场画面，无法继续配送',
+    game_expired:'本局任务的执行期限已到',
+    autonomy_interrupted_or_offline:'设备离线或自主任务被中断',
+    courier_stopped:'送货员决定结束本次配送',
+    delivery_completion_unconfirmed:'未能确认本次配送完成',
+    cargo_identity_unconfirmed:'未能继续确认是同一件货物',
+    cargo_push_stop_unconfirmed:'推送后的停稳结果尚未确认',
+    delivery_service_unavailable:'配送服务当前不可用',
+    go2_activity_unavailable:'机器狗当前无法开始本局任务',
+    delivery_unconfirmed:'本次配送结果尚未确认',
+    lamp_busy:'灯正在处理其他任务',
+    acceptance_unconfirmed:'尚未确认双方接受本局邀请',
+    control_error:'运动执行中断，具体原因见动作回执',
     no_known_free_forward_path:'目标方向暂未确认有可通行的空间',
     turn_clearance_unavailable:'暂未确认有足够的转身空间',
     disconnected:'设备当前未连接',
@@ -119,6 +135,21 @@ function activityReasonText(event) {
   return !/[{}\[\]]/.test(reason) && /[\u3400-\u9fff]/.test(reason)
     && !/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b|\bHTTP(?:\/\d(?:\.\d)?)?\s*\d{3}\b|\b\d{3}\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Internal Server Error|Bad Gateway|Service Unavailable)\b|\b\w*(?:Error|Exception)\b/i.test(reason)
     && !/\b(?:[A-Z][A-Za-z0-9]*\.)+[A-Z][A-Za-z0-9]*\b/.test(reason) ? reason : '';
+}
+
+function activityGameEnd(event) {
+  // Legacy game executors already wrote explicit terminal responses/settlements.
+  // Never infer an ending from an action failure or conversational wording.
+  if (!event.game_id || !['ok','blocked','rejected','cancelled','error','failed','timeout','unknown'].includes(event.status)) return null;
+  if (event.event_type !== 'game_ended' && !(event.trigger_message_id &&
+      (event.event_type === 'response' || event.stage === 'settlement'))) return null;
+  const name = {push_delivery:'送货游戏',color_hunt:'找颜色游戏',rps_siege:'猜拳攻灯'}[event.game_id] || '游戏';
+  const reason = activityReasonText(event) || (event.status === 'ok' ? '' : '结束原因尚未记录');
+  return {name,reason};
+}
+
+function activityGameStart(event) {
+  return event.event_type === 'game_started' && Boolean(event.game_id);
 }
 
 function activityDecisionBasis(event) {
@@ -156,7 +187,7 @@ function activityDecisionEvidence(item, event, events, now = Date.now() / 1000) 
     activity:'活动情境', constraint:'用户要求', action_result:'动作反馈'};
   const recordedAt = Number(item.as_of);
   const hasTime = Number.isFinite(recordedAt) && recordedAt > 0;
-  const maxAge = item.kind === 'observation' ? 600
+  const maxAge = item.validity === 'until_changed' ? null : item.kind === 'observation' ? 600
     : ['peer_state', 'environment'].includes(item.kind) ? 60 : null;
   const atDecision = Number(event.ts);
   const expiredThen = item.status === 'stale' || maxAge !== null && hasTime
@@ -175,6 +206,7 @@ function activityDecisionEvidence(item, event, events, now = Date.now() / 1000) 
 
 Object.assign(window, {activityStateAge, activityLightColor, activityPhysicalLabel, activityMemberView,
   activityMessageReceipt, activityReasonText,
+  activityGameEnd, activityGameStart,
   activityDecisionBasis, activityEventKind, activityDecisionText, activityDecisionEvidence,
   isActivityLightingAction});
 

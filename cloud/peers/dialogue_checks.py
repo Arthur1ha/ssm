@@ -47,6 +47,36 @@ def dialogue_bus(monkeypatch):
     bus.close()
 
 
+@pytest.mark.parametrize("status,task_id,is_game,ended", [
+    ("unknown", "delivery_task", True, True),
+    ("ok", "delivery_task", True, True),
+    ("cancelled", "delivery_task", True, True),
+    ("rejected", None, True, False),
+    ("ok", "chat_task", False, False),
+])
+def test_only_game_task_results_publish_game_end(dialogue_bus, status, task_id, is_game, ended):
+    h = dialogue_bus
+    original = h.start()
+    if is_game:
+        # Seed the already validated invitation metadata; exercise the signed
+        # result path without calling models, accepting a game or moving devices.
+        h.bus._outgoing[original["message_id"]].update(
+            interaction_kind="game_invite", game_id="push_delivery")
+    h.store.record_event.reset_mock()
+    h.bus.send_result(original["message_id"], status, task_id=task_id,
+                      reason="cargo_push_unconfirmed:control_error")
+    h.deliver_last()
+    rows = [call for call in h.store.record_event.call_args_list
+            if call.args[1] == "game_ended"]
+    assert bool(rows) is ended
+    if ended:
+        assert len(rows) == 1
+        assert rows[0].kwargs["game_id"] == "push_delivery"
+        assert rows[0].kwargs["trigger_message_id"] == original["message_id"]
+        assert rows[0].kwargs["status"] == status
+        assert rows[0].kwargs["reason"] == "cargo_push_unconfirmed:control_error"
+
+
 def test_pending_pair_blocks_new_topics_but_allows_same_thread_and_results(dialogue_bus):
     h, bus = dialogue_bus, dialogue_bus.bus
     original = h.start()
@@ -228,10 +258,8 @@ async def test_deferred_invitation_uses_existing_social_graph_after_turn_release
     drive._advance_task = AsyncMock()
     monkeypatch.setattr(free_explore, "go2", SimpleNamespace(is_connected=True))
     monkeypatch.setattr(free_explore, "runtime_for", lambda _robot: None)
-    monkeypatch.setattr("cloud.peers.games.base.game_invitation_ready",
-                        lambda *_: drive._active_goal is None)
-    monkeypatch.setattr("cloud.peers.games.registry.game_invitation_ready",
-                        lambda *_: drive._active_goal is None)
+    monkeypatch.setattr("cloud.peers.games.base.game_invitation_block_reason",
+                        lambda *_: "go2_task_active" if drive._active_goal else None)
     bus._resolve_decision = lambda *_: {"reason": "用户要求这局游戏", "evidence": []}
 
     async def role_graph(*_args, **_kwargs):
@@ -264,7 +292,7 @@ async def test_deferred_invitation_uses_existing_social_graph_after_turn_release
     monkeypatch.setattr("cloud.api.main.get_agent_messenger", lambda: bus)
     monkeypatch.setattr("cloud.space.context.get_space_context", lambda *_args, **_kwargs: space)
     monkeypatch.setattr(free_explore, "get_profile", lambda: {"prompt": "我是机器狗", "traits": {"extraversion": 75}})
-    monkeypatch.setattr(free_explore, "prompt_space_context", lambda: "用户要求双方玩注册游戏。")
+    monkeypatch.setattr(free_explore, "prompt_space_context", lambda: json.dumps(space, ensure_ascii=False))
     monkeypatch.setattr("cloud.go2.perception.identity.identity_skill.context", lambda: {})
     monkeypatch.setattr("cloud.agents.go2.workflows.social.agent_names", lambda: {})
 
@@ -279,7 +307,12 @@ async def test_deferred_invitation_uses_existing_social_graph_after_turn_release
                     "reason": "用户要求这局游戏", "evidence_refs": ["activity_request"]}
 
     monkeypatch.setattr(free_explore, "get_text_llm", Model)
+    decisions = []
+    monkeypatch.setattr("cloud.observability.emit_agent_event",
+                        lambda event, **fields: decisions.append((event, fields)))
     await drive._evaluate_social()
+    social = [fields for event, fields in decisions if event == "model.decision" and fields.get("stage") == "social"]
+    assert social and social[-1]["status"] == "accepted", social
     payload = json.loads(h.sent[-1][1])
     assert payload["interaction_kind"] == "game_invite" and payload["game_id"] == "rps_siege"
     assert not drive._social_state.has_completed_turn("act_dialogue")

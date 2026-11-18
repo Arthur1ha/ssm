@@ -137,6 +137,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       const autonomous = item.scope === 'space' && ['autonomous', 'object_search'].includes(item.source);
       const pending = pendingRuns.current.get(item.run_id);
       if (!autonomous && (!['device_chat', 'object_search'].includes(item.source) || !pending)) return;
+      if (pending?.superseded && !(item.type === 'agent_progress'
+          && (item.fact_kind === 'result' || item.public_result))) return;
       const requestId = autonomous ? `auto:${item.run_id || item.event_id}` : pending.key;
       if (item.type === 'agent_reply' && item.text) {
         const replyKey = `${item.run_id}:${item.source_event_id || item.event_id}`;
@@ -301,13 +303,19 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
 
   /* ── 发送对话 ── */
   const handleSend = text => {
-    if (!text || sending) return;
+    if (!text) return;
+    const previous=activeRun.current;
+    if (previous && pendingRuns.current.has(previous)) {
+      pendingRuns.current.get(previous).superseded=true;
+      retainRun(previous);
+    }
     const runId = pendingRunId || (unitId === 'go2' ? 'go2_' : 'lamp_') +
       crypto.randomUUID().replaceAll('-', '');
     if (pendingRuns.current.has(runId)) forgetRun(runId);
     const requestId = `chat:${++nextRequestId.current}`;
     setMessages(prev => [...prev, { id: `${requestId}:user`, type: 'user', text, requestId, runId }]);
     setSending(true);
+    setPendingRunId(null);
     activeRun.current = runId;
     pendingRuns.current.set(runId, { key: requestId, timer: null });
     const answerText = activityQuestion && unitId === 'go2'
@@ -323,15 +331,15 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     setTrainingSelection(null);
     commandBus.command(unitId, 'chat', params)
       .then(result => {
-        setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
         if (!pendingRuns.current.has(runId)) return;
+        if (pendingRuns.current.get(runId).superseded) return;
+        if (activeRun.current === runId) setPendingRunId(result?.result === 'needs_clarification' ? (result.run_id || result.task_id) : null);
         const reply = result?.reply || result?.response;
         const replyKey = `${runId}:${result?.source_event_id || result?.event_id}`;
         if (result?.event_id && reply && !seenReplies.current.has(replyKey)) {
           seenReplies.current.add(replyKey);
           finishMessage(requestId, reply, result.event_id, result.reply_source === 'runtime', result.emotion);
-          setSending(false);
-          activeRun.current = null;
+          if (activeRun.current === runId) {setSending(false);activeRun.current=null;}
           retainRun(runId);
         } else if (!result?.event_id || !reply) {
           const fallback = reply || result?.question || apiErrorText(
@@ -343,15 +351,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
             finishMessage(requestId, fallback, result?.event_id,
               result?.reply_source === 'runtime' || !reply && !result?.question, result?.emotion);
           }
-          setSending(false);
-          activeRun.current = null;
+          if (activeRun.current === runId) {setSending(false);activeRun.current=null;}
           // HTTP/query can finish before the matching SSE event. Keep its ID
           // briefly so a late reply or error still attaches to this task.
           retainRun(runId);
         }
       })
       .catch(error => {
-        if (!pendingRuns.current.has(runId)) return;
+        if (!pendingRuns.current.has(runId) || pendingRuns.current.get(runId).superseded) return;
         finishMessage(requestId, apiErrorText(error), undefined, true);
         if (activeRun.current === runId) {
           setSending(false);
@@ -424,14 +431,16 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
       }}>
-      {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
-      {activityQuestion && <div className="device-activity-question">
-        <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
-        <span>{activityQuestion.text}</span>
-        {activityMediaUrl(activityQuestion) && <a href={activityMediaUrl(activityQuestion)}
-          target="_blank" rel="noopener noreferrer">查看截图</a>}
-      </div>}
       <ChatPanel
+        beforeMessages={<>
+          {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
+          {activityQuestion && <div className="device-activity-question">
+            <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
+            <span>{activityQuestion.text}</span>
+            {activityMediaUrl(activityQuestion) && <a href={activityMediaUrl(activityQuestion)}
+              target="_blank" rel="noopener noreferrer">查看截图</a>}
+          </div>}
+        </>}
         messages={chatRows}
         training={training}
         onReviseRule={p => setTrainingSelection({unit_id:unitId,transition_id:trainingTransitionIds(p)[0],proposal_id:p.proposal_id,summaryText:p.summaryText})}
@@ -597,13 +606,13 @@ function DeviceCapabilitiesDrawer({ open, onClose, card }) {
       <div className="device-settings-capabilities">
         <section><h3>可用于自动触发的观察</h3>
           {card?.observations?.length ? card.observations.map(obs =>
-            <p key={obs.id}><strong>{obs.name || obs.id}</strong><small>{obs.available === false ? '当前不可用 · ' : ''}{obs.description || '设备声明的观察条件'}</small></p>)
+            <p key={obs.id}><strong>{publicCapabilityText(obs.name) || '设备观察'}</strong><small>{obs.available === false ? '当前不可用 · ' : ''}{publicCapabilityText(obs.description) || '设备声明的观察条件'}</small></p>)
             : <p><small>该设备暂未声明自动触发条件。</small></p>}
         </section>
         <section><h3>公开技能</h3>
           {card?.skills?.length ? card.skills.map(skill =>
-            <p key={skill.id}><strong>{skill.name}</strong>
-              <small>{skill.tags?.includes('persistent') ? '需管理员操作' : '可手动或通过对话调用'} · {skill.description}</small></p>)
+            <p key={skill.id}><strong>{publicCapabilityText(skill.name) || '设备能力'}</strong>
+              <small>{skill.tags?.includes('persistent') ? '需管理员操作' : '可手动或通过对话调用'} · {publicCapabilityText(skill.description)}</small></p>)
             : <p><small>该设备暂未声明公开技能。</small></p>}
         </section>
       </div>

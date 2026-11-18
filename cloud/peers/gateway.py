@@ -427,7 +427,7 @@ def _dispatch_lamp(request_id: str, target: str, action: str, params: dict,
         return _failure("error", "mqtt_unavailable", request_id)
     from cloud.esp32.tool_executor import execute_physical
     execution = ExecutionContext(context.session_id, actor, False, context.space_id,
-                                 origin, context.expires_at)
+                                 origin, context.expires_at, goal_revision=context.goal_revision)
 
     def dispatch(unit_id, physical_action, physical_params, trusted, source, *, task_id):
         payload = {"task_id": task_id, "request_id": request_id,
@@ -474,6 +474,8 @@ def _dispatch_lamp_semantic(request_id: str, target: str, endpoint: str, params:
 
 def _go2_http(path: str, method: str, context: ExecutionContext, origin: str,
               request_id: str, timeout: float, body: dict | None = None) -> dict:
+    from cloud.space.user_goals import get_goal_registry
+    get_goal_registry().check(context.goal_revision)
     token = os.getenv("SSM_INTERNAL_SERVICE_TOKEN", "")
     if len(token) < 16:
         raise RuntimeError("internal_service_token_unavailable")
@@ -487,6 +489,7 @@ def _go2_http(path: str, method: str, context: ExecutionContext, origin: str,
         "X-SSM-Space-Id": "main",
         "X-SSM-Origin-Kind": origin,
         "X-SSM-Expires-At": str(context.expires_at),
+        "X-SSM-Goal-Revision": str(context.goal_revision),
     }
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(base + path, data=data, headers=headers, method=method)
@@ -545,10 +548,13 @@ def _dispatch_coordinator(request_id: str, initiator: str, target: str, skill: s
         return _failure("error", "mqtt_unavailable", request_id)
     topic = f"ssm/peer/request/{request_id}"
     now = int(time.time())
+    from cloud.space.user_goals import get_goal_registry
+    get_goal_registry().check(context.goal_revision)
     payload = {"request_id": request_id, "initiator_unit_id": initiator,
                "target_unit_id": target, "skill_id": skill, "params": params,
                "origin_kind": origin, "origin_session_id": context.session_id if origin == "user_delegated" else None,
                "actor": actor, "persist": False, "space_id": "main",
+               "goal_revision": context.goal_revision,
                "issued_at": now, "expires_at": now + max(1, math.ceil(timeout))}
     correlation = current_event_context()
     payload.update({"trace_id": correlation.get("trace_id"),

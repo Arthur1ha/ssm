@@ -172,18 +172,33 @@ const commandBus = {
   },
 
   // At most two movement writes overlap. A stop gets an immediate extra slot;
-  // page-scoped sequences let the server discard out-of-order arrivals.
+  // Each gesture has its own identity and ordered frames, so a late frame
+  // cannot inherit the authority of a newer conversation or gesture.
   _velocities: new Map(),
   velocity(unitId, action, params, report) {
     let entry = this._velocities.get(unitId);
     if (!entry) {
-      entry = { next: null, running: 0, stopping: 0, sequence: 0,
+      entry = { next: null, opening: null, atRest: true, running: 0, stopping: 0, sequence: 0,
         controllerId: crypto.randomUUID().replaceAll('-', '') };
       this._velocities.set(unitId, entry);
     }
     const stop = !params.vx && !params.vy && !params.vyaw;
-    entry.next = { action, params: { ...params, controller_id: entry.controllerId,
+    if (!stop && entry.atRest) {
+      entry.controllerId=crypto.randomUUID().replaceAll('-', '');
+      entry.sequence=0;
+      entry.atRest=false;
+    }
+    const item = { action, params: { ...params, controller_id: entry.controllerId,
       sequence: ++entry.sequence }, report, stop };
+    if (stop) {
+      entry.atRest=true;
+      entry.opening=null;
+      entry.next=item;
+    } else if (item.params.sequence===1) {
+      // Preserve the opening frame even when older requests fill both slots.
+      entry.opening=item;
+      entry.next=null;
+    } else entry.next=item;
     const send = async item => {
       entry.running++;
       if (item.stop) entry.stopping++;
@@ -198,10 +213,11 @@ const commandBus = {
       }
     };
     const drain = () => {
-      if (!entry.next) return;
-      if (entry.running >= 2 && !(entry.next.stop && !entry.stopping)) return;
-      const item = entry.next;
-      entry.next = null;
+      const item=entry.opening || entry.next;
+      if (!item) return;
+      if (entry.running >= 2 && !(item.stop && !entry.stopping)) return;
+      if (entry.opening) entry.opening=null;
+      else entry.next=null;
       send(item);
     };
     drain();

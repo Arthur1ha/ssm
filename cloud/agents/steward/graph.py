@@ -66,14 +66,23 @@ def stable_reply_event_id(run: Run) -> str:
 
 def run_intent_loop(context: dict, *, llm=None, resume: bool = False,
                     supplemental: str = "") -> dict:
-    """Called in the controlled intent worker, never in an MQTT callback."""
+    """Synchronous peer/test adapter for the same native async Graph."""
+    return asyncio.run(run_intent_loop_async(context, llm=llm, resume=resume,
+                                             supplemental=supplemental))
+
+
+async def run_intent_loop_async(context: dict, *, llm=None, resume: bool = False,
+                                supplemental: str = "") -> dict:
     index = FileRunIndex()
-    with index.session_lock("cloud_orchestrator", context["session_id"]):
-        return _run_intent_loop(context, llm=llm, resume=resume,
-                                supplemental=supplemental, index=index)
+    async with index.async_session_lock("cloud_orchestrator", context["session_id"],
+                                        goal_revision=context.get("goal_revision", 0)):
+        from cloud.space.user_goals import get_goal_registry
+        get_goal_registry().check(context.get("goal_revision", 0))
+        return await _run_intent_loop(context, llm=llm, resume=resume,
+                                      supplemental=supplemental, index=index)
 
 
-def _run_intent_loop(context: dict, *, llm, resume: bool,
+async def _run_intent_loop(context: dict, *, llm, resume: bool,
                      supplemental: str, index: FileRunIndex) -> dict:
     session_id = context["session_id"]
     run_id = context.get("resume_run_id") or context.get("event_id") or uuid.uuid4().hex
@@ -119,6 +128,7 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
         run.parent_run_id = context.get("parent_run_id") or ""
         run.agent_id = "cloud_orchestrator"
         run.origin_kind = context.get("origin_kind") or "user_delegated"
+        run.goal_revision = context.get("goal_revision", 0)
         try:
             index.put_if_absent(run_id, agent_id, session_id, thread_id)
         except ValueError:
@@ -161,15 +171,23 @@ def _run_intent_loop(context: dict, *, llm, resume: bool,
     with bind_context(trace_id=run.trace_id or run.run_id, run_id=run.run_id,
                       parent_run_id=run.parent_run_id or None, agent_id="cloud_orchestrator",
                       session_id=session_id, origin_kind=run.origin_kind):
-        asyncio.run(invoke_graph())
+        await invoke_graph()
     if run.status != "needs_clarification":
         pin_completed_run(run_id, session_id, agent_id, index=index, checkpointer=saver)
+    from cloud.space.user_goals import get_goal_registry
+    if not get_goal_registry().is_current(run.goal_revision):
+        transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,
+            trace_id=run.trace_id or run_id, status="cancelled", stage="done",
+            goal_revision=run.goal_revision, reason="newer_user_goal")
+        return {"run_id": run_id, "result": "cancelled", "response": "",
+                "steps": run.steps, "goal_revision": run.goal_revision}
     stage = ("question" if run.status == "needs_clarification" else
              "done" if run.status == "ok" else
              "partial" if run.status == "partial" else "failed")
     transport.do_publish_ui_event(session_id, "agent_reply" if run.response and run.reply_source != "runtime" else "reply_error",
         run_id=run_id, trace_id=run.trace_id or run_id, status=run.status,
         text=run.response, emotion=run.emotion, reply_source=run.reply_source,
+        goal_revision=run.goal_revision,
         event_id=stable_reply_event_id(run),
         reply_kind="clarification" if run.status == "needs_clarification" else "final")
     transport.do_publish_ui_event(session_id, "run_stage", run_id=run_id,

@@ -98,7 +98,9 @@ async function checkTransport() {
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(pending.length,3,'Queued movement was replayed after release');
   move(.2);
-  assert.equal(pending[3].params.sequence,6,'A new gesture must continue the ordering sequence');
+  assert.equal(pending[3].params.sequence,1,'A new gesture must start its own ordering sequence');
+  assert.notEqual(pending[3].params.controller_id,pending[2].params.controller_id,
+    'A new gesture must not inherit an old goal identity');
   pending[3].resolve({result:'accepted'});
   await new Promise(resolve=>setImmediate(resolve));
   // Pending samples are coalesced to the newest complete pair of stick values.
@@ -109,6 +111,26 @@ async function checkTransport() {
   assert.equal(pending.length,start+1);
   assert.equal(pending.at(-1).params.vx,.4);
   pending[start-1].resolve({result:'accepted'});
+  pending.at(-1).resolve({result:'accepted'});
+  await new Promise(resolve=>setImmediate(resolve));
+  // A rapid restart can overlap the previous gesture's release. Its opening
+  // frame must survive coalescing, or the server cannot bind its new goal.
+  move(.1); move(.2); move(0);
+  const oldFrames=pending.slice(-3);
+  move(.3); move(.4);
+  const beforeRestart=pending.length;
+  oldFrames[0].resolve({result:'accepted'});
+  await new Promise(resolve=>setImmediate(resolve));
+  oldFrames[1].resolve({result:'accepted'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(pending[beforeRestart].params.sequence,1);
+  assert.equal(pending[beforeRestart].params.vx,.3);
+  assert.notEqual(pending[beforeRestart].params.controller_id,oldFrames[0].params.controller_id);
+  oldFrames[2].resolve({result:'accepted'});
+  pending[beforeRestart].resolve({result:'accepted'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(pending.at(-1).params.sequence,2);
+  assert.equal(pending.at(-1).params.vx,.4);
   pending.at(-1).resolve({result:'accepted'});
   await new Promise(resolve=>setImmediate(resolve));
 }

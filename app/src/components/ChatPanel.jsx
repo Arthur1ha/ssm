@@ -26,7 +26,7 @@ window.ChatPanel = ChatPanel;
 function ChatInput({ onSend, busy, disabled, placeholder, focusKey, avatar }) {
   const inputRef = React.useRef(null);
   React.useEffect(() => { if (focusKey) inputRef.current?.focus(); }, [focusKey]);
-  const unavailable = disabled || busy;
+  const unavailable = disabled;
   const [input, setInput] = React.useState('');
 
   const handleSend = () => {
@@ -56,7 +56,7 @@ function ChatInput({ onSend, busy, disabled, placeholder, focusKey, avatar }) {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && !e.isComposing && handleSend()}
-          placeholder={busy && !disabled ? '处理中…' : (placeholder || '告诉我想要什么…')}
+          placeholder={busy && !disabled ? '输入新的要求…' : (placeholder || '告诉我想要什么…')}
           disabled={unavailable}
           style={{
             flex: 1, minWidth: 0, background: 'transparent', border: 'none',

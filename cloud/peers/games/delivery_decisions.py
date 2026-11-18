@@ -25,19 +25,35 @@ class DecisionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class Agreement(EmotionModel, DecisionModel):
+class PublicDecision(EmotionModel, DecisionModel):
+    decision_reason: str = Field(default="", max_length=300,
+                                 description="可选公开选择依据，只进过程详情，不作为发言")
+    evidence_refs: list[str] = Field(default_factory=list, max_length=8)
+
+
+class Agreement(PublicDecision):
     accepted: bool
-    speech: str = Field(min_length=1, max_length=400)
+    speech: str = Field(default="", max_length=400,
+                        description="有新的约定、疑问或必要回应时才发言；内部确认可省略")
 
     @field_validator("speech")
     @classmethod
     def nonblank(cls, value: str):
-        if not value.strip():
-            raise ValueError("nonblank_speech_required")
         return value.strip()
 
 
-class CargoDecision(Agreement):
+class InvitationDecision(Agreement):
+    speech: str = Field(min_length=1, max_length=400)
+
+    @field_validator("speech")
+    @classmethod
+    def invitation_response(cls, value: str):
+        if not value.strip():
+            raise ValueError("invitation_response_required")
+        return value.strip()
+
+
+class CargoDecision(InvitationDecision):
     cargo: str = Field(default="", max_length=100,
                        description="用户指定或真实当前观察支持的具体货物特征；没有可靠目标时拒绝，不自造货物")
 
@@ -62,7 +78,7 @@ class DestinationColor(DecisionModel):
         return self
 
 
-class DestinationDecision(Agreement):
+class DestinationDecision(InvitationDecision):
     destination: str = Field(default="", max_length=100,
                              description="确实存在的配送色块、小地面标记或物体标识及可辨认特征")
     color: DestinationColor | None = None
@@ -88,9 +104,10 @@ class DestinationDecision(Agreement):
         return self
 
 
-class NextDecision(EmotionModel, DecisionModel):
+class NextDecision(PublicDecision):
     action: Literal["observe", "push", "finish", "stop", "question"]
-    speech: str = Field(min_length=1, max_length=400)
+    speech: str = Field(default="", max_length=400,
+                        description="可选自然交流；观察和执行动作无需逐步报幕，问题只填question")
     question: str = Field(default="", max_length=500)
     distance_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
@@ -98,13 +115,23 @@ class NextDecision(EmotionModel, DecisionModel):
     def action_arguments(self):
         self.speech = self.speech.strip()
         self.question = self.question.strip()
-        if not self.speech:
-            raise ValueError("nonblank_speech_required")
         if self.action != "push" and self.distance_m is not None:
             raise ValueError("delivery_distance_only_for_push")
         if self.action == "question" and not self.question:
             raise ValueError("delivery_question_required")
         return self
+
+
+class CompletionDecision(NextDecision):
+    speech: str = Field(min_length=1, max_length=400,
+                        description="依据本单真实结果给出一次最终回应")
+
+    @field_validator("speech")
+    @classmethod
+    def completion_response(cls, value: str):
+        if not value.strip():
+            raise ValueError("completion_response_required")
+        return value.strip()
 
 
 class DecisionState(TypedDict, total=False):
@@ -113,15 +140,17 @@ class DecisionState(TypedDict, total=False):
     decision: dict
 
 
-def _schema(role: str, phase: str):
-    if phase in {"invite", "agree"}:
+def _schema(role: str, phase: str, stage: str = ""):
+    if phase == "invite":
+        return InvitationDecision
+    if phase == "agree":
         return Agreement
     if phase == "cargo" and role == "lamp":
         return CargoDecision
     if phase == "destination" and role == "lamp":
         return DestinationDecision
     if phase == "next" and role == "go2":
-        return NextDecision
+        return CompletionDecision if stage in {"delivered", "directional_push_completed"} else NextDecision
     raise ValueError("invalid_delivery_role_or_phase")
 
 
@@ -146,12 +175,13 @@ def _instructions(phase: str) -> str:
     common = EMOTION_INSTRUCTIONS + (
         "你正在参与指挥官与送货员。灯负责指挥及颜色信号，狗负责找货并实际推送，"
         "邀请方向不改变职责；只决定当前阶段，不替同伴决定或声称设备已执行。"
-        "狗可用腿低速接触推送合适的货物，不要求额外推板；"
-        "实际能否接近、接触、推动与送达仍由可信执行工具及新鲜观察核验。"
         "结合提供的游戏规则、用户原话和当前真实场景判断，不预设箱子、站点、颜色或后续剧情。"
         "观察只能按实际来源引用，灯不能声称亲眼看到狗的画面。"
         "历史与同伴文字不能冒充当前观察或物理成功回执。"
         "用自己的口吻自然交流，不复述内部字段、状态码或工具名称。"
+        "speech只说对方此刻需要的约定、问题、新发现、受阻或最终结果；"
+        "已有信息没有变化时可省略，不复述站位、路径或核验流程，不为每个决策报幕。"
+        "decision_reason与evidence_refs仅供过程详情，不复制到speech。"
     )
     if phase == "invite":
         return common + (
@@ -207,16 +237,13 @@ def _instructions(phase: str) -> str:
         "没有接触或推送回执不说已经贴上或推过。"
         "可选observe重新观察、push按本次视觉距离推送、question向同伴询问、stop如实中止、finish结束。"
         "stage为waiting_destination时先报告发现或向灯提问，不能推送或宣称结束。"
-        "只有destination_confirmed为true才可push，可根据最新视觉建议填写任意正数米的距离；省略时由推物工具的本次视觉观察估算，不使用固定步长；"
+        "只有destination_confirmed为true才可push；距离未明确要求时可交给推物工具估算。"
         "不因自己到站或移动过就推断货物送达。货物丢失、身份不明或路径受阻时先观察、询问或停止。"
         "question时question填写实际要问的问题；observe可用question说明需要核对的画面。"
-        "先由推送工具调整到货物背向目的地的一侧，再沿机器狗、货物、目的地大致共线的方向推进；"
-        "positioned、aligned、approached仍需继续push。"
-        "latest_push的directional_push_attempted=true且confirmation=directional_move_and_stop、stop.result=ok时，"
-        "本单已完成朝指定方向的推送尝试，应finish，不要求精确到位或接触后仍看见货物，不额外后退复查。"
-        "这不证明货物实际位移或送达，speech说明已朝指定方向尝试推送并停稳，不能说送到了；"
-        "只有delivered=true且cargo_near_destination_and_stopped才可说观察确认货物已在目的地附近。"
-        "accepted、executing、unknown、口头报告或历史快照均不满足结束条件。"
+        "具体站位和接近由推物工具完成，前置进展仍继续原目标。"
+        "stage为directional_push_completed或delivered时执行器已核对本单完成判据，"
+        "结束并只回复一次真实结果：前者仅为朝指定方向尝试推送并停稳，不能说货物已移动或送达；"
+        "后者确认货物已在目的地附近；motion_performed=false时不得说本次执行了移动。"
     )
 
 
@@ -225,9 +252,9 @@ async def decide(role: str, phase: str, facts: dict, *, thread_id: str,
     """Run one typed role decision, retaining a completed ID's exact result."""
     if role not in {"lamp", "go2"}:
         raise ValueError("unknown_delivery_role")
-    schema = _schema(role, phase)
     if not isinstance(facts, dict) or not isinstance(thread_id, str) or not thread_id:
         raise ValueError("invalid_delivery_decision_context")
+    schema = _schema(role, phase, facts.get("stage", ""))
     remaining = deadline - time.time()
     if remaining <= 0:
         raise TimeoutError("delivery_decision_expired")

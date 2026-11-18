@@ -92,6 +92,7 @@ async def publish_device_replies(run: GraphRun, *, context: dict, transport, mod
             reply_id, run.session_id, run.goal, min(run.deadline, time.time() + 12),
             steps=outcome["steps"], status=outcome["status"], agent_id=unit_id,
             trace_id=run.trace_id, parent_run_id=run.run_id, origin_kind="user_delegated",
+            goal_revision=run.goal_revision,
             initial_context={"physical_state": outcome["physical_state"]},
             decision_draft=outcome["decision_reply"] if outcome["calls"] == 1 else "",
             emotion=outcome["emotion"],
@@ -128,6 +129,7 @@ async def publish_device_replies(run: GraphRun, *, context: dict, transport, mod
             text=device_run.response, emotion=device_run.emotion, reply_source=device_run.reply_source,
             event_id=reply_id, agent_id=unit_id, parent_run_id=run.run_id,
             source="delegated_skill", step_id=unit_id, reply_kind="final",
+            goal_revision=run.goal_revision,
         )
         ledger.mark_result(*publication, {"event_id": reply_id})
         emit_agent_event("reply.emitted", agent_id=unit_id, run_id=reply_id,

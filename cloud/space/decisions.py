@@ -12,7 +12,7 @@ import math
 import time
 from typing import Any
 
-from cloud.peers.view import STATE_MAX_AGE_S
+from cloud.space.freshness import summary_is_current
 
 MAX_REASON = 400
 MAX_EVIDENCE = 8
@@ -63,7 +63,7 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
     instant = time.time() if now is None else now
     evidence: list[dict] = []
 
-    def add(ref, kind, source, as_of, summary, *, status=None):
+    def add(ref, kind, source, as_of, summary, *, status=None, validity=None):
         if not isinstance(summary, str) or not summary.strip():
             return
         if kind in {"peer_state", "environment", "activity", "constraint"}:
@@ -76,6 +76,8 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
                 "as_of": as_of, "summary": summary.strip()[:240]}
         if status is not None:
             item["status"] = status
+        if validity == "until_changed":
+            item["validity"] = validity
         evidence.append(item)
 
     activity = space.get("activity") or {}
@@ -89,19 +91,17 @@ def decision_evidence(space: dict, *, now: float | None = None) -> list[dict]:
         state = peer.get("state_summary") or {}
         if not unit_id:
             continue
-        if (state.get("status") == "current"
-                and _fresh(state.get("as_of"), instant, STATE_MAX_AGE_S)):
+        if summary_is_current(state, instant):
             name = str(peer.get("name") or unit_id)
             online = "在线" if peer.get("online") else "离线"
             add(f"peer:{unit_id}", "peer_state", unit_id, state["as_of"],
-                f"{name}{online}；{_state_text(state)}", status="current")
+                f"{name}{online}；{_state_text(state)}", status="current", validity=state.get("validity"))
 
     for entry in space.get("environment") or []:
         source = entry.get("source")
-        if (source and entry.get("status") == "current"
-                and _fresh(entry.get("as_of"), instant, STATE_MAX_AGE_S)):
+        if source and summary_is_current(entry, instant):
             add(f"environment:{source}", "environment", source, entry["as_of"],
-                _state_text(entry.get("values") or {}), status="current")
+                _state_text(entry.get("values") or {}), status="current", validity=entry.get("validity"))
 
     for requirement in space.get("constraints") or []:
         if not _fresh(requirement.get("issued_at"), instant, 3600):

@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
+from cloud.go2.connection.fsm import CommandBlocked
 from cloud.agents.go2.memory import spatial as spatial_memory
 from cloud.go2.navigation.astar import astar
 from cloud.go2.control import control_lease, LeaseConflict
@@ -338,6 +339,7 @@ class Navigator:
             # movement. Every control iteration needs a subsequent odom packet.
             last_control_stamp = getattr(go2, 'odom_received_at', None)
             motion_gap_since = None
+            body_gap_since = None
 
             async def checked_snapshot():
                 snapshot, reason = self._snapshot()
@@ -427,7 +429,17 @@ class Navigator:
                 stalled = progress.observe(pose, vx, vy, time.monotonic())
                 if stalled:
                     return {**stalled, 'last_command': last_command}
-                go2.move_velocity(vx, vy, yaw, deadman_s=.3)
+                try:
+                    go2.move_velocity(vx, vy, yaw, deadman_s=.3)
+                except CommandBlocked as exc:
+                    if str(exc) != '等待有效设备反馈':
+                        raise
+                    # A planner/deadman pause may invalidate body confirmation
+                    # after this iteration's snapshot. Yield to actual telemetry;
+                    # the outer loop owns the bounded recovery and all rechecks.
+                    go2.move_velocity(0, 0, 0)
+                    progress.reset()
+                    return None
                 last_command = {"vx": round(vx, 3), "vy": round(vy, 3), "yaw": round(yaw, 3)}
                 return None
 
@@ -479,6 +491,30 @@ class Navigator:
                     path = None
                 if loc["session_id"] != getattr(go2, "_odom_session_id", None):
                     return self._finish("blocked", "map_mismatch", "定位会话已变化，导航已停止", task_id)
+                body_check = getattr(go2, 'body_ready_reason', None)
+                body_reason = body_check() if callable(body_check) else None
+                if body_reason:
+                    if body_reason != '等待有效设备反馈':
+                        return self._finish('blocked', body_reason,
+                                            '身体反馈不可用，未继续发送移动指令', task_id)
+                    if body_gap_since is None:
+                        body_gap_since = time.monotonic()
+                        go2.move_velocity(0, 0, 0)
+                        logger.info('[Go2/Nav] waiting for body feedback after pause')
+                    if time.monotonic() - body_gap_since >= TELEMETRY_RECOVERY_S:
+                        return self._finish('blocked', 'posture_not_confirmed',
+                            '暂停后的身体反馈尚未恢复，未继续发送移动指令', task_id,
+                            diagnostics={'body_reason': body_reason,
+                                         'gap_s': round(time.monotonic() - body_gap_since, 3)})
+                    progress.reset()
+                    await asyncio.sleep(.1)
+                    continue
+                if body_gap_since is not None:
+                    logger.info('[Go2/Nav] body feedback resumed after %.2fs; replanning',
+                                time.monotonic() - body_gap_since)
+                    body_gap_since = None
+                    path = None
+                    progress.reset()
                 odom, fresh_grid = snapshot
                 if loc.get("relative_motion") and odom.get("session_id") != loc["session_id"]:
                     return self._finish("blocked", "map_mismatch", "定位会话已变化，移动已停止", task_id)
@@ -703,6 +739,9 @@ class Navigator:
                 })
         except asyncio.CancelledError:
             return self._finish("cancelled", "cancelled", "导航已取消", task_id)
+        except CommandBlocked as exc:
+            return self._finish('blocked', str(exc), '移动被设备状态拒绝，未继续发送移动指令',
+                                task_id, diagnostics={'error_type': type(exc).__name__, 'error': str(exc)})
         except (RuntimeError, ValueError) as exc:
             logger.warning("[Go2/Nav] navigation failed: %s", exc)
             return self._finish("failed", "control_error", "控制连接异常，已停止", task_id)
@@ -1022,7 +1061,8 @@ class Navigator:
         if owner_session_id is not None and self.owner_session_id != owner_session_id:
             return False
         if self._task and not self._task.done():
-            self._task.cancel()
+            if not self._task.cancelling():
+                self._task.cancel()
             self.status, self.reason, self.message = "cancelled", "cancelled", "导航已取消"
             if self.task_id in self.task_records:
                 self.task_records[self.task_id].update(status="cancelled", reason="cancelled", message="导航已取消")

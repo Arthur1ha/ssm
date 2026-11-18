@@ -86,6 +86,12 @@ class Go2Sensors:
         valid_height = type(height) in (int, float) and math.isfinite(height) and height > 0
         valid_velocity = (isinstance(velocity, (list, tuple)) and len(velocity) >= 3
                           and all(type(v) in (int, float) and math.isfinite(v) for v in velocity))
+        yaw_speed = inner.get('yaw_speed')
+        stationary = (valid_velocity and type(yaw_speed) in (int, float)
+                      and math.isfinite(yaw_speed)
+                      and self._planar_moving(velocity, yaw_speed) is False)
+        self._motion_stationary_samples = (getattr(self, '_motion_stationary_samples', 0) + 1
+                                           if stationary else 0)
         if valid_height or valid_velocity:
             self._sport_state_observed_at = self._last_state_received_at
             motor_valid = not self._joint_observation_available or self._last_motor_observed_at is not None

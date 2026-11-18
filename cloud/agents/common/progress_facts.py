@@ -77,7 +77,7 @@ def public_decision_basis(value: object) -> dict:
         if not isinstance(item, dict):
             continue
         clean = {key: _scalar(item[key], 240) for key in
-                 ("ref", "kind", "source", "as_of", "summary", "status") if key in item}
+                 ("ref", "kind", "source", "as_of", "summary", "status", "validity") if key in item}
         if clean.get("ref") and clean.get("summary"):
             evidence.append(clean)
     return {"reason": reason, "evidence": evidence}
@@ -245,7 +245,7 @@ def public_process_facts(value: dict) -> dict:
         if isinstance(item, str) and item:
             result[key] = canonical_capability(item[:120]) if key in {"action", "tool"} else item[:400]
     for key in ("sequence", "model_turn", "ts", "as_of", "version", "revision",
-                "training_revision", "step_number", "step_index", "completed_count", "failed_count"):
+                "training_revision", "step_number", "step_index", "completed_count", "failed_count", "goal_revision"):
         item = value.get(key)
         if type(item) in (int, float) and math.isfinite(item):
             result[key] = item
@@ -274,11 +274,11 @@ def public_process_facts(value: dict) -> dict:
         if canonical == skill["tool"]:
             result["capability_name"] = skill["name"]
             break
-    if ability and canonical.startswith("go2_") and "capability_name" not in result:
-        from cloud.go2.tools.registry import CARD_SKILLS
-        skill = CARD_SKILLS.get(canonical)
-        if skill:
-            result["capability_name"] = skill["name"]
+    if ability and canonical.startswith("go2_"):
+        from cloud.go2.tools.registry import tool_display_name
+        label = tool_display_name(canonical)
+        if label:
+            result["capability_name"] = label
     if ability and "capability_name" not in result:
         from cloud.cards.registry import get_registry
         unit_id = result.get("target_unit_id") or value.get("unit_id") or value.get("agent_id")
@@ -303,6 +303,7 @@ def progress_event_facts(run, phase: str, step: dict | None) -> dict:
     event_id = "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
     fields = step_progress_facts(item) if step else {}
     fields.update(event_id=event_id, source_event_id=event_id,
+                  goal_revision=getattr(run, "goal_revision", 0),
                   run_id=run.run_id, trace_id=run.trace_id or run.run_id,
                   parent_run_id=run.parent_run_id, agent_id=run.agent_id,
                   model_turn=item.get("model_turn", run.model_turn), sequence=sequence,

@@ -67,6 +67,10 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
         index = state.get('index', 0)
         receipts = list(state.get('receipts') or [])
         try:
+            from cloud.space.user_goals import get_goal_registry
+            if not get_goal_registry().is_current(execution.goal_revision):
+                return {'index': index, 'receipts': receipts, 'stopped': True,
+                        'result': {'result': 'cancelled', 'error': 'newer_user_goal'}}
             if execution.expires_at and execution.expires_at <= time.time():
                 raise ValueError('execution_context_expired')
             records = await invoke_blocking(store.list_records, unit_id, space_id=execution.space_id)
@@ -96,6 +100,9 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
                 result = {'result': 'ok', 'skipped': True,
                           'reason': 'goal_observed', 'goal_state': resolved.get('goal_state')}
             else:
+                if not get_goal_registry().is_current(execution.goal_revision):
+                    return {'index': index, 'receipts': receipts, 'stopped': True,
+                            'result': {'result': 'cancelled', 'error': 'newer_user_goal'}}
                 identity = (unit_id, thread_id, run_id, request_id)
                 reserved = await invoke_blocking(
                     ledger.reserve, *identity, resolved['action'], resolved['params'])
@@ -136,8 +143,10 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
     graph = StateGraph(TeachingState)
     graph.add_node('transition', step)
     graph.add_edge(START, 'transition')
-    graph.add_conditional_edges('transition',
-                                lambda state: END if state.get('stopped') else 'transition',
+    async def transition_route(state: TeachingState) -> str:
+        return END if state.get('stopped') else 'transition'
+
+    graph.add_conditional_edges('transition', transition_route,
                                 {END: END, 'transition': 'transition'})
     compiled = graph.compile(checkpointer=saver)
     async with saver.async_run_lock(thread_id):

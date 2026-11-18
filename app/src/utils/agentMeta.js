@@ -80,17 +80,29 @@ function getAgentOpeningLine(agent) {
 }
 
 // Capability labels complement the discovered Card names.
-function agentCapabilityLabel(id) {
+function agentCapabilityLabel(id, fallback = '设备操作') {
   return ({ set_light_state: '调整灯光', set_led_state: '调整灯光',
-    set_light_color: '调整灯光颜色', set_led_color: '调整灯光颜色', blink_led: '让灯光闪烁',
-    go2_sport: '完成姿态动作', go2_move: '移动', go2_observe: '观察前方',
-    go2_navigate_to_visible_target: '视觉定位并导航到目标附近', go2_find_object: '在指定范围内找物',
+    set_light_color: '调整灯光', set_led_color: '调整灯光', blink_led: '让灯光闪烁',
+    go2_sport: '姿态动作', go2_move: '移动', go2_observe: '观察周围',
+    go2_navigate_to_visible_target: '靠近目标', go2_find_object: '寻找目标',
+    go2_push_cargo: '推送货物', go2_navigate_to_coordinate: '前往指定位置',
+    go2_navigate_to: '前往已保存地点', go2_navigate: '前往已保存地点',
+    go2_visual_navigate: '靠近目标', go2_recognize_person: '识别面前的人',
+    go2_life: '调整活动模式', go2_set_led: '设置机身灯',
+    go2_list_people: '查看空间人员', go2_list_locations: '查看已保存地点', go2_tag_location: '保存当前地点',
     go2_status: '检查连接状态', list_peers: '查找可协作的设备', list_agents: '查找可用设备',
     get_space_context: '查看空间信息', read_state: '查看传感器状态',
     await_result: '核对执行结果', request_peer_skill: '协同处理请求',
-    go2_chat: '回应当前问题',
+    go2_chat: '回应当前问题', send_message: '发送消息', invoke_skill: '调用设备',
+    apply_training: '应用教导', propose_training: '整理教导', list_training: '查看教导',
+    SET_COLOR:'调整灯光', SET_STATE:'调整灯光', BLINK:'让灯光闪烁', blink_light:'让灯光闪烁',
     start_activity: '安排空间活动', set_space_constraint: '记住空间里的共同要求',
-    clear_space_constraints: '撤销空间里的共同要求' })[id] || id || '处理请求';
+    clear_space_constraints: '撤销空间里的共同要求' })[id] || fallback;
+}
+
+function publicCapabilityText(value) {
+  return typeof value === 'string' ? value.replace(/\b(?:go2_[a-z0-9_]+|set_(?:led|light)_[a-z0-9_]+|blink_(?:led|light)|send_message|request_peer_skill|invoke_skill|apply_training|propose_training|list_training|get_space_context|list_peers|list_agents|read_state|await_result|start_activity|set_space_constraint|clear_space_constraints)\b/g,
+    id => agentCapabilityLabel(id)) : '';
 }
 
 function isDeviceOnline(agent, unitData) {

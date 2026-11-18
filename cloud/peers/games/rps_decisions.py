@@ -94,13 +94,11 @@ class Go2Mapping(DecisionModel):
 
 
 class SetupDecision(EmotionModel, DecisionModel):
-    speech: str = Field(min_length=1, max_length=300)
+    speech: str = Field(default="", max_length=300)
 
     @field_validator("speech")
     @classmethod
     def nonblank(cls, value: str):
-        if not value.strip():
-            raise ValueError("nonblank_text_required")
         return value.strip()
 
 
@@ -124,6 +122,8 @@ class LampSetup(SetupDecision):
 
 class LampIdentification(SetupDecision):
     color: LampColor
+    speech: str = Field(min_length=1, max_length=300,
+                        description="亮灯后供对方辨认的外形和颜色线索")
 
 
 class Go2Identification(SetupDecision):
@@ -148,7 +148,7 @@ class Go2Setup(SetupDecision):
 
 class PerformanceDecision(EmotionModel, DecisionModel):
     command: str
-    speech: str = Field(min_length=1, max_length=300)
+    speech: str = Field(default="", max_length=300)
 
     @field_validator("command")
     @classmethod
@@ -160,20 +160,27 @@ class PerformanceDecision(EmotionModel, DecisionModel):
     @field_validator("speech")
     @classmethod
     def nonblank(cls, value: str):
-        if not value.strip():
-            raise ValueError("nonblank_speech_required")
         return value.strip()
 
 
 class Agreement(EmotionModel, DecisionModel):
     accepted: bool
-    speech: str = Field(min_length=1, max_length=300)
+    speech: str = Field(default="", max_length=300)
 
     @field_validator("speech")
     @classmethod
     def nonblank(cls, value: str):
+        return value.strip()
+
+
+class InvitationDecision(Agreement):
+    speech: str = Field(min_length=1, max_length=300)
+
+    @field_validator("speech")
+    @classmethod
+    def response_required(cls, value: str):
         if not value.strip():
-            raise ValueError("nonblank_speech_required")
+            raise ValueError("invitation_response_required")
         return value.strip()
 
 
@@ -194,7 +201,9 @@ def _schema(role: str, phase: str):
         return LampIdentification if role == "lamp" else Go2Identification
     if phase == "setup":
         return LampSetup if role == "lamp" else Go2Setup
-    if phase in {"agree", "invite"}:
+    if phase == "invite":
+        return InvitationDecision
+    if phase == "agree":
         return Agreement
     if phase == "throw":
         return ThrowDecision
@@ -225,6 +234,8 @@ def _instructions(role: str, phase: str) -> str:
         "你正在参与猜拳攻灯，只决定当前阶段，不能调用设备或替同伴决定。"
         "规则与上下文从提供的数据读取，历史记录只用于策略，不当作新鲜观察。"
         "用自己的性格自然表达，不复述内部字段，不声称未获回执的动作已经完成。"
+        "speech是可选交流，不为每个内部确认或动作生成报幕；"
+        "只在有新约定、疑问、发现或实际结果需要告诉对方时发言。"
     )
     if phase == "identify" and role == "go2":
         return common + (
@@ -257,7 +268,7 @@ def _instructions(role: str, phase: str) -> str:
         return common + specific + (
             "本局一把定胜负，平局重来，不协商回合数或推进距离。"
             "这些只是提议，还需要双方确认；不编造空间距离、物品或可达性。"
-            "执行器会逐项公布你的结构化映射；speech简短表达本局提议与意愿，不另造或改写映射。"
+            "执行器会逐项公布你的结构化映射；speech可简短表达意愿，也可省略，不另造或改写映射。"
             "映射是公开规则，不是本轮出拳；此刻不选拳，不以保密为由隐瞒对应关系。"
         )
     if phase == "agree":
@@ -281,7 +292,7 @@ def _instructions(role: str, phase: str) -> str:
         return common + (
             "本局灯已赢，轮到你兑现一次表演。结合当前场地、人格和剩余期限，"
             "从available_gestures选择一个支持的动作，可以跳舞或其他合适表演，不发明动作或固定序列。"
-            "用简短发言说明打算表演什么，不能说已经完成；执行器会等待真实完成回执。"
+            "可简短表达意愿，也可直接选择动作；结果由执行器真实回执确认。"
         )
     return common + (
         "独立秘密决定本轮出石头、剪刀还是布。只依据已结束回合历史和公开约定作策略判断，"

@@ -120,6 +120,8 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     event_counts = {}
 
     def record(kind: str, text: str, *, role="go2", **facts):
+        if kind == "message" and not str(text or "").strip():
+            return None
         identity = (kind, role, facts.get("task_id", task_id), facts.get("stage", ""), facts.get("action", ""))
         ordinal = event_counts.get(identity, 0)
         event_counts[identity] = ordinal + 1
@@ -215,7 +217,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
                          "observation": {"text": text[:1600], "source": "go2.camera",
                          "as_of": time.time(), "ref": (observed or {}).get("event_id")}}
         dog = await decision("go2", "identify", observed_state)
-        record("message", dog["speech"], emotion=dog.get("emotion"), stage="recognition")
+        record("message", dog.get("speech"), emotion=dog.get("emotion"), stage="recognition")
         if not dog["target_visible"] or not dog.get("target"):
             return {**observed_state, "result": "rejected", "reason": "game_target_not_visible"}
         return {**observed_state, "target_identification": dog}
@@ -234,7 +236,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         for role, answer in (("lamp", lamp), ("go2", dog)):
             labels = (lamp["color_names"] if role == "lamp" else
                       {choice: gestures[command]["label"] for choice, command in dog["mapping"].items()})
-            record("message", answer["speech"], role=role,
+            record("message" if answer.get("speech") else "action_result", answer.get("speech") or "", role=role,
                    stage="mapping_proposal", emotion=answer.get("emotion"),
                    result_kind="query", fact_kind="result", public_result={"game_rules": {
                        "mapping": [{"choice": choice, "label": labels[choice]} for choice in CHOICES],
@@ -246,7 +248,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         lamp, dog = await asyncio.gather(decision("lamp", "agree", state),
                                          decision("go2", "agree", state))
         for role, answer in (("lamp", lamp), ("go2", dog)):
-            record("message", answer["speech"], emotion=answer.get("emotion"), role=role, stage="agreement",
+            record("message", answer.get("speech"), emotion=answer.get("emotion"), role=role, stage="agreement",
                    status="accepted" if answer["accepted"] else "rejected")
         if not lamp["accepted"] or not dog["accepted"]:
             return {"result": "rejected", "reason": "game_terms_not_agreed"}
@@ -285,7 +287,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         record("action_progress", "", stage="reveal", status="executing",
                public_result={"game_rules": {"rule_id": GAME_ID, "status": "revealing", "round": number}})
         for role in ("lamp", "go2"):
-            record("message", choices[role]["speech"], role=role, stage="throw_announcement", emotion=choices[role].get("emotion"))
+            record("message", choices[role].get("speech"), role=role, stage="throw_announcement", emotion=choices[role].get("emotion"))
         # Dispatch both without waiting for either receipt. Collect both
         # outcomes before scoring; never leave a sibling task unobserved.
         results = await asyncio.gather(
@@ -349,7 +351,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
     async def perform(state):
         answer = await decision("go2", "performance", state)
         check()
-        record("message", answer["speech"], emotion=answer.get("emotion"))
+        record("message", answer.get("speech"), emotion=answer.get("emotion"))
         record("action", "", action="go2_sport", arguments={"cmd": answer["command"]})
         result = await execute_tool("go2_sport", {"cmd": answer["command"]}, context=context,
             request_id=f"rps_{invitation_id}_performance")
@@ -407,6 +409,7 @@ async def _execute(drive, event: dict, task_id: str) -> None:
         started = await drive._advance_task(goal, stage="start")
         if (started.get("result") or {}).get("result") == "blocked":
             raise GameStopped("go2_activity_unavailable")
+        record("game_started", "", status="executing")
         saver = FileCheckpointSaver()
         thread_id = "rps:game:" + invitation_id
         async with saver.async_run_lock(thread_id):
@@ -455,30 +458,19 @@ GAME = Game(
     available=_available, execute=_execute, on_invitation=on_invitation,
     on_acceptance=on_acceptance, acceptance="", invitation_ttl_s=900,
     rules=("灯或狗均可自主邀请，双方同处活动且空闲，对方自主接受或拒绝。"
-           "流程为接受参与→公开双方映射→确认规则→认灯定位→秘密选拳并同时展示。接受邀请只同意进入准备，"
-           "不要求此时灯已亮起或已经认出灯；上一局认灯失败不能代替本局准备后的新观察。"
+           "流程为接受参与→公开双方映射→确认规则→认灯定位→秘密选拳并同时展示。"
            "开局各自选择石头、剪刀、布的三种表达：灯自选三个可区分的亮灯颜色，狗自选三个当前可执行动作；"
            "用户提供灯是蓝紫色球体、会放在狗视野内的线索。规则确认后灯自主选择识别色并真实亮灯，再告诉狗外形及颜色；狗用亮灯后的新画面辨认和定位。"
-           "用户线索不能代替观察；综合球形、蓝紫色外观线索、发光与识别色辨认，色调差异不能单独否定候选，也不能只凭同色认定身份；观察不足或候选不唯一则不出拳。"
            "约定目标保留圆球灯的位置与固定特征，猜拳变色不更换目标。"
-           "先各自选映射，逐项公开石头、剪刀、布对应的颜色或动作，再分别确认映射与规则；随后认灯定位，确认成功才秘密选拳。"
            "映射是双方和用户都能读到的公开规则，不能用保密出拳为由隐瞒。"
            "不规定固定映射，双方确认后本局冻结，不协商回合数或推进距离。"
            "双方私下锁定选择后并发派发变色和动作，不等待一方完成才派发另一方；设备与网络存在时延，不承诺物理上精确同步。不能根据对方本轮选择改拳。石头胜剪刀、剪刀胜布、布胜石头；"
            "一把定胜负，平局原地重来，直到分出胜负或本局期限到达。展示须灯物理回执与狗真实动作反馈均确认才能判拳。"
-           "狗赢后用找物流程接近约定的圆球灯，沿可通行路径分段移动、停稳再看；"
-           "连续新鲜画面确认已在附近且真实停稳后，执行Hello挥手抬前腿象征性按灯，"
-           "等待真实动作完成反馈后才发送关灯命令，不要求实际碰灯；"
-           "不要求雷达分离出灯的点簇或精确目标距离，须真实关灯回执；"
+           "狗赢后接近约定的灯，挥手抬前腿象征性按灯，再关灯，不要求实际碰灯；"
            "灯赢后由狗结合当前条件选择一个支持的表演动作，可以跳舞或其他动作，须真实完成回执。"
            "猜拳胜负与后续动作完成分开记录，导航、抬前腿、关灯或表演失败不能改判输赢，未确认不能声称兑现成功。"
-           "游戏期间灯暂停普通自主调光；用户介入、活动结束、断连、定位会话改变或期限到达则中断，"
-           "动作未知按原任务核对，重启不重放旧游戏。本局履约完成后释放游戏占用，保留原自主许可，"
-           "由既有自主Graph继续自由探索；用户接管或活动结束不恢复。"
-           "关灯确认后保持该结果直到新的有效传感器机会，不因收尾立即自行开灯。"),
+           "设备动作由各自工具执行并核验，交流只补充当前必要的约定、发现、疑问和结果。"),
     strategy=("结合人格、当前活动、用户要求和新鲜观察决定邀请或接受，不能因可玩列表存在就强制开局。"
               "自行选择易辨认的表达并解释本局约定；可结合已公开的历史出拳调整策略，但不得获取对方本轮私下选择。"
-              "邀请阶段判断参与意愿与当前占用；接受后先公开映射并确认规则，再亮灯辨认目标，不能要求先认灯才制定规则。"
-              "认灯阶段须有本局新画面支持，动作与导航分别遵守实时执行门禁；游戏中不临时改映射或规则。"
               "交流沿用自身人格，不预排对白、固定出拳序列或庆祝动作。"),
 )
