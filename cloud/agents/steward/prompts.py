@@ -11,6 +11,7 @@ from cloud.agents.steward.personality.behavior import clarification_guidance, cu
 from cloud.agents.steward.tools.state import steward_space_context as get_space_context
 from cloud.orchestrator import tools as transport
 from cloud.personality.names import agent_names
+from cloud.agents.common.training.context import TEACHING_GUIDANCE
 
 
 def reply_prompt(run: Run, profile: dict) -> str:
@@ -50,5 +51,5 @@ def build_messages(current: Run, supplemental: str = ""):
         "用户表达当前情境时，语义选择已有教导；不据此开启自主活动或修改全局默认。"
         "自主活动中的具体行为和游戏由设备自己决定；需要转达时保留用户指定的发起方和受邀方。"
     )
-    return role_messages(prompt + "\n" + reply_prompt(current, profile), current.goal,
+    return role_messages(prompt + "\n" + TEACHING_GUIDANCE + "\n" + reply_prompt(current, profile), current.goal,
                          context=data, supplement=supplemental)

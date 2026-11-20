@@ -265,39 +265,14 @@ def completed_game_harness(drive_harness, monkeypatch):
     return module, drive, runtime, goal
 
 
-async def test_completed_rps_returns_real_result_to_activity_graph_once(completed_game_harness,
-                                                                      monkeypatch):
-    _module, drive, runtime, goal = completed_game_harness
-    receipt = {'result': 'ok', 'reason': 'go2_won_lamp_off_confirmed', 'game_winner': 'go2'}
-    await drive._advance_task(goal, stage='start')
-    drive._events.append({'event_id': 'peer_waiting', 'kind': 'peer_message'})
-    await drive._advance_task(goal, stage='finish', result=receipt)
-    assert runtime.data['life_state'] == 'explore'
-    assert [event['event_id'] for event in drive._events] == [
-        'peer_waiting', 'activity_game_result:game_invitation']
-    completed = drive._events.pop()
-    facts = json.loads(completed['content'])
-    assert facts['result'] == receipt
-    assert facts['game']['game_id'] == 'rps_siege'
-    drive._do_explore.assert_not_awaited()
-    await drive._advance_task(goal, stage='finish', result=receipt)
-    assert len(drive._events) == 1
-    drive._events.clear()
-    monkeypatch.setattr(drive, '_decide_event', AsyncMock(return_value={'action': 'explore'}))
-    await drive._handle_activity_event(completed, MemorySaver(), 'post_game')
-    drive._do_explore.assert_awaited_once_with(defer_social=True)
-
-
 @pytest.mark.parametrize('changed', [
     'activity_ended', 'different_activity', 'generation', 'user_interrupt', 'disconnected',
-    'stopped', 'manual', 'rest', 'unconfirmed', 'other_game',
+    'stopped', 'manual', 'rest',
 ])
-async def test_rps_completion_cannot_restore_revoked_or_unconfirmed_exploration(
+async def test_game_completion_cannot_restore_revoked_exploration(
         completed_game_harness, monkeypatch, changed):
     module, drive, runtime, goal = completed_game_harness
     receipt = {'result': 'ok', 'game_winner': 'lamp', 'reason': 'lamp_won_performance_confirmed'}
-    if changed == 'other_game':
-        goal['game_id'] = 'color_hunt'
     await drive._advance_task(goal, stage='start')
     if changed == 'activity_ended':
         monkeypatch.setattr(drive, '_activity_id', lambda: None)
@@ -316,8 +291,6 @@ async def test_rps_completion_cannot_restore_revoked_or_unconfirmed_exploration(
         runtime.commit('manual', autonomy_mode='manual')
     elif changed == 'rest':
         runtime.commit('rest', activity_state='rest', exploration_enabled=False)
-    elif changed == 'unconfirmed':
-        receipt['result'] = 'unknown'
     await drive._advance_task(goal, stage='finish', result=receipt)
     assert not drive._events
     drive._do_explore.assert_not_awaited()

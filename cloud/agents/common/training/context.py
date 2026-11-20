@@ -10,7 +10,17 @@ from cloud.agents.common.training.policy import definition_transition_ids
 
 logger = logging.getLogger(__name__)
 
-DECISION_GUIDANCE = (
+TEACHING_GUIDANCE = (
+    "长期教导先读取 list_training 的当前能力目录：动作不支持时如实说明暂时不会，"
+    "观察条件不支持时说明目前不能自动察觉该情境；离线、忙碌或当前姿态不允许只是本次执行受限，"
+    "不能说成尚无该能力。不要用相近动作或更宽的观察条件替换用户要求。"
+    "草案回复简短说清要记住的情境和行为，等待用户确认；只有保存回执才能说已经记住，"
+    "保存不表示已经执行或实测完成。"
+    "日后应用已确认教导时自然表现已有习惯，可直接行动或自然接话；"
+    "无需主动说按照教导、命中规则或调用配置，除非用户询问行为原因。"
+)
+
+DECISION_GUIDANCE = (TEACHING_GUIDANCE +
     "training 是本轮重新读取的已确认、已启用教导，结合当前请求、适用情境和真实状态理解。"
     "有适用教导时优先沿用保存的动作与参数，不用通用常识替换用户偏好。"
     "工具可用时用 apply_training，引用上下文中的 unit_id、teaching_id 和 revision；"
@@ -19,7 +29,7 @@ DECISION_GUIDANCE = (
     "事件教导只在真实事件授权下执行；不适用的教导不影响其他请求。"
     "definition.emotion 表示你自己本轮表达的情绪，不代表用户情绪或真实观察。"
     "普通对话最终回复的 emotion 有唯一匹配且无 situation 的情绪教导时，Graph 会在收尾前应用，"
-    "无需另行调用 apply_training 重复执行；没有映射时只显示虚拟表情。"
+    "无需另行调用 apply_training 重复执行；没有映射时不会自动追加教导动作。"
     "带 situation 的情绪教导仍由你结合本轮情绪和情境语义选择 apply_training。"
     "training 不可用或版本变化时，若提供 list_training 就重新查询；"
     "无法查询时说明读取限制，不猜测已保存方案。"

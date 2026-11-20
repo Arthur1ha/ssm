@@ -75,10 +75,9 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
     own_life = None
     last_result = {'result': 'unknown'}
 
-    def publish_step(resolved, trusted, *, result=None):
+    def publish_step(resolved, trusted, *, result=None, phase=None):
         from cloud.api.intents import publish_agent_event
-        index = resolved['step_index']
-        definition = prepared['record'].get('definition') or {}
+        from cloud.agents.common.progress_facts import training_step_facts
         autonomous = trusted.origin_kind == 'agent_autonomous'
         action = resolved['action']
         tool = ('go2_sport' if action in SPORT_COMMANDS else next(
@@ -86,19 +85,21 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
              if (spec.get('invoke') or {}).get('action') == action), action))
         arguments = ({'cmd': action, **resolved['params']} if action in SPORT_COMMANDS
                      else resolved['params'])
-        publish_agent_event('agent_progress', agent_id='go2',
-            session_id='' if autonomous else trusted.session_id,
-            scope='space' if autonomous else 'session', space_id=trusted.space_id,
-            source='autonomous' if autonomous else 'training', run_id=run_id,
-            step_id=f'{run_id}:{index}', sequence=index * 2 + int(result is not None),
-            stage='observed' if result is not None else 'executing',
-            status=(result or {}).get('result', 'executing'),
-            fact_kind='result' if result is not None else 'call', result_kind='training',
-            teaching_id=prepared['record']['teaching_id'], version=prepared['record']['revision'],
-            name=definition.get('name') or prepared['record'].get('name') or '',
-            step_number=index + 1, tool=tool, arguments=arguments,
-            public_result=result or {}, activity_id=(trusted.session_id if autonomous
-                and trusted.session_id.startswith('act_') else None))
+        try:
+            facts = training_step_facts(prepared['record'], resolved, run_id=run_id,
+                phase=phase or ('result' if result is not None else 'call'),
+                result=result, observation=prepared.get('observation'))
+            if phase == 'observation' and not facts.get('observation_event_id'):
+                return
+            publish_agent_event('agent_progress', agent_id='go2',
+                session_id='' if autonomous else trusted.session_id,
+                scope='space' if autonomous else 'session', space_id=trusted.space_id,
+                source='autonomous' if autonomous else 'training',
+                **facts, device_epoch=entry['epoch'], goal_revision=trusted.goal_revision,
+                tool=tool, arguments=arguments, activity_id=(trusted.session_id if autonomous
+                    and trusted.session_id.startswith('act_') else None))
+        except Exception:
+            logging.warning('Go2 training progress unavailable', exc_info=True)
 
     async def before_step(resolved, trusted):
         nonlocal own_life
@@ -122,7 +123,22 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
         if resolved['action'] == 'LIFE' and resolved['params'].get('action') == 'request_rest' and own_life:
             go2.runtime.finish_life(own_life)
             own_life = None
+        if resolved['step_index'] == 0:
+            publish_step(resolved, trusted, phase='observation')
         publish_step(resolved, trusted)
+        return None
+
+    async def refresh_observation(trusted):
+        refresh = prepared.get('refresh_observation')
+        if not callable(refresh):
+            return None
+        if (entry['interrupted'] or not go2.is_connected
+                or go2.state_snapshot().get('epoch') != entry['epoch']):
+            return {'result': 'cancelled', 'error': 'training_interrupted'}
+        observation = await refresh(trusted)
+        if not isinstance(observation, dict):
+            return {'result': 'blocked', 'error': 'training_observation_unavailable'}
+        prepared['observation'] = {**(prepared.get('observation') or {}), **observation}
         return None
 
     async def execute(action, params, trusted, request_id):
@@ -163,7 +179,8 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
     try:
         last_result = await run_training_workflow(
             prepared, context, run_id=run_id, snapshot=go2.state_snapshot,
-            execute=execute, before_step=before_step, after_step=after_step, observe=observe)
+            execute=execute, before_step=before_step, after_step=after_step, observe=observe,
+            refresh_observation=refresh_observation)
         return last_result
     finally:
         renewal.cancel()
@@ -290,8 +307,6 @@ def _on_identity_event(event: IdentityEvent) -> None:
                 activity["activity_id"], "person_identified", unit_id="go2",
                 text=f"已确认看到主人{current.name}", source="identity_recognition",
                 confidence=current.score)
-
-    drive.on_identity_event(event)
 
 
 def _on_identity_vision_frame(frame) -> None:

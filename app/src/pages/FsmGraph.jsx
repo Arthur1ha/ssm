@@ -1,6 +1,6 @@
 /* Card-owned spatial layout. State clicks delegate actions; edges inspect rules. */
 function FsmGraph({ nodes:graphNodes, edges:graphEdges,
-  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', pendingCommand, diagram }) {
+  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', live = false, pendingCommand, diagram, trainingCatalog }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
   const svgRef = useRef(null);
@@ -142,7 +142,7 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
     return {element, point:{x:point.x,y:point.y}, keyboard};
   };
   const inspectedLink = visibleEdges.find(edge => edge.id === selectedLink);
-  return <div className={`fsm-whiteboard${inspectedLink ? ' is-inspecting' : ''}`} style={{'--board-accent':color}}>
+  return <div className={`fsm-whiteboard${inspectedLink ? ' is-inspecting' : ''}`} style={{'--board-accent':live ? color : 'var(--color-text-dim)'}}>
     <svg ref={svgRef} className="fsm-whiteboard__viewport" viewBox={`0 0 ${width} ${height}`}
       role="group" aria-label="设备状态机白板，可拖动和缩放"
       onClick={event => { if (!event.target.closest('[role="button"]') && !gesture.current.blockClick) onDismiss?.(); }}
@@ -155,27 +155,40 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
           const source = points[edge.src], target = points[edge.dst];
           if (!source || !target) return null;
           const selected = selectedLink === edge.id;
-          const direction = stateLinkDirection(edge,graphNodes,selected ? selectedDirection : null);
+          const direction = selected ? stateLinkDirection(edge,graphNodes,selectedDirection)
+            : edge.directions.find(item => item.edges.some(rule => rule.teachingActivity))
+              || edge.directions.find(item => item.edges.some(rule => rule.teachings?.length))
+              || stateLinkDirection(edge,graphNodes);
           const rules = direction.edges;
+          const teachings = [...new Map(rules.flatMap(rule => rule.teachings || [])
+            .map(record => [record.teaching_id,record])).values()];
+          const unconfirmed = teachings.length && teachings.every(record => trainingNeedsConfirmation(record,trainingCatalog));
+          const teachingActivity = live && rules.find(rule => rule.teachingActivity)?.teachingActivity;
+          const teachingStage = teachingActivity?.result ? 'result' : teachingActivity?.call ? 'executing'
+            : teachingActivity?.observation ? 'observed' : '';
+          const changed = live && rules.some(rule => rule.teachingChanged);
+          const condition = teachings.length ? trainingAssociationLabel(teachings[0],trainingCatalog) : '';
           const representative = rules.find(rule => rule.transition.action) || rules[0];
           const transition = representative.transition;
-          const disabled = !rules.some(rule => rule.active && !rule.reason);
+          const disabled = !live || !rules.some(rule => rule.active && !rule.reason);
           const automatic = rules.every(rule => !rule.transition.action);
-          const running = pendingCommand && rules.some(rule => [rule.transition.trigger,rule.transition.action].includes(pendingCommand));
+          const running = live && pendingCommand && rules.some(rule => [rule.transition.trigger,rule.transition.action].includes(pendingCommand));
           const path = routes.get(edge.id);
           const focused = selectedState && (edge.src === selectedState || edge.dst === selectedState);
-          const emphasized = selected || focused || (!selectedState && !selectedLink && points[direction.src]?.node.current && !disabled);
+          const emphasized = live && (selected || focused || (!selectedState && !selectedLink && points[direction.src]?.node.current && !disabled));
           const title = edge.directions.length > 1 ? `${source.node.label} ↔ ${target.node.label}`
             : `${points[direction.src].node.label} → ${points[direction.dst].node.label}`;
           const inspect = activate(event => onInspectTransition?.(edge,direction,anchorAt(event)));
           const reverse = direction.src !== edge.src;
-          return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${automatic ? ' is-automatic' : ''}${running ? ' is-running' : ''}${emphasized ? ' is-emphasized' : ''}${selected ? ' is-selected' : ''}`}
+          return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${automatic ? ' is-automatic' : ''}${running ? ' is-running' : ''}${emphasized ? ' is-emphasized' : ''}${selected ? ' is-selected' : ''}${live && teachings.length ? ' is-taught' : ''}${unconfirmed ? ' is-teaching-unconfirmed' : ''}${changed ? ' is-new-teaching' : ''}${teachingStage ? ` is-teaching-${teachingStage}` : ''}`}
             data-action={transition.action || undefined} data-trigger={transition.trigger} data-label={transition.label}
             data-source={direction.src} data-target={direction.dst} data-link={edge.id} data-direction={direction.id}
             data-rule-count={rules.length}
+            data-teaching-ids={teachings.map(record => record.teaching_id).join(',') || undefined}
+            data-teaching-stage={teachingStage || undefined}
             role="button" tabIndex="0" aria-pressed={selected}
-            data-available={transition.action ? rules.some(rule => rule.transition.action && rule.active && !rule.reason) : !disabled}
-            aria-label={`${title}，查看转换规则`}
+            data-available={!disabled && (transition.action ? rules.some(rule => rule.transition.action && rule.active && !rule.reason) : true)}
+            aria-label={`${title}${condition ? `，${condition}` : ''}，查看转换规则`}
             onClick={inspect} onKeyDown={inspect}>
             <title>{title}</title>
             <path d={path} className="fsm-whiteboard__hit"/>
@@ -190,21 +203,22 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
           const nodeRadius = p.radius;
           const label = node.label;
           const targetAction = node.control?.transition;
-          const actionable = !!targetAction || node.control?.choices?.some(edge => !edge.reason);
-          const reachable = node.control?.reachable || actionable;
+          const current = live && node.current;
+          const actionable = live && (!!targetAction || node.control?.choices?.some(edge => !edge.reason));
+          const reachable = live && (node.control?.reachable || actionable);
           const related = inspectedLink && [inspectedLink.src,inspectedLink.dst].includes(node.id);
-          const nodeHint = targetAction ? '点击执行' : node.current
+          const nodeHint = !live ? '状态未同步，查看说明' : targetAction ? '点击执行' : current
             ? '当前状态，查看说明' : reachable ? '查看转换条件' : node.control?.reason || '查看说明';
           const lines = label.length > 4 ? [label.slice(0,4),label.slice(4)] : [label];
           const select = activate(event => onSelectState?.(node.id, anchorAt(event)));
-          return <g key={node.id} className={`fsm-whiteboard__node${node.current ? ' is-current' : ''}${actionable ? ' is-actionable' : ''}${reachable ? ' is-reachable' : ''}${related ? ' is-related' : ''}${node.retained ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}
+          return <g key={node.id} className={`fsm-whiteboard__node${current ? ' is-current' : ''}${actionable ? ' is-actionable' : ''}${reachable ? ' is-reachable' : ''}${related ? ' is-related' : ''}${node.retained || !live && node.current ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}
             transform={`translate(${p.x} ${p.y})`} role="button" tabIndex="0"
             data-state={node.id} data-group={node.group} data-radius={nodeRadius}
-            data-executable={!!targetAction} data-reachable={!!reachable} aria-label={`${label}，${nodeHint}`} aria-pressed={selected}
+            data-executable={live && !!targetAction} data-reachable={!!reachable} aria-label={`${label}，${nodeHint}`} aria-pressed={selected}
             onClick={select} onKeyDown={select}>
             <title>{label}</title>
             <circle r={nodeRadius+7} fill="transparent"/>
-            {(node.current || selected) && <circle r={nodeRadius+7} className="fsm-whiteboard__halo"/>}
+            {(current || selected) && <circle r={nodeRadius+7} className="fsm-whiteboard__halo"/>}
             <circle r={nodeRadius} className="fsm-whiteboard__circle"/>
             {lines.map((line,index) => <text key={index} y={(index-(lines.length-1)/2)*21} className="fsm-whiteboard__node-label">{line}</text>)}
           </g>;

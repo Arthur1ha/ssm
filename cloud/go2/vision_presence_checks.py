@@ -1,5 +1,7 @@
-"""Face and body detections share one person-presence observation."""
+"""Shared person evidence updates context without redundant autonomy events."""
 
+import asyncio
+from types import SimpleNamespace
 import cv2
 import numpy as np
 import pytest
@@ -57,3 +59,36 @@ def test_body_detection_does_not_create_identity_evidence(detection_frame):
     result = vision.detect(jpeg)
     assert result['persons']['detected'] is True
     assert result['faces'] == {'detected': False, 'count': 0, 'boxes': []}
+
+
+@pytest.mark.asyncio
+async def test_person_and_face_changes_update_drive_context_without_displacing_queued_work(
+        detection_frame, monkeypatch):
+    from cloud.go2.mode import free_explore
+
+    detections, jpeg = detection_frame
+    drive = free_explore.Drive()
+    drive._loop = asyncio.get_running_loop()
+    drive._task = asyncio.create_task(asyncio.Event().wait())
+    monkeypatch.setattr(drive, '_activity_id', lambda: None)
+    memories = []
+    monkeypatch.setattr(free_explore, 'episode_memory', SimpleNamespace(
+        add=lambda kind, text: memories.append((kind, text))))
+    queued = {'kind': 'peer_message', 'event_id': 'existing-task'}
+    drive._events.append(queued)
+    previous = 0
+    try:
+        for index, (bodies, faces) in enumerate(((1, 0), (1, 1), (0, 0)), 1):
+            detections.update(bodies=bodies, faces=faces)
+            frame = vision.detect(jpeg, prev_person_count=previous, frame_id=index)
+            previous = frame['persons']['count']
+            drive.on_vision_frame(frame)
+            assert drive.state_snapshot['person_present'] is (bodies > 0 or faces > 0)
+            assert drive._person_engaging is (faces > 0)
+            await asyncio.sleep(0)
+            assert list(drive._events) == [queued]
+        assert any('进入画面' in text for _kind, text in memories)
+        assert any('已离开' in text for _kind, text in memories)
+    finally:
+        drive._task.cancel()
+        await asyncio.gather(drive._task, return_exceptions=True)

@@ -31,6 +31,8 @@ def persona_reply_prompt(run, profile: dict | None = None) -> str:
         "执行中的站位、路径和核验过程交给工具，不逐步口述操作规则。"
         "动作成功、货物实际移动和送达分别按本轮工具事实说明；"
         "人物身份以本轮可信识别为准，不能从历史记忆认定主人。"
+        "用户想教你尚未开放的身体动作时，以当前人格自然说暂时还不会，"
+        "可以简短提及真实可用的替代能力供用户选择，但不能擅自替换或承诺未来会自动学会。"
     )
 
 
@@ -52,6 +54,7 @@ def build_messages(run, *, supplement: str = "", memory: str = "", space_id: str
     if memory:
         context["memory"] = memory
     instructions = (_FIXED_RULES + "\n" + DECISION_GUIDANCE + "\n" + persona_reply_prompt(run, profile)
+        + '\n开心时可以适当地直接调用 go2_sport(cmd="Content") 做开心动作，不需要先有情绪教导。'
         + "\n用户说前面的、眼前、脚边或这个物体时，先观察当前画面并保留近处位置和外观特征，"
         "不要把目标简化成泛称后去寻找远处同类物体。"
         "根据用户的空间指代核对候选，不按材质词或显眼程度替换目标。"

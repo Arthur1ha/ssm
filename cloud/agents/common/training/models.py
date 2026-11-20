@@ -17,7 +17,7 @@ class Condition(StrictModel):
 
 class Trigger(StrictModel):
     event_id: StrictStr
-    where: dict[str, Any] = Field(description='观察事件的条件，例如 recognized=true；只使用事件声明的字段')
+    where: dict[str, Any] = Field(description='只使用目录声明的观察字段。身份事件例如 recognized=true；vision.target_presence 必须为 target=具体可见物体描述、detected=true，目标随教导动态增加')
 
 
 class Step(StrictModel):

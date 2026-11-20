@@ -264,7 +264,8 @@ async def _ask_vision(jpeg: bytes, target: str, frame: dict,
             observation = observation[0]
         if not isinstance(observation, dict):
             raise ValueError('non-object vision output')
-        fields = (('scene_summary',) if mode == 'scene' else
+        fields = (('targets',) if mode == 'teaching_targets' else
+                  ('scene_summary',) if mode == 'scene' else
                   ('found', 'bbox_1000', 'proximity', 'proximity_reason', 'scene_summary',
                    'estimated_distance_m', 'advance_distance_m') if mode == 'visible_target' else
                   ('cargo_count', 'cargo_ground_contact_visible', 'cargo_bbox_1000',

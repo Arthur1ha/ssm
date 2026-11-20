@@ -39,7 +39,8 @@ async def _call(callback, *args):
 
 async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
                                 run_id: str, snapshot, execute,
-                                before_step=None, after_step=None, observe=None) -> dict:
+                                before_step=None, after_step=None, observe=None,
+                                refresh_observation=None) -> dict:
     """Run one confirmed behavior, including a one-step behavior, identically.
 
     ``execute`` receives an already-resolved action, parameters, trusted step
@@ -73,6 +74,19 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
                         'result': {'result': 'cancelled', 'error': 'newer_user_goal'}}
             if execution.expires_at and execution.expires_at <= time.time():
                 raise ValueError('execution_context_expired')
+            if refresh_observation is not None:
+                block = await _call(refresh_observation, replace(
+                    execution, training_step_index=index,
+                    trigger_step_index=index if execution.trigger_ref else None))
+                if block:
+                    return {'index': index, 'receipts': receipts, 'stopped': True,
+                            'result': block}
+                # Refresh may wait on the camera. Read all record, capability
+                # and physical facts below only after it finishes.
+                if not get_goal_registry().is_current(execution.goal_revision):
+                    raise ValueError('newer_user_goal')
+                if execution.expires_at and execution.expires_at <= time.time():
+                    raise ValueError('execution_context_expired')
             records = await invoke_blocking(store.list_records, unit_id, space_id=execution.space_id)
             record = next((row for row in records if row['teaching_id'] == reference), None)
             if record is None or record['desired_status'] != 'enabled':

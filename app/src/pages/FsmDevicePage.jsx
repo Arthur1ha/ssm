@@ -14,7 +14,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   const transport = card?.transport || null;
   const cardLoaded = !!card;
   const [streamState, setStreamState] = useState(null);
-  const [streamHealth, setStreamHealth] = useState('');
+  const [streamHealth, setStreamHealth] = useState(null);
   const [eventsHealthy, setEventsHealthy] = useState(apiClient.eventsConnected !== false && apiClient.devicesSynced !== false);
   useEffect(() => {
     const opened = () => setEventsHealthy(false);
@@ -221,20 +221,27 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   useEffect(() => {
     const url = transport?.state_stream;
     setStreamState(null);
-    setStreamHealth('');
+    setStreamHealth(null);
     if (!url || !url.startsWith('/api/')) return;
     let active = true;
     const es = new EventSource(url);
-    es.onopen = () => { if (active) setStreamHealth('live'); };
-    es.onerror = () => { if (active) setStreamHealth('reconnecting'); };
+    const health = value => setStreamHealth({unitId,url,value});
+    // Opening a transport does not confirm a device state snapshot.
+    es.onopen = () => { if (active) health('reconnecting'); };
+    es.onerror = () => { if (active) health('reconnecting'); };
     es.onmessage = event => {
       if (!active) return;
       try {
         const state = JSON.parse(event.data);
-        setStreamHealth('live');
-        if (state && typeof state === 'object') setStreamState(previous => ({ unitId,
-          state: mergeStateSnapshot(previous?.unitId === unitId ? previous.state : null,
-            state, snapshotCursor.current.retired) }));
+        if (!state || typeof state !== 'object' || Array.isArray(state) || !Object.keys(state).length) return;
+        const cursor = snapshotCursor.current;
+        if (cursor.unitId !== unitId) return;
+        const next = mergeStateSnapshot(cursor.state,state,cursor.retired);
+        // A rejected revision or retired epoch cannot restore stream health.
+        if (next === cursor.state && next !== state) return;
+        cursor.state = next;
+        setStreamState({unitId,url,state:next});
+        health('live');
       } catch (_) {}
     };
     return () => { active = false; es.close(); };
@@ -246,15 +253,19 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   }
   const cursor = snapshotCursor.current;
   cursor.state = mergeStateSnapshot(cursor.state, snapshot, cursor.retired);
-  cursor.state = mergeStateSnapshot(cursor.state, streamState?.unitId === unitId ? streamState.state : null, cursor.retired);
+  cursor.state = mergeStateSnapshot(cursor.state, streamState?.unitId === unitId
+    && streamState.url === transport?.state_stream ? streamState.state : null, cursor.retired);
   const runtimeState = cursor.state || {};
   const regions = stateMachineRegions(sm);
   const primaryRegion = primaryStateRegion(sm);
-  const stateHealth = transport?.state_stream ? streamHealth : eventsHealthy ? 'live' : 'reconnecting';
+  const streamReady = !transport?.state_stream || streamHealth?.unitId === unitId
+    && streamHealth.url === transport.state_stream && streamHealth.value === 'live';
+  const stateHealth = eventsHealthy && streamReady ? 'live' : 'reconnecting';
   const connectionField = sm?.connection_field || '';
   const current = runtimeState[primaryRegion?.state_field] || '';
   const connected = connectionField ? runtimeState[connectionField] === true : !!(card?._online ?? card?.online);
   const offline = !(card?._online ?? card?.online) || (connectionField && !connected);
+  const runtimeLive = !offline && stateHealth === 'live';
   useEffect(() => {
     companionPresentation.updateDevice(unitId, {
       card, state:runtimeState, connected:eventsHealthy, health:stateHealth,
@@ -403,11 +414,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         <div style={{ minWidth: 0, flex: '0 1 auto' }}>
           <div style={{
             fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            color: offline ? 'var(--color-text-dim)' : ACCENT,
+            color: runtimeLive ? ACCENT : 'var(--color-text-dim)',
           }}>{getAgentDisplayName(card || unitId)}</div>
         </div>
         <div className="device-header__status" title={statusLabel}>
-          <i className={offline ? 'is-offline' : ''}/>
+          <i className={runtimeLive ? '' : 'is-offline'}/>
           <span>{statusLabel}</span>
         </div>
         {!isGo2 && safetyAction && <button type="button" className="device-header__stop btn btn--danger"
@@ -423,7 +434,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
             actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth}
-            onTransition={dispatchTransition} report={reportExecution} training={training} />
+            onTransition={dispatchTransition} report={reportExecution} training={training}
+            onReviseTraining={record => setTrainingSelection({unit_id:unitId,
+              transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)})} />
         </div>
       )}
 
@@ -436,7 +449,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       }}>
       <ChatPanel
         beforeMessages={<>
-          {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
           {activityQuestion && <div className="device-activity-question">
             <strong>{getAgentDisplayName(unitId)}刚才问：</strong>
             <span>{activityQuestion.text}</span>
@@ -458,7 +470,9 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         onSend={handleSend}
         placeholder={offline ? '设备离线，暂不可用' : sending ? '正在处理…' : '告诉设备要做什么…'}
         disabled={offline}
-      />
+      >
+        {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
+      </ChatPanel>
       </div>
       {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)}); setTrainingOpen(false);}}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}

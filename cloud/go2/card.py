@@ -18,6 +18,7 @@ _mqtt_client = None
 _last_status_online: bool | None = None
 TRAINING_OBSERVATIONS = (
     "vision.person_presence", "vision.face_presence", "vision.owner_recognized",
+    "vision.stranger_recognized", "vision.target_presence",
 )
 
 from cloud.go2.tools.registry import card_skills
@@ -204,6 +205,13 @@ def _build_go2_card() -> dict:
              "description": "人脸识别确认已登记的主人；需要人脸识别服务可用",
              "available": identity_skill.enabled,
              "fields": {"recognized": "boolean"}},
+            {"id": "vision.stranger_recognized", "name": "识别到陌生人",
+             "description": "本次有效人脸识别未匹配到登记人员；识别失败或服务不可用不表示陌生人",
+             "available": identity_skill.enabled,
+             "fields": {"recognized": "boolean"}},
+            {"id": "vision.target_presence", "name": "看到目标物体",
+             "description": "按已确认教导动态观察书本、食物等可见物体；where 必须包含具体 target 和 detected=true，不用于人物身份、不可见意图或新增硬件感知",
+             "fields": {"target": "string", "detected": "boolean"}},
         ],
         "transport": {
             "kind": "http",

@@ -203,6 +203,11 @@ async function checkInteractions() {
     return tree;
   };
   let board = find(render(), ui.window.HierarchicalFsmBoard);
+  assert.equal(board.props.streamHealth,'reconnecting','A cached snapshot must not confirm an unopened state stream');
+  sources[0].onopen();
+  assert.equal(find(render(), ui.window.HierarchicalFsmBoard).props.streamHealth,'reconnecting','Transport open is not a valid snapshot');
+  sources[0].onmessage({data:JSON.stringify(initial)});
+  board = find(render(), ui.window.HierarchicalFsmBoard);
   const transition = { action:'Sit', trigger:'Sit', dst:'sitting' };
   await Promise.all([board.props.onTransition(transition), board.props.onTransition(transition)]);
   assert.equal(calls.length, 1, 'Repeated click sent two commands');
@@ -216,6 +221,9 @@ async function checkInteractions() {
   sources[0].onmessage({data:JSON.stringify({...initial,epoch:'a',revision:999})});
   board = find(render(), ui.window.HierarchicalFsmBoard);
   assert.equal(board.props.liveState.body_state, null);
+  assert.equal(board.props.streamHealth,'reconnecting','A retired epoch must not restore stream health');
+  sources[0].onmessage({data:JSON.stringify({...initial,epoch:'b',revision:2,body_state:null})});
+  assert.equal(find(render(), ui.window.HierarchicalFsmBoard).props.streamHealth,'live');
   const lamp = {unit_id:'lamp',name:'灯',_online:true,transport:{},state_machine:{primary_region:'device',regions:[{id:'device',label:'照明',states:['OFF','ON'],state_field:'ism',transitions:[],views:{}}]},widgets:[],modes:[],skills:[]};
   const flat = find(render(lamp, {ism:'ON',ts:1}), ui.window.DeviceStateBoard);
   assert.equal(flat.props.current, 'ON', 'Old device stream contaminated the lamp');
@@ -225,7 +233,7 @@ async function checkInteractions() {
   const rebootedBoard = find(render(lamp,{ism:'ON',ts:19,_received_at:1001}),ui.window.DeviceStateBoard);
   assert.equal(rebootedBoard.props.current,'ON','Device page remained stuck in its pre-reboot state');
   let previewCount = 0, fireCount = 0;
-  const graph = ui.window.FsmGraph({nodes:[{id:'standing',label:'standing',current:true},{id:'sitting',label:'sitting'}],
+  const graph = ui.window.FsmGraph({live:true,nodes:[{id:'standing',label:'standing',current:true},{id:'sitting',label:'sitting'}],
     edges:[{id:'sit',src:'standing',dst:'sitting',active:true,transition:{src:'standing',dst:'sitting',trigger:'Sit',action:'Sit',label:'坐下'}}],
     onSelectState() { previewCount++; }, onInspectTransition() { fireCount++; } });
   const descendants = tree => !tree || typeof tree !== 'object' ? [] : Array.isArray(tree)
@@ -267,7 +275,7 @@ async function checkInteractions() {
     {...initialState,life_state:'explore',body_state:'moving',control_mode:'remote',available_actions:['StopMove'],available_life_actions:['stop_explore']}];
   const previews = previewCases.map(state => ReactDOMServer.renderToStaticMarkup(React.createElement(
     previewContext.window.HierarchicalFsmBoard, {unitId:'go2',sm,current:state.body_state,
-      liveState:state,widgets:[],connected:true,offline:false,actor:'admin',color:'#C8FF3E',
+      liveState:state,widgets:[],connected:true,offline:false,streamHealth:'live',actor:'admin',color:'#C8FF3E',
       onSelectState(){},onTransition(){},report(){}})));
   fs.writeFileSync('/tmp/go2-hierarchical-preview.html', '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Go2 模拟状态前端预览</title><style>*{box-sizing:border-box}body{margin:0;background:#0B0B0E;color:#ddd;font-family:sans-serif}h1{font-size:16px;padding:18px}main{display:flex;flex-wrap:wrap;gap:20px;padding:20px}.preview{width:390px;height:720px;border:1px solid #333}'+read('app/styles/app.css')+'</style></head><body><h1>浏览器验证用模拟状态 · 非真机截图 · 控制不可执行</h1><main>'+previews.map(html=>'<section class="preview">'+html+'</section>').join('')+'</main></body></html>');
   console.log('Rendered actual components with simulated states: /tmp/go2-hierarchical-preview.html');
@@ -328,7 +336,7 @@ async function checkInteractions() {
       const listeners=new EventTarget();
       window.__emit=detail=>listeners.dispatchEvent(new CustomEvent('server-event',{detail}));
       window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;window.__proposals=[];
-      window.apiClient={addEventListener:(...a)=>listeners.addEventListener(...a),removeEventListener:(...a)=>listeners.removeEventListener(...a),async request(url,options={}){
+      window.apiClient={eventsConnected:true,devicesSynced:true,dispatchEvent:event=>listeners.dispatchEvent(event),addEventListener:(...a)=>listeners.addEventListener(...a),removeEventListener:(...a)=>listeners.removeEventListener(...a),async request(url,options={}){
         __requests.push({url,options});
         if(url.startsWith('/api/training/proposals/') && url.endsWith('/confirm')){
           if(window.__conflict) throw Object.assign(new Error('conflict'),{status:409});
@@ -348,7 +356,7 @@ async function checkInteractions() {
       window.commandBus={describe:r=>r.error || (r.result==='accepted'?'指令已发送，尚未确认完成':'执行完成'),
         command:async(unit,action,params)=>{__calls.push({unit,action,params}); await new Promise(r=>setTimeout(r,100));return {result:'accepted'};},
         velocity(unit,action,params){__velocities.push({unit,action,params});}};
-      window.EventSource=function(){__sources.push(this);this.close=()=>{};};
+      window.EventSource=function(){__sources.push(this);this.close=()=>{};queueMicrotask(()=>this.onmessage?.({data:JSON.stringify(__state)}));};
       window.Icon=()=>null;window.Go2AssetsDrawer=()=>null;window.LampAssetsDrawer=()=>null;window.AgentPersonalitySettings=()=>null;
       window.ChatPanel=props=>React.createElement('div',{style:{padding:'18px',fontSize:'13px',color:'#999'}},
         React.createElement('p',null,'浏览器验证 · 模拟状态，不连接真机'),
@@ -372,6 +380,94 @@ async function checkInteractions() {
 
     await page.waitForSelector('.device-state-board');
     await page.evaluate(() => document.fonts.ready);
+    if (process.argv.includes('--offline-only')) {
+      const active='.fsm-whiteboard__node.is-current,.fsm-whiteboard__node.is-actionable,.fsm-whiteboard__node.is-reachable,.fsm-whiteboard__edge.is-emphasized,.fsm-whiteboard__edge.is-running,.fsm-whiteboard__edge.is-taught,.fsm-whiteboard__edge.is-teaching-observed,.fsm-whiteboard__edge.is-teaching-executing,.fsm-whiteboard__edge.is-teaching-result,.fsm-whiteboard__edge.is-new-teaching';
+      const assertInactive=async reason=>{
+        await page.waitForFunction(()=>document.querySelector('.device-state-board')?.dataset.live==='false');
+        assert.equal(await page.$$(active).then(nodes=>nodes.length),0,reason);
+        assert.ok(await page.$('.device-header__status i.is-offline'),'The header must use the same live gate');
+      };
+      await page.waitForSelector('[data-state="body:standing"].is-current');
+      await page.evaluate(()=>{
+        const transition=__sm.regions.find(region=>region.id==='body').transitions.find(t=>t.action==='Sit' && t.src==='standing');
+        transition.id='offline-sit'; window.__sitId=transition.id;
+        __training.records=[{teaching_id:'offline-rule',revision:1,desired_status:'enabled',name:'看到人就坐下',
+          definition:{steps:[{transition_ids:[__sitId],conditions:[],defaults:{}}]}}];
+        __emit({type:'training.updated',unit_id:'go2'});
+        __renderState({...__state,revision:2,pending_action:{command:'Sit'}});
+      });
+      await page.waitForSelector('.fsm-whiteboard__edge.is-taught');
+      await page.waitForSelector('.fsm-whiteboard__edge.is-running');
+      await page.evaluate(()=>{
+        const now=Date.now()/1000;
+        window.__offlineProgress={type:'agent_progress',result_kind:'training',agent_id:'go2',teaching_id:'offline-rule',
+          revision:1,version:1,run_id:'pre-disconnect',step_id:'pre-disconnect:0',step_index:0,transition_id:__sitId,
+          device_epoch:__state.epoch,ts:now,sequence:0,fact_kind:'observation',observation_id:'vision.owner_recognized',
+          observation_event_id:'appearance',as_of:now};
+        __emit(__offlineProgress);
+      });
+      await page.waitForSelector('.fsm-whiteboard__edge.is-teaching-observed');
+      await page.evaluate(()=>__renderState(__state,{...__card,_online:false}));
+      await assertInactive('MQTT offline must override cached connected=true, posture, pending actions and teaching activity');
+      await page.$eval('.fsm-whiteboard__edge[data-action="Sit"]',node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+      await page.waitForSelector('.training-inspector__card');
+      assert.equal(await page.evaluate(()=>__calls.length),0,'Offline inspection sent a physical action');
+      await page.screenshot({path:'/tmp/ssm-offline-rules.png',fullPage:true});
+      await page.keyboard.press('Escape');
+      await page.evaluate(()=>{
+        __sources.at(-1).onmessage({data:JSON.stringify({...__state,revision:3})});
+      });
+      await assertInactive('A live device stream cannot override offline MQTT status');
+      await page.evaluate(()=>__renderState({...__state,revision:4,pending_action:null}));
+      await page.waitForSelector('[data-state="body:standing"].is-current');
+      assert.equal(await page.$('.fsm-whiteboard__edge.is-teaching-observed'),null,'Reconnection must not replay pre-disconnect execution highlights');
+      await page.evaluate(()=>__renderState({...__state,revision:5,connected:false}));
+      await assertInactive('An online Go2 service must not substitute for the physical control connection');
+      await page.evaluate(()=>__renderState({...__state,revision:6,connected:true,body_telemetry_fresh:false}));
+      await page.waitForFunction(()=>document.querySelector('.device-state-board')?.dataset.live==='true');
+      assert.equal(await page.$('.fsm-whiteboard__node.is-current[data-state^="body:"]'),null,'Invalid body feedback must not illuminate a cached posture');
+      assert.ok(await page.$('[data-state="life:idle"].is-current'),'Body validity must not suppress independent behavior facts');
+      await page.evaluate(()=>__renderState({...__state,revision:7,body_telemetry_fresh:true}));
+      await page.waitForSelector('[data-state="body:standing"].is-current');
+      await page.evaluate(()=>{apiClient.eventsConnected=false;apiClient.dispatchEvent(new Event('events-error'));});
+      await assertInactive('Global event loss invalidates MQTT presence even with a separate healthy device stream');
+      await page.evaluate(()=>{
+        __sources.at(-1).onmessage({data:JSON.stringify({...__state,revision:8})});
+        apiClient.eventsConnected=true;apiClient.dispatchEvent(new Event('events-open'));
+      });
+      await assertInactive('Reopening global SSE must wait for device snapshot resynchronization');
+      await page.evaluate(()=>{apiClient.devicesSynced=true;apiClient.dispatchEvent(new Event('devices-synced'));});
+      await page.waitForSelector('[data-state="body:standing"].is-current');
+      await page.evaluate(()=>__sources.at(-1).onerror());
+      await assertInactive('Independent device stream failure must remove all live highlights');
+      await page.evaluate(()=>{
+        const source=__sources.at(-1);source.onopen();
+        for(const state of [{},[],null])source.onmessage({data:JSON.stringify(state)});
+      });
+      await assertInactive('Transport open and empty frames do not restore live state');
+      await page.evaluate(()=>__sources.at(-1).onmessage({data:JSON.stringify({...__state,epoch:'b',revision:1})}));
+      await page.waitForSelector('[data-state="body:standing"].is-current');
+      await page.evaluate(()=>{
+        const source=__sources.at(-1);source.onerror();source.onopen();
+        source.onmessage({data:JSON.stringify({...__state,epoch:'a',revision:999})});
+      });
+      await assertInactive('A retired epoch must not restore stream health or highlights');
+      await page.evaluate(()=>__sources.at(-1).onmessage({data:JSON.stringify({...__state,epoch:'b',revision:0})}));
+      await assertInactive('An older revision must not restore stream health or highlights');
+      await page.evaluate(()=>__sources.at(-1).onmessage({data:JSON.stringify({...__state,epoch:'b',revision:2})}));
+      await page.waitForSelector('[data-state="body:standing"].is-current');
+      await page.evaluate(()=>__renderState({ism:'ON',ts:1},{...__lampCard,_online:true}));
+      await page.waitForSelector('[data-state="device:ON"].is-current');
+      await page.evaluate(()=>__renderState(__state,{...__lampCard,_online:false}));
+      await assertInactive('A cached lamp ON state must not stay illuminated while offline');
+      assert.ok(await page.$('[data-state="device:ON"].is-retained'),'Last observation can remain as a neutral, retained marker');
+      await page.evaluate(()=>__renderState({...__state,ts:2},{...__lampCard,_online:true}));
+      await page.waitForSelector('[data-state="device:ON"].is-current');
+      assert.equal(await page.evaluate(()=>__calls.length),0,'Availability changes must never dispatch actions');
+      assert.deepEqual(errors,[]);
+      console.log('PASS: shared MQTT/control/SSE highlight gates, offline rule inspection, neutral cached observations, independent body validity, no stale execution replay, and valid-snapshot-only reconnection.');
+      return;
+    }
     if (process.argv.includes('--lamp-reboot-only')) {
       await page.evaluate(() => __renderState({ism:'OFF',ts:570,_received_at:1000},{...__lampCard,_online:true}));
       await page.waitForSelector('[data-state="device:OFF"].is-current');
@@ -462,27 +558,101 @@ async function checkInteractions() {
       await page.evaluate(() => {
         const edge=__sm.regions.find(r=>r.id==='body').transitions.find(t=>t.action==='Sit' && t.src==='standing');
         edge.id='tr_sit'; edge.training_fixed_params=[];
-        __training.catalog.transitions=[{id:'tr_sit',trainable:true}];
-        __training.records=[{unit_id:'go2',teaching_id:'teach1',revision:1,transition_ids:['tr_sit'],name:'坐下后至少间隔三秒再坐',summaryText:'坐下后至少间隔三秒再坐',source_text:'坐下前等三秒',desired_status:'enabled'}];
+        __training.catalog.transitions=[{id:'tr_sit',trainable:true,src:'standing',dst:'sitting',state_field:'body_state',source_label:'站立',destination_label:'坐下'}];
+        __training.catalog.events=[{id:'vision.owner_recognized',name:'识别到主人'}];
+        __training.catalog.state_fields={body_state:{label:'身体',labels:{standing:'站立',sitting:'坐下'}}};
+        __training.records=[{unit_id:'go2',teaching_id:'teach1',revision:1,history:[],updated_at:1,
+          definition:{steps:[{transition_ids:['tr_sit'],conditions:[],defaults:{},goal_state:'sitting'}],
+            trigger:{event_id:'vision.owner_recognized',where:{recognized:true}},origins:['agent_autonomous'],cooldown_s:3},
+          name:'坐下后至少间隔三秒再坐',summaryText:'坐下后至少间隔三秒再坐',source_text:'坐下前等三秒',desired_status:'enabled'}];
         __training.edge_annotations=[{transition_id:'tr_sit',teachings:[{desired_status:'enabled'}]}];
         __renderState(__state);
         __emit({type:'training.updated',unit_id:'go2',cursor:1});
       });
       await page.waitForFunction(()=>__requests.some(r=>r.url.includes('/api/devices/go2/training')));
-      assert.equal(await page.$('.training-edge-badge'),null,'Rules must not add badges to graph lines');
+      await page.waitForSelector('.fsm-whiteboard__edge[data-teaching-ids="teach1"].is-taught');
+      assert.equal(await page.$('.state-teachings'),null,'Teaching belongs in the graph, without a duplicate top section');
+      assert.equal(await page.$('.fsm-whiteboard__edge text'),null,'Rules must not add text to graph lines');
+      assert.ok(await page.$('.fsm-whiteboard__node[data-state="body:standing"].is-current'));
       const count=await page.evaluate(()=>__calls.length);
+      await page.screenshot({path:'/tmp/ssm-training-graph.png',fullPage:true});
+      await page.evaluate(()=>{
+        const now=Date.now()/1000;
+        window.__trainingProgress={type:'agent_progress',result_kind:'training',agent_id:'go2',teaching_id:'teach1',
+          revision:1,version:1,run_id:'learned-owner',step_id:'learned-owner:0',step_index:0,transition_id:'tr_sit',
+          device_epoch:__state.epoch,ts:now,sequence:0,fact_kind:'observation',stage:'observed',status:'observed',
+          observation_id:'vision.owner_recognized',observation_event_id:'owner-appearance',as_of:now};
+        __emit(__trainingProgress);
+      });
+      await page.waitForSelector('.fsm-whiteboard__edge.is-teaching-observed');
+      await page.evaluate(()=>__emit({...__trainingProgress,sequence:1,fact_kind:'call',stage:'executing',status:'executing'}));
+      await page.waitForSelector('.fsm-whiteboard__edge.is-teaching-executing');
+      await page.evaluate(()=>__emit({...__trainingProgress,sequence:2,fact_kind:'result',status:'ok',public_result:{result:'ok'}}));
+      await page.waitForSelector('.fsm-whiteboard__edge.is-teaching-result');
+      assert.ok(await page.$('.fsm-whiteboard__node[data-state="body:standing"].is-current'),'Action receipt must not fabricate a measured sitting posture');
+      await page.evaluate(()=>{
+        window.__originalTeaching=structuredClone(__training.records[0]);
+        __training.records=Array.from({length:12},(_,index)=>({...structuredClone(__originalTeaching),
+          teaching_id:index ? `teach-${index}` : 'teach1',name:`教导 ${index+1}`,summaryText:`教导 ${index+1}`}));
+        __emit({type:'training.updated',unit_id:'go2'});
+      });
+      await page.waitForFunction(()=>document.querySelector('.fsm-whiteboard__edge[data-action="Sit"]')?.dataset.teachingIds.split(',').length===12);
+      await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
+      await page.waitForFunction(()=>document.querySelectorAll('.training-inspector__card').length===12);
+      assert.equal(await page.$('.fsm-whiteboard__edge text'),null,'Many rules must not crowd the graph with labels');
+      assert.ok(await page.$eval('.device-whiteboard__popover-body',node=>node.scrollHeight>node.clientHeight),'Many rules must scroll inside the popover');
+      assert.ok(await page.$eval('.training-inspector',node=>{
+        const base=getComputedStyle(node.querySelector('.training-inspector__base'));
+        const card=getComputedStyle(node.querySelector('.training-inspector__card'));
+        return base.backgroundColor!==card.backgroundColor && parseFloat(card.borderLeftWidth)>parseFloat(base.borderLeftWidth);
+      }),'Original rules and teachings need distinct backgrounds and borders');
+      await page.screenshot({path:'/tmp/ssm-training-many-rules.png',fullPage:true});
+      const lastRevise=await page.$('.training-inspector__card:last-child .training-inspector__revise');
+      await lastRevise.scrollIntoView();
+      await lastRevise.click();
+      await page.waitForFunction(()=>document.querySelector('.training-selection')?.textContent.includes('教导 12'));
+      await page.click('.training-selection button');
+      await page.evaluate(()=>{
+        __training.records=[__originalTeaching];
+        __emit({type:'training.updated',unit_id:'go2'});
+      });
+      await page.waitForFunction(()=>document.querySelector('.fsm-whiteboard__edge[data-action="Sit"]')?.dataset.teachingIds==='teach1');
+      await page.evaluate(()=>{
+        __training.catalog.hash='new-capabilities';
+        __training.records[0].capability_hash='old-capabilities';
+        __training.records[0].execution_reasons=[{code:'capability_changed'}];
+        __emit({type:'training.updated',unit_id:'go2'});
+      });
+      await page.waitForSelector('.fsm-whiteboard__edge.is-teaching-unconfirmed');
+      assert.equal(await page.$('.fsm-whiteboard__edge.is-teaching-result'),null,'An incompatible association must not retain an active highlight');
       await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
       await page.waitForSelector('.training-inspector');
       await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('坐下后至少间隔三秒再坐'));
       assert.equal(await page.evaluate(()=>__calls.length),count,'Line inspection sent a command');
-      assert.equal(await page.$('.training-inspector button'),null,'Line details must not expose a teaching entry');
+      assert.ok(await page.$eval('.training-inspector__notice',node=>node.textContent.includes('能力已更新')));
+      assert.equal(await page.$eval('.training-inspector__base .training-inspector__source',node=>node.textContent),'设备原有规则');
+      assert.equal(await page.$eval('.training-inspector__card .training-inspector__source',node=>node.textContent),'教导规则');
+      assert.ok(await page.$('.training-inspector__revise'),'Administrators can revise a saved association at its transition');
+      await page.screenshot({path:'/tmp/ssm-training-rule-card.png',fullPage:true});
+      await page.click('.training-inspector__revise');
+      await page.waitForSelector('.training-selection');
+      assert.ok(await page.$eval('.training-selection',node=>node.textContent.includes('坐下后至少间隔三秒再坐')),
+        'Incompatible associations retain their current teaching revision entry');
+      await page.click('.training-selection button');
+      await page.evaluate(()=>{
+        delete __training.catalog.hash;
+        delete __training.records[0].capability_hash;
+        __training.records[0].execution_reasons=[];
+        __emit({type:'training.updated',unit_id:'go2'});
+      });
+      await page.waitForFunction(()=>!document.querySelector('.fsm-whiteboard__edge.is-teaching-unconfirmed'));
       await page.keyboard.press('Escape');
       await page.type('.device-page__chat input','以后坐下后等三秒才能再次坐下');
       await page.keyboard.press('Enter');
       await page.waitForFunction(()=>__calls.some(r=>r.action==='chat'));
       await page.evaluate(()=>{
         const call=__calls.find(r=>r.action==='chat');
-        __proposal={proposal_id:'p1',unit_id:'go2',operation:'create',source_run_id:call.params.task_id,source_text:call.params.message,created_at:1,expected_revision:0,capability_hash:'hash',transition_ids:['tr_sit'],summaryText:'坐下后至少间隔三秒再坐',changeText:'坐下完成后，三秒内不重复坐下。',confirmation_allowed:true,after:{name:'坐下后至少间隔三秒再坐',source_text:call.params.message}};
+        __proposal={proposal_id:'p1',unit_id:'go2',operation:'create',source_run_id:call.params.task_id,source_text:call.params.message,created_at:1,expected_revision:0,capability_hash:'hash',summaryText:'坐下后至少间隔三秒再坐',changeText:'坐下完成后，三秒内不重复坐下。',confirmation_allowed:true,after:{...__training.records[0],source_text:call.params.message}};
         __proposals.push(__proposal);
         __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p1'});
       });
@@ -501,7 +671,7 @@ async function checkInteractions() {
         __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p2'});
       });
       await page.waitForFunction(()=>document.querySelectorAll('.chat-messages .training-change').length===2);
-      await page.waitForFunction(()=>[...document.querySelectorAll('.training-change')].some(node=>node.textContent.includes('原来：坐下后至少间隔三秒再坐')));
+      assert.equal(await page.$eval('.chat-messages',node=>node.textContent.includes('原来：')),false,'Rule comparison belongs on the state machine');
       await page.evaluate(()=>window.__conflict=true);
       await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='就这样').click());
       await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('规则已经变化'));
@@ -525,6 +695,9 @@ async function checkInteractions() {
       await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='在对话中修改').click());
       await page.waitForSelector('.training-selection');
       assert.equal(await page.$eval('.training-selection',node=>node.textContent.includes('坐下后至少间隔三秒再坐')),true);
+      await page.waitForFunction(()=>!document.querySelector('.training-drawer'));
+      assert.equal(await page.$eval('.training-selection',node=>!!node.closest('.chat-panel__footer')),true,
+        'The current teaching selection must stay beside the input, outside scrolling history');
       await page.click('.training-selection button');
       await page.click('.device-header__settings');
       await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备规则')).click());
@@ -548,8 +721,9 @@ async function checkInteractions() {
       await page.evaluate(() => {
         const edge=__lampCard.state_machine.regions.find(region=>region.id==='device').transitions
           .find(edge=>edge.src==='ON' && edge.dst==='ON' && edge.action==='SET_COLOR');
-        __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'reading',desired_status:'enabled',
-          name:'阅读灯光',transition_ids:[edge.id],definition:{situation:'准备看书时',defaults:{r:255,g:236,b:210,brightness:200}}}];
+        __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'reading',revision:1,history:[],updated_at:1,desired_status:'enabled',
+          name:'阅读灯光',definition:{situation:'准备看书时',origins:['user_delegated'],
+            steps:[{transition_ids:[edge.id],conditions:[],defaults:{r:255,g:236,b:210,brightness:200}}]}}];
         __renderState({ism:'ON',ts:Date.now()/1000},__lampCard);
         __emit({type:'training.updated',unit_id:__lampCard.unit_id});
       });
@@ -562,7 +736,7 @@ async function checkInteractions() {
       assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect,'Parameter inspection executed an action');
       await page.screenshot({path:'/tmp/ssm-lamp-teaching-preview.png',fullPage:true});
       assert.deepEqual(errors,[]);
-      console.log('PASS: concise edge details without teaching entry, in-chat rule cards, draft revision and before/after, conflict preservation, confirmation/cancellation history, direct deletion, transcript restoration and responsive viewport.');
+      console.log('PASS: text-free taught links, distinct rule cards, factual execution highlights, per-rule revision, concise in-chat confirmation, conflict/history preservation, direct deletion and responsive viewport.');
       return;
     }
     if (process.argv.includes('--reachability-only')) {
@@ -1140,7 +1314,7 @@ async function checkInteractions() {
     await clickNode('body:greeting');
     assert.equal(await page.evaluate(()=>__calls.at(-1).action),'Hello','Next manual action waited for posture feedback');
     await closeExplanation();
-    await page.evaluate(()=>__renderState({...__state,revision:2,body_state:'standing',pending_action:null,
+    await page.evaluate(()=>__renderState({...__state,revision:2,body_state:'standing',body_confirmation:'observed',body_telemetry_fresh:true,pending_action:null,
       last_action:{command:'Hello',phase:'completed',result:'ok'}}));
     await page.waitForSelector('.fsm-whiteboard__node.is-current[data-state="body:standing"]');
     assert.equal(await page.$$('.fsm-whiteboard__edge.is-running').then(nodes=>nodes.length),0,

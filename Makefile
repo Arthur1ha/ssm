@@ -126,9 +126,4 @@ tunnel-url:
 	@echo "$(PUBLIC_URL)"
 
 trace:
-	@set -a; . cloud/.env; set +a; while true; do \
-		mosquitto_sub -h 127.0.0.1 -p 1883 -u "$$MQTT_USER" -P "$$MQTT_PASSWORD" -t "ssm/#" -v \
-			| awk '{ print strftime("%Y-%m-%d %H:%M:%S"), $$0; fflush() }'; \
-		echo "[`date '+%Y-%m-%d %H:%M:%S'`] MQTT 连接断开，2 秒后重连..."; \
-		sleep 2; \
-	done
+	@uv run python scripts/trace_mqtt.py

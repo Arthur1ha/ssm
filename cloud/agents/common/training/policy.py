@@ -106,6 +106,14 @@ def validate_definition(definition: dict, catalog: dict) -> dict:
             event = next((item for item in catalog['events'] if item['id'] == trigger['event_id']), None)
             if event is None or any(trigger['event_id'] not in edge['events'] for edge in selected):
                 raise ValueError('unknown event for the first step')
+            if trigger['event_id'] == 'vision.target_presence':
+                target = trigger['where'].get('target')
+                if (not isinstance(target, str) or not target.strip() or target != target.strip()
+                        or len(target) > 200 or trigger['where'].get('detected') is not True):
+                    raise ValueError('target_presence_requires_target_and_detected')
+            if (trigger['event_id'] == 'vision.stranger_recognized'
+                    and trigger['where'].get('recognized') is not True):
+                raise ValueError('stranger_recognized_requires_positive_observation')
             for key, value in trigger['where'].items():
                 kind = event['fields'].get(key)
                 if (kind is None or (kind == 'boolean' and type(value) is not bool)
@@ -134,7 +142,9 @@ def conflicts(definition: dict, records: list[dict]) -> list[dict]:
         if definition.get('emotion') is not None:
             found.append({'code': 'emotion_overlap', 'teaching_id': record['teaching_id']})
             continue
-        if a and b and a['event_id'] == b['event_id'] and set(definition['steps'][0]['transition_ids']) & set(other['steps'][0]['transition_ids']):
+        if (a and b and a['event_id'] == b['event_id']
+                and all(a['where'][key] == b['where'][key] for key in a['where'].keys() & b['where'].keys())
+                and set(definition['steps'][0]['transition_ids']) & set(other['steps'][0]['transition_ids'])):
             found.append({'code': 'event_overlap', 'teaching_id': record['teaching_id']})
         if a or b:
             continue

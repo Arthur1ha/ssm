@@ -14,7 +14,6 @@ function TrainingPreview({proposal,onConfirm,onCancel,onRevise,error}) {
       {proposal.unit_id && <span className="training-change__agent">{getAgentDisplayName(proposal.unit_id)}</span>}
     </div>
     <h3 className="training-rule-title">{proposal.operation === 'remove' ? '删除规则' : summary}</h3>
-    {before && proposal.operation !== 'remove' && <p className="training-change__before">原来：{before}</p>}
     {proposal.operation === 'remove' ? <p>{before || summary}</p>
       : effect && effect !== summary && <p>{effect}</p>}
     {proposal.operation !== 'remove' && <TrainingRuleSteps record={proposal}/>}

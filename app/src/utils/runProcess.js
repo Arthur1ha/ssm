@@ -1,7 +1,7 @@
 /* Presentation only: grouping requires run/step/task identities, never proximity. */
 function processRecord(event = {}) {
   const keys = ['event_id', 'source_event_id', 'event_type', 'agent_id', 'run_id', 'parent_run_id', 'step_id', 'task_id', 'trace_id',
-    'sequence', 'model_turn', 'tool_call_id', 'fact_kind', 'result_kind', 'public_result', 'dispatch_only', 'observation_event_id', 'frame_id', 'as_of', 'conversation_id', 'reply_to', 'teaching_id', 'version', 'name', 'step_number', 'tool', 'action', 'target_unit_id', 'unit_id', 'skill_id', 'capability_name', 'arguments',
+    'sequence', 'model_turn', 'tool_call_id', 'fact_kind', 'result_kind', 'public_result', 'dispatch_only', 'observation_event_id', 'observation_id', 'transition_id', 'device_epoch', 'frame_id', 'as_of', 'conversation_id', 'reply_to', 'teaching_id', 'version', 'name', 'step_number', 'tool', 'action', 'target_unit_id', 'unit_id', 'skill_id', 'capability_name', 'arguments',
     'request_id','activity_id','question_id','observation','observation_summary','training_ref','revision','training_revision','step_index','reply_source','requested_text', 'result_state', 'status', 'reason', 'stage', 'ts', 'media_ref', 'media_url',
     'decision_basis', 'state_at_event', 'trigger_message_id', 'message_id', 'game_round', 'game_id'];
   return Object.fromEntries(keys.filter(key => event[key] !== undefined).map(key => [key, event[key]]));

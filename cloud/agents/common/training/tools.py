@@ -45,6 +45,10 @@ class ProposeTraining(BaseModel):
     用户明确只在聊天或只在自主活动中表达时尊重其范围，仍由用户确认草案后生效。
     情绪映射与观察触发不可混用；用户开心等他人情绪不得当作自身 emotion。
     观察条件只放 trigger.where，动作参数一律放 steps 中的 defaults。
+    看到书本、食物等物体时，用目录中的 vision.target_presence，where={target:具体物体描述,detected:true}；
+    目标作为教导参数动态增加，不自造 vision.book 等事件。此观察仅判断画面中可见物体，不能识别人物身份或不可见意图。
+    看到陌生人用 vision.stranger_recognized，where={recognized:true}，必须来自本次有效身份识别未匹配登记人员。
+    主人和陌生人身份不使用通用目标观察替代；没有相应观察或动作能力时说明缺项，不静默缩减用户目标。
     同一要求更新原教导；补充草案用 supersedes_proposal_id，保留原 operation。
     create/update 给出完整 name 和 effect_text，文字完整对应条件、顺序及参数。
     失败重试必须保留触发器、身份限制和动作顺序，修正参数或如实说明能力缺项。

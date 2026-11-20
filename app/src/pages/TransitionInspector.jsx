@@ -57,13 +57,39 @@ function TrainingRuleDetails({record,transition}) {
   </div>;
 }
 
-function TransitionInspector({transition,projection = []}) {
+function TransitionInspector({transition,projection = [],catalog,activityFor,changedTeaching,onRevise}) {
   const rules = projection.filter(record => record.desired_status === 'enabled');
   const condition = transition.trigger_condition || (transition.action
     ? `收到${stateTransitionLabel(transition)}指令` : `${stateTransitionLabel(transition)}时`);
-  return <div className="training-inspector"><p>{condition}</p>
+  return <div className="training-inspector">
+    <div className="training-inspector__base">
+      <span className="training-inspector__source">设备原有规则</span>
+      <p>{condition}</p>
+    </div>
     {rules.length > 0 && <ul className="training-inspector__rules" aria-label="你制定的规则">
-      {rules.map(record => <li key={record.teaching_id}><TrainingRuleDetails record={record} transition={transition}/></li>)}
+      {rules.map(record => {
+        const unconfirmed = trainingNeedsConfirmation(record,catalog);
+        const activity = !unconfirmed && activityFor?.(record);
+        const status = unconfirmed ? '需重新确认' : activity?.result
+          ? ['ok','accepted'].includes(activity.result.status) ? '已响应'
+            : ['executing','timeout','unknown'].includes(activity.result.status) ? '等待确认' : '本次未完成'
+          : activity?.call ? '执行中' : activity?.observation ? '已感知' : '';
+        const changed = changedTeaching === record.teaching_id;
+        const previous = trainingPreviousRecord(record);
+        return <li key={record.teaching_id} className={`training-inspector__card${changed ? ' is-new' : ''}${unconfirmed ? ' is-unconfirmed' : ''}`}>
+          <div className="training-inspector__heading">
+            <span className="training-inspector__source">教导规则</span>
+            {(status || changed) && <span className="training-inspector__status" role="status">{status || (previous ? '刚修改' : '新增')}</span>}
+          </div>
+          <TrainingRuleDetails record={record} transition={transition}/>
+          {unconfirmed && <p className="training-inspector__notice">能力已更新，需管理员修改并重新确认。</p>}
+          {previous && <details className="training-inspector__previous">
+            <summary>查看修改前</summary>
+            <TrainingRuleDetails record={trainingRecordProjection(previous,catalog)} transition={transition}/>
+          </details>}
+          {onRevise && <button type="button" className="training-inspector__revise" onClick={() => onRevise(record)}>修改这项教导</button>}
+        </li>;
+      })}
     </ul>}
   </div>;
 }

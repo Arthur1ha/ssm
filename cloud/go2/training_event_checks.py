@@ -453,7 +453,11 @@ async def test_user_takeover_discards_appearance_waiting_for_telemetry(listener)
 @pytest.mark.asyncio
 async def test_bound_event_reuses_command_ledger_and_manual_hello_stays_available(bound_listener):
     from cloud.go2.tools.executor import execute_tool
+    from cloud.agents.common.training import store
     adapter, robot, _, f = bound_listener
+    # Isolate stale-event admission from the independent completion cooldown.
+    with store.partition_lock('go2', space_id='main', write=True) as data:
+        data['records'][f['records'][0]['teaching_id']]['definition']['cooldown_s'] = None
     robot.send_command.return_value = {'result': 'ok', 'confirmation_scope': 'completion'}
     now = time.time()
     context = replace(adapter._context, trigger_mode_epoch=adapter._generation,
@@ -468,11 +472,16 @@ async def test_bound_event_reuses_command_ledger_and_manual_hello_stays_availabl
                      trigger_mode_epoch=None)
     assert (await execute_tool('go2_sport', {'cmd': 'Hello'}, context=manual))['result'] == 'ok'
     assert robot.send_command.await_count == 2
+    # The tool above is an in-goal action; model the external user takeover
+    # explicitly before reusing the earlier autonomous event context.
+    adapter.interrupt()
     stale = replace(context, trigger_ref=f['records'][0]['teaching_id'],
                     trigger_revision=f['records'][0]['revision'],
-                    trigger_transition_id=f['records'][0]['definition']['steps'][0]['transition_ids'][0])
+                    trigger_transition_id=f['records'][0]['definition']['steps'][0]['transition_ids'][0],
+                    trigger_step_index=0)
     blocked = await execute_tool('go2_sport', {'cmd': 'Hello'}, context=stale, request_id='stale-event')
     assert blocked['result'] == 'blocked'
+    assert not adapter.allows(stale)
     assert blocked['reasons'][0]['code'] == 'autonomy_unavailable'
     assert robot.send_command.await_count == 2
 

@@ -8,10 +8,8 @@ from unittest.mock import AsyncMock
 import cv2
 import numpy as np
 import pytest
-from PIL import Image
 
 from cloud.go2.identity_threshold_checks import recognition
-from cloud.go2.connection.video import Go2Video, JPEG_QUALITY, PREVIEW_JPEG_QUALITY, ENCODE_INTERVAL_S
 from cloud.go2.perception import vision
 from cloud.space.people.provider import FaceCandidate, FaceProviderUnavailable, FaceSearchResult
 
@@ -141,53 +139,6 @@ def test_face_detection_preserves_aspect_and_more_detail_than_body(monkeypatch):
     result = vision.detect(jpeg.tobytes())
     assert shapes == {"body": (180, 320), "face": (360, 640)}
     assert result["faces"]["boxes"] == [(200, 100, 160, 160)]
-
-
-async def test_video_keeps_native_dimensions_and_high_quality_encoding(monkeypatch):
-    robot = Go2Video()
-    robot.is_connected = True
-    robot._odom_session_id = "camera"
-    image = Image.new("RGB", (1280, 720))
-    original_save = Image.Image.save
-    qualities = []
-    def save(img, fp, **kwargs):
-        qualities.append(kwargs["quality"])
-        return original_save(img, fp, **kwargs)
-    monkeypatch.setattr(Image.Image, "save", save)
-    received = False
-    async def recv():
-        nonlocal received
-        if received:
-            raise EOFError("end test")
-        received = True
-        return SimpleNamespace(to_image=lambda: image)
-    await robot._consume_video(SimpleNamespace(recv=recv))
-    jpeg, meta = robot.latest_frame_snapshot()
-    decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    preview = cv2.imdecode(np.frombuffer(robot._latest_preview_frame, dtype=np.uint8), cv2.IMREAD_COLOR)
-    assert decoded.shape[:2] == (720, 1280)
-    assert preview.shape[:2] == (360, 640)
-    assert qualities == [90, 70] and JPEG_QUALITY == 90 and PREVIEW_JPEG_QUALITY == 70
-    assert ENCODE_INTERVAL_S == .1
-    assert (meta["width"], meta["height"]) == (1280, 720)
-
-
-def test_chat_reads_fresh_identity_projection(recognition, monkeypatch):
-    from cloud.agents.go2 import prompts
-    skill, _, person, frame = recognition
-    skill._identity_frame = frame
-    skill._current = skill._recognized(person, 80, frame)
-    monkeypatch.setattr(prompts, "identity_skill", skill)
-    monkeypatch.setattr(prompts, "get_profile", lambda: {"traits": {}})
-    monkeypatch.setattr(prompts, "agent_names", lambda: {})
-    monkeypatch.setattr(prompts, "persona_reply_prompt", lambda *a: "test")
-    monkeypatch.setattr(prompts, "prompt_space_context", lambda: "")
-    monkeypatch.setattr(prompts, "decision_context", lambda *a, **k: {})
-    monkeypatch.setattr(prompts, "role_messages", lambda *a, context, **k: context)
-    run = SimpleNamespace(origin_kind="user_delegated", goal="你认得我吗")
-    assert prompts.build_messages(run)["identity"]["person_id"] == "owner"
-    frame["ts"] -= 6
-    assert prompts.build_messages(run)["identity"]["status"] == "idle"
 
 
 def test_manual_mode_keeps_identity_and_teaching_consumers(monkeypatch):

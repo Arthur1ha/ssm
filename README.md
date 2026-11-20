@@ -114,4 +114,6 @@ uv run python -m pytest cloud edge -o 'python_files=test_*.py *_test.py *_checks
 git diff --check
 ```
 
+`make trace` 实时查看 `ssm/#` MQTT 消息，断线自动重连；通过 python-dotenv 加载 `cloud/.env` 的 Broker 地址、端口和 API 账号，账号未配置时兼容回退到 `MQTT_USER/PASSWORD`。
+
 测试必须使用临时目录与模拟设备，不覆盖本机运行资产。前端回归见 `scripts/check_*.cjs` 的依赖说明；模拟通过不代表真机或真实模型已验收。修改约束见 [AGENTS.md](AGENTS.md)，协议见 [topics.md](protocol/topics.md)、[agent-card.md](protocol/agent-card.md)，追踪说明见 [OBSERVABILITY.md](OBSERVABILITY.md)。

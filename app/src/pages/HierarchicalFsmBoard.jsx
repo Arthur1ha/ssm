@@ -55,14 +55,32 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
 
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
 function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, connected,
-  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, card, training, locateTransition }) {
+  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, card, training, locateTransition, onReviseTraining }) {
   const { useState, useEffect, useRef, useCallback } = React;
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLinkId, setSelectedLinkId] = useState(null);
   const [selectedDirectionId, setSelectedDirectionId] = useState(null);
   const [anchor,setAnchor] = useState(null);
+  const [changedTeaching,setChangedTeaching] = useState(null);
+  const [activityClock,setActivityClock] = useState(() => Date.now()/1000);
   const canvasRef = useRef(null);
+  const stale = streamHealth !== 'live';
+  const runtimeLive = !offline && connected === true && !stale;
   const records = training?.records || [];
+  const displayedRecords = records.map(record => trainingRecordProjection(record,training?.catalog));
+  const activeRecords = displayedRecords.filter(record => record.desired_status === 'enabled');
+  // Losing live evidence retires that run's highlight, even if the same
+  // cached activity or a late receipt is still present after reconnection.
+  const interruptedActivities = useRef(new Map());
+  const activityRun = activity => JSON.stringify([activity.revision,activity.device_epoch,activity.run_id]);
+  if (!runtimeLive) Object.entries(training?.activities || {}).forEach(([id,activity]) => {
+    interruptedActivities.current.set(id,activityRun(activity));
+  });
+  const activityFor = record => {
+    if (!runtimeLive || trainingNeedsConfirmation(record,training?.catalog)) return null;
+    const activity = trainingActivityFor(record,training?.activities,liveState.epoch,activityClock);
+    return activity && interruptedActivities.current.get(record.teaching_id) !== activityRun(activity) ? activity : null;
+  };
   const clearSelection = useCallback(() => {
     setSelectedId(null); setSelectedLinkId(null); setSelectedDirectionId(null); setAnchor(null); onSelectState?.(null);
   }, [onSelectState]);
@@ -73,11 +91,10 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   }, [anchor,clearSelection]);
   const nodeCommandPending = useRef(false);
   const primary = primaryStateRegion(sm);
-  const stale = streamHealth === 'reconnecting';
-  const taughtTransitionIds = new Set(records.filter(record => record.desired_status === 'enabled')
-    .flatMap(trainingTransitionIds));
+  // Teaching can expose parameter-only self-loops without inventing new states.
+  const taughtTransitionIds = new Set(activeRecords.flatMap(trainingTransitionIds));
   const topology = stateBoardTopology(sm, liveState, taughtTransitionIds);
-  const pendingExecution = liveState[sm?.execution_field];
+  const pendingExecution = runtimeLive ? liveState[sm?.execution_field] : null;
   const remoteActive = widget => Object.keys(widget.enabled_when || {}).length > 0
     && Object.entries(widget.enabled_when).every(([key,value]) =>
       Array.isArray(value) ? value.includes(liveState[key]) : liveState[key] === value);
@@ -88,6 +105,11 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       && node.region.state_field === (widget.state_field || primary?.state_field));
     return {...edge,dst:target?.id || edge.dst,
       hasTeaching:taughtTransitionIds.has(edge.transition.id),
+      teachings:activeRecords.filter(record => trainingTransitionIds(record).includes(edge.transition.id)),
+      teachingActivity:activeRecords.map(record => activityFor(record)).find(activity =>
+        activity?.transition_id === edge.transition.id),
+      teachingChanged:changedTeaching && activeRecords.some(record =>
+        record.teaching_id === changedTeaching && trainingTransitionIds(record).includes(edge.transition.id)),
       reason:!edge.transition.action
       ? offline ? '请先连接设备' : stale ? '状态同步中' : ''
       : widget && remoteActive(widget) ? '已进入遥控' : edge.active
@@ -118,7 +140,10 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         liveState,{offline,busy,actor,stale});
       if (reason) control.reason = reason;
     }
-    return {...node,control};
+    const observed = node.region.id !== primary?.id || !sm?.freshness_field
+      || liveState[sm.freshness_field] !== false;
+    return {...node,control,current:node.current && observed,
+      retained:node.retained || node.current && !observed};
   });
   const selected = nodes.find(node => node.id === selectedId);
   const selectedActions = selected?.control.choices.filter(edge => !edge.reason) || [];
@@ -183,7 +208,25 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     setAnchor(nextAnchor);
     onSelectState?.(null);
   };
-  useEffect(() => { clearSelection(); }, [unitId,liveState.epoch,clearSelection]);
+  useEffect(() => { clearSelection(); }, [unitId,liveState.epoch,runtimeLive,clearSelection]);
+  useEffect(() => {
+    setChangedTeaching(null);
+  }, [unitId,training?.resetVersion]);
+  useEffect(() => {
+    const change = training?.recentChange;
+    if (!change) return;
+    setChangedTeaching(change.teaching_id);
+    const timer = setTimeout(() => setChangedTeaching(null),5000);
+    return () => clearTimeout(timer);
+  }, [training?.recentChange?.teaching_id,training?.recentChange?.revision]);
+  useEffect(() => {
+    const now = Date.now()/1000;
+    const deadlines = Object.values(training?.activities || {}).map(activity => activity.ts + (activity.result ? 12 : 90))
+      .filter(deadline => deadline >= now);
+    if (!deadlines.length) return;
+    const timer = setTimeout(() => setActivityClock(Date.now()/1000),Math.min(1000,(Math.min(...deadlines)-now)*1000+20));
+    return () => clearTimeout(timer);
+  }, [training?.activities,activityClock]);
   useEffect(() => {
     if (!locateTransition || !canvasRef.current) return;
     const edge = edges.find(item => item.transition.id === locateTransition.id);
@@ -221,7 +264,8 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       </div></div>)}
     </div>;
   return <div className={`device-state-board device-whiteboard${insetMedia ? ' device-whiteboard--inset-media' : ''}`}
-    style={{'--board-accent':color, '--board-graph-ratio':graphSize.height / graphSize.width}} aria-busy={busy}
+    style={{'--board-accent':runtimeLive ? color : 'var(--color-text-dim)', '--board-graph-ratio':graphSize.height / graphSize.width}} aria-busy={busy}
+    data-live={runtimeLive}
     onKeyDown={event => { if (event.key === 'Escape' && anchor) { event.stopPropagation(); closePopover(); } }}>
     {!insetMedia && mediaPanel}
     <div className="device-whiteboard__frame">
@@ -230,7 +274,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
         selectedLink={selectedLinkId} selectedDirection={selectedDirection?.id} onSelectState={select} onInspectTransition={inspectEdge}
         onDismiss={clearSelection}
-        color={color} pendingCommand={pendingExecution?.command}/>
+        color={color} live={runtimeLive} pendingCommand={pendingExecution?.command} trainingCatalog={training?.catalog}/>
         : <p className="device-state-note">等待设备状态机</p>}
       {selected && (selectedActions.length > 1 || selected.region.until_field && liveState[selected.region.until_field])
         && !remoteControls.some(widget => selected.value === widget.node_state) && <StateBoardPopover
@@ -254,13 +298,15 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
         <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
           {selectedDirection.edges.map((edge,index) => {
             const earlierIds = new Set(selectedDirection.edges.slice(0,index).map(item => item.transition.id));
-            const projection = records.filter(record => {
+            const projection = displayedRecords.filter(record => {
               const ids = trainingTransitionIds(record);
               return ids.includes(edge.transition.id) && !ids.some(id => earlierIds.has(id));
             });
             return <React.Fragment key={edge.id}>
               {index > 0 && <div className="device-whiteboard__rule-or">或</div>}
-              <TransitionInspector transition={edge.transition} projection={projection}/>
+              <TransitionInspector transition={edge.transition} projection={projection}
+                catalog={training?.catalog} activityFor={activityFor} changedTeaching={changedTeaching}
+                onRevise={actor === 'admin' && onReviseTraining ? record => {onReviseTraining(record);clearSelection();} : undefined}/>
             </React.Fragment>;
           })}
         </div>

@@ -15,7 +15,6 @@ from typing import Optional
 
 from cloud.go2.state import runtime_for
 from cloud.go2.connection import go2
-from cloud.go2.tools.tools import go2_observe
 from cloud.go2.models import get_text_llm
 from cloud.go2.tools.executor import execute_tool
 from cloud.space.execution import ExecutionContext, SYSTEM_CONTEXT
@@ -50,7 +49,6 @@ class Drive:
         self._social_tick      = 0
         self.user_interrupt    = False
         self._task: Optional[asyncio.Task] = None
-        self._identity = None
         self.owner_session_id: str | None = None
         self._context: ExecutionContext = SYSTEM_CONTEXT
         self._last_execution_result: str = "ok"
@@ -601,7 +599,6 @@ class Drive:
             return
         currently_present  = detected
         currently_engaging = frame["faces"]["detected"]
-        face_changed = currently_engaging != self._person_engaging
 
         # 追踪人体 presence，供对话上下文使用。
         if currently_present and not self._person_present:
@@ -624,25 +621,6 @@ class Drive:
 
         if frame["changed"] and frame["change_type"] != "none" and not currently_present and not self._person_present:
             episode_memory.add(EventType.VISION_CHANGE, f"视觉变化：{frame['change_type']}")
-        if (frame["changed"] or face_changed) and frame.get("frame_id"):
-            self.submit_event({"event_id": "frame:" + str(frame["frame_id"]),
-                "kind": "observation", "source": "go2.camera", "ts": frame["ts"],
-                "deadline": frame["ts"] + 5,
-                "content": f"persons={frame['persons']['count']}; faces={frame['faces']['count']}",
-                "activity_id": self._activity_id()})
-
-    def on_identity_event(self, event) -> None:
-        """Keep identity as social context; person teachings have their own consumer."""
-        self._identity = event.current
-
-    def _identity_context(self) -> str:
-        from cloud.go2.perception.identity import identity_skill
-        current = identity_skill.current
-        if current and current.status == "recognized":
-            return f"当前人物：{current.name}（{current.role}，置信分 {current.score:.1f}）"
-        if current and current.status == "unknown":
-            return "当前人物：陌生人"
-        return "当前人物：未确认"
 
     # ── 主循环 ─────────────────────────────────────────────────────
 

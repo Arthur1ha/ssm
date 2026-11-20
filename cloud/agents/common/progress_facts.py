@@ -36,7 +36,8 @@ def resolve_public_decision(space: dict, reason: object, refs: object, *,
 _ID_FIELDS = ("event_id", "source_event_id", "trace_id", "run_id", "parent_run_id",
               "step_id", "tool_call_id", "task_id", "request_id", "agent_id",
               "target_unit_id", "trigger_message_id", "reply_to", "conversation_id",
-              "observation_event_id", "frame_id", "teaching_id", "training_ref", "activity_id", "question_id", "game_instance_id")
+              "observation_event_id", "observation_id", "transition_id", "device_epoch",
+              "frame_id", "teaching_id", "training_ref", "activity_id", "question_id", "game_instance_id")
 _RESULT_FIELDS = {
     "action": {"ism_state", "confirmation", "device_connected", "execution_phase",
                "completion_basis", "dispatch_only", "skipped", "goal_state",
@@ -245,14 +246,16 @@ def public_process_facts(value: dict) -> dict:
         if isinstance(item, str) and item:
             result[key] = canonical_capability(item[:120]) if key in {"action", "tool"} else item[:400]
     for key in ("sequence", "model_turn", "ts", "as_of", "version", "revision",
-                "training_revision", "step_number", "step_index", "completed_count", "failed_count", "goal_revision"):
+                "training_revision", "step_number", "step_index", "completed_count", "failed_count", "goal_revision", "frame_id"):
         item = value.get(key)
         if type(item) in (int, float) and math.isfinite(item):
             result[key] = item
     observation = value.get("observation")
     if isinstance(observation, dict):
-        result["observation"] = {key: _scalar(observation[key], 240) for key in
-            ("found", "frame_id", "as_of", "scene_summary", "proximity_reason", "proximity")
+        fields = ("found", "frame_id", "as_of", "scene_summary", "proximity_reason", "proximity")
+        if result.get("result_kind") == "training":
+            fields += ("event", "detected", "recognized", "target")
+        result["observation"] = {key: _scalar(observation[key], 240) for key in fields
             if key in observation and (observation[key] is None or
                 isinstance(observation[key], (str, bool, int, float)))}
     if type(value.get("dispatch_only")) is bool:
@@ -288,6 +291,51 @@ def public_process_facts(value: dict) -> dict:
                 result["capability_name"] = str(skill.get("name") or ability)[:120]
                 break
     return result
+
+
+def training_step_facts(record: dict, resolved: dict, *, run_id: str,
+                        phase: str, result: dict | None = None,
+                        observation: dict | None = None) -> dict:
+    """Link a saved behavior's observation, dispatch and receipt without inferring posture.
+
+    The observation is attached by the trusted listener, never by a model or
+    browser. Its original timestamp remains intact through later steps.
+    """
+    import uuid
+
+    index = resolved["step_index"]
+    sequence = index * 3 + {"observation": 0, "call": 1, "result": 2}[phase]
+    identity = f'{run_id}:{record["teaching_id"]}:{record["revision"]}:{index}:{phase}'
+    facts = {
+        "source_event_id": "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, identity).hex,
+        "run_id": run_id, "step_id": f"{run_id}:{index}", "sequence": sequence,
+        "teaching_id": record["teaching_id"], "version": record["revision"],
+        "revision": record["revision"], "training_revision": record["revision"],
+        "transition_id": resolved.get("transition_id"),
+        "step_index": index, "step_number": index + 1,
+        "name": record.get("name") or "", "result_kind": "training",
+        "fact_kind": phase, "context_scope": "process",
+        "stage": "executing" if phase == "call" else "observed",
+        "status": (result or {}).get("result", "unknown") if phase == "result" else
+                  "executing" if phase == "call" else "observed",
+        "public_result": result or {},
+    }
+    trigger = (record.get("definition") or {}).get("trigger") or {}
+    observed = observation if isinstance(observation, dict) else {}
+    ts = observed.get("ts")
+    if (trigger.get("event_id") and observed.get("id") == trigger["event_id"]
+            and isinstance(observed.get("event_id"), str) and observed["event_id"]
+            and type(ts) in (int, float) and math.isfinite(ts) and ts >= 0):
+        facts.update(observation_event_id=observed["event_id"],
+                     observation_id=observed["id"], as_of=ts)
+        frame_id = observed.get("frame_id")
+        if isinstance(frame_id, str) or type(frame_id) is int:
+            facts["frame_id"] = frame_id
+        values = observed.get("values") if isinstance(observed.get("values"), dict) else {}
+        facts["observation"] = {"event": observed["id"], "as_of": ts,
+                                **{key: values[key] for key in ("detected", "recognized", "target")
+                                   if key in values}}
+    return public_process_facts(facts)
 
 
 def progress_event_facts(run, phase: str, step: dict | None) -> dict:
