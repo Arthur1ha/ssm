@@ -1,6 +1,6 @@
 /* Shared panel shell. Pages supply context and domain-specific feed cards;
  * ChatMessages and ChatInput own all conversation presentation. */
-function ChatPanel({ messages = [], agents, defaultAgent, training, onReviseRule,
+function ChatPanel({ messages = [], agents, defaultAgent, training,
   onSend, busy, busyProgress, disabled, placeholder, focusKey, suggestions = [],
   beforeMessages, messageContent, inputAvatar, children }) {
   const scrollRef = React.useRef(null);
@@ -57,7 +57,7 @@ function ChatPanel({ messages = [], agents, defaultAgent, training, onReviseRule
       <div ref={contentRef} className="chat-panel__content">
       {beforeMessages}
       {messageContent || <ChatMessages entries={messages} agents={agents} defaultAgent={defaultAgent}
-        training={training} onReviseRule={onReviseRule} busy={busy && !disabled} busyProgress={busyProgress}/>}
+        training={training} busy={busy && !disabled} busyProgress={busyProgress}/>}
       <div style={{ height: 16 }}/>
       </div>
     </div>

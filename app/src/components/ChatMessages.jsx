@@ -1,7 +1,7 @@
 /* Shared conversation hierarchy: speech bubbles and expandable process records.
  * Domain-specific cards are supplied by the surrounding feed. */
 function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator',
-  training, onReviseRule, renderEntry, busy = false, busyProgress }) {
+  training, renderEntry, busy = false, busyProgress }) {
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const rows = [], groups = new Map();
   entries.forEach((entry,index) => {
@@ -21,7 +21,8 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
       {rows.map(({ entry: e, index: i }) => {
         if (e.type === 'rule') return <div key={e.id} className="chat-rule-message" style={{maxWidth:420,marginBottom:10}}>
           <TrainingPreview proposal={e.proposal} error={training?.proposalErrors?.[e.proposal.proposal_id]}
-            onConfirm={training?.confirm} onCancel={training?.cancel} onRevise={onReviseRule}/>
+            catalog={training?.catalogs?.[e.proposal.unit_id] || training?.catalog}
+            onConfirm={training?.confirm} onCancel={training?.cancel}/>
         </div>;
         if (e.type === 'process_group') {
           const finished = entries.some(item => item.requestId === e.requestId && item.type === 'ai' && item.final);

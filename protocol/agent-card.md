@@ -138,3 +138,9 @@ Go2 的姿态和动作在初始白板视口内全部可见，站立连接趴卧�
 `/api/devices/{unit_id}/agent` 返回 Registry 收到的原始静态声明，按身份、通信、能力和界面分段，不附加运行状态。未发现原始卡时返回 404，不用离线占位设备拼装 Card。空行只分隔顶层字段组，JSON 保持可解析。
 
 规则 API `/api/devices/{unit_id}/training` 按需从 `regions` 与 `skills` 生成能力目录；目录不回灌 Card，也不随 MQTT/SSE 的设备卡公告重复传输。稳定转换 ID 在唯一拓扑上声明，用户已保存的规则继续按这些 ID 引用。
+
+规则卡片把触发来源、事件匹配参数、动作参数和额外条件分别呈现；同一步的多个 `transition_ids` 是不同源状态的候选转换，不作为执行顺序重复展示。连线仅用小圆标记关联规则，不添加文字或底部图例。动作显示名称由 Card 派生的 `catalog.presentation.actions` 提供，展示元数据不参与执行能力哈希。
+
+状态转换弹卡按所选源状态和目标状态汇总触发事件，不在多条事件之间插入“或”或重复生成用户规则。转换可声明 `event_label` 与 `guard_label` 分别显示事件和守卫条件；原 `trigger_condition` 作为旧声明的说明回退。技能可声明 `parameter_labels:{参数键:展示名}`，由目录投影为 `catalog.presentation.parameters`，不改变参数校验或能力哈希。规则标题和正文由结构化定义生成，不将模型的 `effect_text` 当作当前定义的说明；首次新增没有修改前占位，已有规则修改只展示真实字段差异。
+
+管理员可通过 `PATCH /api/training/{teaching_id}/parameters` 在原卡片快速修改已有参数。请求包含 `expected_revision`、`capability_hash`，以及可选的 `event_params`、`steps:[{step_index,params}]`、已有的 `emotion` / `cooldown_s` 参数；不得新增参数、修改事件 ID、动作、转换 ID、条件或步骤顺序，固定参数、只读参数及复杂值不开放快速编辑。服务端复制当前定义、复核参数类型/范围、冲突和版本，并沿用草案确认及执行器加载流程。此保存只更新原规则，不派发物理动作；内部 `source_kind=parameter_edit` 草案保留审计但不生成对话规则卡片。能力或版本变化时保留编辑内容并提示重新载入，不覆盖他人的新版本。

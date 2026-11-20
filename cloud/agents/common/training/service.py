@@ -13,7 +13,7 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 from cloud.agents.common.training.catalog import catalog_for
 from cloud.agents.common.training.models import (
-    Identifier, LoadedRequest, Proposal, ProposalRequest, Record,
+    Identifier, LoadedRequest, ParameterEdit, Proposal, ProposalRequest, Record,
 )
 from cloud.agents.common.training.policy import (
     conflicts, validate_definition, definition_transition_ids, step_parameters, evaluate,
@@ -154,6 +154,9 @@ def _explain(record, catalog):
         if step.get('goal_state') and selected:
             goal_text = '已经' + selected[0].get('destination_label', step['goal_state']) + '时跳过'
         summaries.append({'step_index': index, 'label': label,
+                          'actionText': ' / '.join(dict.fromkeys(
+                              catalog.get('presentation', {}).get('actions', {}).get(edge['action'], edge['action'])
+                              for edge in selected)),
                           'transition_ids': list(step['transition_ids']),
                           'conditions': deepcopy(step['conditions']),
                           'conditionText': '，且'.join(_condition_text(item, catalog) for item in step['conditions']),
@@ -191,7 +194,10 @@ def _preview(proposal, data, catalog):
     previous = data['proposals'].get(proposal['request'].get('supersedes_proposal_id'))
     if previous:
         before = deepcopy(previous['record'])
+    if before:
+        before.update(_explain(before, catalog))
     return {'proposal_id': proposal['proposal_id'], 'operation': proposal['request']['operation'],
+            'source_kind': proposal.get('source_kind', 'conversation'),
             'unit_id': record['unit_id'], 'teaching_id': record['teaching_id'],
             'expected_revision': proposal['request']['expected_revision'],
             'capability_hash': record['capability_hash'], 'expires_at': proposal['expires_at'],
@@ -205,7 +211,7 @@ def _preview(proposal, data, catalog):
             **_explain(record, catalog)}
 
 
-def propose(request: dict, session: dict) -> dict:
+def propose(request: dict, session: dict, *, source_kind='conversation') -> dict:
     _session(session, admin=True)
     req = ProposalRequest.model_validate(request).model_dump()
     source = session.get('training_source')
@@ -252,6 +258,7 @@ def propose(request: dict, session: dict) -> dict:
             _check_catalog(record, catalog)
         _check_conflicts(record, data)
         proposal = Proposal.model_validate({'proposal_id': 'prp_' + uuid4().hex,
+            'source_kind': source_kind,
             'session_id': session['session_id'], 'source_run_id': source.run_id, 'request': req, 'record': record,
             'created_at': now, 'expires_at': now + 1800}).model_dump()
         # Expired drafts cannot execute, but retain them for a meaningful 410.
@@ -314,7 +321,7 @@ def list_proposals(session: dict, *, unit_id: str | None = None) -> dict:
         catalog = catalog_for(card)
         with store.partition_lock(uid, space_id=session['space_id']) as data:
             previews.extend(_preview(p, data, catalog) for p in data['proposals'].values()
-                            if p['session_id'] == session['session_id'])
+                            if p['session_id'] == session['session_id'] and p.get('source_kind') != 'parameter_edit')
     return {'proposals': sorted(previews, key=lambda p: (p['created_at'], p['proposal_id']))}
 
 
@@ -370,6 +377,97 @@ def _find_record(teaching_id, session):
             if teaching_id in data['records']:
                 return unit_id
     raise TrainingError('teaching_not_found', 404)
+
+
+def update_parameters(teaching_id: str, request: dict, session: dict) -> dict:
+    """Confirm an explicit form edit through the existing proposal/version boundary.
+
+    Event identity, action selection, guards and execution order are server-owned
+    copies of the saved definition. This endpoint never dispatches a device action.
+    """
+    _session(session, admin=True)
+    patch = ParameterEdit.model_validate(request).model_dump(exclude_unset=True)
+    unit_id = _find_record(teaching_id, session)
+    catalog = catalog_for(_target(unit_id, session['space_id']))
+    with store.partition_lock(unit_id, space_id=session['space_id']) as data:
+        current = deepcopy(data['records'][teaching_id])
+    if current['desired_status'] == 'removed':
+        raise TrainingError('teaching_removed', 409)
+    if current['revision'] != patch['expected_revision']:
+        raise TrainingError('revision_conflict', 409)
+    if current['capability_hash'] != patch['capability_hash'] or catalog['hash'] != patch['capability_hash']:
+        raise TrainingError('capability_changed', 409)
+    definition = deepcopy(current['definition'])
+
+    def replace_existing(target, values):
+        if not set(values) <= set(target):
+            raise TrainingError('parameter_not_editable')
+        for key, value in values.items():
+            if type(value) not in (bool, str, int, float) or type(target[key]) not in (bool, str, int, float):
+                raise TrainingError('parameter_not_editable')
+            target[key] = value
+
+    event_params = patch.get('event_params', {})
+    if event_params:
+        if not definition.get('trigger'):
+            raise TrainingError('parameter_not_editable')
+        event = next((item for item in catalog['events'] if item['id'] == definition['trigger']['event_id']), {})
+        properties = event.get('params_schema', {}).get('properties', {})
+        if any(properties.get(key, {}).get('readOnly') or 'const' in properties.get(key, {}) for key in event_params):
+            raise TrainingError('parameter_not_editable')
+        replace_existing(definition['trigger']['where'], event_params)
+    seen = set()
+    edges = {edge['id']: edge for edge in catalog['transitions']}
+    for edit in patch.get('steps', []):
+        index = edit['step_index']
+        if index in seen or index >= len(definition['steps']):
+            raise TrainingError('training_step_invalid')
+        seen.add(index)
+        step = definition['steps'][index]
+        if any(set(edit['params']) & set(edges.get(key, {}).get('fixed_params', []))
+               for key in step['transition_ids']):
+            raise TrainingError('parameter_not_editable')
+        for key in step['transition_ids']:
+            properties = edges.get(key, {}).get('params_schema', {}).get('properties', {})
+            if any(properties.get(name, {}).get('readOnly') or 'const' in properties.get(name, {}) for name in edit['params']):
+                raise TrainingError('parameter_not_editable')
+        replace_existing(step['defaults'], edit['params'])
+    for key in ('emotion', 'cooldown_s'):
+        if key in patch:
+            if definition.get(key) is None or patch[key] is None:
+                raise TrainingError('parameter_not_editable')
+            definition[key] = patch[key]
+    # Reuse every existing capability, parameter, event and conflict validation.
+    try:
+        definition = validate_definition(definition, catalog)
+    except ValueError as exc:
+        raise TrainingError('invalid_parameter_value', details=str(exc)) from exc
+    if definition == current['definition']:
+        return {**current, **_explain(current, catalog)}
+    actions = []
+    for step in definition['steps']:
+        names = list(dict.fromkeys(catalog.get('presentation', {}).get('actions', {}).get(
+            edges[key]['action'], edges[key]['action']) for key in step['transition_ids']))
+        params = '，'.join(f'{key}={value}' for key, value in step['defaults'].items())
+        actions.append(' / '.join(names) + (f'（{params}）' if params else ''))
+    trigger = definition.get('trigger')
+    if trigger:
+        event = next(item for item in catalog['events'] if item['id'] == trigger['event_id'])
+        cause = (event.get('name') or event['id']) + '（' + '，'.join(
+            f'{key}={value}' for key, value in trigger['where'].items()) + '）'
+    elif definition.get('emotion') is not None:
+        cause = '表达情绪（' + definition['emotion'] + '）'
+    else:
+        cause = definition.get('situation') or '按原规则'
+    summary = (cause + ' → ' + '，然后'.join(actions))[:1200]
+    trusted = {**session, 'training_source': UserText(session['session_id'], '调整规则参数：' + summary)}
+    preview = propose({'unit_id': unit_id, 'operation': 'update', 'teaching_id': teaching_id,
+        'expected_revision': patch['expected_revision'], 'capability_hash': patch['capability_hash'],
+        'definition': definition, 'name': summary[:120], 'effect_text': summary}, trusted,
+        source_kind='parameter_edit')
+    saved = confirm(preview['proposal_id'], patch['expected_revision'], session,
+                    capability_hash=patch['capability_hash'])
+    return {**saved, **_explain(saved, catalog)}
 
 
 def set_enabled(teaching_id: str, enabled: bool, expected_revision: int, session: dict) -> dict:
@@ -433,6 +531,7 @@ def snapshot(unit_id: str, viewer: dict) -> dict:
                 'cursor': data['cursor'], 'records': projected,
                 'proposals': [_preview(p, data, catalog) for p in data['proposals'].values()
                               if viewer['actor'] == 'admin' and p['session_id'] == viewer['session_id']
+                              and p.get('source_kind') != 'parameter_edit'
                               and p['proposal_id'] not in data['confirmed_proposals']
                               and p.get('cancelled_at') is None and not p.get('superseded_by')
                               and p['expires_at'] > _now()],

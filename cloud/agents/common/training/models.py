@@ -139,6 +139,7 @@ class Proposal(StrictModel):
     proposal_id: Identifier
     session_id: Identifier
     source_run_id: Identifier | None = None
+    source_kind: Literal['conversation', 'parameter_edit'] = 'conversation'
     request: ProposalRequest
     record: Record
     created_at: Timestamp
@@ -161,6 +162,20 @@ class Proposal(StrictModel):
 class ConfirmRequest(StrictModel):
     expected_revision: StrictInt = Field(ge=0)
     capability_hash: CapabilityHash
+
+
+class StepParameterEdit(StrictModel):
+    step_index: StrictInt = Field(ge=0)
+    params: dict[str, Any]
+
+
+class ParameterEdit(StrictModel):
+    expected_revision: StrictInt = Field(ge=1)
+    capability_hash: CapabilityHash
+    event_params: dict[str, Any] = Field(default_factory=dict)
+    steps: list[StepParameterEdit] = Field(default_factory=list, max_length=12)
+    emotion: StrictStr | None = None
+    cooldown_s: StrictInt | StrictFloat | None = None
 
 
 class EnabledRequest(StrictModel):

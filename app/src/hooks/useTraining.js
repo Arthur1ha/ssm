@@ -25,7 +25,7 @@ function trainingSteps(record) {
   return (definition.steps || []).map((step, index) => {
     const summary = record?.stepSummaries?.find(item => item.step_index === index);
     return {...step, step_index:index, label:summary?.label || `第 ${index + 1} 步`,
-      conditionText:summary?.conditionText || '', goalText:summary?.goalText || ''};
+      actionText:summary?.actionText,conditionText:summary?.conditionText || '', goalText:summary?.goalText || ''};
   });
 }
 function trainingTransitionIds(record) {
@@ -57,7 +57,7 @@ function trainingComparisonRecords(records, teachingId, before) {
 function trainingRecordProjection(record, catalog) {
   if (!record || record.stepSummaries) return record;
   return {...record,stepSummaries:(record.definition?.steps || []).map((step,index) => ({
-    step_index:index,label:[...new Set(step.transition_ids.map(id => {
+    step_index:index,label:[...new Set((step.transition_ids || []).map(id => {
       const edge = catalog?.transitions?.find(item => item.id === id);
       return edge ? `${edge.source_label || edge.src} → ${edge.destination_label || edge.dst}` : '能力已变化';
     }))].join('、'),conditionText:(step.conditions || []).map(condition => {
@@ -75,6 +75,95 @@ function trainingNeedsConfirmation(record, catalog) {
 }
 /* Every phase belongs to one exact rule version, connection, run and step.
  * A receipt cannot stand in for a camera observation or measured posture. */
+const trainingEmotionLabels = {neutral:'平常',happy:'开心',curious:'好奇',confused:'困惑',surprised:'惊讶',angry:'生气',sad:'难过',relaxed:'放松'};
+function trainingValueText(value, schema = {}) {
+  return schema['x-enum-labels']?.[value] || (typeof value === 'boolean' ? value ? '是' : '否'
+    : value != null && typeof value === 'object' ? JSON.stringify(value) : String(value ?? ''));
+}
+function trainingRuleView(record, catalog) {
+  const definition = record?.definition || record?.after?.definition || {};
+  const simple = value => ['string','number','boolean'].includes(typeof value);
+  const field = (key,value,schema,path,label) => ({key,value,schema:schema || {},path,
+    label:label || schema?.title || key,editable:!!schema && !schema.readOnly && !('const' in schema)
+      && simple(value) && ['string','number','integer','boolean'].includes(schema.type)});
+  const trigger = definition.trigger;
+  const event = catalog?.events?.find(item => item.id === trigger?.event_id);
+  const triggerGroup = trigger ? {label:'事件',value:event?.name || trigger.event_id,
+    fields:Object.entries(trigger.where || {}).map(([key,value]) => field(key,value,
+      event?.params_schema?.properties?.[key] || (event?.fields?.[key] ? {type:event.fields[key]} : null),`event:${key}`))}
+    : definition.emotion != null ? {label:'触发',value:'情绪表达',fields:[field('emotion',definition.emotion,
+      {type:'string',title:'情绪',enum:Object.keys(trainingEmotionLabels),'x-enum-labels':trainingEmotionLabels},'emotion')]}
+    : {label:'触发',value:definition.situation ? '情境匹配' : (definition.origins || []).map(origin =>
+      ({user_delegated:'用户请求',agent_autonomous:'自主决策'})[origin] || origin).join(' / ') || '按原规则',
+      description:definition.situation,fields:[]};
+  const steps = trainingSteps(record).map(step => {
+    const edges = (step.transition_ids || []).map(id => catalog?.transitions?.find(edge => edge.id === id));
+    const schemas = key => {
+      if (!edges.length || edges.some(edge => !edge || edge.fixed_params?.includes(key) || !edge.params_schema?.properties?.[key])) return null;
+      const specs = edges.map(edge => edge.params_schema.properties[key]);
+      const result = {...specs[0]};
+      if (specs.some(spec => spec.readOnly || 'const' in spec || spec.type !== result.type)) result.readOnly=true;
+      for (const key of ['minimum','minLength']) {
+        const values=specs.map(spec=>spec[key]).filter(Number.isFinite); if (values.length) result[key]=Math.max(...values);
+      }
+      for (const key of ['maximum','maxLength']) {
+        const values=specs.map(spec=>spec[key]).filter(Number.isFinite); if (values.length) result[key]=Math.min(...values);
+      }
+      const enums=specs.filter(spec=>spec.enum).map(spec=>spec.enum);
+      if (enums.length) result.enum=enums[0].filter(value=>enums.every(values=>values.includes(value)));
+      return result;
+    };
+    const actions = [...new Set(edges.filter(Boolean).map(edge => catalog?.presentation?.actions?.[edge.action] || edge.action))];
+    return {label:(definition.steps || []).length > 1 ? `动作 ${step.step_index+1}` : '动作',
+      value:step.actionText || actions.join(' / ') || (step.label.includes('→') ? '能力待同步' : step.label),
+      fields:Object.entries(step.defaults || {}).map(([key,value]) => field(key,value,schemas(key),`step:${step.step_index}:${key}`,
+        catalog?.presentation?.parameters?.[edges.find(Boolean)?.action]?.[key])),
+      conditions:step.conditionText,goal:step.goalText};
+  });
+  const limits = definition.cooldown_s != null ? {label:'执行间隔',value:'冷却时间',fields:[field('cooldown_s',definition.cooldown_s,
+    catalog?.limits?.cooldown_s ? {type:'number',title:'秒',...catalog.limits.cooldown_s} : null,'cooldown_s')]} : null;
+  return [triggerGroup,...steps,...(limits ? [limits] : [])];
+}
+function trainingRuleHeading(record,catalog) {
+  const groups=trainingRuleView(record,catalog), trigger=groups[0];
+  const argumentsText=trigger.fields.filter(field=>typeof field.value!=='boolean')
+    .map(field=>trainingValueText(field.value,field.schema)).join('、');
+  const cause=trigger.value+(argumentsText ? `（${argumentsText}）` : '');
+  const actions=groups.filter(group=>group.label.startsWith('动作')).map(group=>group.value).join(' → ');
+  return actions ? `${cause} → ${actions}` : cause;
+}
+function trainingRuleChanges(before,after,catalog) {
+  const flatten=record=>Object.fromEntries(trainingRuleView(trainingRecordProjection(record,catalog),catalog)
+    .flatMap((group,index)=>[
+      [`group:${index}`,{label:group.label,value:group.value}],
+      ...(group.description ? [[`description:${index}`,{label:'情境',value:group.description}]] : []),
+      ...(group.conditions ? [[`condition:${index}`,{label:'条件',value:group.conditions}]] : []),
+      ...group.fields.map(field=>[field.path,{label:field.label,value:trainingValueText(field.value,field.schema)}])
+    ]));
+  const old=flatten(before), next=flatten(after);
+  return [...new Set([...Object.keys(old),...Object.keys(next)])].flatMap(key=>
+    old[key]?.value===next[key]?.value ? [] : [{key,label:(next[key] || old[key]).label,
+      before:old[key]?.value ?? '无',after:next[key]?.value ?? '无'}]);
+}
+function trainingParameterPatch(record, catalog, values) {
+  const patch = {event_params:{},steps:[]};
+  for (const group of trainingRuleView(record,catalog)) for (const field of group.fields) {
+    if (!field.editable || !(field.path in values)) continue;
+    const raw=values[field.path];
+    const value=field.schema.enum || field.schema.type === 'boolean' ? JSON.parse(raw)
+      : ['integer','number'].includes(field.schema.type) ? raw.trim() === '' ? NaN : Number(raw) : raw;
+    if (typeof value === 'number' && (!Number.isFinite(value) || field.schema.type === 'integer' && !Number.isInteger(value))) throw new Error('请输入有效参数');
+    if (JSON.stringify(value) === JSON.stringify(field.value)) continue;
+    if (field.path.startsWith('event:')) patch.event_params[field.key]=value;
+    else if (field.path.startsWith('step:')) {
+      const index=Number(field.path.split(':')[1]);
+      let step=patch.steps.find(item=>item.step_index===index);
+      if (!step) {step={step_index:index,params:{}};patch.steps.push(step);}
+      step.params[field.key]=value;
+    } else patch[field.path]=value;
+  }
+  return patch;
+}
 function trainingActivityEvent(previous, item, unitId, now = Date.now()/1000) {
   const revision = item?.revision ?? item?.version;
   if (item?.type !== 'agent_progress' || item.result_kind !== 'training'
@@ -120,7 +209,7 @@ function trainingTimeline(rows, proposals) {
   // Only the current authenticated proposal history owns rule cards. Clearing
   // training must not leave a stale, actionable card inside a cached transcript.
   const result = rows.filter(row => row.type !== 'rule');
-  for (const proposal of [...proposals].sort((a,b) => a.created_at - b.created_at)) {
+  for (const proposal of proposals.filter(item => item.source_kind !== 'parameter_edit').sort((a,b) => a.created_at - b.created_at)) {
     const sourceText = proposal.source_text || proposal.after?.source_text;
     const id = `rule:${proposal.proposal_id}`;
     let anchor = proposal.source_run_id ? result.findIndex(row => row.type === 'user' && row.runId === proposal.source_run_id) : -1;
@@ -150,6 +239,7 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
   const {useState, useEffect, useCallback, useRef} = React;
   const [snapshot, setSnapshot] = useState(null);
   const [allRecords, setAllRecords] = useState([]);
+  const [catalogs,setCatalogs] = useState({});
   const [proposals, setProposals] = useState([]);
   const [error, setError] = useState('');
   const [readErrors, setReadErrors] = useState({});
@@ -182,6 +272,7 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
           if (changed) setRecentChange({teaching_id:changed.teaching_id,revision:changed.revision});
       }
       snapshotValue.current = data; setSnapshot(data);
+      setCatalogs(previous=>({...previous,[unitId]:data.catalog}));
       setReadErrors(previous => ({...previous,snapshot:''})); return data;
     } catch (e) { if (current(token) && sequence === snapshotRequest.current) setReadErrors(previous => ({...previous,snapshot:apiErrorText(e, '设备规则读取失败，请重试')})); }
   }, [unitId, sessionId]);
@@ -193,6 +284,7 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
       const data = await Promise.all(allUnits.current.map(uid => apiClient.request(`/api/devices/${encodeURIComponent(uid)}/training`)));
       if (current(token) && sequence === allRequest.current) {
         setAllRecords(data.flatMap(item => (item.records || []).map(record => ({...record, unit_id:item.unit_id || record.unit_id}))));
+        setCatalogs(previous=>({...previous,...Object.fromEntries(data.map((item,index)=>[item.unit_id || allUnits.current[index],item.catalog]))}));
         setReadErrors(previous => ({...previous,all:''}));
       }
     } catch (e) { if (current(token) && sequence === allRequest.current) setReadErrors(previous => ({...previous,all:apiErrorText(e, '设备规则读取失败，请重试')})); }
@@ -216,6 +308,7 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
     try {
       const data = await apiClient.request(`/api/training/proposals/${encodeURIComponent(id)}`);
       if (!current(token) || sequence !== proposalRequests.current.get(id) || unitId && data.unit_id !== unitId) return;
+      if (data.source_kind === 'parameter_edit') return;
       setProposals(previous => [...previous.filter(p => p.proposal_id !== id),data]);
       setProposalErrors(previous => ({...previous,[id]:''}));
       return data;
@@ -224,7 +317,7 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
     }
   }, [unitId, sessionId, canEdit]);
   useEffect(() => {
-    setSnapshot(null); setAllRecords([]); setProposals([]); setError(''); setReadErrors({}); setProposalErrors({});
+    setSnapshot(null); setAllRecords([]); setCatalogs({}); setProposals([]); setError(''); setReadErrors({}); setProposalErrors({});
     setActivities({}); setRecentChange(null);
     snapshotValue.current = null;
     load(); loadHistory();
@@ -294,11 +387,36 @@ function useTraining(unitId, {sessionId, canEdit = true} = {}) {
       await load(); await loadHistory(); if (allUnits.current.length) await loadAll(); setError(''); return true;
     } catch (e) { if (current(token)) setError(apiErrorText(e, '规则未删除，请稍后重试')); return false; }
   };
+  const saveParameters = async (record, patch) => {
+    if (!canEdit) throw new Error('需要管理员操作');
+    const token=generation.current;
+    invalidateReads();
+    let saved;
+    try {
+      saved=await apiClient.request(`/api/training/${encodeURIComponent(record.teaching_id)}/parameters`,{
+        method:'PATCH',body:{expected_revision:record.revision,capability_hash:record.capability_hash,...patch}});
+    } catch (error) {
+      const code=error.data?.detail?.code;
+      if (error.status===409) {
+        await load(); if (allUnits.current.length) await loadAll();
+        throw new Error(code==='capability_changed' ? '设备能力已变化，请重新确认规则' : '规则已更新，请重新载入后再修改');
+      }
+      throw new Error(apiErrorText(error,'参数未保存，请检查取值后重试'));
+    }
+    if (!current(token)) return saved;
+    setSnapshot(previous=>previous ? {...previous,records:(previous.records || []).map(item=>item.teaching_id===saved.teaching_id ? saved : item)} : previous);
+    setAllRecords(previous=>previous.map(item=>item.teaching_id===saved.teaching_id ? saved : item));
+    setRecentChange({teaching_id:saved.teaching_id,revision:saved.revision});
+    await load(); if (allUnits.current.length) await loadAll();
+    return saved;
+  };
   return {catalog:snapshot?.catalog, records:snapshot?.records || [], allRecords,
+    catalogs,saveParameters,
     activities,recentChange,
     edges:snapshot?.edge_annotations || [], proposals, proposal, proposalErrors,
     load, loadAll, loadHistory, resetVersion, confirm:selected => act(selected,'confirm'), cancel:selected => act(selected,'cancel'), remove, error:error || Object.values(readErrors).find(Boolean) || ''};
 }
 Object.assign(window, {useTraining,useSessionTranscript,trainingRuleText,trainingSteps,trainingTransitionIds,
+  trainingRuleView,trainingValueText,trainingParameterPatch,trainingRuleHeading,trainingRuleChanges,
   trainingAssociationLabel,trainingPreviousRecord,trainingComparisonRecords,trainingRecordProjection,trainingNeedsConfirmation,
   trainingActivityEvent,trainingActivityFor,trainingProposalOpen,trainingTimeline});

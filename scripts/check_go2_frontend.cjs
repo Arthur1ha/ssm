@@ -76,7 +76,7 @@ assert.equal(merge(rebootedLamp,{ts:9999,ism:'ON'}).ism,'OFF',
   'Retained state without live receipt evidence replaced the live state');
 assert.equal(merge({ts:570,ism:'OFF'},{ts:19,ism:'ON',_received_at:1001}).ism,'ON',
   'First live post-reboot state was discarded behind a retained snapshot');
-const files = ['app/src/avatars/registry.js','app/src/avatars/presentation.js','app/src/avatars/Avatar.jsx','app/src/avatars/CompanionAvatar.jsx','app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
+const files = ['app/src/components/Icon.jsx','app/src/avatars/registry.js','app/src/avatars/presentation.js','app/src/avatars/Avatar.jsx','app/src/avatars/CompanionAvatar.jsx','app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
   'app/src/hooks/useTraining.js', 'app/src/components/TrainingPreview.jsx', 'app/src/components/TrainingDrawer.jsx', 'app/src/pages/TransitionInspector.jsx',
   'app/src/components/DeviceWidgets.jsx', 'app/src/pages/fsmWidgets.jsx',
   'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx',
@@ -338,6 +338,18 @@ async function checkInteractions() {
       window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;window.__proposals=[];
       window.apiClient={eventsConnected:true,devicesSynced:true,dispatchEvent:event=>listeners.dispatchEvent(event),addEventListener:(...a)=>listeners.addEventListener(...a),removeEventListener:(...a)=>listeners.removeEventListener(...a),async request(url,options={}){
         __requests.push({url,options});
+        if(url.startsWith('/api/training/') && url.endsWith('/parameters') && options.method==='PATCH'){
+          if(window.__parameterConflict) throw Object.assign(new Error('conflict'),{status:409});
+          const record=__training.records.find(r=>url.includes('/'+r.teaching_id+'/'));
+          if(record.revision!==options.body.expected_revision)throw Object.assign(new Error('conflict'),{status:409});
+          const old=structuredClone(record);old.history=undefined;
+          record.history=[...(record.history || []),old];record.revision++;
+          if(options.body.event_params && record.definition.trigger)Object.assign(record.definition.trigger.where,options.body.event_params);
+          for(const step of options.body.steps || [])Object.assign(record.definition.steps[step.step_index].defaults,step.params);
+          for(const key of ['emotion','cooldown_s'])if(key in options.body)record.definition[key]=options.body[key];
+          __emit({type:'training.updated',unit_id:record.unit_id});
+          return structuredClone(record);
+        }
         if(url.startsWith('/api/training/proposals/') && url.endsWith('/confirm')){
           if(window.__conflict) throw Object.assign(new Error('conflict'),{status:409});
           const p=__proposals.find(p=>url.includes('/'+p.proposal_id+'/'));p.confirmed=true;
@@ -345,7 +357,9 @@ async function checkInteractions() {
           return {saved:true};}
         if(url.startsWith('/api/training/proposals/') && url.endsWith('/cancel')){const p=__proposals.find(p=>url.includes('/'+p.proposal_id+'/'));p.cancelled=true;return p;}
         if(url.startsWith('/api/training/proposals/'))return structuredClone(__proposals.find(p=>url.endsWith('/'+p.proposal_id)) || __proposal);
-        if(url.startsWith('/api/training/proposals') && options.method!=='POST')return {proposals:structuredClone(__proposals)};
+        if(url.startsWith('/api/training/proposals') && options.method!=='POST'){
+          const uid=new URL(url,'https://ssm-test.invalid').searchParams.get('unit_id');
+          return {proposals:structuredClone(__proposals.filter(p=>!uid || p.unit_id===uid))};}
         if(url==='/api/training/proposals'){
           __proposal={...__proposal,proposal_id:'remove1',superseded_by:null,superseded:false,cancelled:false,operation:'remove',teaching_id:options.body.teaching_id,created_at:Date.now()/1000,confirmed:false};
           __proposals.push(__proposal);return __proposal;}
@@ -380,6 +394,54 @@ async function checkInteractions() {
 
     await page.waitForSelector('.device-state-board');
     await page.evaluate(() => document.fonts.ready);
+    if(process.argv.includes('--rule-presentation-only')) {
+      await page.evaluate(()=>{
+        __lampCard._online=true;
+        const region=__lampCard.state_machine.regions[0];
+        __training.catalog={hash:'a'.repeat(64),events:__lampCard.observations,
+          presentation:{actions:Object.fromEntries(region.transitions.filter(t=>t.action).map(t=>[t.action,t.label])),
+            parameters:Object.fromEntries(__lampCard.skills.map(skill=>[skill.invoke.action,skill.parameter_labels || {}]))},
+          transitions:region.transitions.map(edge=>({...edge,fixed_params:edge.training_fixed_params || [],
+            params_schema:__lampCard.skills.find(skill=>skill.invoke.action===edge.action)?.params_schema || {properties:{}}}))};
+        __training.records=[{teaching_id:'expression',unit_id:__lampCard.unit_id,revision:1,history:[],capability_hash:__training.catalog.hash,
+          desired_status:'enabled',definition:{emotion:'happy',origins:['user_delegated','agent_autonomous'],
+            steps:[{transition_ids:region.transitions.filter(t=>t.action==='BLINK').map(t=>t.id),defaults:{count:3}}]}}];
+        __renderState({ism:'OFF',ts:Date.now()/1000},__lampCard);
+        __emit({type:'training.updated',unit_id:__lampCard.unit_id});
+      });
+      await page.waitForSelector('.fsm-whiteboard__edge.is-taught');
+      const edge='.fsm-whiteboard__edge[data-source="device:OFF"][data-target="device:BLINKING"]';
+      await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+      await page.waitForSelector('.training-inspector__card');
+      assert.equal(await page.$('.device-whiteboard__rule-or'),null);
+      const sizes=await page.evaluate(()=>({
+        title:getComputedStyle(document.querySelector('.training-inspector__card h3')).fontSize,
+        action:getComputedStyle(document.querySelector('.training-rule-group__heading strong')).fontSize,
+        label:getComputedStyle(document.querySelector('.training-rule-parameters dt')).fontSize,
+        value:getComputedStyle(document.querySelector('.training-rule-parameters dd')).fontSize,
+      }));
+      assert.deepEqual(sizes,{title:'18px',action:'16px',label:'14px',value:'16px'});
+      assert.ok(await page.$eval('.training-rule-content',node=>node.textContent.includes('次数')));
+      await page.click('.training-inspector__revise');
+      await page.waitForSelector('input[aria-label="次数参数"]');
+      await page.screenshot({path:'/tmp/ssm-rule-hierarchy-mobile.png',fullPage:true});
+      await page.$$eval('.training-parameter-actions button',nodes=>nodes.find(node=>node.textContent==='取消').click());
+      await page.$$eval('.device-whiteboard__directions button',nodes=>nodes.find(node=>node.textContent.includes('闪烁 → 熄灭')).click());
+      await page.waitForFunction(()=>document.querySelectorAll('.training-transition-events li').length===2);
+      const list=await page.$eval('.training-transition-events',node=>node.textContent);
+      assert.match(list,/请求关灯/);assert.match(list,/有限闪烁完成/);assert.match(list,/闪烁前为熄灭/);
+      assert.equal(await page.$$('.training-inspector').then(nodes=>nodes.length),1);
+      assert.equal(await page.$('.training-inspector__card'),null,'A completion event must not inherit the rule that starts blinking');
+      for(const width of [320,390]){
+        await page.setViewport({width,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+      }
+      await page.screenshot({path:'/tmp/ssm-transition-events-mobile.png',fullPage:true});
+      assert.equal(await page.evaluate(()=>__calls.length),0,'Inspecting transitions or editing a form must not dispatch actions');
+      assert.deepEqual(errors,[]);
+      console.log('PASS: 18/16/14 typography, inline parameter edit, one event list per transition, correct completion guards and 320/390px layout.');
+      return;
+    }
     if (process.argv.includes('--offline-only')) {
       const active='.fsm-whiteboard__node.is-current,.fsm-whiteboard__node.is-actionable,.fsm-whiteboard__node.is-reachable,.fsm-whiteboard__edge.is-emphasized,.fsm-whiteboard__edge.is-running,.fsm-whiteboard__edge.is-taught,.fsm-whiteboard__edge.is-teaching-observed,.fsm-whiteboard__edge.is-teaching-executing,.fsm-whiteboard__edge.is-teaching-result,.fsm-whiteboard__edge.is-new-teaching';
       const assertInactive=async reason=>{
@@ -560,8 +622,11 @@ async function checkInteractions() {
         edge.id='tr_sit'; edge.training_fixed_params=[];
         __training.catalog.transitions=[{id:'tr_sit',trainable:true,src:'standing',dst:'sitting',state_field:'body_state',source_label:'站立',destination_label:'坐下'}];
         __training.catalog.events=[{id:'vision.owner_recognized',name:'识别到主人'}];
+        __training.catalog.limits={cooldown_s:{minimum:1,maximum:3600}};
+        __training.catalog.presentation={actions:{Sit:'坐下'}};
+        __training.catalog.transitions[0].action='Sit';
         __training.catalog.state_fields={body_state:{label:'身体',labels:{standing:'站立',sitting:'坐下'}}};
-        __training.records=[{unit_id:'go2',teaching_id:'teach1',revision:1,history:[],updated_at:1,
+        __training.records=[{unit_id:'go2',teaching_id:'teach1',revision:1,history:[],updated_at:1,capability_hash:'hash',
           definition:{steps:[{transition_ids:['tr_sit'],conditions:[],defaults:{},goal_state:'sitting'}],
             trigger:{event_id:'vision.owner_recognized',where:{recognized:true}},origins:['agent_autonomous'],cooldown_s:3},
           name:'坐下后至少间隔三秒再坐',summaryText:'坐下后至少间隔三秒再坐',source_text:'坐下前等三秒',desired_status:'enabled'}];
@@ -572,7 +637,10 @@ async function checkInteractions() {
       await page.waitForFunction(()=>__requests.some(r=>r.url.includes('/api/devices/go2/training')));
       await page.waitForSelector('.fsm-whiteboard__edge[data-teaching-ids="teach1"].is-taught');
       assert.equal(await page.$('.state-teachings'),null,'Teaching belongs in the graph, without a duplicate top section');
-      assert.equal(await page.$('.fsm-whiteboard__edge text'),null,'Rules must not add text to graph lines');
+      assert.ok(await page.$('.fsm-whiteboard__edge .fsm-whiteboard__rule-badge'),'Saved rules need a persistent marker');
+      assert.equal(await page.$('.fsm-whiteboard__edge text'),null,'Rule markers must not add text to the lines');
+      assert.equal(await page.$('.fsm-whiteboard__legend'),null,'The graph must not include an explanatory legend');
+      assert.ok(await page.$eval('.fsm-whiteboard__edge.is-taught',node=>node.getAttribute('aria-label').includes('识别到主人')));
       assert.ok(await page.$('.fsm-whiteboard__node[data-state="body:standing"].is-current'));
       const count=await page.evaluate(()=>__calls.length);
       await page.screenshot({path:'/tmp/ssm-training-graph.png',fullPage:true});
@@ -599,19 +667,21 @@ async function checkInteractions() {
       await page.waitForFunction(()=>document.querySelector('.fsm-whiteboard__edge[data-action="Sit"]')?.dataset.teachingIds.split(',').length===12);
       await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
       await page.waitForFunction(()=>document.querySelectorAll('.training-inspector__card').length===12);
-      assert.equal(await page.$('.fsm-whiteboard__edge text'),null,'Many rules must not crowd the graph with labels');
+      assert.equal(await page.$$('.fsm-whiteboard__rule-badge').then(nodes=>nodes.length),1,'Multiple rules on one direction share a compact marker');
       assert.ok(await page.$eval('.device-whiteboard__popover-body',node=>node.scrollHeight>node.clientHeight),'Many rules must scroll inside the popover');
       assert.ok(await page.$eval('.training-inspector',node=>{
-        const base=getComputedStyle(node.querySelector('.training-inspector__base'));
+        const base=getComputedStyle(node.querySelector('.training-transition-events'));
         const card=getComputedStyle(node.querySelector('.training-inspector__card'));
         return base.backgroundColor!==card.backgroundColor && parseFloat(card.borderLeftWidth)>parseFloat(base.borderLeftWidth);
       }),'Original rules and teachings need distinct backgrounds and borders');
       await page.screenshot({path:'/tmp/ssm-training-many-rules.png',fullPage:true});
-      const lastRevise=await page.$('.training-inspector__card:last-child .training-inspector__revise');
+      const lastRevise=(await page.$$('.training-inspector__revise')).at(-1);
       await lastRevise.scrollIntoView();
       await lastRevise.click();
-      await page.waitForFunction(()=>document.querySelector('.training-selection')?.textContent.includes('教导 12'));
-      await page.click('.training-selection button');
+      await page.waitForSelector('.training-inspector__card[data-teaching-id="teach-11"] input[aria-label="秒参数"]');
+      assert.equal(await page.$('.training-selection'),null,'Parameter editing must stay in the original rule card');
+      await page.$$eval('.training-inspector__card[data-teaching-id="teach-11"] button',buttons=>buttons.find(b=>b.textContent==='取消').click());
+      await page.keyboard.press('Escape');
       await page.evaluate(()=>{
         __training.records=[__originalTeaching];
         __emit({type:'training.updated',unit_id:'go2'});
@@ -627,21 +697,16 @@ async function checkInteractions() {
       assert.equal(await page.$('.fsm-whiteboard__edge.is-teaching-result'),null,'An incompatible association must not retain an active highlight');
       await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
       await page.waitForSelector('.training-inspector');
-      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('坐下后至少间隔三秒再坐'));
+      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('识别到主人'));
       assert.equal(await page.evaluate(()=>__calls.length),count,'Line inspection sent a command');
-      assert.ok(await page.$eval('.training-inspector__notice',node=>node.textContent.includes('能力已更新')));
-      assert.equal(await page.$eval('.training-inspector__base .training-inspector__source',node=>node.textContent),'设备原有规则');
-      assert.equal(await page.$eval('.training-inspector__card .training-inspector__source',node=>node.textContent),'教导规则');
-      assert.ok(await page.$('.training-inspector__revise'),'Administrators can revise a saved association at its transition');
+      assert.ok(await page.$eval('.training-inspector__notice',node=>node.textContent.includes('能力已变化')));
+      assert.equal(await page.$eval('.training-transition-events h4',node=>node.textContent),'触发事件');
+      assert.ok(await page.$('.training-inspector__card h3.training-rule-title'));
+      assert.equal(await page.$('.training-inspector__revise'),null,'Incompatible capabilities cannot be edited against a stale schema');
       await page.screenshot({path:'/tmp/ssm-training-rule-card.png',fullPage:true});
-      await page.click('.training-inspector__revise');
-      await page.waitForSelector('.training-selection');
-      assert.ok(await page.$eval('.training-selection',node=>node.textContent.includes('坐下后至少间隔三秒再坐')),
-        'Incompatible associations retain their current teaching revision entry');
-      await page.click('.training-selection button');
       await page.evaluate(()=>{
-        delete __training.catalog.hash;
-        delete __training.records[0].capability_hash;
+        __training.catalog.hash='hash';
+        __training.records[0].capability_hash='hash';
         __training.records[0].execution_reasons=[];
         __emit({type:'training.updated',unit_id:'go2'});
       });
@@ -659,11 +724,11 @@ async function checkInteractions() {
       await page.waitForSelector('.chat-messages .training-change');
       assert.equal(await page.$eval('.chat-messages',node=>node.textContent.split('以后坐下后等三秒才能再次坐下').length-1),1,'Proposal duplicated the original user message');
       assert.equal(await page.$eval('.training-change',node=>/待确认|用户委托|已加载|JSON/.test(node.textContent)),false);
-      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='继续修改').click());
+      assert.equal(await page.$('.training-change button[aria-label="修改规则"]'),null,'Drafts must not send parameter edits back into chat');
       await page.type('.device-page__chat input','改成五秒');
       await page.keyboard.press('Enter');
       await page.waitForFunction(()=>__calls.filter(r=>r.action==='chat').length===2);
-      assert.equal(await page.evaluate(()=>__calls.filter(r=>r.action==='chat')[1].params.selection.proposal_id),'p1','Draft revision lost its selected proposal');
+      assert.equal(await page.evaluate(()=>!!__calls.filter(r=>r.action==='chat')[1].params.selection),false,'Natural-language messages must not acquire an edit selection from the rule card');
       await page.evaluate(()=>{
         const call=__calls.filter(r=>r.action==='chat')[1];
         __proposals[0].superseded_by='p2';
@@ -671,12 +736,12 @@ async function checkInteractions() {
         __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p2'});
       });
       await page.waitForFunction(()=>document.querySelectorAll('.chat-messages .training-change').length===2);
-      assert.equal(await page.$eval('.chat-messages',node=>node.textContent.includes('原来：')),false,'Rule comparison belongs on the state machine');
+      assert.equal(await page.$('.training-change__version--before'),null,'A new rule must not invent a previous saved version');
       await page.evaluate(()=>window.__conflict=true);
-      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='就这样').click());
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='保存规则').click());
       await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('规则已经变化'));
       await page.evaluate(()=>window.__conflict=false);
-      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='就这样').click());
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='保存规则').click());
       await page.waitForFunction(()=>__proposals.find(p=>p.proposal_id==='p2').confirmed);
       await page.waitForFunction(()=>document.querySelectorAll('.training-change .training-actions').length===0);
       assert.equal(await page.$$('.chat-messages .training-change').then(nodes=>nodes.length),2,'Confirmation removed the history card');
@@ -692,17 +757,13 @@ async function checkInteractions() {
       await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备规则')).click());
       await page.waitForSelector('.training-drawer');
       assert.equal(await page.$eval('.training-drawer',node=>/已加载|暂停|启用|伙伴训练/.test(node.textContent)),false);
-      await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='在对话中修改').click());
-      await page.waitForSelector('.training-selection');
-      assert.equal(await page.$eval('.training-selection',node=>node.textContent.includes('坐下后至少间隔三秒再坐')),true);
-      await page.waitForFunction(()=>!document.querySelector('.training-drawer'));
-      assert.equal(await page.$eval('.training-selection',node=>!!node.closest('.chat-panel__footer')),true,
-        'The current teaching selection must stay beside the input, outside scrolling history');
-      await page.click('.training-selection button');
-      await page.click('.device-header__settings');
-      await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备规则')).click());
-      await page.waitForSelector('.training-drawer');
-      await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='删除').click());
+      assert.equal(await page.$$eval('.training-record__actions button',nodes=>nodes.every(node=>!node.textContent.trim() && node.querySelector('svg') && node.getAttribute('aria-label'))),true);
+      await page.click('.training-record button[aria-label="修改参数"]');
+      await page.waitForSelector('.training-record input[aria-label="秒参数"]');
+      assert.equal(await page.$('.training-selection'),null);
+      assert.ok(await page.$('.training-drawer'),'Editing must not navigate away from the rule list');
+      await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='取消').click());
+      await page.click('.training-record button[aria-label="删除规则"]');
       await page.waitForFunction(()=>document.querySelectorAll('.training-record').length===0);
       assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/proposals' && r.options.body.operation==='remove')),true);
       await page.keyboard.press('Escape');
@@ -719,9 +780,15 @@ async function checkInteractions() {
       }
       await page.screenshot({path:'/tmp/ssm-rule-chat-preview.png',fullPage:true});
       await page.evaluate(() => {
+        __lampCard._online=true;
+        const region=__lampCard.state_machine.regions.find(region=>region.id==='device');
+        __training.catalog={hash:'a'.repeat(64),events:__lampCard.observations,limits:{cooldown_s:{minimum:1,maximum:3600}},
+          presentation:{actions:Object.fromEntries(region.transitions.filter(t=>t.action).map(t=>[t.action,t.label]))},
+          transitions:region.transitions.map(edge=>({...edge,fixed_params:edge.training_fixed_params || [],
+            params_schema:__lampCard.skills.find(skill=>skill.invoke.action===edge.action)?.params_schema || {type:'object',properties:{}}}))};
         const edge=__lampCard.state_machine.regions.find(region=>region.id==='device').transitions
           .find(edge=>edge.src==='ON' && edge.dst==='ON' && edge.action==='SET_COLOR');
-        __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'reading',revision:1,history:[],updated_at:1,desired_status:'enabled',
+        __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'reading',revision:1,history:[],updated_at:1,desired_status:'enabled',capability_hash:__training.catalog.hash,
           name:'阅读灯光',definition:{situation:'准备看书时',origins:['user_delegated'],
             steps:[{transition_ids:[edge.id],conditions:[],defaults:{r:255,g:236,b:210,brightness:200}}]}}];
         __renderState({ism:'ON',ts:Date.now()/1000},__lampCard);
@@ -731,12 +798,73 @@ async function checkInteractions() {
       await page.waitForSelector(loopSelector);
       const callsBeforeInspect=await page.evaluate(()=>__calls.length);
       await page.$eval(loopSelector,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('255, 236, 210'));
+      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('255'));
       assert.equal(await page.$eval('.training-inspector',node=>/已保存|已加载|已应用/.test(node.textContent)),false);
       assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect,'Parameter inspection executed an action');
       await page.screenshot({path:'/tmp/ssm-lamp-teaching-preview.png',fullPage:true});
+      await page.click('.training-inspector__revise');
+      await page.waitForSelector('input[aria-label="brightness参数"]');
+      assert.equal(await page.$('.training-selection'),null);
+      await page.$eval('input[aria-label="brightness参数"]',input=>{
+        const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+        setter.call(input,'190');input.dispatchEvent(new Event('input',{bubbles:true}));
+      });
+      await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForFunction(()=>__training.records[0].revision===2 && !document.querySelector('.training-parameter-actions'));
+      assert.equal(await page.evaluate(()=>__training.records[0].definition.steps[0].defaults.brightness),190);
+      assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect);
+      await page.keyboard.press('Escape');
+      await page.evaluate(()=>{
+        const transitions=__lampCard.state_machine.regions.find(region=>region.id==='device').transitions.filter(edge=>edge.action==='BLINK');
+        __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'happy-blink',revision:1,history:[],desired_status:'enabled',capability_hash:__training.catalog.hash,
+          name:'开心时闪烁5下',definition:{emotion:'happy',trigger:null,origins:['user_delegated','agent_autonomous'],
+            steps:[{transition_ids:transitions.map(edge=>edge.id),conditions:[],defaults:{count:5}}]}}];
+        __renderState({ism:'BLINKING',count:5,ts:Date.now()/1000+1},__lampCard);
+        __emit({type:'training.updated',unit_id:__lampCard.unit_id});
+      });
+      await page.waitForFunction(()=>document.querySelectorAll('.fsm-whiteboard__rule-badge').length===3);
+      const blinkLoop='.fsm-whiteboard__edge[data-source="device:BLINKING"][data-target="device:BLINKING"]';
+      assert.ok(await page.$eval(blinkLoop,node=>node.getAttribute('aria-label').includes('开心时')));
+      assert.equal(await page.$('.fsm-whiteboard__edge text'),null);
+      // Saving associates conditions with the declared loop; it never dispatches an action.
+      assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect);
+      await page.screenshot({path:'/tmp/ssm-lamp-happy-rule-mobile.png',fullPage:true});
+      await page.$eval(blinkLoop,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+      await page.waitForSelector('.training-transition-events__self');
+      assert.match(await page.$eval('.training-transition-events__self',node=>node.textContent),/不会沿箭头自动重复/);
+      assert.ok(await page.$eval('.fsm-whiteboard__rule-ring',node=>Number(node.getAttribute('r'))<=3.5),'The line marker must stay small');
+      await page.click('.training-inspector__revise');
+      await page.waitForSelector('input[aria-label="count参数"]');
+      assert.equal(await page.$('.training-selection'),null);
+      assert.equal(await page.$eval('input[aria-label="count参数"]',input=>input.max),'20');
+      const setCount=async value=>page.$eval('input[aria-label="count参数"]',(input,value)=>{
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      },value);
+      await setCount('6');
+      await page.evaluate(()=>window.__parameterConflict=true);
+      await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForSelector('.training-inspector__card .training-error');
+      assert.equal(await page.$eval('input[aria-label="count参数"]',input=>input.value),'6','A conflict must preserve unsaved input');
+      assert.equal(await page.evaluate(()=>__training.records[0].revision),1);
+      await page.evaluate(()=>window.__parameterConflict=false);
+      await setCount('7');
+      await page.screenshot({path:'/tmp/ssm-rule-parameter-editor-mobile.png',fullPage:true});
+      const cardsBefore=await page.$$('.chat-rule-message').then(nodes=>nodes.length);
+      await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForFunction(()=>__training.records[0].revision===2 && !document.querySelector('.training-parameter-actions'));
+      assert.equal(await page.evaluate(()=>__training.records[0].definition.steps[0].defaults.count),7);
+      assert.equal(await page.$$('.fsm-whiteboard__rule-badge').then(nodes=>nodes.length),3,'One saved rule must continue to annotate all its transitions');
+      assert.equal(await page.$$('.chat-rule-message').then(nodes=>nodes.length),cardsBefore,'A parameter save must not add conversation cards');
+      assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect,'Editing parameters must not dispatch chat or physical actions');
+      await page.keyboard.press('Escape');
+      for (const width of [320,390,1440]) {
+        await page.setViewport({width,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Rule markers must not cause horizontal page overflow');
+      }
+      await page.screenshot({path:'/tmp/ssm-lamp-happy-rule-desktop.png',fullPage:true});
       assert.deepEqual(errors,[]);
-      console.log('PASS: text-free taught links, distinct rule cards, factual execution highlights, per-rule revision, concise in-chat confirmation, conflict/history preservation, direct deletion and responsive viewport.');
+      console.log('PASS: marked taught links, distinct rule cards, factual execution highlights, per-rule revision, in-chat comparison, conflict/history preservation, direct deletion and responsive viewport.');
       return;
     }
     if (process.argv.includes('--reachability-only')) {

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cloud.agents.common.training import service, store
 from cloud.agents.common.training.models import (
-    BrowserProposal, ConfirmRequest, EnabledRequest, LoadedRequest, ProposalRequest, TrustedSource,
+    BrowserProposal, ConfirmRequest, EnabledRequest, LoadedRequest, ParameterEdit, ProposalRequest, TrustedSource,
 )
 from cloud.api.auth import require_admin, require_admin_csrf, require_session
 from cloud.space.execution import ExecutionContext, require_service_context, require_authenticated_read
@@ -85,6 +85,12 @@ def propose_training(request: BrowserProposal | ProposalRequest, session: dict =
 @router.get('/api/training/proposals')
 def proposal_history(unit_id: str | None = None, session: dict = Depends(require_admin)):
     return _call(service.list_proposals, session, unit_id=unit_id)
+
+
+@router.patch('/api/training/{teaching_id}/parameters')
+def edit_training_parameters(teaching_id: str, request: ParameterEdit,
+                             session: dict = Depends(require_admin_csrf)):
+    return _call(service.update_parameters, teaching_id, request.model_dump(exclude_unset=True), session)
 
 
 @router.get('/api/training/proposals/{proposal_id}')

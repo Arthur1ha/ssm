@@ -63,8 +63,8 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
       function SurfaceHarness() {
         const [active, setActive] = React.useState('');
         const [rules, setRules] = React.useState([
-          {unit_id:'go2',teaching_id:'wave',desired_status:'enabled',summaryText:'每次挥手后间隔十秒'},
-          {unit_id:'lamp',teaching_id:'blink',desired_status:'enabled',summaryText:'听到声音时闪两次'},
+          {unit_id:'go2',teaching_id:'wave',desired_status:'enabled',revision:1,definition:{origins:['user_delegated'],cooldown_s:10,steps:[{transition_ids:['wave'],defaults:{}}]}},
+          {unit_id:'lamp',teaching_id:'blink',desired_status:'enabled',revision:1,definition:{origins:['agent_autonomous'],trigger:{event_id:'sound',where:{detected:true}},steps:[{transition_ids:['blink'],defaults:{count:2}}]}},
           {unit_id:'go2',teaching_id:'old',desired_status:'removed',summaryText:'已经删除的规则'},
         ]);
         const loadAll = React.useCallback(async () => {}, []);
@@ -77,8 +77,15 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
           }),
           active === 'training' && React.createElement(TrainingDrawer,{
             unitId:'',agents:[{unit_id:'go2'},{unit_id:'lamp'}],
-            training:{records:[],allRecords:rules,loadAll,remove:async record=>setRules(previous=>previous.filter(item=>item.teaching_id!==record.teaching_id))},
-            onRevise:record=>{window.__revised=record;close();},onClose:close,
+            training:{records:[],allRecords:rules,loadAll,
+              catalogs:{go2:{limits:{cooldown_s:{minimum:1,maximum:3600}},transitions:[{id:'wave',action:'挥手'}]},
+                lamp:{events:[{id:'sound',name:'检测到声音',fields:{detected:'boolean'}}],transitions:[{id:'blink',action:'闪烁',params_schema:{properties:{count:{type:'integer',minimum:0,maximum:20}}}}]}},
+              remove:async record=>setRules(previous=>previous.filter(item=>item.teaching_id!==record.teaching_id)),
+              saveParameters:async(record,patch)=>{
+                const saved=structuredClone(record);saved.revision++;
+                for(const step of patch.steps)Object.assign(saved.definition.steps[step.step_index].defaults,step.params);
+                window.__saved=saved;setRules(previous=>previous.map(item=>item.teaching_id===saved.teaching_id ? saved : item));return saved;
+              }},onClose:close,
           }),
           ...[[AdminInviteDrawer,'invite'],[AdminSpaceDrawer,'space'],
             [OrchestratorSettingsDrawer,'agent'],[SpacePeopleDrawer,'people']].map(([Component,key]) =>
@@ -175,12 +182,18 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), { trans
     await page.click('.space-menu__trigger');
     await page.evaluate(() => [...document.querySelectorAll('.space-menu__item')].find(button=>button.textContent.includes('设备规则')).click());
     await page.waitForSelector('.training-record');
-    await page.click('.training-record .training-actions button:last-child');
+    await page.click('.training-record button[aria-label="删除规则"]');
     await page.waitForFunction(()=>document.querySelectorAll('.training-record').length===1);
-    assert.equal(await page.$eval('.training-drawer', node=>node.textContent.includes('每次挥手后间隔十秒')), false, 'Deleted rule remained visible');
-    await page.click('.training-record .training-actions button:first-child');
-    await page.waitForFunction(()=>!document.querySelector('.training-drawer'));
-    assert.equal(await page.evaluate(()=>window.__revised.unit_id), 'lamp', 'Revision lost the selected device');
+    assert.equal(await page.$('.training-record[data-teaching-id="wave"]'),null,'Deleted rule remained visible');
+    await page.click('.training-record button[aria-label="修改参数"]');
+    await page.waitForSelector('input[aria-label="count参数"]');
+    await page.$eval('input[aria-label="count参数"]',input=>{
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'3');input.dispatchEvent(new Event('input',{bubbles:true}));
+    });
+    await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(button=>button.textContent==='保存').click());
+    await page.waitForFunction(()=>window.__saved?.revision===2);
+    assert.equal(await page.evaluate(()=>window.__saved.unit_id), 'lamp', 'Parameter edit lost the selected device');
+    assert.ok(await page.$('.training-drawer'),'Parameter editing must keep the original drawer open');
     assert.deepEqual(errors, []);
     console.log('PASS: real closed drawers do not paint or receive focus; management menu and five drawers open/close; 320/390/1280px layout; no network or browser errors.');
   } finally { await browser.close(); }

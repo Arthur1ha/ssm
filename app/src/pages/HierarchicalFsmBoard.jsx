@@ -1,5 +1,5 @@
 /* Non-modal card anchored in SVG space; never participates in canvas layout. */
-function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
+function StateBoardPopover({ anchor, canvasRef, label, onClose, children, expanded = false }) {
   const ref = React.useRef(null);
   const reposition = React.useRef(null);
   React.useLayoutEffect(() => {
@@ -8,7 +8,10 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
     const place = () => {
       const matrix = anchor.element.getScreenCTM();
       if (!matrix) return;
-      const bounds = canvas.getBoundingClientRect();
+      const headerBottom=canvas.closest('.device-page')?.querySelector('.device-page__header')?.getBoundingClientRect().bottom || 54;
+      const bounds = expanded ? {left:0,top:headerBottom,width:window.innerWidth,height:window.innerHeight-headerBottom-96}
+        : canvas.getBoundingClientRect();
+      if(expanded)card.style.maxHeight=Math.min(560,bounds.height-16)+'px';
       const screen = new DOMPoint(anchor.point.x,anchor.point.y).matrixTransform(matrix);
       const x = screen.x-bounds.left, y = screen.y-bounds.top;
       const w = card.offsetWidth, h = card.offsetHeight, gap = 16, margin = 8;
@@ -29,7 +32,7 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
         return {left,top,score:overlap+Math.hypot(left-point.x,top-point.y)};
       });
       const best = candidates.reduce((a,b) => a.score<=b.score ? a : b);
-      card.style.left = best.left+'px'; card.style.top = best.top+'px';
+      card.style.left = (best.left+(expanded ? bounds.left : 0))+'px'; card.style.top = (best.top+(expanded ? bounds.top : 0))+'px';
       card.style.visibility = 'visible';
     };
     reposition.current = place;
@@ -37,7 +40,7 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
     const observer = new ResizeObserver(place);
     observer.observe(card); observer.observe(canvas);
     window.addEventListener('resize',place);
-    const outside = event => { if (!canvas.contains(event.target)) onClose(); };
+    const outside = event => { if (!canvas.contains(event.target) && !card.contains(event.target)) onClose(); };
     const escape = event => {
       if (event.key !== 'Escape' || event.target.closest?.('[aria-modal="true"]')) return;
       event.stopPropagation(); anchor.element.focus({preventScroll:true}); onClose();
@@ -47,15 +50,16 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children }) {
     if (anchor.keyboard) card.focus({preventScroll:true});
     return () => { reposition.current = null; observer.disconnect(); window.removeEventListener('resize',place);
       document.removeEventListener('pointerdown',outside); document.removeEventListener('keydown',escape); };
-  }, [anchor,canvasRef,onClose]);
+  }, [anchor,canvasRef,onClose,expanded]);
   React.useLayoutEffect(() => { reposition.current?.(); });
-  return <section ref={ref} className="device-whiteboard__popover" role="dialog" aria-label={label}
+  const content=<section ref={ref} className={`device-whiteboard__popover${expanded ? ' device-whiteboard__popover--rule' : ''}`} role="dialog" aria-label={label}
     tabIndex="-1" style={{visibility:'hidden'}}>{children}</section>;
+  return expanded ? ReactDOM.createPortal(content,document.body) : content;
 }
 
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
 function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, connected,
-  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, card, training, locateTransition, onReviseTraining }) {
+  offline, actor, color, busy, onSelectState, onTransition, report, streamHealth, card, training, locateTransition }) {
   const { useState, useEffect, useRef, useCallback } = React;
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLinkId, setSelectedLinkId] = useState(null);
@@ -85,8 +89,8 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     setSelectedId(null); setSelectedLinkId(null); setSelectedDirectionId(null); setAnchor(null); onSelectState?.(null);
   }, [onSelectState]);
   const closePopover = useCallback(() => {
-    if (canvasRef.current?.querySelector('.device-whiteboard__popover')?.contains(document.activeElement))
-      anchor?.element?.focus({preventScroll:true});
+    if (document.activeElement?.closest('.device-whiteboard__popover') && anchor?.element?.isConnected)
+      anchor.element.focus({preventScroll:true});
     clearSelection();
   }, [anchor,clearSelection]);
   const nodeCommandPending = useRef(false);
@@ -216,8 +220,6 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     const change = training?.recentChange;
     if (!change) return;
     setChangedTeaching(change.teaching_id);
-    const timer = setTimeout(() => setChangedTeaching(null),5000);
-    return () => clearTimeout(timer);
   }, [training?.recentChange?.teaching_id,training?.recentChange?.revision]);
   useEffect(() => {
     const now = Date.now()/1000;
@@ -287,28 +289,26 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
             && <small>至 {new Date(liveState[selected.region.until_field]*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</small>}
         </div>
       </StateBoardPopover>}
-      {selectedDirection && <StateBoardPopover anchor={anchor} canvasRef={canvasRef} label="转换说明" onClose={closePopover}>
+      {selectedDirection && <StateBoardPopover anchor={anchor} canvasRef={canvasRef} label="转换说明" onClose={closePopover}
+        expanded>
+        <div className="device-whiteboard__popover-heading">
+          <h3>{nodes.find(node=>node.id===selectedDirection.src)?.label} → {nodes.find(node=>node.id===selectedDirection.dst)?.label}</h3>
+          <button type="button" className="training-icon-action" aria-label="关闭状态转换" title="关闭状态转换" onClick={closePopover}><Icon name="x" size={18}/></button>
+        </div>
+        {selectedLink.directions.length>1 &&
         <div className="device-whiteboard__directions" role="group" aria-label="转换方向">
           {selectedLink.directions.map(direction => <button key={direction.id} type="button"
             aria-pressed={direction.id === selectedDirection.id}
             onClick={() => setSelectedDirectionId(direction.id)}>
             {nodes.find(node => node.id === direction.src)?.label} → {nodes.find(node => node.id === direction.dst)?.label}
           </button>)}
-        </div>
+        </div>}
         <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
-          {selectedDirection.edges.map((edge,index) => {
-            const earlierIds = new Set(selectedDirection.edges.slice(0,index).map(item => item.transition.id));
-            const projection = displayedRecords.filter(record => {
-              const ids = trainingTransitionIds(record);
-              return ids.includes(edge.transition.id) && !ids.some(id => earlierIds.has(id));
-            });
-            return <React.Fragment key={edge.id}>
-              {index > 0 && <div className="device-whiteboard__rule-or">或</div>}
-              <TransitionInspector transition={edge.transition} projection={projection}
+              <TransitionInspector transitions={selectedDirection.edges.map(edge=>edge.transition)}
+                projection={displayedRecords.filter(record=>selectedDirection.edges.some(edge=>trainingTransitionIds(record).includes(edge.transition.id)))}
                 catalog={training?.catalog} activityFor={activityFor} changedTeaching={changedTeaching}
-                onRevise={actor === 'admin' && onReviseTraining ? record => {onReviseTraining(record);clearSelection();} : undefined}/>
-            </React.Fragment>;
-          })}
+                onSave={actor === 'admin' ? training?.saveParameters : undefined}
+                onRemove={actor === 'admin' ? training?.remove : undefined}/>
         </div>
       </StateBoardPopover>}
     </div>

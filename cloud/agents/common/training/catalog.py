@@ -52,6 +52,12 @@ def catalog_for(card: dict) -> dict:
     result = {'unit_id': card['unit_id'], 'transitions': transitions, 'state_fields': fields,
               'events': events, 'limits': {'cooldown_s': {'minimum': 1, 'maximum': 3600}}}
     result['hash'] = hashlib.sha256(json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+    # Display names do not change execution capabilities or invalidate saved rules.
+    result['presentation'] = {'actions': {
+        edge.get('action'): edge.get('label') or edge.get('action')
+        for region in regions for edge in region.get('transitions', []) if edge.get('action')
+    }, 'parameters': {skill['invoke']['action']: deepcopy(skill.get('parameter_labels', {}))
+                      for skill in card.get('skills', [])}}
     return result
 
 

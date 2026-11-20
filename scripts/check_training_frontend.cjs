@@ -9,7 +9,7 @@ const {renderToStaticMarkup} = require('react-dom/server');
 const {transform} = require('sucrase');
 const root = path.resolve(__dirname,'..');
 const context = vm.createContext({window:{},React});
-for (const name of ['app/src/utils/stateMachine.js','app/src/hooks/useTraining.js','app/src/pages/TransitionInspector.jsx','app/src/components/TrainingPreview.jsx']) {
+for (const name of ['app/src/components/Icon.jsx','app/src/utils/stateMachine.js','app/src/hooks/useTraining.js','app/src/pages/TransitionInspector.jsx','app/src/components/TrainingPreview.jsx']) {
   const source = fs.readFileSync(path.join(root,name),'utf8');
   vm.runInContext(transform(source,{transforms:['jsx'],jsxRuntime:'classic',production:true}).code,context);
 }
@@ -20,21 +20,24 @@ const colorTransition = {action:'SET_COLOR',label:'调色',trigger:'CMD_COLOR'};
 const light = inspect(colorTransition,[reading]);
 assert.match(light,/准备看书时/);
 assert.match(light,/调色/);
-assert.match(light,/255, 236, 210/);
-assert.match(light,/亮度/);
+assert.match(light,/>255</);
+assert.match(light,/brightness/);
 assert.match(light,/>200</);
-assert.match(light,/background-color:rgb\(255,236,210\)/);
+assert.match(light,/training-rule-parameters/);
+assert.doesNotMatch(light,/training-rule-group__caption|设备原有规则/);
+assert.doesNotMatch(light,/常亮 → 常亮/);
 assert.doesNotMatch(light,/已保存|已加载|已应用|等待加载|awaiting_load/);
 assert.doesNotMatch(inspect(colorTransition,[{...reading,desired_status:'removed'}]),/准备看书时/);
 assert.doesNotMatch(inspect(colorTransition,[]),/动作参数|training-inspector__rule/);
 const hello = inspect({action:'Hello',label:'打招呼'},[{teaching_id:'hello',desired_status:'enabled',name:'看到人就打招呼',
   stepSummaries:[{step_index:0,label:'打招呼'}],definition:{steps:[{transition_ids:['hello'],defaults:{}}]}}]);
-assert.match(hello,/看到人就打招呼/);
+assert.match(hello,/打招呼/);
 assert.doesNotMatch(hello,/动作参数/);
 const blink = inspect({action:'BLINK',label:'闪烁'},[{teaching_id:'sound',desired_status:'enabled',name:'声音提醒',
   definition:{steps:[{transition_ids:['blink'],defaults:{count:2}}],cooldown_s:20}}]);
 assert.match(blink,/>2</);
-assert.match(blink,/20 秒/);
+assert.match(blink,/>20</);
+assert.match(blink,/冷却时间/);
 assert.doesNotMatch(blink,/持续闪烁/);
 console.log('PASS: teaching lines show situation, action and exact saved parameters without load/application labels.');
 const catalog = {hash:'current',events:[{id:'vision.owner_recognized',name:'识别到主人'}],
@@ -80,9 +83,33 @@ assert.equal(context.window.trainingActivityEvent(newer,{...baseEvent,run_id:'un
   as_of:99,sequence:2,fact_kind:'result'},'go2',103),newer,'Source observation time orders different appearances');
 const proposalMarkup = renderToStaticMarkup(React.createElement(context.window.TrainingPreview,{proposal:{
   proposal_id:'p1',operation:'update',summaryText:'主人出现时坐好',beforeSummaryText:'主人出现就坐下',
-  after:current,stepSummaries:projected.stepSummaries}}));
-assert.doesNotMatch(proposalMarkup,/原来：/,'Confirmation stays focused on the requested teaching');
-console.log('PASS: saved-version comparison, exact execution identity, stale observation rejection and simple confirmation.');
+  before:old,after:current,stepSummaries:projected.stepSummaries}}));
+assert.doesNotMatch(proposalMarkup,/修改前|修改后|主人出现就坐下|规则草案/);
+assert.match(proposalMarkup,/保存规则/);
+const blinkProposal = renderToStaticMarkup(React.createElement(context.window.TrainingPreview,{proposal:{
+  operation:'update',summaryText:'开心时闪烁',before:{name:'开心时闪烁',definition:{steps:[{defaults:{count:3}}]}},
+  after:{name:'开心时闪烁',definition:{steps:[{defaults:{count:5}}]}}}}));
+assert.match(blinkProposal,/>3</,'Same-title parameter edits must show the old count');
+assert.match(blinkProposal,/>5</,'Same-title parameter edits must show the new count');
+assert.match(blinkProposal,/training-rule-changes/);
+const createProposal = renderToStaticMarkup(React.createElement(context.window.TrainingPreview,{proposal:{
+  operation:'create',summaryText:'模型生成的标题',changeText:'当我自己觉得开心时，不论原本是什么状态都闪烁',
+  before:{name:'先前未保存的版本',definition:{steps:[{defaults:{count:2}}]}},
+  after:{definition:{emotion:'happy',steps:[{defaults:{count:3}}]}}}}));
+assert.doesNotMatch(createProposal,/修改前|修改后|规则草案|未添加|模型生成|当我自己|不论原本|training-rule-changes/);
+assert.match(createProposal,/情绪表达（开心）/);
+const combined=renderToStaticMarkup(React.createElement(context.window.TransitionInspector,{transitions:[
+  {src:'BLINKING',dst:'OFF',trigger:'CMD_OFF',action:'SET_STATE',label:'关灯',event_label:'请求关灯'},
+  {src:'BLINKING',dst:'OFF',trigger:'BLINK_DONE',label:'闪烁结束',event_label:'有限闪烁完成',guard_label:'闪烁前为熄灭'}
+]}));
+assert.equal((combined.match(/aria-label="触发事件"/g) || []).length,1);
+assert.match(combined,/请求关灯/);assert.match(combined,/有限闪烁完成/);assert.match(combined,/闪烁前为熄灭/);
+assert.doesNotMatch(combined,/rule-or|设备原有/);
+const selfTransition = inspect({src:'BLINKING',dst:'BLINKING',action:'BLINK',label:'闪烁'},[]);
+assert.match(selfTransition,/不会沿箭头自动重复/);
+assert.doesNotMatch(inspect({src:'OFF',dst:'BLINKING',action:'BLINK',label:'闪烁'},[]),/自循环表示/);
+console.log('PASS: exact-version and parameter comparison, self-transition explanation, execution identity and stale observation rejection.');
+if(process.argv.includes('--presentation-only')) process.exit(0);
 const args = [path.join(__dirname,'check_go2_frontend.cjs'), ...process.argv.slice(2), '--training-only'];
 const result = spawnSync(process.execPath,args,{stdio:'inherit',env:process.env});
 process.exit(result.status ?? 1);

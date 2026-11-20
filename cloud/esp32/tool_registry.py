@@ -98,8 +98,10 @@ def valid_auxiliary_params(tool: str, params: Any) -> bool:
 
 def lamp_skill(action: str) -> dict:
     metadata = LAMP_SKILLS[action]
+    parameter_labels = {'count': '次数', 'r': '红色', 'g': '绿色', 'b': '蓝色', 'brightness': '亮度', 'state': '目标状态'}
     return {"id": metadata["id"], "name": metadata["name"],
             "description": metadata["description"], "tags": ["actuator", "light"],
+            "parameter_labels": {key: parameter_labels[key] for key in ACTION_SCHEMAS[action]['properties']},
             "params_schema": deepcopy(ACTION_SCHEMAS[action]), "invoke": {"action": action}}
 
 

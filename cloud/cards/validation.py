@@ -64,7 +64,7 @@ def _validate_region(sm: dict) -> None:
         for field in ("graph_hidden", "safety", "available_only", "dispatch_only", "training_disabled"):
             if field in transition and type(transition[field]) is not bool:
                 raise ValueError(f"transition.{field} must be a boolean")
-        for field in ("availability_key", "completion", "trigger_condition"):
+        for field in ("availability_key", "completion", "trigger_condition", "event_label", "guard_label"):
             if field in transition:
                 _required_string(transition[field], f"transition.{field}")
         if "required_actor" in transition and transition["required_actor"] not in ("admin", "visitor"):
@@ -184,6 +184,10 @@ def normalize_card(payload: dict) -> dict:
     for skill in skills:
         if not isinstance(skill, dict):
             raise ValueError("skill must be an object")
+        if 'parameter_labels' in skill and (not isinstance(skill['parameter_labels'], dict)
+                or any(not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+                       for key, value in skill['parameter_labels'].items())):
+            raise ValueError('invalid skill parameter labels')
         for field in ("id", "name", "description"):
             _required_string(skill.get(field), f"skill.{field}")
         if not isinstance(skill.get("tags"), list) or not isinstance(skill.get("params_schema"), dict) or not isinstance(skill.get("invoke"), dict):

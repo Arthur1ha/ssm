@@ -1,6 +1,5 @@
-function TrainingDrawer({unitId,training,onClose,onRevise,agents}) {
+function TrainingDrawer({unitId,training,onClose,agents}) {
   const {records,allRecords,loadAll,remove,error} = training;
-  const [removing, setRemoving] = React.useState(null);
   const panelRef = React.useRef(null);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
@@ -11,7 +10,7 @@ function TrainingDrawer({unitId,training,onClose,onRevise,agents}) {
     const onKey = event => {
       if (event.key === 'Escape') closeRef.current();
       if (event.key !== 'Tab') return;
-      const controls = panelRef.current?.querySelectorAll('button:not([disabled])');
+      const controls = panelRef.current?.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled])');
       if (!controls?.length) return;
       if (event.shiftKey && document.activeElement === controls[0]) {
         event.preventDefault(); controls[controls.length - 1].focus();
@@ -39,17 +38,11 @@ function TrainingDrawer({unitId,training,onClose,onRevise,agents}) {
         <h3>{getAgentDisplayName(agent.unit_id)}</h3>
         <span>{visibleRecords.filter(record => record.unit_id === agent.unit_id || (!agents && !record.unit_id)).length} 条规则</span>
       </div>}
-      {visibleRecords.filter(record => record.unit_id === agent.unit_id || (!agents && !record.unit_id)).map(record => <article key={record.teaching_id} className="training-record">
-        <h4 className="training-rule-title">{record.summaryText || record.name || record.source_text}</h4>
-        <TrainingRuleSteps record={record}/>
-        <div className="training-actions">
-          <button type="button" className="btn" onClick={() => onRevise(record)}>在对话中修改</button>
-          <button type="button" className="btn training-actions__delete" disabled={removing === record.teaching_id} onClick={async () => {
-            setRemoving(record.teaching_id);
-            try { await remove(record); } finally { setRemoving(null); }
-          }}>{removing === record.teaching_id ? '正在删除…' : '删除'}</button>
-        </div>
-      </article>)}
+      {visibleRecords.filter(record => record.unit_id === agent.unit_id || (!agents && !record.unit_id)).map(record => {
+        const catalog=training.catalogs?.[record.unit_id || unitId] || training.catalog;
+        return <TrainingRuleCard key={record.teaching_id} className="training-record" record={record} catalog={catalog}
+          unconfirmed={trainingNeedsConfirmation(record,catalog)} onSave={training.saveParameters} onRemove={remove}/>;
+      })}
     </section>)}
     </div>
   </section></div>;

@@ -1,6 +1,6 @@
 /* Space activity placement; conversation rendering lives in ChatMessages. */
 function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, activity, activityEvents = [], activityHistory = [], activityEnding, activityError,
-  onEndActivity, onAnswerActivity, training, onReviseRule, busy = false }) {
+  onEndActivity, onAnswerActivity, training, busy = false }) {
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const hasActivity = Boolean(activity || activityEvents.length || activityError);
   const currentCard = hasActivity ? {
@@ -39,7 +39,7 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     (cardsAt.get(index) || []).forEach(card => rows.push({ type: 'space_activity', card }));
     if (index < entries.length) rows.push(entries[index]);
   }
-  return <ChatMessages entries={rows} agents={agents} training={training} onReviseRule={onReviseRule} busy={busy}
+  return <ChatMessages entries={rows} agents={agents} training={training} busy={busy}
     renderEntry={e => {
       if (e.type === 'space_activity') {
         const card = e.card;

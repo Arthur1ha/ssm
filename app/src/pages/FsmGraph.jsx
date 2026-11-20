@@ -73,6 +73,7 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
   };
   const pointerUp = event => { gesture.current.points.delete(event.pointerId); };
   const visibleEdges = stateGraphLinks(graphEdges);
+  const rulePoints = new Map();
   // Geometry stays fixed when switching direction; only the arrow changes.
   const routes = new Map(visibleEdges.map(edge => {
     const source = points[edge.src], target = points[edge.dst];
@@ -80,10 +81,19 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
     if (edge.src === edge.dst) {
       const at = (angle,radius) => ({x:source.x+Math.cos(angle)*radius,y:source.y+Math.sin(angle)*radius});
       const obstacles = bounds.filter(point => point !== source);
+      const adjacent = new Set(graphEdges.flatMap(item => item.src === edge.src && item.dst !== edge.src ? [item.dst]
+        : item.dst === edge.src && item.src !== edge.src ? [item.src] : []));
+      const bearings = [...adjacent].filter(id => points[id])
+        .map(id => Math.atan2(points[id].y-source.y,points[id].x-source.x));
       const loop = [-Math.PI/2,0,Math.PI/2,Math.PI].map(angle => {
         const start=at(angle-.6,source.radius+2), end=at(angle+.6,source.radius+5);
         const first=at(angle-.75,source.radius+65), second=at(angle+.75,source.radius+65);
         let score=0;
+        // Keep the loop's arrow away from the other arrows entering this node.
+        for (const bearing of bearings) for (const endpoint of [angle-.6,angle+.6]) {
+          const separation=Math.abs(Math.atan2(Math.sin(endpoint-bearing),Math.cos(endpoint-bearing)));
+          score+=Math.max(0,.8-separation)**2*100;
+        }
         for (let step=1; step<16; step++) {
           const t=step/16,u=1-t;
           const x=u*u*u*start.x+3*u*u*t*first.x+3*u*t*t*second.x+t*t*t*end.x;
@@ -92,8 +102,11 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
           for (const point of obstacles)
             score+=Math.max(0,point.radius+10-Math.hypot(x-point.x,y-point.y))**2;
         }
-        return {score,path:`M${start.x} ${start.y}C${first.x} ${first.y} ${second.x} ${second.y} ${end.x} ${end.y}`};
+        return {score,label:{x:(start.x+3*first.x+3*second.x+end.x)/8,
+          y:(start.y+3*first.y+3*second.y+end.y)/8},
+          path:`M${start.x} ${start.y}C${first.x} ${first.y} ${second.x} ${second.y} ${end.x} ${end.y}`};
       }).reduce((best,candidate) => candidate.score<best.score ? candidate : best);
+      rulePoints.set(edge.id,loop.label);
       return [edge.id,loop.path];
     }
     const dx = target.x-source.x, dy = target.y-source.y, length = Math.hypot(dx,dy) || 1;
@@ -119,8 +132,10 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
         for (const point of obstacles) score += Math.max(0,point.radius+10-Math.hypot(x-point.x,y-point.y))**2;
         if (x<8 || x>width-8 || y<8 || y>height-8) score += 1000;
       }
-      return {bend,score,path:`M${start.x} ${start.y}Q${control.x} ${control.y} ${end.x} ${end.y}`};
+      return {bend,score,label:{x:(start.x+2*control.x+end.x)/4,y:(start.y+2*control.y+end.y)/4},
+        path:`M${start.x} ${start.y}Q${control.x} ${control.y} ${end.x} ${end.y}`};
     }).reduce((best,candidate) => candidate.score < best.score ? candidate : best);
+    rulePoints.set(edge.id,route.label);
     return [edge.id,route.path];
   }));
   const activate = callback => event => {
@@ -148,8 +163,8 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
       onClick={event => { if (!event.target.closest('[role="button"]') && !gesture.current.blockClick) onDismiss?.(); }}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
       onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}>
-      <defs><marker id={marker.current} markerWidth="8" markerHeight="8" refX="7" refY="4"
-        orient="auto-start-reverse"><path d="M1 1L7 4L1 7" fill="none" stroke="currentColor" strokeWidth="1.3"/></marker></defs>
+      <defs><marker id={marker.current} markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" viewBox="0 0 8 8" refX="7" refY="4"
+        orient="auto-start-reverse"><path d="M1 1L7 4L1 7" fill="none" stroke="context-stroke" strokeWidth="1.3"/></marker></defs>
       <g transform={`translate(${cx+camera.x} ${cy+camera.y}) scale(${camera.zoom}) translate(${-cx} ${-cy})`}>
         {visibleEdges.map(edge => {
           const source = points[edge.src], target = points[edge.dst];
@@ -180,21 +195,26 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
             : `${points[direction.src].node.label} → ${points[direction.dst].node.label}`;
           const inspect = activate(event => onInspectTransition?.(edge,direction,anchorAt(event)));
           const reverse = direction.src !== edge.src;
+          const badgePoint = rulePoints.get(edge.id);
           return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${automatic ? ' is-automatic' : ''}${running ? ' is-running' : ''}${emphasized ? ' is-emphasized' : ''}${selected ? ' is-selected' : ''}${live && teachings.length ? ' is-taught' : ''}${unconfirmed ? ' is-teaching-unconfirmed' : ''}${changed ? ' is-new-teaching' : ''}${teachingStage ? ` is-teaching-${teachingStage}` : ''}`}
             data-action={transition.action || undefined} data-trigger={transition.trigger} data-label={transition.label}
             data-source={direction.src} data-target={direction.dst} data-link={edge.id} data-direction={direction.id}
             data-rule-count={rules.length}
             data-teaching-ids={teachings.map(record => record.teaching_id).join(',') || undefined}
-            data-teaching-stage={teachingStage || undefined}
+            data-teaching-stage={teachingStage || undefined} data-self-transition={edge.src === edge.dst || undefined}
             role="button" tabIndex="0" aria-pressed={selected}
             data-available={!disabled && (transition.action ? rules.some(rule => rule.transition.action && rule.active && !rule.reason) : true)}
-            aria-label={`${title}${condition ? `，${condition}` : ''}，查看转换规则`}
+            aria-label={`${title}${condition ? `，${condition}，${teachings.length}条教导规则` : ''}${edge.src === edge.dst ? '，再次触发，状态不变' : ''}，查看转换规则`}
             onClick={inspect} onKeyDown={inspect}>
-            <title>{title}</title>
+            <title>{`${title}${condition ? ` · ${condition} · ${teachings.length}条规则` : ''}`}</title>
             <path d={path} className="fsm-whiteboard__hit"/>
             <path d={path} className="fsm-whiteboard__line"
               markerStart={reverse ? `url(#${marker.current})` : undefined}
               markerEnd={reverse ? undefined : `url(#${marker.current})`}/>
+            {teachings.length > 0 && badgePoint && <g className="fsm-whiteboard__rule-badge"
+              transform={`translate(${badgePoint.x} ${badgePoint.y})`} aria-hidden="true">
+              <circle r="3.5" className="fsm-whiteboard__rule-ring"/>
+            </g>}
           </g>;
         })}
         {graphNodes.map(node => {

@@ -434,9 +434,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
             actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth}
-            onTransition={dispatchTransition} report={reportExecution} training={training}
-            onReviseTraining={record => setTrainingSelection({unit_id:unitId,
-              transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)})} />
+            onTransition={dispatchTransition} report={reportExecution} training={training}/>
         </div>
       )}
 
@@ -458,7 +456,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         </>}
         messages={chatRows}
         training={training}
-        onReviseRule={p => setTrainingSelection({unit_id:unitId,transition_id:trainingTransitionIds(p)[0],proposal_id:p.proposal_id,summaryText:p.summaryText})}
         focusKey={trainingSelection}
         defaultAgent={unitId}
         agents={card ? [card] : []}
@@ -474,7 +471,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
       </ChatPanel>
       </div>
-      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)} onRevise={record => {setTrainingSelection({unit_id:unitId,transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record)}); setTrainingOpen(false);}}/>}
+      {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}
         card={card}
         modes={modes} modeVals={effectiveModeVals} onSwitchMode={switchMode}

@@ -28,6 +28,8 @@ class FsmTransition(TypedDict):
     completion: NotRequired[str]  # 真实完成依据；unavailable 不得承诺可串联执行
     dispatch_only: NotRequired[bool]  # 手动请求只等发送结果，不依赖姿态观察
     trigger_condition: NotRequired[str]  # 连线卡片：触发事件及必要条件，用“且”连接
+    event_label: NotRequired[str]  # 触发事件的展示名称，不改变 trigger 身份
+    guard_label: NotRequired[str]  # 守卫条件的展示名称，不重复事件本身
 
 
 class StateView(TypedDict):
@@ -94,6 +96,7 @@ class SkillDef(TypedDict):
     description: str
     tags: list[str]
     params_schema: dict   # JSON Schema object
+    parameter_labels: NotRequired[dict[str, str]]  # 参数展示名，不参与执行能力身份
     invoke: SkillInvoke
 
 

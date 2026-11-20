@@ -323,7 +323,7 @@ function App({ session, logout, refreshSession }) {
 
           </>}
           messageContent={<ActivityFeed entries={chatRows} busy={thinking}
-            training={training} onReviseRule={p => setTrainingSelection({unit_id:p.unit_id,transition_id:trainingTransitionIds(p)[0],proposal_id:p.proposal_id})} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
+            training={training} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}
@@ -339,12 +339,7 @@ function App({ session, logout, refreshSession }) {
 
         {session.actor === 'admin' && trainingOpen && <TrainingDrawer
           training={training} agents={agents}
-          onClose={() => setTrainingOpen(false)}
-          onRevise={record => {
-            setTrainingOpen(false);
-            setTrainingLocation({unit_id:record.unit_id,transition_id:trainingTransitionIds(record)[0],teaching_id:record.teaching_id,summaryText:trainingRuleText(record),nonce:Date.now()});
-            navigate(`#/devices/${encodeURIComponent(record.unit_id)}`);
-          }}/>}
+          onClose={() => setTrainingOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
         {session.actor === 'admin' && <OrchestratorSettingsDrawer open={orchestratorOpen} onClose={() => setOrchestratorOpen(false)}/>}
