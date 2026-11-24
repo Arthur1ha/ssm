@@ -25,6 +25,7 @@ def test_action_copy_preview_and_deadline_follow_one_definition(monkeypatch):
     assert machine["views"]["greeting"]["label"] == "测试问候"
     assert machine["views"]["greeting"]["pose"] == "test-pose"
     assert next(edge for edge in machine["transitions"] if edge["trigger"] == "Hello")["label"] == "测试问候"
+    assert "测试问候" in next(edge for edge in machine["transitions"] if edge["trigger"] == "Hello")["trigger_condition"]
     assert registry.get_tool_spec("go2_sport").timeout_s == 85
     assert actions.ACTIONS["Hello"].api_id == 1016
 
@@ -67,7 +68,7 @@ def test_life_guard_change_updates_runtime_and_card(monkeypatch):
     machine = _go2_state_machine()
     life = next(region for region in machine["regions"] if region["id"] == "life")
     transition = next(edge for edge in life["transitions"] if edge["trigger"] == spec.action)
-    assert "非遥控" in transition["trigger_condition"]
+    assert "已退出遥控" in transition["trigger_condition"]
     assert transition["required_actor"] == spec.required_actor
     assert get_card_skill("go2_life")["params_schema"] == state.life_tool_schema()
 

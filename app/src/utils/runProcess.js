@@ -18,6 +18,8 @@ function processCapability(event, agents = []) {
   return processUserText(publicCapabilityText(event.capability_name || skill?.name || agentCapabilityLabel(id))) || '设备操作';
 }
 function processFactTitle(event, agents = []) {
+  if (event.result_kind === 'training' && event.public_result?.training_run_finished)
+    return processUserText(event.name) || '规则执行结果';
   const id = event.skill_id || event.tool || event.action;
   if (id === 'go2_push_cargo') {
     const title = {assess:'观察货物与目的地',approach:'接近货物',push:'推送货物'}[event.arguments?.operation];
@@ -123,6 +125,14 @@ function processReceiptNeedsAttention(result, depth = 0) {
     || (Array.isArray(result.steps) ? result.steps : []).some(item => processReceiptNeedsAttention(item.result,depth+1));
 }
 function processOutcome(event) {
+  if (event.result_kind === 'training') {
+    const result = event.public_result || {};
+    if (result.training_run_finished && Number.isInteger(result.step_count)
+      && Number.isInteger(result.total_steps) && result.step_count > 0 && result.step_count < result.total_steps)
+      return ['accepted','executing','timeout','unknown'].includes(event.status) ? '部分完成 · 结果待确认' : '部分完成';
+    if (!result.training_run_finished && ['ok','accepted'].includes(event.status))
+      return result.skipped ? '目标已满足' : '本步完成';
+  }
   if (event.tool === 'send_message' && ['rejected','blocked','error','failed'].includes(event.status))
     return '消息未发出';
   if (event.result_kind === 'activity' && ['ok','accepted'].includes(event.status)
@@ -267,6 +277,9 @@ function processResultNotes(event) {
     if (result.loaded === true) add('设备已加载这份教导。');
     else if (result.loaded === false) add('设备尚未确认加载这份教导。',true);
     if (result.skipped === true) add('当前已满足目标，这一步无需重复执行。');
+    if (result.training_run_finished && Number.isInteger(result.step_count)
+      && Number.isInteger(result.total_steps) && result.total_steps > 0)
+      add(`本次完成 ${result.step_count}/${result.total_steps} 步。`);
   }
   const rules = result.game_rules;
   if (rules && typeof rules === 'object') {

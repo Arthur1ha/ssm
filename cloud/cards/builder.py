@@ -29,17 +29,14 @@ def _current_led_transitions():
         label, action, params = _LED_COMMANDS[trigger]
         transitions.append({"src": src, "dst": dst, "trigger": trigger,
                             "label": label, "action": action, "params": deepcopy(params),
-                            "event_label": "请求" + label,
-                            "trigger_condition": f"收到{label}指令",
+                            "trigger_condition": f"收到{label}指令。",
                             "graph_hidden": trigger == "CMD_COLOR",
                             **({"training_events": ["sensor.sound_detected"]} if action == "BLINK" else {}),
                             **({"training_fixed_params": ["state"]} if action == "SET_STATE" else {})})
     for target in BLINK_DONE_TARGETS:
         transitions.append({"src": "BLINKING", "dst": target, "trigger": "BLINK_DONE",
                             "label": "闪烁结束",
-                            "event_label": "有限闪烁完成",
-                            "guard_label": "闪烁前为" + ("熄灭" if target == "OFF" else "常亮"),
-                            "trigger_condition": "指定次数完成，且闪烁前为" + ("熄灭" if target == "OFF" else "常亮"),
+                            "trigger_condition": "已完成指定闪烁次数，闪烁前为" + ("熄灭" if target == "OFF" else "常亮") + "。",
                             "action": "", "params": {}, "graph_hidden": False})
     return transitions
 

@@ -1,8 +1,8 @@
 """Proposal/confirmation service owned by the API; no device execution here.
 
 UserText and ExecutorContext are constructed by trusted API adapters, never from
-model arguments. Loading is informational: later executors must use the store's
-partition lock and revalidate each reservation against the current definition.
+model arguments. Loading does not grant execution: later executors must use the
+store's partition lock and revalidate each reservation against the current definition.
 """
 from copy import deepcopy
 from dataclasses import dataclass
@@ -88,13 +88,6 @@ def _target(unit_id, space_id):
     return card
 
 
-def _definition_reasons(record):
-    # A persistent rule describes future requests. Availability of an identity
-    # observation now is not a property of that definition. The executor checks
-    # fresh, server-owned requester facts on every matching action instead.
-    return []
-
-
 def _check_catalog(record, catalog):
     if record['capability_hash'] != catalog['hash']:
         raise TrainingError('capability_changed', 409)
@@ -172,7 +165,7 @@ def _explain(record, catalog):
 
 def _preview(proposal, data, catalog):
     record = deepcopy(proposal['record'])
-    reasons = _definition_reasons(record)
+    reasons = []
     current = data['records'].get(record['teaching_id'])
     confirmed = proposal['proposal_id'] in data['confirmed_proposals']
     cancelled = proposal.get('cancelled_at') is not None
@@ -359,9 +352,6 @@ def confirm(proposal_id: str, expected_revision: int, session: dict, *, capabili
             raise TrainingError('capability_changed', 409)
         if proposal['request']['operation'] != 'remove':
             _check_catalog(record, catalog)
-        reasons = _definition_reasons(record)
-        if reasons:
-            raise TrainingError(reasons[0]['code'], details=reasons)
         _check_conflicts(record, data)
         result = _commit(data, record, expected_revision, proposal_id)
         cursor = data['cursor']
@@ -382,8 +372,9 @@ def _find_record(teaching_id, session):
 def update_parameters(teaching_id: str, request: dict, session: dict) -> dict:
     """Confirm an explicit form edit through the existing proposal/version boundary.
 
-    Event identity, action selection, guards and execution order are server-owned
-    copies of the saved definition. This endpoint never dispatches a device action.
+    Action selection, guards and execution order are server-owned copies of the
+    saved definition. Visual target edits use the server's observation mapping;
+    the browser cannot select an event ID or dispatch a device action.
     """
     _session(session, admin=True)
     patch = ParameterEdit.model_validate(request).model_dump(exclude_unset=True)
@@ -398,6 +389,34 @@ def update_parameters(teaching_id: str, request: dict, session: dict) -> dict:
     if current['capability_hash'] != patch['capability_hash'] or catalog['hash'] != patch['capability_hash']:
         raise TrainingError('capability_changed', 409)
     definition = deepcopy(current['definition'])
+
+    if 'event_target' in patch:
+        # A visible target is an editable semantic parameter. Identity evidence
+        # must retain its dedicated positive observation; an object detector can
+        # never establish that a person is the owner or a stranger.
+        visual_targets = {
+            '主人': ('vision.owner_recognized', 'recognized'),
+            '陌生人': ('vision.stranger_recognized', 'recognized'),
+            '人': ('vision.person_presence', 'detected'),
+            '人脸': ('vision.face_presence', 'detected'),
+        }
+        positive_fields = {event_id: field for event_id, field in visual_targets.values()}
+        positive_fields['vision.target_presence'] = 'detected'
+        trigger = definition.get('trigger') or {}
+        event_id = trigger.get('event_id')
+        positive = positive_fields.get(event_id)
+        allowed_fields = {'target', 'detected'} if event_id == 'vision.target_presence' else {positive}
+        if (not positive or trigger.get('where', {}).get(positive) is not True
+                or set(trigger.get('where', {})) != allowed_fields):
+            raise TrainingError('parameter_not_editable')
+        target = patch['event_target']
+        if target in visual_targets:
+            next_event, field = visual_targets[target]
+            where = {field: True}
+        else:
+            next_event = 'vision.target_presence'
+            where = {'target': target, 'detected': True}
+        definition['trigger'] = {'event_id': next_event, 'where': where}
 
     def replace_existing(target, values):
         if not set(values) <= set(target):
@@ -434,7 +453,10 @@ def update_parameters(teaching_id: str, request: dict, session: dict) -> dict:
         replace_existing(step['defaults'], edit['params'])
     for key in ('emotion', 'cooldown_s'):
         if key in patch:
-            if definition.get(key) is None or patch[key] is None:
+            # Clearing an existing interval is an explicit parameter edit,
+            # not a new rule or an inferred default. Emotion remains required
+            # for an existing emotion mapping.
+            if definition.get(key) is None or (patch[key] is None and key != 'cooldown_s'):
                 raise TrainingError('parameter_not_editable')
             definition[key] = patch[key]
     # Reuse every existing capability, parameter, event and conflict validation.
@@ -470,6 +492,17 @@ def update_parameters(teaching_id: str, request: dict, session: dict) -> dict:
     return {**saved, **_explain(saved, catalog)}
 
 
+def remove_record(teaching_id: str, expected_revision: int, capability_hash: str, session: dict) -> dict:
+    """Commit an explicit management deletion without a conversation proposal."""
+    _session(session, admin=True)
+    unit_id = _find_record(teaching_id, session)
+    trusted = {**session, 'training_source': UserText(session['session_id'], '删除自定义事件')}
+    preview = propose({'unit_id': unit_id, 'operation': 'remove', 'teaching_id': teaching_id,
+        'expected_revision': expected_revision, 'capability_hash': capability_hash}, trusted,
+        source_kind='parameter_edit')
+    return confirm(preview['proposal_id'], expected_revision, session, capability_hash=capability_hash)
+
+
 def set_enabled(teaching_id: str, enabled: bool, expected_revision: int, session: dict) -> dict:
     _session(session, admin=True)
     if type(enabled) is not bool:
@@ -483,9 +516,6 @@ def set_enabled(teaching_id: str, enabled: bool, expected_revision: int, session
         card = _target(unit_id, session['space_id'])
         if enabled:
             _check_catalog(record, catalog_for(card))
-            reasons = _definition_reasons(record)
-            if reasons:
-                raise TrainingError(reasons[0]['code'], details=reasons)
             _check_conflicts(record, data)
         result = _commit(data, record, expected_revision, 'toggle_' + uuid4().hex)
         cursor = data['cursor']
@@ -505,7 +535,7 @@ def snapshot(unit_id: str, viewer: dict) -> dict:
             loaded = record['loaded_revision'] == record['revision'] and data['loaded_epoch'].get(record['teaching_id']) == _BOOT_ID
             if not loaded:
                 record['loaded_revision'] = None
-            reasons = _definition_reasons(record)
+            reasons = []
             if record['desired_status'] != 'enabled':
                 reasons.append({'code': record['desired_status']})
             if record['capability_hash'] != catalog['hash']:
@@ -553,9 +583,12 @@ def acknowledge(unit_id: str, revisions: dict, service_context: ExecutorContext)
             record = data['records'].get(key)
             if record is None or version['revision'] != record['revision']:
                 raise TrainingError('stale_loaded_revision', 409)
-            if version['capability_hash'] != record['capability_hash'] or version['capability_hash'] != catalog['hash']:
+            if version['capability_hash'] != record['capability_hash']:
                 raise TrainingError('capability_changed', 409)
             if record['desired_status'] == 'enabled':
+                # Revocations retain their saved capability fingerprint. They
+                # acknowledge removal, not execution against today's Card,
+                # and must not reject the load of unrelated current rules.
                 _check_catalog(record, catalog)
             record['loaded_revision'] = record['revision']
             data['loaded_epoch'][key] = _BOOT_ID
@@ -755,7 +788,8 @@ def load_runtime(card, context):
             return _send_loaded_ack(card['unit_id'], revisions, context,
                                     'go2' if card.get('agent_type') == 'robot' else 'lamp')
         except Exception:
-            # An unavailable ACK affects display only, never weakens guards.
+            # Failed ACKs leave event rules unloaded. Later observations may
+            # retry the load without weakening the execution guards.
             return False
     return True
 

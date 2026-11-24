@@ -123,6 +123,28 @@ function stateTransitionLabel(transition) {
     BLINK_DONE:'闪烁结束'})[transition.trigger]
     || (transition.label || '').replace(/^接纳/,'开始').replace(/ · 自动转换$/,'');
 }
+/* A control notice belongs to the user's click, not to the agent's speech.
+ * Only a successful receipt carrying the target fact may explain that state.
+ * Dispatch acceptance, timeouts and cached page state cannot confirm entry. */
+function stateCommandFeedback(machine, transition, result, describeResult) {
+  const label = stateTransitionLabel(transition) || '设备操作';
+  if (!result) return `正在请求${label}，等待设备反馈。`;
+  if (result.result === 'ok' && !result.dispatch_only && result.confirmation_scope !== 'request') {
+    const topology = stateBoardTopology(machine, result);
+    const same = edge => transition.id ? edge.transition.id === transition.id
+      : edge.transition.action === transition.action && edge.transition.src === transition.src
+        && edge.transition.dst === transition.dst
+        && JSON.stringify(edge.transition.params || {}) === JSON.stringify(transition.params || {});
+    const edge = topology.edges.find(same);
+    const target = edge && topology.nodes.find(node => node.id === edge.dst && node.current);
+    const observed = edge && result[edge.region.state_field] === transition.dst
+      && (edge.region.id !== machine?.primary_region || !machine?.freshness_field
+        || result[machine.freshness_field] !== false);
+    if (target && observed) return `已进入${target.label}。${target.view?.description || ''}`;
+  }
+  const outcome = describeResult(result);
+  return `${label}：${outcome}${/[。！？…]$/.test(outcome) ? '' : '。'}`;
+}
 /* Small graphs need a shallower default canvas; explicit Card diagrams win. */
 function stateGraphDimensions(nodeCount, diagram) {
   return {width: diagram?.width || 600,
@@ -166,4 +188,4 @@ function stateBoardTopology(machine, state = {}, visibleTransitionIds = new Set(
 }
 Object.assign(window, { stateMachineRegions, primaryStateRegion, stateRegionActive, stateRegionLabel,
   stateMachineSummary, stateActionReason, stateActionVisible, stateWidgetEnabled, stateNodeControl, stateBoardTopology,
-  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateGraphDimensions });
+  stateGraphLinks, stateLinkDirection, stateTransitionLabel, stateCommandFeedback, stateGraphDimensions });

@@ -74,9 +74,9 @@ def _go2_state_machine() -> dict:
             if trigger == "StopMove" and src not in interruptible_states:
                 continue  # Safety STOP remains available without promising interruption.
             spec = ACTIONS[trigger]
-            condition = f"收到{spec.label}指令"
+            condition = f"收到{spec.label}指令。"
             if spec.expected_state and not spec.execution_state and spec.completion == "joint_posture":
-                condition += "，且设备确认" + views[dst]["label"]
+                condition = f"收到{spec.label}指令，设备确认已{views[dst]['label']}。"
             transitions.append({
                 "src": src, "dst": dst, "trigger": trigger,
                 "label": ACTIONS[trigger].label,
@@ -103,16 +103,19 @@ def _go2_state_machine() -> dict:
         if spec.execution_state in TRANSIENT_STATES and spec.expected_state:
             transitions.append(observed_transition(spec.execution_state, spec.expected_state,
                                                    "action_completed", "动作执行完毕",
-                                                   "设备确认动作完成，且已恢复" + views[spec.expected_state]["label"]))
+                                                   f"设备确认{spec.label}动作完成并恢复{views[spec.expected_state]['label']}。"))
     transitions.extend([
-        observed_transition("standing", "moving", "motion_observed", "开始移动", "设备反馈正在移动"),
-        observed_transition("moving", "standing", "motion_stationary", "停止移动", "设备反馈已停止移动"),
+        observed_transition("standing", "moving", "motion_observed", "开始移动",
+                            "设备确认机器狗开始移动。"),
+        observed_transition("moving", "standing", "motion_stationary", "停止移动",
+                            "设备确认机器狗已停止移动。"),
     ])
     for src in BODY_STATES:
         transitions.append({
             "src": src, "dst": src,
             "trigger": "EMERGENCY_STOP", "label": "紧急制停",
             "action": "STOP", "params": {}, "safety": True,
+            "trigger_condition": "收到紧急制停指令。",
         })
     state_machine = {
         "connection_field": "connected",
@@ -147,11 +150,16 @@ def _go2_state_machine() -> dict:
     state_machine["regions"] = [
         {"id": "connection", "label": "连接", "state_field": "connection_state",
          "states": ["offline", "connecting", "online"], "transitions": [
-             {"src": "offline", "dst": "connecting", "trigger": "connection_requested", "label": "建立连接"},
-             {"src": "online", "dst": "connecting", "trigger": "connection_requested", "label": "重新连接"},
-             {"src": "connecting", "dst": "online", "trigger": "connection_online", "label": "连接成功"},
-             {"src": "connecting", "dst": "offline", "trigger": "connection_failed", "label": "连接失败"},
-             {"src": "online", "dst": "offline", "trigger": "connection_offline", "label": "断开或连接失效"},
+             {"src": "offline", "dst": "connecting", "trigger": "connection_requested", "label": "建立连接",
+              "trigger_condition": "发起连接请求。"},
+             {"src": "online", "dst": "connecting", "trigger": "connection_requested", "label": "重新连接",
+              "trigger_condition": "发起重连请求。"},
+             {"src": "connecting", "dst": "online", "trigger": "connection_online", "label": "连接成功",
+              "trigger_condition": "控制连接建立。"},
+             {"src": "connecting", "dst": "offline", "trigger": "connection_failed", "label": "连接失败",
+              "trigger_condition": "连接失败。"},
+             {"src": "online", "dst": "offline", "trigger": "connection_offline", "label": "断开或连接失效",
+              "trigger_condition": "控制连接断开。"},
          ],
          "views": {key: {"label": label, "description": description, "type": "generic"}
                    for key, label, description in (

@@ -64,6 +64,5 @@ htmlcov/
 /cloud/space/devices.json
 /cloud/space/space.json
 /cloud/orchestrator/devices.json
-/cloud/orchestrator/rules.json
 /cloud/go2/agentcore/personality.json
 /cloud/go2/agentcore/traits.json

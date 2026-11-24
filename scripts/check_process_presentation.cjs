@@ -137,6 +137,13 @@ const teaching={...call,tool:'apply_teaching',result_kind:'training',public_resu
   name:'阅读灯光',step_number:2,loaded:true,completed:false}};
 assert(context.processResultNotes(teaching).some(note=>note.text.includes('「阅读灯光」') && note.text.includes('第 2 步')));
 assert(!JSON.stringify(context.processResultNotes(teaching)).includes('reading'));
+const interruptedTeaching={...teaching,name:'见人先挥手再坐下',status:'blocked',
+  public_result:{result:'blocked',training_run_finished:true,step_count:1,total_steps:2,error:'source_state_unavailable'}};
+assert.equal(context.processOutcome({...teaching,status:'ok'}),'本步完成');
+assert.equal(context.processOutcome(interruptedTeaching),'部分完成');
+assert.equal(context.processFactTitle(interruptedTeaching),'见人先挥手再坐下');
+assert(context.processResultNotes(interruptedTeaching).some(note=>note.text==='本次完成 1/2 步。'));
+assert(context.processResultNotes(interruptedTeaching).some(note=>note.text==='当前姿态不满足下一步动作要求' && note.attention));
 const message={event_type:'message',agent_id:'go2',unit_id:'go2',message_id:'msg-1',event_id:'speech-1',text:'再来一次！'};
 assert.equal(context.activityEventKind({...message,fact_kind:'observation'}),'message',
   'A real peer message was rendered as a non-persona observation');

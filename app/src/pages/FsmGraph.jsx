@@ -1,6 +1,6 @@
 /* Card-owned spatial layout. State clicks delegate actions; edges inspect rules. */
 function FsmGraph({ nodes:graphNodes, edges:graphEdges,
-  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', live = false, pendingCommand, diagram, trainingCatalog }) {
+  selectedState, selectedLink, selectedDirection, onSelectState, onInspectTransition, onDismiss, color = 'var(--color-accent)', live = false, pendingCommand, diagram, trainingCatalog, locateTransition }) {
   const { useState, useRef, useEffect } = React;
   const [camera, setCamera] = useState({ x:0, y:0, zoom:1 });
   const svgRef = useRef(null);
@@ -24,6 +24,14 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
   const fit = {zoom:fitZoom,x:(cx-(left+right)/2)*fitZoom,y:(cy-(top+bottom)/2)*fitZoom};
   const signature = JSON.stringify([width,height,...graphNodes.map(node => [node.id,points[node.id].x,points[node.id].y,points[node.id].radius])]);
   useEffect(() => { setCamera(fit); }, [signature]);
+  const locatedRequest=useRef(null);
+  const transitionSignature=graphEdges.map(edge=>edge.transition.id).join('|');
+  useEffect(()=>{
+    if (!locateTransition?.id || locatedRequest.current===locateTransition
+      || !graphEdges.some(edge=>edge.transition.id===locateTransition.id)) return;
+    locatedRequest.current=locateTransition;
+    setCamera(fit);
+  },[locateTransition,signature,transitionSignature]);
   const zoomAt = (factor, point = {x:cx,y:cy}) => setCamera(old => {
     const zoom = Math.max(.25, Math.min(3.5, old.zoom * factor));
     const ratio = zoom / old.zoom;
@@ -175,6 +183,7 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
               || edge.directions.find(item => item.edges.some(rule => rule.teachings?.length))
               || stateLinkDirection(edge,graphNodes);
           const rules = direction.edges;
+          const linkHasTeaching=edge.directions.some(item=>item.edges.some(rule=>rule.teachings?.length));
           const teachings = [...new Map(rules.flatMap(rule => rule.teachings || [])
             .map(record => [record.teaching_id,record])).values()];
           const unconfirmed = teachings.length && teachings.every(record => trainingNeedsConfirmation(record,trainingCatalog));
@@ -196,7 +205,7 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
           const inspect = activate(event => onInspectTransition?.(edge,direction,anchorAt(event)));
           const reverse = direction.src !== edge.src;
           const badgePoint = rulePoints.get(edge.id);
-          return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${automatic ? ' is-automatic' : ''}${running ? ' is-running' : ''}${emphasized ? ' is-emphasized' : ''}${selected ? ' is-selected' : ''}${live && teachings.length ? ' is-taught' : ''}${unconfirmed ? ' is-teaching-unconfirmed' : ''}${changed ? ' is-new-teaching' : ''}${teachingStage ? ` is-teaching-${teachingStage}` : ''}`}
+          return <g key={edge.id} className={`fsm-whiteboard__edge${disabled ? ' is-disabled' : ' is-available'}${automatic ? ' is-automatic' : ''}${running ? ' is-running' : ''}${emphasized ? ' is-emphasized' : ''}${selected ? ' is-selected' : ''}${live && linkHasTeaching ? ' is-taught' : ''}${unconfirmed ? ' is-teaching-unconfirmed' : ''}${changed ? ' is-new-teaching' : ''}${teachingStage ? ` is-teaching-${teachingStage}` : ''}`}
             data-action={transition.action || undefined} data-trigger={transition.trigger} data-label={transition.label}
             data-source={direction.src} data-target={direction.dst} data-link={edge.id} data-direction={direction.id}
             data-rule-count={rules.length}
@@ -204,16 +213,16 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
             data-teaching-stage={teachingStage || undefined} data-self-transition={edge.src === edge.dst || undefined}
             role="button" tabIndex="0" aria-pressed={selected}
             data-available={!disabled && (transition.action ? rules.some(rule => rule.transition.action && rule.active && !rule.reason) : true)}
-            aria-label={`${title}${condition ? `，${condition}，${teachings.length}条教导规则` : ''}${edge.src === edge.dst ? '，再次触发，状态不变' : ''}，查看转换规则`}
+            aria-label={`${title}${condition ? `，${condition}，${teachings.length}个自定义事件` : ''}${edge.src === edge.dst ? '，事件发生后，状态不变' : ''}，查看状态转移事件`}
             onClick={inspect} onKeyDown={inspect}>
-            <title>{`${title}${condition ? ` · ${condition} · ${teachings.length}条规则` : ''}`}</title>
+            <title>{`${title}${condition ? ` · ${condition} · ${teachings.length}个自定义事件` : ''}`}</title>
             <path d={path} className="fsm-whiteboard__hit"/>
             <path d={path} className="fsm-whiteboard__line"
               markerStart={reverse ? `url(#${marker.current})` : undefined}
               markerEnd={reverse ? undefined : `url(#${marker.current})`}/>
-            {teachings.length > 0 && badgePoint && <g className="fsm-whiteboard__rule-badge"
+            {linkHasTeaching && badgePoint && <g className="fsm-whiteboard__event-marker fsm-whiteboard__rule-badge"
               transform={`translate(${badgePoint.x} ${badgePoint.y})`} aria-hidden="true">
-              <circle r="3.5" className="fsm-whiteboard__rule-ring"/>
+              <circle r="3.5" className="fsm-whiteboard__event-ring fsm-whiteboard__rule-ring"/>
             </g>}
           </g>;
         })}
@@ -228,7 +237,7 @@ function FsmGraph({ nodes:graphNodes, edges:graphEdges,
           const reachable = live && (node.control?.reachable || actionable);
           const related = inspectedLink && [inspectedLink.src,inspectedLink.dst].includes(node.id);
           const nodeHint = !live ? '状态未同步，查看说明' : targetAction ? '点击执行' : current
-            ? '当前状态，查看说明' : reachable ? '查看转换条件' : node.control?.reason || '查看说明';
+            ? '当前状态，查看说明' : reachable ? '查看状态转移条件' : node.control?.reason || '查看说明';
           const lines = label.length > 4 ? [label.slice(0,4),label.slice(4)] : [label];
           const select = activate(event => onSelectState?.(node.id, anchorAt(event)));
           return <g key={node.id} className={`fsm-whiteboard__node${current ? ' is-current' : ''}${actionable ? ' is-actionable' : ''}${reachable ? ' is-reachable' : ''}${related ? ' is-related' : ''}${node.retained || !live && node.current ? ' is-retained' : ''}${selected ? ' is-selected' : ''}`}

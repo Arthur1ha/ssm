@@ -1,7 +1,7 @@
 /* Shared conversation hierarchy: speech bubbles and expandable process records.
  * Domain-specific cards are supplied by the surrounding feed. */
 function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator',
-  training, renderEntry, busy = false, busyProgress }) {
+  training, onLocate, renderEntry, busy = false, busyProgress }) {
   const getName = unitId => getAgentDisplayName(agents.find(agent => agent.unit_id === unitId) || unitId);
   const rows = [], groups = new Map();
   entries.forEach((entry,index) => {
@@ -19,10 +19,12 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
 
   return <div className="chat-messages" style={{ padding: '0 16px' }}>
       {rows.map(({ entry: e, index: i }) => {
-        if (e.type === 'rule') return <div key={e.id} className="chat-rule-message" style={{maxWidth:420,marginBottom:10}}>
+        if (e.type === 'rule') return <div key={e.id} className="chat-rule-message" style={{maxWidth:340,marginBottom:10}}>
           <TrainingPreview proposal={e.proposal} error={training?.proposalErrors?.[e.proposal.proposal_id]}
             catalog={training?.catalogs?.[e.proposal.unit_id] || training?.catalog}
-            onConfirm={training?.confirm} onCancel={training?.cancel}/>
+            record={[...(training?.records || []),...(training?.allRecords || [])].find(record => record.teaching_id === e.proposal.teaching_id
+              && record.unit_id === e.proposal.unit_id)}
+            onConfirm={training?.confirm} onCancel={training?.cancel} onLocate={onLocate}/>
         </div>;
         if (e.type === 'process_group') {
           const finished = entries.some(item => item.requestId === e.requestId && item.type === 'ai' && item.final);

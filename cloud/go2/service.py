@@ -74,6 +74,9 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
     session_tasks.track(context.session_id, task)
     own_life = None
     last_result = {'result': 'unknown'}
+    last_step = None
+    completed_steps = 0
+    step_inflight = False
 
     def publish_step(resolved, trusted, *, result=None, phase=None):
         from cloud.api.intents import publish_agent_event
@@ -102,13 +105,12 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
             logging.warning('Go2 training progress unavailable', exc_info=True)
 
     async def before_step(resolved, trusted):
-        nonlocal own_life
+        nonlocal own_life, last_step, step_inflight
+        last_step = resolved
         current = go2.state_snapshot()
         if (entry['interrupted'] or not go2.is_connected
                 or current.get('epoch') != entry['epoch']):
             return {'result': 'cancelled', 'error': 'training_interrupted'}
-        if availability is not None and not availability(trusted):
-            return {'result': 'blocked', 'error': 'autonomy_unavailable'}
         lease = control_lease.snapshot()
         if ((lease is not None and lease.owner_session_id != trusted.session_id)
                 or entry['lease_generation'] is not None and
@@ -120,12 +122,18 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
         waking = resolved['action'] == 'LIFE' and resolved['params'].get('action') == 'wake'
         if current.get('activity_state') != 'active' and not waking:
             return {'result': 'blocked', 'error': 'device_resting'}
+        if availability is not None and not availability(trusted):
+            reason = prepared.get('availability_reason')
+            return {'result': 'blocked', 'error': reason(trusted) if callable(reason)
+                    else 'autonomy_unavailable'}
         if resolved['action'] == 'LIFE' and resolved['params'].get('action') == 'request_rest' and own_life:
             go2.runtime.finish_life(own_life)
             own_life = None
         if resolved['step_index'] == 0:
             publish_step(resolved, trusted, phase='observation')
-        publish_step(resolved, trusted)
+        if not resolved.get('skip'):
+            publish_step(resolved, trusted)
+            step_inflight = True
         return None
 
     async def refresh_observation(trusted):
@@ -153,7 +161,10 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
         return await execute_tool(name, arguments, context=trusted, request_id=request_id)
 
     async def after_step(resolved, trusted, result):
-        nonlocal own_life
+        nonlocal own_life, completed_steps, step_inflight
+        step_inflight = False
+        if result.get('result') == 'ok':
+            completed_steps = resolved['step_index'] + 1
         publish_step(resolved, trusted, result=result)
         runtime = runtime_for(go2)
         if (result.get('result') == 'ok' and runtime is not None
@@ -182,7 +193,28 @@ async def run_training_behavior(prepared: dict, context: ExecutionContext, *,
             execute=execute, before_step=before_step, after_step=after_step, observe=observe,
             refresh_observation=refresh_observation)
         return last_result
+    except asyncio.CancelledError:
+        last_result = {'result': 'unknown' if step_inflight else 'cancelled',
+                       'error': 'training_interrupted', 'step_count': completed_steps}
+        raise
+    except Exception:
+        last_result = {'result': 'unknown' if step_inflight else 'error',
+                       'error': 'training_execution_failed', 'step_count': completed_steps}
+        raise
     finally:
+        if not last_result.get('replayed'):
+            index = min(last_result.get('step_index', completed_steps), len(prepared['steps']) - 1)
+            resolved = last_step if last_step and last_step['step_index'] == index else {
+                'step_index': index, 'transition_id': None, 'action': '', 'params': {}}
+            terminal = {**last_result, 'training_run_finished': True,
+                        'step_index': index, 'total_steps': len(prepared['steps']),
+                        'step_count': last_result.get('step_count', completed_steps)}
+            # Completion of a skipped goal is an observation, never a dispatch.
+            if resolved.get('skip'):
+                terminal['skipped'] = True
+            publish_step(resolved, replace(context, training_run_id=run_id,
+                                          training_step_index=index),
+                         phase='finish', result=terminal)
         renewal.cancel()
         await asyncio.gather(renewal, return_exceptions=True)
         if own_life is not None:

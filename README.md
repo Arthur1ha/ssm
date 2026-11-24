@@ -35,6 +35,7 @@ cp -n cloud/.env.example cloud/.env
 |---|---|
 | `OPENAI_BASE_URL`、`OPENAI_API_KEY` | 兼容 OpenAI 的模型服务 |
 | `TEXT_MODEL`、`VISION_MODEL` | 全系统文字与视觉模型，以服务实际支持为准 |
+| `ORCHESTRATOR_MAX_TOKENS` | 管家输出额度；默认 `0`，沿用模型服务默认值；仅正整数主动限制，过小可能导致空响应 |
 | `MQTT_BROKER_HOST/PORT`、`MQTT_API_*`、`MQTT_ORCHESTRATOR_*` | Broker 地址及云端专用账号 |
 | `SSM_INTERNAL_SERVICE_TOKEN` | API、编排器共用的内部认证与默认 MQTT 签名来源 |
 | `SSM_SESSION_SECRET` | 至少 32 字符，保持重启后的会话签名稳定 |

@@ -324,6 +324,11 @@ function App({ session, logout, refreshSession }) {
           </>}
           messageContent={<ActivityFeed entries={chatRows} busy={thinking}
             training={training} agents={agents} unitData={unitData} connected={connected} activity={displayActivity}
+            onLocate={location => {
+              if (!location?.unit_id || !location.id) return;
+              setTrainingLocation({...location,request:Date.now()});
+              navigate(`#/devices/${encodeURIComponent(location.unit_id)}`);
+            }}
             activityHistory={activityHistory}
             activityEvents={activityEvents} activityEnding={activityEnding}
             activityError={activityError} onEndActivity={endActivity}

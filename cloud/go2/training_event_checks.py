@@ -482,7 +482,7 @@ async def test_bound_event_reuses_command_ledger_and_manual_hello_stays_availabl
     blocked = await execute_tool('go2_sport', {'cmd': 'Hello'}, context=stale, request_id='stale-event')
     assert blocked['result'] == 'blocked'
     assert not adapter.allows(stale)
-    assert blocked['reasons'][0]['code'] == 'autonomy_unavailable'
+    assert blocked['reasons'][0]['code'] == 'training_interrupted'
     assert robot.send_command.await_count == 2
 
 

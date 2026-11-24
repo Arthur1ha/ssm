@@ -61,7 +61,7 @@ def _brief(event: dict) -> str:
                 "bbox_1000", "bbox_pixels",
                 "observation", "kind", "goal", "artifact", "reason",
                 "target_unit_id", "initiator_unit_id", "skill_id",
-                "request_id", "task_id", "transport", "status", "duration_ms",
+                "request_id", "task_id", "transport", "status", "duration_ms", "finish_reason", "usage",
                 "input", "output", "decision", "params", "result",
                 "motion_mode", "last_command", "command",
                 "pose_heading_rad", "lookahead_odom_xy", "route_heading_error_rad",

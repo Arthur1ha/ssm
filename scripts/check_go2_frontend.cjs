@@ -2,6 +2,8 @@
  * --browser also needs puppeteer and a local Chrome (or PUPPETEER_EXECUTABLE_PATH).
  * Optional GO2_PREVIEW_REACT/GO2_PREVIEW_REACT_DOM select the product's cached UMD;
  * GO2_PREVIEW_FONT embeds a small local CJK font solely for readable screenshots.
+ * --rule-layout-only checks direction tabs, lamp layout and immediate deletion.
+ * --control-notices-only checks shared chat feedback for state-node commands.
  * Screenshots and controls use explicitly simulated state, never a live API. */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -44,6 +46,21 @@ assert.equal(nodeControl(sittingNode,[automaticEdge]).reachable,true,'Automatic 
 assert.equal(nodeControl(sittingNode,[automaticEdge]).transition,null,'Automatic event became a command');
 assert.equal(nodeControl(sittingNode,[{...automaticEdge,active:false}]).reachable,false);
 assert.equal(nodeControl(sittingNode,[{...automaticEdge,reason:'offline'}]).reachable,false);
+const feedbackMachine={primary_region:'mode',regions:[{id:'mode',state_field:'phase',states:['ready','working'],
+  transitions:[{id:'enter',src:'ready',dst:'working',trigger:'start',action:'START',label:'开始工作'}],
+  views:{working:{label:'工作中',description:'按当前安排继续工作。'}}}]};
+const feedbackTransition=feedbackMachine.regions[0].transitions[0];
+const feedback=context.window.stateCommandFeedback;
+assert.equal(feedback(feedbackMachine,feedbackTransition,null),'正在请求开始工作，等待设备反馈。');
+assert.equal(feedback(feedbackMachine,feedbackTransition,{result:'ok',phase:'working'},()=>''),
+  '已进入工作中。按当前安排继续工作。','Control feedback must follow Card-owned states and copy');
+for(const result of [{result:'accepted',phase:'working'},{result:'ok',dispatch_only:true,phase:'working'},
+  {result:'ok',confirmation_scope:'request',phase:'working'},
+  {result:'timeout',phase:'working'},{result:'unknown',phase:'working'},{result:'blocked',phase:'working'},
+  {result:'ok'}]) {
+  assert.equal(feedback(feedbackMachine,feedbackTransition,result,()=> '原始回执'), '开始工作：原始回执。',
+    'A missing or unconfirmed target must not be reported as state entry');
+}
 const merge = context.window.mergeStateSnapshot;
 const retired = new Set();
 let state = { epoch: 'old', revision: 8, body_state: 'standing' };
@@ -296,6 +313,7 @@ async function checkInteractions() {
   const browser = await puppeteer.launch({ headless: true,
     ...(process.env.PUPPETEER_EXECUTABLE_PATH ? { executablePath: process.env.PUPPETEER_EXECUTABLE_PATH } : {}),
     args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  console.log('Local simulated browser launched.');
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
@@ -314,6 +332,7 @@ async function checkInteractions() {
       return request.abort();
     });
     await page.setContent('<html lang="zh-CN"><head><base href="https://ssm-test.invalid/"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div></body></html>');
+    console.log('Local simulated browser page ready.');
     await page.addStyleTag({ content: '*{box-sizing:border-box;margin:0}html,body,#root{height:100%}body{background:#0B0B0E}' + read('app/styles/app.css') });
     if (process.env.GO2_PREVIEW_FONT) {
       const fontData = fs.readFileSync(process.env.GO2_PREVIEW_FONT).toString('base64');
@@ -338,12 +357,29 @@ async function checkInteractions() {
       window.__training={records:[],edge_annotations:[],catalog:{hash:'hash',transitions:[]}};window.__requests=[];window.__proposal=null;window.__proposals=[];
       window.apiClient={eventsConnected:true,devicesSynced:true,dispatchEvent:event=>listeners.dispatchEvent(event),addEventListener:(...a)=>listeners.addEventListener(...a),removeEventListener:(...a)=>listeners.removeEventListener(...a),async request(url,options={}){
         __requests.push({url,options});
+        if((!options.method || options.method==='GET') && url.includes('/training')
+            && (window.__heldTrainingReads || window.__holdNextTrainingRead)){
+          window.__holdNextTrainingRead=false;
+          const payload=url.startsWith('/api/training/proposals') ? {proposals:structuredClone(__proposals)} : structuredClone(__training);
+          return new Promise(resolve=>(window.__heldTrainingReadQueue ||= []).push({url,payload,resolve}));
+        }
+        if(url.startsWith('/api/training/') && options.method==='DELETE'){
+          const record=__training.records.find(r=>url.endsWith('/'+r.teaching_id));
+          if(!record || record.revision!==options.body.expected_revision)throw Object.assign(new Error('conflict'),{status:409});
+          const removed={...structuredClone(record),revision:record.revision+1,desired_status:'removed'};
+          if(window.__deleteFailure)throw new Error('模拟删除请求失败');
+          if(window.__invalidDeleteReceipt)return {...removed,...({wrong_id:{teaching_id:'another-rule'},same_revision:{revision:record.revision},enabled:{desired_status:'enabled'}}[window.__invalidDeleteReceipt])};
+          __training.records=__training.records.filter(r=>r.teaching_id!==record.teaching_id);
+          if(window.__holdReadsAfterDelete)window.__heldTrainingReads=true;
+          __emit({type:'training.updated',unit_id:record.unit_id});return removed;}
         if(url.startsWith('/api/training/') && url.endsWith('/parameters') && options.method==='PATCH'){
+          if(window.__parameterDelay)await new Promise(resolve=>setTimeout(resolve,window.__parameterDelay));
           if(window.__parameterConflict) throw Object.assign(new Error('conflict'),{status:409});
           const record=__training.records.find(r=>url.includes('/'+r.teaching_id+'/'));
           if(record.revision!==options.body.expected_revision)throw Object.assign(new Error('conflict'),{status:409});
           const old=structuredClone(record);old.history=undefined;
           record.history=[...(record.history || []),old];record.revision++;
+          if(options.body.event_target){const labels={主人:['vision.owner_recognized','recognized'],陌生人:['vision.stranger_recognized','recognized'],人:['vision.person_presence','detected'],人脸:['vision.face_presence','detected']};const mapped=labels[options.body.event_target];record.definition.trigger=mapped ? {event_id:mapped[0],where:{[mapped[1]]:true}} : {event_id:'vision.target_presence',where:{target:options.body.event_target,detected:true}};}
           if(options.body.event_params && record.definition.trigger)Object.assign(record.definition.trigger.where,options.body.event_params);
           for(const step of options.body.steps || [])Object.assign(record.definition.steps[step.step_index].defaults,step.params);
           for(const key of ['emotion','cooldown_s'])if(key in options.body)record.definition[key]=options.body[key];
@@ -354,7 +390,7 @@ async function checkInteractions() {
           if(window.__conflict) throw Object.assign(new Error('conflict'),{status:409});
           const p=__proposals.find(p=>url.includes('/'+p.proposal_id+'/'));p.confirmed=true;
           if(p.operation==='remove')__training.records=__training.records.filter(r=>r.teaching_id!==p.teaching_id);
-          return {saved:true};}
+          else {const record={...structuredClone(p.after),revision:p.expected_revision+1,loaded_revision:null,load_status:'awaiting_load'};p.teaching_id=record.teaching_id;__training.records=[...__training.records.filter(r=>r.teaching_id!==record.teaching_id),record];}return structuredClone(__training.records.find(r=>r.teaching_id===p.teaching_id) || {saved:true});}
         if(url.startsWith('/api/training/proposals/') && url.endsWith('/cancel')){const p=__proposals.find(p=>url.includes('/'+p.proposal_id+'/'));p.cancelled=true;return p;}
         if(url.startsWith('/api/training/proposals/'))return structuredClone(__proposals.find(p=>url.endsWith('/'+p.proposal_id)) || __proposal);
         if(url.startsWith('/api/training/proposals') && options.method!=='POST'){
@@ -364,7 +400,7 @@ async function checkInteractions() {
           __proposal={...__proposal,proposal_id:'remove1',superseded_by:null,superseded:false,cancelled:false,operation:'remove',teaching_id:options.body.teaching_id,created_at:Date.now()/1000,confirmed:false};
           __proposals.push(__proposal);return __proposal;}
         if(url.startsWith('/api/training/') && options.method==='PUT')return {};
-        if(url.includes('/training'))return __training;
+        if(url.includes('/training'))return structuredClone(__training);
         if(url==='/api/devices')return [__lampCard,__card];return {};}};
       window.apiErrorText=error=>error.message;
       window.commandBus={describe:r=>r.error || (r.result==='accepted'?'指令已发送，尚未确认完成':'执行完成'),
@@ -394,7 +430,59 @@ async function checkInteractions() {
 
     await page.waitForSelector('.device-state-board');
     await page.evaluate(() => document.fonts.ready);
-    if(process.argv.includes('--rule-presentation-only')) {
+    if(process.argv.includes('--control-notices-only')) {
+      for(const name of ['app/src/utils/activityView.js','app/src/utils/runProcess.js',
+        'app/src/components/RunProcess.jsx','app/src/components/ChatMessages.jsx','app/src/components/ChatPanel.jsx'])
+        await page.addScriptTag({content:compile(name)});
+      await page.addStyleTag({content:read('app/styles/process.css')});
+      await page.evaluate(()=>{
+        window.__controlRequests=[];
+        commandBus.command=(unit,action,params)=>new Promise((resolve,reject)=>{
+          __calls.push({unit,action,params});__controlRequests.push({resolve,reject});
+        });
+        __renderState(__state);
+      });
+      await page.waitForSelector('.chat-messages');
+      const tap=async (id,count)=>{
+        await page.tap(`[data-state="${id}"]`);
+        await page.waitForFunction(count=>__controlRequests.length===count,{},count);
+      };
+      await tap('life:explore',1);
+      await page.waitForFunction(()=>document.querySelector('.chat-system-status')?.textContent.includes('正在请求开启探索'));
+      await page.evaluate(()=>{
+        __emit({type:'agent_progress',agent_id:'go2',source:'autonomous',scope:'space',
+          run_id:'exploration-notice-test',event_id:'exploration-observation',fact_kind:'observation',
+          text:'看到了周围环境',ts:Date.now()/1000});
+      });
+      await page.waitForSelector('.run-process');
+      assert.ok(await page.evaluate(()=>!!(document.querySelector('.chat-system-status').compareDocumentPosition(
+        document.querySelector('.run-process')) & Node.DOCUMENT_POSITION_FOLLOWING)),
+        'The click context must precede progress even when SSE beats the command receipt');
+      await page.evaluate(()=>__controlRequests[0].resolve({...__state,result:'ok',life_state:'explore',exploration_enabled:true}));
+      await page.waitForFunction(()=>document.querySelector('.chat-system-status')?.textContent.startsWith('已进入探索。'));
+      assert.equal(await page.$$('.chat-system-status').then(nodes=>nodes.length),1,'The receipt must update the pending notice');
+      assert.ok(await page.$eval('.chat-system-status',node=>node.textContent.includes('自主决定')));
+      assert.ok(await page.$('[data-state="life:idle"].is-current'),'A chat notice must not invent a live state update');
+      await page.evaluate(()=>__renderState({...__state,revision:2,life_state:'explore',available_life_actions:['stop_explore']}));
+      await tap('life:idle',2);
+      await page.evaluate(()=>__controlRequests[1].resolve({result:'blocked',error:'停止尚未确认'}));
+      await page.waitForFunction(()=>[...document.querySelectorAll('.chat-system-status')].some(node=>node.textContent==='停止探索：停止尚未确认。'));
+      assert.ok(!(await page.$eval('.chat-messages',node=>node.textContent)).includes('已进入待命。'));
+      await page.evaluate(()=>__renderState({...__state,revision:3,life_state:'idle',available_life_actions:['request_rest','start_explore']}));
+      await tap('body:sitting',3);
+      await page.evaluate(()=>__controlRequests[2].resolve({result:'accepted',dispatch_only:true}));
+      await page.waitForFunction(()=>[...document.querySelectorAll('.chat-system-status')].some(node=>node.textContent.includes('坐下：指令已发送')));
+      assert.ok(!(await page.$eval('.chat-messages',node=>node.textContent)).includes('已进入坐下。'));
+      await tap('activity:rest',4);
+      await page.evaluate(()=>__controlRequests[3].reject(new Error('连接中断')));
+      await page.waitForFunction(()=>[...document.querySelectorAll('.chat-system-status')].some(node=>node.textContent==='休息：连接中断。'));
+      assert.equal(await page.$$('.chat-system-status').then(nodes=>nodes.length),4);
+      assert.deepEqual(await page.evaluate(()=>__calls.map(call=>call.action)),['LIFE','LIFE','Sit','LIFE']);
+      assert.deepEqual(errors,[]);
+      console.log('PASS: Card-owned chat control notices, SSE ordering, pending receipt updates, failed/dispatch-only outcomes and unchanged state highlights.');
+      return;
+    }
+    if(process.argv.includes('--rule-presentation-only') || process.argv.includes('--rule-layout-only')) {
       await page.evaluate(()=>{
         __lampCard._online=true;
         const region=__lampCard.state_machine.regions[0];
@@ -411,27 +499,163 @@ async function checkInteractions() {
       });
       await page.waitForSelector('.fsm-whiteboard__edge.is-taught');
       const edge='.fsm-whiteboard__edge[data-source="device:OFF"][data-target="device:BLINKING"]';
+      if(process.argv.includes('--rule-layout-only')) {
+        await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+        await page.waitForSelector('.device-whiteboard__directions');
+        const directionSizes=await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.map(button=>{
+          const range=document.createRange();range.selectNodeContents(button);
+          return {width:button.getBoundingClientRect().width,textWidth:range.getBoundingClientRect().width};
+        }));
+        assert.ok(directionSizes.every(size=>size.width-size.textWidth<=24),'Direction backgrounds stay close to their labels instead of stretching across the card');
+        await page.screenshot({path:'/tmp/ssm-direction-tabs-compact.png',fullPage:true});
+        await page.keyboard.press('Escape');
+        await page.evaluate(()=>{window.__layoutTeaching=structuredClone(__training.records[0]);__training.records=[];__emit({type:'training.updated',unit_id:__lampCard.unit_id});});
+        await page.waitForFunction(()=>!document.querySelector('.fsm-whiteboard__event-marker'));
+        await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+        await page.waitForSelector('.device-whiteboard__popover--transition .training-transition-events');
+        assert.ok(await page.$('.device-whiteboard__directions'),'Native-only bidirectional transitions retain direction tabs');
+        assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-custom-events'),null,'The entire empty custom-event section is absent');
+        assert.ok(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events',node=>node.textContent.trim().length>0));
+        await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.find(button=>button.textContent.includes('闪烁 → 熄灭')).click());
+        await page.waitForFunction(()=>document.querySelectorAll('[data-transition-direction]:not([hidden]) .training-transition-events li').length===2);
+        assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-custom-events'),null);
+        assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events',node=>node.textContent),/指定次数完成.*闪烁前为熄灭/);
+        await page.screenshot({path:'/tmp/ssm-native-transition-without-custom.png',fullPage:true});
+        await page.keyboard.press('Escape');
+        await page.evaluate(()=>{__training.records=[{...__layoutTeaching,desired_status:'removed'}];__emit({type:'training.updated',unit_id:__lampCard.unit_id});});
+        await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+        await page.waitForSelector('.device-whiteboard__popover--transition');
+        assert.ok(await page.$('.device-whiteboard__directions'));
+        assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-custom-events'),null,'Removed events cannot leave behind a custom-event heading, divider or empty prompt');
+        await page.keyboard.press('Escape');
+        await page.evaluate(()=>{__training.records=[{...__layoutTeaching,desired_status:'disabled'}];__emit({type:'training.updated',unit_id:__lampCard.unit_id});});
+        await page.waitForSelector('.fsm-whiteboard__event-marker');
+        await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+        await page.waitForSelector('.device-whiteboard__directions');
+        assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-custom-events',node=>node.textContent),/未启用/);
+        await page.keyboard.press('Escape');
+        // ON and BLINKING share the same colour/brightness controls. Measure
+        // the actual visible group rather than the width of its grid tracks.
+        for(const width of [320,390,1440]) {
+          await page.setViewport({width,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+          for(const state of ['ON','BLINKING']) {
+            await page.evaluate(state=>__renderState({ism:state,ts:Date.now()/1000,r:255,g:200,b:80,brightness:180},__lampCard),state);
+            await page.waitForSelector(`.fsm-whiteboard__node.is-current[data-state="device:${state}"]`);
+            await page.waitForSelector('.device-led-controls__wheel');
+            const alignment=await page.$eval('.device-led-controls',node=>{
+              const parent=node.getBoundingClientRect();
+              const wheel=node.querySelector('.device-led-controls__wheel').getBoundingClientRect();
+              const brightness=node.querySelector('.device-led-controls__brightness').getBoundingClientRect();
+              const picker=node.querySelector('.device-led-controls__picker').getBoundingClientRect();
+              const side=node.querySelector('.device-led-controls__side').getBoundingClientRect();
+              const left=Math.min(picker.left,side.left),right=Math.max(picker.right,side.right);
+              return {offsetX:Math.abs((left+right)/2-parent.left-parent.width/2),
+                offsetY:Math.abs(wheel.top+wheel.height/2-brightness.top-brightness.height/2),
+                width:right-left,parentWidth:parent.width,text:node.querySelector('output').textContent};
+            });
+            assert.ok(alignment.offsetX<=1.5,`Lamp ${state} colour/brightness group must be horizontally centred at ${width}px`);
+            assert.ok(alignment.offsetY<=1.5,`Lamp ${state} colour and brightness must share a vertical centre at ${width}px`);
+            assert.ok(alignment.width<=alignment.parentWidth,'Lamp controls stay inside their parent');
+            assert.match(alignment.text,/71%|180/);
+            if(width===390)await page.screenshot({path:`/tmp/ssm-lamp-centred-${state.toLowerCase()}-mobile.png`,fullPage:true});
+          }
+        }
+        await page.evaluate(()=>{
+          const color=__training.catalog.transitions.find(edge=>edge.action==='SET_COLOR' && edge.src==='ON' && edge.dst==='ON');
+          const other={...structuredClone(__layoutTeaching),teaching_id:'keep-color',
+            definition:{situation:'阅读时',origins:['user_delegated'],steps:[{transition_ids:[color.id],conditions:[],defaults:{r:12,g:34,b:56,brightness:160}}]}};
+          __training.records=[structuredClone(__layoutTeaching),other];
+          __state={ism:'ON',ts:Date.now()/1000,epoch:'delete-layout-epoch'};
+          function DeletionProbe(){
+            const training=useTraining(__lampCard.unit_id,{sessionId:'delete-layout',canEdit:true});
+            window.__deletionTraining=training;
+            React.useEffect(()=>{void training.loadAll([__lampCard.unit_id]);},[]);
+            return React.createElement('div',{id:'training-delete-probe',style:{height:'100%',display:'flex'}},
+              React.createElement(DeviceStateBoard,{unitId:__lampCard.unit_id,sm:__lampCard.state_machine,
+                current:'ON',widgets:[],liveState:__state,connected:true,offline:false,actor:'admin',streamHealth:'live',
+                card:__lampCard,training,color:'#b8a4ff'}));
+          }
+          appRoot.render(React.createElement(DeletionProbe));
+        });
+        await page.waitForFunction(()=>__deletionTraining?.records.length===2 && __deletionTraining?.allRecords.length===2);
+        await page.waitForSelector('#training-delete-probe .fsm-whiteboard__edge[data-teaching-ids="expression"] .fsm-whiteboard__event-marker');
+        await page.$eval('#training-delete-probe .fsm-whiteboard__edge[data-teaching-ids="expression"]',node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+        await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-custom-events');
+        const otherBefore=await page.evaluate(()=>JSON.stringify(__deletionTraining.records.find(record=>record.teaching_id==='keep-color')));
+        const startRemoval=mode=>page.evaluate(mode=>{
+          window.__invalidDeleteReceipt=mode;window.__deleteOutcome='pending';window.__deleteError='';
+          const record=__deletionTraining.records.find(item=>item.teaching_id==='expression');
+          window.__deletePromise=__deletionTraining.remove(record).then(result=>{
+            window.__deleteOutcome='resolved';window.__deleteResult=result;
+          },error=>{window.__deleteOutcome='rejected';window.__deleteError=error.message;});
+        },mode);
+        for(const invalid of ['wrong_id','same_revision','enabled']) {
+          await startRemoval(invalid);
+          await page.waitForFunction(()=>__deleteOutcome==='rejected');
+          assert.match(await page.evaluate(()=>__deleteError),/删除回执/);
+          assert.ok(await page.$('#training-delete-probe .fsm-whiteboard__edge[data-teaching-ids="expression"] .fsm-whiteboard__event-marker'),'An invalid deletion receipt cannot remove the event marker');
+          assert.equal(await page.evaluate(()=>__deletionTraining.records.find(record=>record.teaching_id==='expression').desired_status),'enabled');
+        }
+        await page.evaluate(()=>{window.__deleteFailure=true;});
+        await startRemoval(false);
+        await page.waitForFunction(()=>__deleteOutcome==='rejected');
+        assert.match(await page.evaluate(()=>__deleteError),/模拟删除请求失败/);
+        assert.equal(await page.evaluate(()=>__deletionTraining.allRecords.find(record=>record.teaching_id==='expression').desired_status),'enabled');
+        await page.evaluate(()=>{
+          window.__deleteFailure=false;
+          const now=Date.now()/1000;
+          __emit({type:'agent_progress',result_kind:'training',agent_id:__lampCard.unit_id,teaching_id:'expression',
+            revision:1,version:1,run_id:'delete-layout-run',step_id:'delete-layout-run:0',step_index:0,
+            transition_id:__layoutTeaching.definition.steps[0].transition_ids[0],device_epoch:'delete-layout-epoch',
+            ts:now,sequence:0,fact_kind:'call',stage:'executing'});
+          window.__holdNextTrainingRead=true;
+          window.__staleLoadDone=false;
+          window.__staleLoadPromise=__deletionTraining.load().then(()=>{window.__staleLoadDone=true;});
+        });
+        await page.waitForFunction(()=>__heldTrainingReadQueue?.length===1 && __deletionTraining.activities.expression);
+        await page.evaluate(()=>{window.__holdReadsAfterDelete=true;});
+        await startRemoval(false);
+        await page.waitForFunction(()=>__deleteOutcome==='resolved',{timeout:3000});
+        await page.waitForFunction(()=>!document.querySelector('#training-delete-probe .fsm-whiteboard__edge[data-teaching-ids="expression"] .fsm-whiteboard__event-marker'));
+        assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-custom-events'),null,'Deleting the last custom event immediately removes its complete section');
+        assert.ok(await page.$('.device-whiteboard__directions'),'Deleting custom events does not hide native direction navigation');
+        assert.ok(await page.$('[data-transition-direction]:not([hidden]) .training-transition-events'));
+        assert.equal(await page.evaluate(()=>__deleteResult),true);
+        assert.equal(await page.evaluate(()=>__deletionTraining.records.find(record=>record.teaching_id==='expression').desired_status),'removed');
+        assert.equal(await page.evaluate(()=>__deletionTraining.allRecords.find(record=>record.teaching_id==='expression').desired_status),'removed');
+        assert.equal(await page.evaluate(()=>!!__deletionTraining.activities.expression),false,'A confirmed deletion immediately retires its execution highlight');
+        assert.ok(await page.evaluate(()=>__heldTrainingReadQueue.length>=3),'The snapshot/history refresh is still waiting after remove has resolved');
+        assert.ok(await page.$('#training-delete-probe .fsm-whiteboard__edge[data-teaching-ids="keep-color"] .fsm-whiteboard__event-marker'),'Other saved events retain their marker');
+        assert.equal(await page.evaluate(()=>JSON.stringify(__deletionTraining.records.find(record=>record.teaching_id==='keep-color'))),otherBefore);
+        await page.evaluate(()=>{const stale=__heldTrainingReadQueue.shift();stale.resolve(stale.payload);});
+        await page.waitForFunction(()=>__staleLoadDone);
+        assert.equal(await page.evaluate(()=>__deletionTraining.records.find(record=>record.teaching_id==='expression').desired_status),'removed','An older in-flight GET cannot resurrect the deleted event');
+        assert.ok(await page.evaluate(()=>__heldTrainingReadQueue.length>0));
+        await page.screenshot({path:'/tmp/ssm-training-delete-immediate.png',fullPage:true});
+        await page.evaluate(()=>{
+          window.__heldTrainingReads=false;window.__holdReadsAfterDelete=false;
+          for(const read of __heldTrainingReadQueue.splice(0))read.resolve(read.payload);
+        });
+        assert.equal(await page.evaluate(()=>__calls.length),0,'Presentation checks never execute a device command');
+        assert.deepEqual(errors,[]);
+        console.log('PASS: compact bidirectional navigation, no empty custom-event section, centred lamp controls and immediate receipt-backed deletion while refreshes are pending.');
+        return;
+      }
       await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      await page.waitForSelector('.training-inspector__card');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card');
       assert.equal(await page.$('.device-whiteboard__rule-or'),null);
-      const sizes=await page.evaluate(()=>({
-        title:getComputedStyle(document.querySelector('.training-inspector__card h3')).fontSize,
-        action:getComputedStyle(document.querySelector('.training-rule-group__heading strong')).fontSize,
-        label:getComputedStyle(document.querySelector('.training-rule-parameters dt')).fontSize,
-        value:getComputedStyle(document.querySelector('.training-rule-parameters dd')).fontSize,
-      }));
-      assert.deepEqual(sizes,{title:'18px',action:'16px',label:'14px',value:'16px'});
-      assert.ok(await page.$eval('.training-rule-content',node=>node.textContent.includes('次数')));
-      await page.click('.training-inspector__revise');
-      await page.waitForSelector('input[aria-label="次数参数"]');
+      assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-rule-title',node=>node.textContent),/开心.*闪烁.*3.*次/);
+      assert.equal(await page.$('.training-rule-group__heading'),null,'Compact cards use one sentence instead of stacked action/parameter sections');
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：次数"]');
       await page.screenshot({path:'/tmp/ssm-rule-hierarchy-mobile.png',fullPage:true});
-      await page.$$eval('.training-parameter-actions button',nodes=>nodes.find(node=>node.textContent==='取消').click());
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',nodes=>nodes.find(node=>node.textContent==='取消').click());
       await page.$$eval('.device-whiteboard__directions button',nodes=>nodes.find(node=>node.textContent.includes('闪烁 → 熄灭')).click());
-      await page.waitForFunction(()=>document.querySelectorAll('.training-transition-events li').length===2);
-      const list=await page.$eval('.training-transition-events',node=>node.textContent);
-      assert.match(list,/请求关灯/);assert.match(list,/有限闪烁完成/);assert.match(list,/闪烁前为熄灭/);
-      assert.equal(await page.$$('.training-inspector').then(nodes=>nodes.length),1);
-      assert.equal(await page.$('.training-inspector__card'),null,'A completion event must not inherit the rule that starts blinking');
+      await page.waitForFunction(()=>document.querySelectorAll('[data-transition-direction]:not([hidden]) .training-transition-events li').length===2);
+      const list=await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events',node=>node.textContent);
+      assert.match(list,/收到关灯指令|请求关灯/);assert.match(list,/指定次数完成|有限闪烁完成/);assert.match(list,/闪烁前为熄灭/);
+      assert.equal(await page.$$('[data-transition-direction]:not([hidden]) .training-inspector').then(nodes=>nodes.length),1);
+      assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-inspector__card'),null,'A completion event must not inherit the rule that starts blinking');
       for(const width of [320,390]){
         await page.setViewport({width,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
         assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
@@ -472,7 +696,7 @@ async function checkInteractions() {
       await page.evaluate(()=>__renderState(__state,{...__card,_online:false}));
       await assertInactive('MQTT offline must override cached connected=true, posture, pending actions and teaching activity');
       await page.$eval('.fsm-whiteboard__edge[data-action="Sit"]',node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      await page.waitForSelector('.training-inspector__card');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card');
       assert.equal(await page.evaluate(()=>__calls.length),0,'Offline inspection sent a physical action');
       await page.screenshot({path:'/tmp/ssm-offline-rules.png',fullPage:true});
       await page.keyboard.press('Escape');
@@ -621,7 +845,7 @@ async function checkInteractions() {
         const edge=__sm.regions.find(r=>r.id==='body').transitions.find(t=>t.action==='Sit' && t.src==='standing');
         edge.id='tr_sit'; edge.training_fixed_params=[];
         __training.catalog.transitions=[{id:'tr_sit',trainable:true,src:'standing',dst:'sitting',state_field:'body_state',source_label:'站立',destination_label:'坐下'}];
-        __training.catalog.events=[{id:'vision.owner_recognized',name:'识别到主人'}];
+        __training.catalog.events=[{id:'vision.owner_recognized',name:'识别到主人',fields:{recognized:'boolean'}},{id:'vision.target_presence',name:'看到目标物体',fields:{target:'string',detected:'boolean'}}];
         __training.catalog.limits={cooldown_s:{minimum:1,maximum:3600}};
         __training.catalog.presentation={actions:{Sit:'坐下'}};
         __training.catalog.transitions[0].action='Sit';
@@ -638,9 +862,10 @@ async function checkInteractions() {
       await page.waitForSelector('.fsm-whiteboard__edge[data-teaching-ids="teach1"].is-taught');
       assert.equal(await page.$('.state-teachings'),null,'Teaching belongs in the graph, without a duplicate top section');
       assert.ok(await page.$('.fsm-whiteboard__edge .fsm-whiteboard__rule-badge'),'Saved rules need a persistent marker');
+      assert.equal(await page.$$('.fsm-whiteboard__edge:not(.is-taught) .fsm-whiteboard__event-marker').then(nodes=>nodes.length),0,'Preset-only connections do not show event dots');
       assert.equal(await page.$('.fsm-whiteboard__edge text'),null,'Rule markers must not add text to the lines');
       assert.equal(await page.$('.fsm-whiteboard__legend'),null,'The graph must not include an explanatory legend');
-      assert.ok(await page.$eval('.fsm-whiteboard__edge.is-taught',node=>node.getAttribute('aria-label').includes('识别到主人')));
+      assert.ok(await page.$eval('.fsm-whiteboard__edge.is-taught',node=>node.getAttribute('aria-label').includes('看到（主人）')));
       assert.ok(await page.$('.fsm-whiteboard__node[data-state="body:standing"].is-current'));
       const count=await page.evaluate(()=>__calls.length);
       await page.screenshot({path:'/tmp/ssm-training-graph.png',fullPage:true});
@@ -666,27 +891,114 @@ async function checkInteractions() {
       });
       await page.waitForFunction(()=>document.querySelector('.fsm-whiteboard__edge[data-action="Sit"]')?.dataset.teachingIds.split(',').length===12);
       await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
-      await page.waitForFunction(()=>document.querySelectorAll('.training-inspector__card').length===12);
+      await page.waitForFunction(()=>document.querySelectorAll('[data-transition-direction]:not([hidden]) .training-inspector__card').length===12);
+      assert.equal(await page.$('.device-whiteboard__popover--expanded'),null,'Transition events must not use an expanded panel');
+      assert.ok(await page.$eval('.device-whiteboard__popover--transition',node=>{
+        const rect=node.getBoundingClientRect();return rect.width<=280 && rect.height<=248 && rect.height<innerHeight*.5;
+      }),'A transition card must leave the state machine visible');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events',node=>!!node.querySelector('button,input,select')),false,'Preset events are read-only');
+      assert.ok(await page.$('[data-transition-direction]:not([hidden]) .training-custom-events'));
       assert.equal(await page.$$('.fsm-whiteboard__rule-badge').then(nodes=>nodes.length),1,'Multiple rules on one direction share a compact marker');
       assert.ok(await page.$eval('.device-whiteboard__popover-body',node=>node.scrollHeight>node.clientHeight),'Many rules must scroll inside the popover');
-      assert.ok(await page.$eval('.training-inspector',node=>{
-        const base=getComputedStyle(node.querySelector('.training-transition-events'));
-        const card=getComputedStyle(node.querySelector('.training-inspector__card'));
-        return base.backgroundColor!==card.backgroundColor && parseFloat(card.borderLeftWidth)>parseFloat(base.borderLeftWidth);
-      }),'Original rules and teachings need distinct backgrounds and borders');
+      assert.equal(await page.$('.device-whiteboard__popover--transition button[aria-label^="关闭"]'),null,'Compact transition cards close through outside interaction');
+      const fixedTop=await page.$eval('.device-whiteboard__popover-heading',node=>node.getBoundingClientRect().top);
+      const tabsTop=await page.$eval('.device-whiteboard__directions',node=>node.getBoundingClientRect().top);
+      await page.$eval('.device-whiteboard__popover-body',node=>{node.scrollTop=node.scrollHeight;});
+      assert.equal(await page.$eval('.device-whiteboard__popover-heading',node=>node.getBoundingClientRect().top),fixedTop,'The transition title stays fixed while events scroll');
+      assert.equal(await page.$eval('.device-whiteboard__directions',node=>node.getBoundingClientRect().top),tabsTop,'Direction tabs stay fixed while events scroll');
       await page.screenshot({path:'/tmp/ssm-training-many-rules.png',fullPage:true});
-      const lastRevise=(await page.$$('.training-inspector__revise')).at(-1);
+      const lastRevise=(await page.$$('[data-transition-direction]:not([hidden]) .training-inspector__revise')).at(-1);
       await lastRevise.scrollIntoView();
       await lastRevise.click();
-      await page.waitForSelector('.training-inspector__card[data-teaching-id="teach-11"] input[aria-label="秒参数"]');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card[data-teaching-id="teach-11"] input[aria-label="事件参数：看到的对象"]');
       assert.equal(await page.$('.training-selection'),null,'Parameter editing must stay in the original rule card');
-      await page.$$eval('.training-inspector__card[data-teaching-id="teach-11"] button',buttons=>buttons.find(b=>b.textContent==='取消').click());
-      await page.keyboard.press('Escape');
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-inspector__card[data-teaching-id="teach-11"] button',buttons=>buttons.find(b=>b.textContent==='取消').click());
+      await page.mouse.click(195,28);
+      await page.waitForFunction(()=>!document.querySelector('.device-whiteboard__popover--transition'));
       await page.evaluate(()=>{
         __training.records=[__originalTeaching];
         __emit({type:'training.updated',unit_id:'go2'});
       });
       await page.waitForFunction(()=>document.querySelector('.fsm-whiteboard__edge[data-action="Sit"]')?.dataset.teachingIds==='teach1');
+      await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]',input=>input.tagName),'INPUT');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]',input=>input.type),'text');
+      assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-inspector select'),null,'Inline parameters use free text inputs');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]',button=>button.disabled),true,'Unchanged event parameters cannot be saved');
+      const setTarget=async value=>page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]',(input,value)=>{
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      },value);
+      await setTarget('花');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]',button=>button.disabled),false);
+      assert.ok(await page.$('[data-transition-direction]:not([hidden]) .training-parameter-actions .btn--accent'));
+      const chatRequestsBefore=await page.evaluate(()=>__calls.length);
+      await page.evaluate(()=>{window.__parameterConflict=true;});
+      await page.click('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card .training-error');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]',input=>input.value),'花');
+      await page.evaluate(()=>{window.__parameterConflict=false;window.__parameterDelay=400;});
+      await page.click('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]');
+      await page.waitForFunction(()=>document.querySelector('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]')?.textContent.includes('保存中'));
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]',button=>button.disabled),true);
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-save-success');
+      assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-save-success',node=>node.textContent),/已更新/);
+      assert.equal(await page.evaluate(()=>__training.records[0].definition.trigger.where.target),'花');
+      assert.equal(await page.evaluate(()=>__requests.filter(r=>r.options.method==='PATCH').at(-1).options.body.event_target),'花');
+      assert.equal(await page.evaluate(()=>__calls.length),chatRequestsBefore,'Direct event edits must not call chat or execute a device action');
+      await page.screenshot({path:'/tmp/ssm-event-parameter-saved.png',fullPage:true});
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await setTarget('主人');
+      await page.click('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-save-success');
+      await page.evaluate(()=>{window.__parameterDelay=0;window.__originalTeaching=structuredClone(__training.records[0]);});
+      await page.keyboard.press('Escape');
+      await page.evaluate(()=>{
+        const edge=__sm.regions.find(r=>r.id==='body').transitions.find(t=>t.src==='sitting' && t.dst==='standing');
+        edge.id='tr_reverse';
+        __training.catalog.transitions.push({id:'tr_reverse',action:edge.action,src:'sitting',dst:'standing',
+          state_field:'body_state',source_label:'坐下',destination_label:'站立',params_schema:{properties:{}},fixed_params:[]});
+        __training.catalog.presentation.actions[edge.action]='站立';
+        __training.records.push({...structuredClone(__originalTeaching),teaching_id:'reverse-event',revision:1,history:[],
+          definition:{trigger:{event_id:'vision.target_presence',where:{target:'椅子',detected:true}},origins:['agent_autonomous'],
+            steps:[{transition_ids:['tr_reverse'],defaults:{},conditions:[],goal_state:'standing'}]}});
+        __renderState(__state);__emit({type:'training.updated',unit_id:'go2'});
+      });
+      await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card[data-teaching-id="teach1"]');
+      const originalForward=await page.evaluate(()=>JSON.stringify(__training.records.find(r=>r.teaching_id==='teach1')));
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await setTarget('花');
+      await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.find(button=>button.textContent.includes('坐下 → 站立')).click());
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card[data-teaching-id="reverse-event"]');
+      assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-inspector__card[data-teaching-id="teach1"]'),null,'The reverse tab only shows its own events');
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await setTarget('盒子');
+      await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.find(button=>button.textContent.includes('站立 → 坐下')).click());
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]',input=>input.value),'花','Switching direction preserves the forward draft');
+      await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.find(button=>button.textContent.includes('坐下 → 站立')).click());
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：看到的对象"]',input=>input.value),'盒子','Switching back preserves the reverse draft independently');
+      await page.evaluate(()=>{window.__parameterDelay=400;});
+      await page.click('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]');
+      await page.waitForFunction(()=>[...document.querySelectorAll('.device-whiteboard__directions button')].every(button=>button.disabled));
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-save-success');
+      assert.equal(await page.evaluate(()=>JSON.stringify(__training.records.find(r=>r.teaching_id==='teach1'))),originalForward,'Saving a reverse event cannot modify the forward event');
+      const savedReverse=await page.evaluate(()=>JSON.stringify(__training.records.find(r=>r.teaching_id==='reverse-event')));
+      await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.find(button=>button.textContent.includes('站立 → 坐下')).click());
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card[data-teaching-id="teach1"]');
+      await setTarget('树');
+      await page.click('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-save-success');
+      assert.equal(await page.evaluate(()=>JSON.stringify(__training.records.find(r=>r.teaching_id==='reverse-event'))),savedReverse,'Saving a forward event cannot modify the reverse event');
+      await page.screenshot({path:'/tmp/ssm-compact-direction-save.png',fullPage:true});
+      await page.keyboard.press('Escape');
+      await page.evaluate(()=>{
+        __training.records=[structuredClone(__originalTeaching)];window.__parameterDelay=0;
+        __emit({type:'training.updated',unit_id:'go2'});
+      });
       await page.evaluate(()=>{
         __training.catalog.hash='new-capabilities';
         __training.records[0].capability_hash='old-capabilities';
@@ -696,13 +1008,18 @@ async function checkInteractions() {
       await page.waitForSelector('.fsm-whiteboard__edge.is-teaching-unconfirmed');
       assert.equal(await page.$('.fsm-whiteboard__edge.is-teaching-result'),null,'An incompatible association must not retain an active highlight');
       await page.tap('.fsm-whiteboard__edge[data-action="Sit"]');
-      await page.waitForSelector('.training-inspector');
-      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('识别到主人'));
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector');
+      await page.waitForFunction(()=>{
+        const text=document.querySelector('[data-transition-direction]:not([hidden]) .training-inspector')?.textContent || '';
+        return text.includes('看到') && text.includes('主人');
+      });
       assert.equal(await page.evaluate(()=>__calls.length),count,'Line inspection sent a command');
-      assert.ok(await page.$eval('.training-inspector__notice',node=>node.textContent.includes('能力已变化')));
-      assert.equal(await page.$eval('.training-transition-events h4',node=>node.textContent),'触发事件');
-      assert.ok(await page.$('.training-inspector__card h3.training-rule-title'));
-      assert.equal(await page.$('.training-inspector__revise'),null,'Incompatible capabilities cannot be edited against a stale schema');
+      assert.ok(await page.$eval('[data-transition-direction]:not([hidden]) .training-inspector__notice',node=>node.textContent.includes('能力已变化')));
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events h4',node=>node.textContent),'预置事件');
+      assert.ok(await page.$('[data-transition-direction]:not([hidden]) .training-inspector__card h3.training-rule-title'));
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button[type="submit"]',button=>button.disabled),true,'Incompatible capabilities cannot be saved against a stale schema');
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(button=>button.textContent==='重新载入' || button.textContent==='取消').click());
       await page.screenshot({path:'/tmp/ssm-training-rule-card.png',fullPage:true});
       await page.evaluate(()=>{
         __training.catalog.hash='hash';
@@ -722,8 +1039,13 @@ async function checkInteractions() {
         __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p1'});
       });
       await page.waitForSelector('.chat-messages .training-change');
+      assert.ok(await page.$eval('.training-event-chain',node=>node.textContent.includes('站立') && node.textContent.includes('坐下')));
+      assert.equal(await page.$('.training-event-chain__event'),null,'The compact chat card does not repeat the event inside its state pair');
+      assert.ok(await page.$eval('.training-change',node=>node.textContent.includes('看到主人时') && node.textContent.includes('切换到坐下')));
+      assert.ok(await page.$eval('.training-change__status',node=>node.textContent==='待确认'));
+      assert.equal(await page.$('.training-event-details'),null,'The sentence replaces redundant parameter rows');
       assert.equal(await page.$eval('.chat-messages',node=>node.textContent.split('以后坐下后等三秒才能再次坐下').length-1),1,'Proposal duplicated the original user message');
-      assert.equal(await page.$eval('.training-change',node=>/待确认|用户委托|已加载|JSON/.test(node.textContent)),false);
+      assert.equal(await page.$eval('.training-change',node=>/用户委托|已加载|JSON/.test(node.textContent)),false);
       assert.equal(await page.$('.training-change button[aria-label="修改规则"]'),null,'Drafts must not send parameter edits back into chat');
       await page.type('.device-page__chat input','改成五秒');
       await page.keyboard.press('Enter');
@@ -738,12 +1060,50 @@ async function checkInteractions() {
       await page.waitForFunction(()=>document.querySelectorAll('.chat-messages .training-change').length===2);
       assert.equal(await page.$('.training-change__version--before'),null,'A new rule must not invent a previous saved version');
       await page.evaluate(()=>window.__conflict=true);
-      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='保存规则').click());
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='确认并生效').click());
       await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('规则已经变化'));
       await page.evaluate(()=>window.__conflict=false);
-      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='保存规则').click());
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='确认并生效').click());
       await page.waitForFunction(()=>__proposals.find(p=>p.proposal_id==='p2').confirmed);
       await page.waitForFunction(()=>document.querySelectorAll('.training-change .training-actions').length===0);
+      assert.equal(await page.$('.training-change--active'),null,'A saved event must wait for the exact executor load acknowledgement');
+      assert.ok(await page.$eval('.chat-messages',node=>node.textContent.includes('等待设备加载')));
+      await page.evaluate(()=>{
+        __training.records[0].loaded_revision=__training.records[0].revision;
+        __training.records[0].load_status='loaded';
+        __emit({type:'training.loaded',unit_id:'go2'});
+      });
+      await page.waitForSelector('.training-change--active');
+      assert.equal(await page.$$('.training-change--active button').then(nodes=>nodes.length),1);
+      assert.match(await page.$eval('.training-change--active',node=>node.textContent),/看到主人时.*切换到坐下/);
+      assert.ok(await page.$('.training-change--active button[aria-label="查看状态转移"] svg'));
+      assert.equal(await page.$eval('.training-change--active button[aria-label="查看状态转移"]',node=>node.textContent.trim()),'');
+      assert.deepEqual(await page.$eval('.training-change--active',node=>{
+        const pair=getComputedStyle(node.querySelector('.training-event-chain__path'));
+        const icon=getComputedStyle(node.querySelector('[aria-label="查看状态转移"]'));
+        return {pairFont:pair.fontSize,iconPosition:icon.position,iconMarginTop:icon.marginTop,
+          iconWidth:icon.width,iconHeight:icon.height};
+      }),
+      {pairFont:'12px',iconPosition:'absolute',iconMarginTop:'0px',iconWidth:'44px',iconHeight:'44px'},
+      'The mobile state pair remains small and the accessible locate icon stays compact');
+      assert.ok(await page.$eval('.training-change--active',node=>{
+        const card=node.getBoundingClientRect(),button=node.querySelector('[aria-label="查看状态转移"]').getBoundingClientRect();
+        return button.top-card.top<20 && card.right-button.right<20;
+      }),'The accessible locate icon remains in the top right corner');
+      await page.screenshot({path:'/tmp/ssm-event-active-chat.png',fullPage:true});
+      const pointerSession=await page.createCDPSession();
+      await page.setViewport({width:1440,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+      await pointerSession.send('Emulation.setTouchEmulationEnabled',{enabled:false});
+      assert.deepEqual(await page.$eval('.training-change--active button[aria-label="查看状态转移"]',node=>{
+        const style=getComputedStyle(node);return {width:style.width,height:style.height,marginTop:style.marginTop};
+      }),{width:'32px',height:'32px',marginTop:'0px'},'The desktop locate icon uses the compact fine-pointer size');
+      await pointerSession.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+      await pointerSession.detach();
+      await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+      await page.click('.training-change--active .training-event-locate');
+      await page.waitForSelector('.device-whiteboard__popover--transition [data-transition-direction]:not([hidden]) .training-inspector__card.is-new');
+      assert.ok(await page.$('.fsm-whiteboard__edge.is-selected'),'View transition must select and open the matching graph connection');
+      await page.keyboard.press('Escape');
       assert.equal(await page.$$('.chat-messages .training-change').then(nodes=>nodes.length),2,'Confirmation removed the history card');
       assert.equal(await page.evaluate(()=>__calls.filter(r=>r.action!=='chat').length),0,'Confirmation sent a device action');
       await page.evaluate(()=>{
@@ -751,7 +1111,7 @@ async function checkInteractions() {
         __emit({type:'training.proposed',unit_id:'go2',proposal_id:'p3'});
       });
       await page.waitForFunction(()=>document.querySelectorAll('.training-change').length===3);
-      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='取消').click());
+      await page.$$eval('.training-change button',buttons=>buttons.find(b=>b.textContent==='先不添加').click());
       await page.waitForFunction(()=>__proposals.find(p=>p.proposal_id==='p3').cancelled);
       await page.click('.device-header__settings');
       await page.$$eval('.device-settings-go2', nodes => nodes.find(node => node.textContent.includes('设备规则')).click());
@@ -759,13 +1119,14 @@ async function checkInteractions() {
       assert.equal(await page.$eval('.training-drawer',node=>/已加载|暂停|启用|伙伴训练/.test(node.textContent)),false);
       assert.equal(await page.$$eval('.training-record__actions button',nodes=>nodes.every(node=>!node.textContent.trim() && node.querySelector('svg') && node.getAttribute('aria-label'))),true);
       await page.click('.training-record button[aria-label="修改参数"]');
-      await page.waitForSelector('.training-record input[aria-label="秒参数"]');
+      await page.waitForSelector('.training-record input[type="text"]');
       assert.equal(await page.$('.training-selection'),null);
       assert.ok(await page.$('.training-drawer'),'Editing must not navigate away from the rule list');
       await page.$$eval('.training-record button',buttons=>buttons.find(b=>b.textContent==='取消').click());
       await page.click('.training-record button[aria-label="删除规则"]');
       await page.waitForFunction(()=>document.querySelectorAll('.training-record').length===0);
-      assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/proposals' && r.options.body.operation==='remove')),true);
+      assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/teach1' && r.options.method==='DELETE')),true);
+      assert.equal(await page.evaluate(()=>__requests.some(r=>r.url==='/api/training/proposals' && r.options.body.operation==='remove')),false,'Direct deletion must not create a conversation proposal');
       await page.keyboard.press('Escape');
       await page.evaluate(()=>{
         __renderState({...__state},__lampCard);
@@ -798,27 +1159,28 @@ async function checkInteractions() {
       await page.waitForSelector(loopSelector);
       const callsBeforeInspect=await page.evaluate(()=>__calls.length);
       await page.$eval(loopSelector,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      await page.waitForFunction(()=>document.querySelector('.training-inspector')?.textContent.includes('255'));
-      assert.equal(await page.$eval('.training-inspector',node=>/已保存|已加载|已应用/.test(node.textContent)),false);
+      await page.waitForFunction(()=>document.querySelector('[data-transition-direction]:not([hidden]) .training-inspector')?.textContent.includes('255'));
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) .training-inspector',node=>/已保存|已加载|已应用/.test(node.textContent)),false);
       assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect,'Parameter inspection executed an action');
       await page.screenshot({path:'/tmp/ssm-lamp-teaching-preview.png',fullPage:true});
-      await page.click('.training-inspector__revise');
-      await page.waitForSelector('input[aria-label="brightness参数"]');
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) input[data-path="step:0:brightness"]');
       assert.equal(await page.$('.training-selection'),null);
-      await page.$eval('input[aria-label="brightness参数"]',input=>{
+      await page.$eval('[data-transition-direction]:not([hidden]) input[data-path="step:0:brightness"]',input=>{
         const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
         setter.call(input,'190');input.dispatchEvent(new Event('input',{bubbles:true}));
       });
-      await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
-      await page.waitForFunction(()=>__training.records[0].revision===2 && !document.querySelector('.training-parameter-actions'));
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForFunction(()=>__training.records[0].revision===2 && !document.querySelector('[data-transition-direction]:not([hidden]) .training-parameter-actions'));
       assert.equal(await page.evaluate(()=>__training.records[0].definition.steps[0].defaults.brightness),190);
+      assert.deepEqual(await page.evaluate(()=>__training.records[0].definition.steps[0].defaults),{r:255,g:236,b:210,brightness:190},'Editing brightness preserves every other saved color parameter');
       assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect);
       await page.keyboard.press('Escape');
       await page.evaluate(()=>{
         const transitions=__lampCard.state_machine.regions.find(region=>region.id==='device').transitions.filter(edge=>edge.action==='BLINK');
         __training.records=[{unit_id:__lampCard.unit_id,teaching_id:'happy-blink',revision:1,history:[],desired_status:'enabled',capability_hash:__training.catalog.hash,
           name:'开心时闪烁5下',definition:{emotion:'happy',trigger:null,origins:['user_delegated','agent_autonomous'],
-            steps:[{transition_ids:transitions.map(edge=>edge.id),conditions:[],defaults:{count:5}}]}}];
+            steps:[{transition_ids:transitions.map(edge=>edge.id),conditions:[],defaults:{count:5,r:120,g:40,b:210}}],cooldown_s:12}}];
         __renderState({ism:'BLINKING',count:5,ts:Date.now()/1000+1},__lampCard);
         __emit({type:'training.updated',unit_id:__lampCard.unit_id});
       });
@@ -830,30 +1192,59 @@ async function checkInteractions() {
       assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect);
       await page.screenshot({path:'/tmp/ssm-lamp-happy-rule-mobile.png',fullPage:true});
       await page.$eval(blinkLoop,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
-      await page.waitForSelector('.training-transition-events__self');
-      assert.match(await page.$eval('.training-transition-events__self',node=>node.textContent),/不会沿箭头自动重复/);
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-transition-events__self');
+      for(const value of ['120','40','210','12'])assert.ok(await page.$eval('[data-transition-direction]:not([hidden]) .training-rule-title',(node,value)=>node.textContent.includes(value),value),'The sentence retains non-default colors and cooldown');
+      assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events__self',node=>node.textContent),/源状态与目标状态相同/);
       assert.ok(await page.$eval('.fsm-whiteboard__rule-ring',node=>Number(node.getAttribute('r'))<=3.5),'The line marker must stay small');
-      await page.click('.training-inspector__revise');
-      await page.waitForSelector('input[aria-label="count参数"]');
+      await page.click('[data-transition-direction]:not([hidden]) .training-inspector__revise');
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：次数"]');
       assert.equal(await page.$('.training-selection'),null);
-      assert.equal(await page.$eval('input[aria-label="count参数"]',input=>input.max),'20');
-      const setCount=async value=>page.$eval('input[aria-label="count参数"]',(input,value)=>{
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：次数"]',input=>input.type),'text');
+      assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-inspector select'),null);
+      const setCount=async value=>page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：次数"]',(input,value)=>{
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);
         input.dispatchEvent(new Event('input',{bubbles:true}));
       },value);
+      const patchesBeforeInvalid=await page.evaluate(()=>__requests.filter(r=>r.options.method==='PATCH').length);
+      await setCount('21');
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card .training-error');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：次数"]',input=>input.value),'21','Invalid numeric text remains available for correction');
+      assert.equal(await page.evaluate(()=>__requests.filter(r=>r.options.method==='PATCH').length),patchesBeforeInvalid,'Out-of-range values are rejected before the API request');
+      await setCount('1.5');
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      assert.equal(await page.evaluate(()=>__requests.filter(r=>r.options.method==='PATCH').length),patchesBeforeInvalid,'Integer schema still applies to text inputs');
+      const emotionInput='[data-transition-direction]:not([hidden]) input[aria-label="事件参数：情绪"]';
+      assert.equal(await page.$eval(emotionInput,input=>input.type),'text');
+      assert.equal(await page.$eval(emotionInput,input=>input.value),'开心');
+      await page.$eval(emotionInput,input=>{
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'兴奋');
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      });
+      await setCount('6');
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      assert.equal(await page.evaluate(()=>__requests.filter(r=>r.options.method==='PATCH').length),patchesBeforeInvalid,'Unsupported emotion labels cannot bypass the enum schema');
+      assert.equal(await page.$eval(emotionInput,input=>input.value),'兴奋');
+      await page.$eval(emotionInput,input=>{
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'好奇');
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      });
       await setCount('6');
       await page.evaluate(()=>window.__parameterConflict=true);
-      await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
-      await page.waitForSelector('.training-inspector__card .training-error');
-      assert.equal(await page.$eval('input[aria-label="count参数"]',input=>input.value),'6','A conflict must preserve unsaved input');
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForSelector('[data-transition-direction]:not([hidden]) .training-inspector__card .training-error');
+      assert.equal(await page.$eval('[data-transition-direction]:not([hidden]) input[aria-label="事件参数：次数"]',input=>input.value),'6','A conflict must preserve unsaved input');
       assert.equal(await page.evaluate(()=>__training.records[0].revision),1);
       await page.evaluate(()=>window.__parameterConflict=false);
       await setCount('7');
       await page.screenshot({path:'/tmp/ssm-rule-parameter-editor-mobile.png',fullPage:true});
       const cardsBefore=await page.$$('.chat-rule-message').then(nodes=>nodes.length);
-      await page.$$eval('.training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
-      await page.waitForFunction(()=>__training.records[0].revision===2 && !document.querySelector('.training-parameter-actions'));
+      await page.$$eval('[data-transition-direction]:not([hidden]) .training-parameter-actions button',buttons=>buttons.find(b=>b.textContent==='保存').click());
+      await page.waitForFunction(()=>__training.records[0].revision===2 && !document.querySelector('[data-transition-direction]:not([hidden]) .training-parameter-actions'));
       assert.equal(await page.evaluate(()=>__training.records[0].definition.steps[0].defaults.count),7);
+      assert.equal(await page.evaluate(()=>__training.records[0].definition.emotion),'curious','Chinese emotion text maps back to its declared enum value');
+      assert.deepEqual(await page.evaluate(()=>__training.records[0].definition.steps[0].defaults),{count:7,r:120,g:40,b:210},'Saving inline count preserves additional action parameters');
+      assert.equal(await page.evaluate(()=>__training.records[0].definition.cooldown_s),12);
       assert.equal(await page.$$('.fsm-whiteboard__rule-badge').then(nodes=>nodes.length),3,'One saved rule must continue to annotate all its transitions');
       assert.equal(await page.$$('.chat-rule-message').then(nodes=>nodes.length),cardsBefore,'A parameter save must not add conversation cards');
       assert.equal(await page.evaluate(()=>__calls.length),callsBeforeInspect,'Editing parameters must not dispatch chat or physical actions');
@@ -864,7 +1255,7 @@ async function checkInteractions() {
       }
       await page.screenshot({path:'/tmp/ssm-lamp-happy-rule-desktop.png',fullPage:true});
       assert.deepEqual(errors,[]);
-      console.log('PASS: marked taught links, distinct rule cards, factual execution highlights, per-rule revision, in-chat comparison, conflict/history preservation, direct deletion and responsive viewport.');
+      console.log('PASS: compact event popovers, inline target saving and conflict recovery, complete proposal chains, exact load acknowledgements, transition navigation, direct deletion and responsive layout.');
       return;
     }
     if (process.argv.includes('--reachability-only')) {

@@ -94,12 +94,61 @@ async def test_actual_teaching_workflow_publishes_exact_phases_and_survives_disp
     assert adapter.last_result['result'] == 'ok'
     robot.send_command.assert_awaited_once_with('Hello')
     if display_available:
-        assert [item['fact_kind'] for item in published] == ['observation', 'call', 'result']
-        assert [item['sequence'] for item in published] == [0, 1, 2]
+        assert [item['fact_kind'] for item in published] == ['observation', 'call', 'result', 'result']
+        assert [item['sequence'] for item in published] == [0, 1, 2, 4]
+        assert published[-1]['public_result']['training_run_finished'] is True
+        assert published[-1]['public_result']['step_count'] == published[-1]['public_result']['total_steps'] == 1
         assert {item['observation_event_id'] for item in published} == {'fresh-appearance'}
         assert {item['frame_id'] for item in published} == {17}
         assert len({item['transition_id'] for item in published}) == 1
         assert len({item['run_id'] for item in published}) == 1
     await adapter.handle_event(event, context)
     assert robot.send_command.await_count == 1
-    assert len(published) == (3 if display_available else 0)
+    assert len(published) == (4 if display_available else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('takeover', [False, True])
+async def test_appearance_starts_whole_chain_but_explicit_takeover_still_revokes(
+        bound_listener, monkeypatch, tmp_path, takeover):
+    from cloud.api import intents
+    from cloud.go2 import training_events as events
+    from cloud.go2.observation_refresh_checks import saved_behavior
+    from cloud.observability import logging_config
+
+    monkeypatch.setattr(logging_config, '_event_log_dir', tmp_path)
+    adapter, robot, _, fixture = bound_listener
+    saved_behavior(fixture, ['Hello', 'Sit'])
+    published = []
+    monkeypatch.setattr(intents, 'publish_agent_event',
+                        lambda _kind, **fields: published.append(public_process_facts(fields)))
+
+    async def execute(command):
+        if command == 'Hello':
+            events._ObservationTeachingListener.on_vision_frame(adapter, {
+                'frame_id': 18, 'ts': time.time(), 'persons': {'detected': False}})
+            adapter._frame_ts = time.time() - 10
+            if takeover:
+                adapter.interrupt()
+        elif command == 'Sit':
+            robot.runtime.body('sitting', confirmation='observed')
+        return {'result': 'ok', 'confirmation_scope': 'completion'}
+
+    robot.send_command.side_effect = execute
+    adapter._frame_id = 17
+    adapter._frame_ts = time.time() - .1
+    now = time.time()
+    context = replace(adapter._context, trigger_mode_epoch=adapter._generation,
+                      expires_at=int(now + 30))
+    await adapter.handle_event({'event_id': 'whole-chain', 'kind': 'training_event',
+                                'ts': now, 'deadline': now + 30}, context)
+    assert [call.args[0] for call in robot.send_command.await_args_list] == (
+        ['Hello'] if takeover else ['Hello', 'Sit'])
+    assert adapter.last_result['step_count'] == (1 if takeover else 2)
+    assert adapter.last_result['result'] == ('blocked' if takeover else 'ok')
+    final = published[-1]['public_result']
+    assert final['training_run_finished'] is True and final['total_steps'] == 2
+    assert final['step_count'] == (1 if takeover else 2)
+    if takeover:
+        assert final['error'] == 'training_interrupted'
+        assert final['step_index'] == 1

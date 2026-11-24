@@ -58,6 +58,7 @@ class _ObservationTeachingListener:
         self._frame_goal_revisions: dict[int, int] = {}
         self._task: asyncio.Task | None = None
         self._dispatching_task: asyncio.Task | None = None
+        self._admitted_behavior: tuple | None = None
         self._pending_appearance: tuple[dict, ExecutionContext] | None = None
         self._waiting_appearance: tuple[float, str] | None = None
         self._waiting_goal_revision = 0
@@ -93,6 +94,18 @@ class _ObservationTeachingListener:
                 and self._task is not self._dispatching_task):
             self._task.cancel()
 
+    def _observation_lost(self) -> None:
+        """Retire an unaccepted appearance, not the behavior it already started."""
+        self._pending_appearance = None
+        self._waiting_appearance = None
+        if (self._task is not None and not self._task.done()
+                and self._task is not self._dispatching_task):
+            self._task.cancel()
+
+    def _behavior_identity(self, context: ExecutionContext) -> tuple:
+        return (context.training_run_id, context.trigger_ref, context.trigger_revision,
+                context.trigger_mode_epoch, context.trigger_person_id)
+
     def _blocked(self, context: ExecutionContext) -> bool:
         if self._coordinator is not None and any(
                 worker is not self and worker._dispatching_task is not None
@@ -126,7 +139,10 @@ class _ObservationTeachingListener:
         """Rechecked inside the original command lock immediately before send."""
         if context.trigger_observation_id not in (None, self._observation_id):
             return False
-        if self._observation_id in IDENTITY_OBSERVATIONS:
+        admitted = (self._admitted_behavior is not None
+                    and self._dispatching_task is not None
+                    and self._behavior_identity(context) == self._admitted_behavior)
+        if not admitted and self._observation_id in IDENTITY_OBSERVATIONS:
             person = self._recognized_person
             if (person is None or not self._identity_matches(person)
                     or (self._observation_id == 'vision.owner_recognized'
@@ -134,13 +150,13 @@ class _ObservationTeachingListener:
                     or not 0 <= time.time() - person.ts <= 5):
                 return False
         return (self._enabled
-                and self._presence is True
+                and (admitted or self._presence is True)
                 and context.trigger_mode_epoch == self._generation
                 and context.session_id == self._context.session_id
                 and context.origin_kind == 'agent_autonomous'
                 and get_goal_registry().is_current(context.goal_revision)
                 and context.expires_at > time.time()
-                and 0 <= time.time() - self._frame_ts <= 5
+                and (admitted or 0 <= time.time() - self._frame_ts <= 5)
                 and not self._blocked(context))
 
     def _can_start(self, context: ExecutionContext) -> bool:
@@ -148,6 +164,16 @@ class _ObservationTeachingListener:
         return (not self._blocked(context) and not go2._command_lock.locked()
                 and snapshot.get('body_state') in STABLE_BODY_STATES
                 and snapshot.get('body_telemetry_fresh') is True)
+
+    def execution_rejection(self, context: ExecutionContext) -> str:
+        """Explain an already-rejected context without changing admission."""
+        if context.trigger_mode_epoch != self._generation or not self._enabled:
+            return 'training_interrupted'
+        if not get_goal_registry().is_current(context.goal_revision):
+            return 'newer_user_goal'
+        if context.expires_at <= time.time():
+            return 'execution_context_expired'
+        return 'autonomy_unavailable'
 
     def on_vision_frame(self, frame: dict) -> None:
         ts = frame.get('ts')
@@ -174,9 +200,7 @@ class _ObservationTeachingListener:
             self._recognized_person = None
             self._last_person_id = None
             if previous is True:
-                # Revoke this source only; independent object observations
-                # remain valid when a person leaves the same camera frame.
-                _ObservationTeachingListener.interrupt(self)
+                self._observation_lost()
             return
         if self._observation_id in IDENTITY_OBSERVATIONS:
             self._try_waiting_appearance()
@@ -221,7 +245,7 @@ class _ObservationTeachingListener:
                     or getattr(person, 'error_code', None) in {'face_absent', 'face_changed', 'multiple_faces'}):
                 self._last_person_id = None
             if previous is not None:
-                self.interrupt()
+                self._observation_lost()
             return
         if (not self._enabled or self._presence is not True
                 or (self._observation_id == 'vision.owner_recognized' and not person.person_id)
@@ -240,6 +264,8 @@ class _ObservationTeachingListener:
         self._try_waiting_appearance()
 
     def _submit(self, ts: float, source_id: str, *, goal_revision: int) -> None:
+        if self._dispatching_task is not None:
+            return  # A later appearance cannot revoke or queue behind this behavior.
         self._generation += 1
         event_id = '%s:%s:%s' % (self._observation_id, ts, source_id)
         event = {'event_id': event_id, 'kind': 'training_event', 'ts': ts,
@@ -347,29 +373,34 @@ class _ObservationTeachingListener:
                             'steps': record['definition']['steps'],
                             'training_ref': record['teaching_id'],
                             'training_revision': record['revision'], 'training_overrides': {},
+                            'availability_reason': self.execution_rejection,
                             'observation': {'event_id': event['event_id'], 'id': self._observation_id,
                                             'frame_id': (getattr(self._recognized_person, 'frame_id', None)
                                                          if self._recognized_person else self._frame_id),
                                             'ts': observed_at, 'values': values}}
-                refresh = getattr(self, 'refresh_observation', None)
-                if callable(refresh):
-                    prepared['refresh_observation'] = refresh
-                # The accepted event owns a bounded whole behavior; live
-                # appearance, handoff and device checks remain per-step.
-                context = replace(context, expires_at=math.ceil(time.time() + 180))
+                # The fresh event starts one whole behavior. Presence is no
+                # longer a continuing condition; takeover and device checks are.
+                run_id = 'teaching_' + event_key
+                context = replace(context, expires_at=math.ceil(time.time() + 180),
+                                  training_run_id=run_id)
+                self._admitted_behavior = self._behavior_identity(context)
                 result = await run_training_behavior(
-                    prepared, context, run_id='teaching_' + event_key,
+                    prepared, context, run_id=run_id,
                     availability=self.allows)
                 self.last_result = result
                 await graph.ainvoke({'pending_event': {}, 'task_update': {
                     'stage': 'finish', 'event_id': event['event_id'], 'result': result}},
                     config, durability='sync')
             finally:
+                self._admitted_behavior = None
                 self._dispatching_task = None
         _emit('training.applied', space_id=context.space_id, unit_id='go2',
               teaching_id=intent['teaching_id'], revision=intent['revision'],
               transition_id=intent['transition_id'], status=result.get('result', 'unknown'),
-              reasons=result.get('reasons', []))
+              reasons=result.get('reasons', []), error=result.get('error'),
+              training_run_id=result.get('training_run_id'),
+              step_index=result.get('step_index'), step_count=result.get('step_count'),
+              total_steps=result.get('total_steps'))
 
     def _observation_values(self) -> dict:
         return {'recognized': True} if self._recognized_person else {'detected': True}
@@ -403,7 +434,7 @@ class _TargetTeachingListener(_ObservationTeachingListener):
             if detected is False:
                 self._visible_latched = False
             if previous is True:
-                self.interrupt()
+                self._observation_lost()
             return
         if not self._visible_latched:
             self._visible_latched = True
@@ -526,6 +557,17 @@ class PersonTeachingListener(_ObservationTeachingListener):
             return False
         return super().allows(context)
 
+    def execution_rejection(self, context: ExecutionContext) -> str:
+        sources = {'vision.owner_recognized': self._owner_listener,
+                   'vision.face_presence': self._face_listener,
+                   'vision.stranger_recognized': self._stranger_listener}
+        worker = sources.get(context.trigger_observation_id)
+        if context.trigger_observation_id == 'vision.target_presence':
+            worker = next((item for item in self._target_listeners.values()
+                           if context.trigger_ref in item.references), None)
+        return (worker.execution_rejection(context) if worker is not None
+                else super().execution_rejection(context))
+
     def on_vision_frame(self, frame: dict) -> None:
         super().on_vision_frame(frame)
         self._face_listener.on_vision_frame(frame)
@@ -562,8 +604,8 @@ class PersonTeachingListener(_ObservationTeachingListener):
         runtime = runtime_for(go2)
         if runtime is not None and runtime.active_reason():
             return False
-        # An accepted taught behavior still needs evidence between its steps;
-        # its own pending body action must not suspend camera observation.
+        # Observation may discover later appearances while an accepted
+        # behavior runs; its own body action does not suspend the camera.
         if any(worker._dispatching_task is not None for worker in self._target_listeners.values()):
             return True
         return not self._blocked(self._context)

@@ -93,6 +93,12 @@ def edit_training_parameters(teaching_id: str, request: ParameterEdit,
     return _call(service.update_parameters, teaching_id, request.model_dump(exclude_unset=True), session)
 
 
+@router.delete('/api/training/{teaching_id}')
+def remove_training(teaching_id: str, request: ConfirmRequest,
+                    session: dict = Depends(require_admin_csrf)):
+    return _call(service.remove_record, teaching_id, request.expected_revision, request.capability_hash, session)
+
+
 @router.get('/api/training/proposals/{proposal_id}')
 def get_proposal(proposal_id: str, session: dict = Depends(require_admin)):
     return _call(service.get_proposal, proposal_id, session)

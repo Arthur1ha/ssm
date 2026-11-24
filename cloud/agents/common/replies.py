@@ -73,15 +73,17 @@ def public_reply_text(value: object, *, diagnostic: bool = False) -> str:
 
 def step_kind(step: dict) -> str:
     """Persistence and delivery are effects, but are not physical completion."""
+    tool = step.get("tool")
+    if tool == "list_training":
+        return "query"
     result = step.get("result") or {}
     if result.get("result_kind"):
         return result["result_kind"]
-    tool = step.get("tool")
     if tool == "apply_training":
         return "training"
     if tool == "propose_training":
         return "training_proposal"
-    if tool == "list_training" or step.get("effectful") is False:
+    if step.get("effectful") is False:
         return "query"
     if tool == "send_message":
         return "message"
@@ -105,6 +107,14 @@ async def finalize_reply(run: Run, *, model, instructions,
         if run.decision_draft:
             answer, source = run.decision_draft, "decision_model"
             run.emotion = normalize_emotion(run.emotion)
+        elif run.status == "error" and run.steps and all(
+                step_kind(step) == "query" for step in effective_steps(run.steps)):
+            # A failed decision after reading data has no new action or saved
+            # proposal to explain. Do not turn that failure into another model
+            # request that can invent pending work from a management snapshot.
+            run.response, run.reply_source = public_reply_text(fallback(run)), "runtime"
+            run.emotion = "neutral"
+            return run
         elif run.steps and time.time() < run.deadline:
             prompt = instructions(run) if callable(instructions) else instructions
             messages = reply_messages(prompt + "\n" + REPLY_INSTRUCTIONS, run,
@@ -160,6 +170,10 @@ def factual_fallback(agent_id: str, status: str, run: Run | None = None) -> str:
         reason = failed[-1].get("message") or failed[-1].get("error") or failed[-1].get("reason")
         prefix = "部分操作已有成功回执，其余未完成。" if completed else "本次请求未完成。"
         return prefix + (f"执行反馈：{public_reply_text(reason[:160], diagnostic=True)}" if isinstance(reason, str) and reason else "")
+    if status == "error" and results and all(step_kind(step) == "query" for step, _ in results):
+        if any(step.get("tool") == "list_training" for step, _ in results):
+            return "已查询当前事件，但后续处理未完成；本次没有新增或修改事件。"
+        return "查询已返回，但后续处理未完成；本次未执行新的操作。"
     kinds = {step_kind(step) for step, result in results if result.get("result") in SUCCESS}
     if "training_proposal" in kinds:
         return "教导草案已生成，请核对后确认；尚未执行物理动作。"

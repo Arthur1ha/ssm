@@ -73,13 +73,13 @@ LIFE_ACTION_SPECS = {spec.action: spec for spec in (
 LIFE_ACTIONS = tuple(LIFE_ACTION_SPECS)
 LIFE_VIEWS = {
     "activity": {
-        "active": {"label": "可活动", "description": "生活与身体区域同时有效。", "type": "generic"},
+        "active": {"label": "可活动", "description": "可以响应指令、执行动作和参与互动。", "type": "generic"},
         "rest": {"label": "休息", "description": "保持连接与当前稳定姿态，暂停自主活动。", "type": "generic"},
     },
     "life": {
-        "idle": {"label": "待命", "description": "等待用户或现有自主策略接纳任务。", "type": "generic"},
-        "play": {"label": "互动", "description": "已接纳的互动任务正在进行。", "type": "generic"},
-        "explore": {"label": "探索", "description": "自由探索正在运行，观察、规划和轮次间等待均保持探索。", "type": "generic"},
+        "idle": {"label": "待命", "description": "等待你的下一条指令，也会响应已启用的教导事件。", "type": "generic"},
+        "play": {"label": "互动", "description": "正在执行当前的互动任务。", "type": "generic"},
+        "explore": {"label": "探索", "description": "会观察周围环境，自主决定去哪里探索或何时停留。", "type": "generic"},
     },
 }
 LIFE_TASK_STATES = ("play", "explore")
@@ -92,51 +92,63 @@ def life_tool_schema():
     }}, "required": ["action"], "additionalProperties": False}
 
 
+def _life_transition_description(spec):
+    """Describe only the triggering event and necessary conditions."""
+    if spec.action == "wake":
+        return "收到唤醒指令。"
+    if spec.action == "stop_explore":
+        return "收到停止探索指令，探索动作已结束。"
+    guards = set(spec.guards)
+    conditions = []
+    if "standing" in guards:
+        conditions.append("机器狗已站稳")
+    elif "stable" in guards:
+        conditions.append("姿态已确认稳定")
+    if {"no_life_task", "no_body_action", "no_motion"} <= guards:
+        conditions.append("任务和动作均已结束")
+    else:
+        for guard, label in (("no_life_task", "没有正在执行的任务"),
+                             ("no_body_action", "没有待确认动作"),
+                             ("no_motion", "已停止运动")):
+            if guard in guards:
+                conditions.append(label)
+    if "not_remote" in guards:
+        conditions.append("已退出遥控")
+    ready = "、".join(conditions) + "时，" if conditions else ""
+    requester = "管理员的" if spec.required_actor == "admin" else ""
+    return ready + "收到" + requester + spec.label + "指令。"
+
+
 def life_transitions(region):
     transitions = []
     for spec in LIFE_ACTION_SPECS.values():
         if spec.region != region:
             continue
         for source in spec.sources:
-            # Source and parent states are already visible on the diagram.
-            # Keep the remaining guards beside the trigger that needs them.
-            guard_labels = {"stable": "姿态已确认", "standing": "站立已确认",
-                            "no_body_action": "无待确认动作", "no_motion": "无运动任务",
-                            "not_remote": "非遥控", "exploring": "探索已开启", "idle": "待命",
-                            "no_life_task": "无进行中的任务"}
-            rule_conditions = ["收到" + spec.label + "指令"]
-            if spec.required_actor == "admin":
-                rule_conditions[0] = "收到管理员的" + spec.label + "指令"
-            for guard in spec.guards:
-                if guard not in guard_labels or guard == "idle" and source == "idle":
-                    continue
-                if guard == "stable" and "standing" in spec.guards:
-                    continue
-                rule_conditions.append(guard_labels[guard])
             transitions.append({
                 "src": source, "dst": spec.target, "trigger": spec.action,
                 "label": spec.label, "action": "LIFE", "params": {"action": spec.action},
                 "training_fixed_params": ["action"],
                 **({"training_disabled": True} if spec.action in {"start_explore", "stop_explore"} else {}),
                 "availability_key": spec.action,
-                "trigger_condition": "，且".join(rule_conditions),
+                "trigger_condition": _life_transition_description(spec),
                 **({"required_actor": spec.required_actor} if spec.required_actor else {}),
                 **({"available_only": True} if source == spec.target else {}),
             })
     if region == "life":
         transitions.extend([
             {"src": "idle", "dst": "explore", "trigger": "exploration_started", "label": "自主探索启动",
-             "trigger_condition": "自由探索已启动，且当前可活动、无互动任务"},
+             "trigger_condition": "自由探索启动。"},
             {"src": "explore", "dst": "idle", "trigger": "exploration_stopped", "label": "自主探索停止",
-             "trigger_condition": "探索许可已撤销，且无待确认的探索任务动作"},
+             "trigger_condition": "自由探索已关闭，探索动作已结束。"},
             {"src": "play", "dst": "idle", "trigger": "task_finished", "label": "互动结束",
-             "trigger_condition": "互动任务结束，且无待确认的任务动作、无有效探索许可"},
+             "trigger_condition": "互动任务和动作均已结束，未开启自由探索。"},
             {"src": "play", "dst": "explore", "trigger": "task_finished", "label": "恢复探索",
-             "trigger_condition": "互动任务结束，且无待确认的任务动作、探索许可仍有效"},
+             "trigger_condition": "互动任务和动作均已结束，仍允许自由探索。"},
         ])
         for source in ("idle", "explore"):
             transitions.append({"src": source, "dst": "play", "trigger": "task_accepted", "label": "接到互动任务",
-                                "trigger_condition": "互动任务已接纳"})
+                                "trigger_condition": "接到互动任务。"})
     return transitions
 
 

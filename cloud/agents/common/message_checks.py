@@ -135,6 +135,65 @@ async def test_direct_receipt_composes_once_with_original_request_and_tool_messa
     assert isinstance(inputs[0][-1], ToolMessage)
 
 
+@pytest.mark.parametrize('agent_id', ['esp32_desk_led', 'go2', 'cloud_orchestrator'])
+@pytest.mark.asyncio
+async def test_query_then_model_timeout_does_not_invent_pending_training(agent_id, tmp_path, monkeypatch):
+    from cloud.agents.common.training.tools import ListTraining
+    monkeypatch.setattr('cloud.agents.common.runner.emit_agent_event', lambda *a, **k: None)
+    monkeypatch.setattr('cloud.agents.common.replies.emit_agent_event', lambda *a, **k: None)
+
+    class Model(JsonReplyModel):
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, *_args, **_kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content='', tool_calls=[{'name': 'list_training', 'id': 'current-events',
+                    'args': {'unit_id': agent_id, 'final': False}}])
+            if self.calls == 2:
+                raise TimeoutError('simulated decision timeout')
+            pytest.fail('A failed decision after a query must not start a persona rewrite')
+
+    receipt = {'result': 'ok', 'result_kind': 'training', 'records': [], 'proposals': []}
+    dispatched = []
+
+    async def execute(name, params, _step_id):
+        dispatched.append(name)
+        assert name == 'list_training'
+        return receipt
+
+    current = run()
+    current.agent_id = agent_id
+    model = Model()
+    await run_role_graph(current, model=model,
+        tool_schemas={'list_training': ListTraining},
+        build_messages=lambda value: role_messages('依据本次真实结果回应', value.goal),
+        execute=execute,
+        finalize=lambda value: finalize_reply(value, model=model, instructions='只回应真实结果'),
+        checkpointer=FileCheckpointSaver(tmp_path / 'checkpoints'),
+        effect_ledger=FileEffectLedger(tmp_path / 'effects'))
+    assert model.calls == 2 and dispatched == ['list_training']
+    assert current.status == 'error' and current.reply_source == 'runtime'
+    assert '没有新增或修改事件' in current.response
+    assert '清理' not in current.response and '待处理' not in current.response
+    assert current.steps[0]['result']['records'] == []
+
+
+@pytest.mark.asyncio
+async def test_failed_query_keeps_real_failure_in_runtime_reply(monkeypatch):
+    monkeypatch.setattr('cloud.agents.common.replies.emit_agent_event', lambda *a, **k: None)
+    receipt = {'result': 'error', 'result_kind': 'training', 'message': '当前事件读取失败'}
+    current = run(status='error', steps=[{'tool': 'list_training', 'result': receipt}])
+    model = SimpleNamespace(ainvoke=lambda *_a: pytest.fail('unexpected persona rewrite'))
+    await finalize_reply(current, model=model, instructions='只回应真实结果')
+    assert current.reply_source == 'runtime' and '当前事件读取失败' in current.response
+    assert current.steps[0]['result'] == receipt
+
+
 @pytest.mark.asyncio
 async def test_reply_format_error_cannot_erase_successful_lamp_receipt(tmp_path, monkeypatch):
     from cloud.agents.lamp.tools.schemas import SetLedColor

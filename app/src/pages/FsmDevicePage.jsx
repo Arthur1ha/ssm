@@ -34,11 +34,14 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   const training = useTraining(unitId, {sessionId,canEdit:actor === 'admin'});
   const [trainingOpen, setTrainingOpen] = useState(false);
   const [trainingSelection, setTrainingSelection] = useState(null);
-  useEffect(() => { setTrainingSelection(null); }, [training.resetVersion]);
+  const [locatedTransition,setLocatedTransition] = useState(null);
+  useEffect(() => { setTrainingSelection(null); setLocatedTransition(null); }, [training.resetVersion,unitId]);
+  const locateTrainingTransition = location => {
+    if (!location?.id || location.unit_id && location.unit_id!==unitId) return;
+    setLocatedTransition({...location,request:Date.now()});
+  };
   useEffect(() => {
-    if (trainingLocation?.teaching_id) {
-      setTrainingSelection({unit_id:unitId,transition_id:trainingLocation.transition_id,teaching_id:trainingLocation.teaching_id,summaryText:trainingLocation.summaryText});
-    }
+    locateTrainingTransition(trainingLocation);
   }, [trainingLocation]);
   const [controlBusy, setControlBusy] = useState(false);
   const controlPending = useRef(false);
@@ -76,6 +79,8 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   const pendingRuns = useRef(new Map());
   const nextRequestId = useRef(Date.now());
   const nextProcessId = useRef(0);
+  const controlScope = useRef(null);
+  controlScope.current = `${sessionId || ''}:${unitId}`;
   const forgetRun = runId => {
     clearTimeout(pendingRuns.current.get(runId)?.timer);
     pendingRuns.current.delete(runId);
@@ -300,15 +305,27 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       return;
     }
     if (!t.safety) { controlPending.current = true; setControlBusy(true); }
+    const scope = controlScope.current;
+    const requestId = `control:${++nextRequestId.current}`;
+    setMessages(previous => [...previous, {id:requestId,type:'system',source:'device_control',
+      agent:unitId,requestId,status:'pending',text:stateCommandFeedback(sm,t,null)}]);
+    const finishControl = result => {
+      if (controlScope.current !== scope) return;
+      reportExecution(result);
+      setMessages(previous => previous.map(message => message.id === requestId
+        ? {...message,status:result?.result || 'unknown',
+          text:stateCommandFeedback(sm,t,result || {result:'unknown'},value => commandBus.describe(value))}
+        : message));
+    };
     setExecution(t.prepare_action ? '正在先起身，确认站稳后执行目标动作…'
       : t.dispatch_only ? '正在发送指令…' : '正在等待设备执行反馈…');
     try {
       const params = t.id ? Object.fromEntries((t.training_fixed_params || []).filter(key => Object.hasOwn(t.params || {}, key)).map(key => [key, t.params[key]])) : (t.params || {});
       const result = await commandBus.command(unitId, t.prepare_action || t.action,
         t.prepare_action ? {cmd:t.action,prepare_standing:true} : params);
-      reportExecution(result);
+      finishControl(result);
     } catch (error) {
-      reportExecution({ result: 'error', error: apiErrorText(error, '这次请求没有完成，请检查设备状态') });
+      finishControl({ result: 'error', error: apiErrorText(error, '这次请求没有完成，请检查设备状态') });
     } finally {
       if (!t.safety) { controlPending.current = false; setControlBusy(false); }
     }
@@ -434,7 +451,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           <DeviceStateBoard key={unitId} unitId={unitId} sm={sm} current={current} card={card}
             widgets={widgets} liveState={runtimeState} connected={connected} offline={offline}
             actor={actor} color={ACCENT} busy={controlBusy} streamHealth={stateHealth}
-            onTransition={dispatchTransition} report={reportExecution} training={training}/>
+            onTransition={dispatchTransition} report={reportExecution} training={training} locateTransition={locatedTransition}/>
         </div>
       )}
 
@@ -456,6 +473,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
         </>}
         messages={chatRows}
         training={training}
+        onLocate={locateTrainingTransition}
         focusKey={trainingSelection}
         defaultAgent={unitId}
         agents={card ? [card] : []}

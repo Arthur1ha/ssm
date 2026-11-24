@@ -1,5 +1,5 @@
 /* Non-modal card anchored in SVG space; never participates in canvas layout. */
-function StateBoardPopover({ anchor, canvasRef, label, onClose, children, expanded = false }) {
+function StateBoardPopover({ anchor, canvasRef, label, onClose, children, transitionCard = false }) {
   const ref = React.useRef(null);
   const reposition = React.useRef(null);
   React.useLayoutEffect(() => {
@@ -9,9 +9,12 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children, expand
       const matrix = anchor.element.getScreenCTM();
       if (!matrix) return;
       const headerBottom=canvas.closest('.device-page')?.querySelector('.device-page__header')?.getBoundingClientRect().bottom || 54;
-      const bounds = expanded ? {left:0,top:headerBottom,width:window.innerWidth,height:window.innerHeight-headerBottom-96}
+      const viewport = window.visualViewport;
+      const bounds = transitionCard ? {left:viewport?.offsetLeft || 0,top:Math.max(headerBottom,viewport?.offsetTop || 0),
+        width:viewport?.width || window.innerWidth,
+        height:Math.max(120,(viewport?.height || window.innerHeight)-Math.max(headerBottom-(viewport?.offsetTop || 0),0)-16)}
         : canvas.getBoundingClientRect();
-      if(expanded)card.style.maxHeight=Math.min(560,bounds.height-16)+'px';
+      if (transitionCard) card.style.maxHeight=Math.min(248,bounds.height*.66)+'px';
       const screen = new DOMPoint(anchor.point.x,anchor.point.y).matrixTransform(matrix);
       const x = screen.x-bounds.left, y = screen.y-bounds.top;
       const w = card.offsetWidth, h = card.offsetHeight, gap = 16, margin = 8;
@@ -32,7 +35,7 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children, expand
         return {left,top,score:overlap+Math.hypot(left-point.x,top-point.y)};
       });
       const best = candidates.reduce((a,b) => a.score<=b.score ? a : b);
-      card.style.left = (best.left+(expanded ? bounds.left : 0))+'px'; card.style.top = (best.top+(expanded ? bounds.top : 0))+'px';
+      card.style.left = (best.left+(transitionCard ? bounds.left : 0))+'px'; card.style.top = (best.top+(transitionCard ? bounds.top : 0))+'px';
       card.style.visibility = 'visible';
     };
     reposition.current = place;
@@ -40,7 +43,15 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children, expand
     const observer = new ResizeObserver(place);
     observer.observe(card); observer.observe(canvas);
     window.addEventListener('resize',place);
-    const outside = event => { if (!canvas.contains(event.target) && !card.contains(event.target)) onClose(); };
+    window.addEventListener('scroll',place,true);
+    window.visualViewport?.addEventListener('resize',place);
+    const outside = event => {
+      if (card.contains(event.target)) return;
+      // SVG nodes/edges handle this same gesture themselves: let a second
+      // transition open or a node act without an overlay swallowing the tap.
+      if (canvas.contains(event.target) && event.target.closest?.('.fsm-whiteboard__edge,.fsm-whiteboard__node')) return;
+      onClose();
+    };
     const escape = event => {
       if (event.key !== 'Escape' || event.target.closest?.('[aria-modal="true"]')) return;
       event.stopPropagation(); anchor.element.focus({preventScroll:true}); onClose();
@@ -49,12 +60,13 @@ function StateBoardPopover({ anchor, canvasRef, label, onClose, children, expand
     document.addEventListener('keydown',escape);
     if (anchor.keyboard) card.focus({preventScroll:true});
     return () => { reposition.current = null; observer.disconnect(); window.removeEventListener('resize',place);
+      window.removeEventListener('scroll',place,true); window.visualViewport?.removeEventListener('resize',place);
       document.removeEventListener('pointerdown',outside); document.removeEventListener('keydown',escape); };
-  }, [anchor,canvasRef,onClose,expanded]);
+  }, [anchor,canvasRef,onClose,transitionCard]);
   React.useLayoutEffect(() => { reposition.current?.(); });
-  const content=<section ref={ref} className={`device-whiteboard__popover${expanded ? ' device-whiteboard__popover--rule' : ''}`} role="dialog" aria-label={label}
+  const content=<section ref={ref} className={`device-whiteboard__popover${transitionCard ? ' device-whiteboard__popover--transition' : ''}`} role="dialog" aria-label={label}
     tabIndex="-1" style={{visibility:'hidden'}}>{children}</section>;
-  return expanded ? ReactDOM.createPortal(content,document.body) : content;
+  return transitionCard ? ReactDOM.createPortal(content,document.body) : content;
 }
 
 /* Shared flat whiteboard. Device Card remains the authority for all commands. */
@@ -66,13 +78,15 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const [selectedDirectionId, setSelectedDirectionId] = useState(null);
   const [anchor,setAnchor] = useState(null);
   const [changedTeaching,setChangedTeaching] = useState(null);
+  const [inspectorBusy,setInspectorBusy] = useState(false);
   const [activityClock,setActivityClock] = useState(() => Date.now()/1000);
   const canvasRef = useRef(null);
+  const locatedRequest = useRef(null);
   const stale = streamHealth !== 'live';
   const runtimeLive = !offline && connected === true && !stale;
   const records = training?.records || [];
   const displayedRecords = records.map(record => trainingRecordProjection(record,training?.catalog));
-  const activeRecords = displayedRecords.filter(record => record.desired_status === 'enabled');
+  const activeRecords = displayedRecords.filter(record => record.desired_status !== 'removed');
   // Losing live evidence retires that run's highlight, even if the same
   // cached activity or a late receipt is still present after reconnection.
   const interruptedActivities = useRef(new Map());
@@ -154,6 +168,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
   const links = stateGraphLinks(edges);
   const selectedLink = links.find(link => link.id === selectedLinkId);
   const selectedDirection = selectedLink && stateLinkDirection(selectedLink,nodes,selectedDirectionId);
+  const showDirectionSwitch=selectedLink?.directions.length>1;
   const select = async (id, nextAnchor) => {
     const node = nodes.find(item => item.id === id);
     const remote = widgets.find(widget => widget.type === 'joystick' && widget.visible !== false
@@ -229,15 +244,27 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
     const timer = setTimeout(() => setActivityClock(Date.now()/1000),Math.min(1000,(Math.min(...deadlines)-now)*1000+20));
     return () => clearTimeout(timer);
   }, [training?.activities,activityClock]);
+  const locationTopology=edges.map(edge=>edge.transition.id).join('|');
   useEffect(() => {
-    if (!locateTransition || !canvasRef.current) return;
+    if (!locateTransition || locatedRequest.current===locateTransition || !canvasRef.current || !training?.catalog) return;
     const edge = edges.find(item => item.transition.id === locateTransition.id);
     const link = edge && links.find(item => item.directions.some(direction => direction.edges.includes(edge)));
     const direction = link?.directions.find(item => item.edges.includes(edge));
     const element = link && [...canvasRef.current.querySelectorAll('.fsm-whiteboard__edge')].find(item => item.dataset.link === link.id);
     const path = element?.querySelector('.fsm-whiteboard__line');
-    if (path && direction) { setSelectedLinkId(link.id); setSelectedDirectionId(direction.id); setSelectedId(null); setAnchor({element,point:path.getPointAtLength(path.getTotalLength()/2),keyboard:true}); }
-  }, [locateTransition, training?.catalog]);
+    if (!path || !direction) return;
+    locatedRequest.current=locateTransition;
+    canvasRef.current.scrollIntoView({block:'nearest',inline:'nearest'});
+    setSelectedLinkId(link.id);setSelectedDirectionId(direction.id);setSelectedId(null);
+    if (locateTransition.teaching_id) setChangedTeaching(locateTransition.teaching_id);
+    setAnchor({element,point:path.getPointAtLength(path.getTotalLength()/2),keyboard:true});
+    const frame=requestAnimationFrame(()=>{
+      const target=[...document.querySelectorAll('.device-whiteboard__popover [data-teaching-id]')]
+        .find(item=>!item.closest('[hidden]') && item.dataset.teachingId===locateTransition.teaching_id);
+      target?.scrollIntoView({block:'nearest',inline:'nearest'});
+    });
+    return ()=>cancelAnimationFrame(frame);
+  }, [locateTransition,training?.catalog,locationTopology]);
   const ordered = widgets.map((widget,index) => ({...widget,_index:index}))
     .sort((a,b) => (a.order ?? a._index)-(b.order ?? b._index));
   const active = ordered.filter(widget => !widget.states?.length
@@ -276,7 +303,7 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
       {nodes.length ? <FsmGraph nodes={nodes} edges={edges} selectedState={selectedId} diagram={sm?.diagram}
         selectedLink={selectedLinkId} selectedDirection={selectedDirection?.id} onSelectState={select} onInspectTransition={inspectEdge}
         onDismiss={clearSelection}
-        color={color} live={runtimeLive} pendingCommand={pendingExecution?.command} trainingCatalog={training?.catalog}/>
+        color={color} live={runtimeLive} pendingCommand={pendingExecution?.command} trainingCatalog={training?.catalog} locateTransition={locateTransition}/>
         : <p className="device-state-note">等待设备状态机</p>}
       {selected && (selectedActions.length > 1 || selected.region.until_field && liveState[selected.region.until_field])
         && !remoteControls.some(widget => selected.value === widget.node_state) && <StateBoardPopover
@@ -289,26 +316,32 @@ function DeviceStateBoard({ unitId, sm, current, widgets = [], liveState = {}, c
             && <small>至 {new Date(liveState[selected.region.until_field]*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</small>}
         </div>
       </StateBoardPopover>}
-      {selectedDirection && <StateBoardPopover anchor={anchor} canvasRef={canvasRef} label="转换说明" onClose={closePopover}
-        expanded>
+      {selectedDirection && <StateBoardPopover anchor={anchor} canvasRef={canvasRef} label="状态转移" onClose={closePopover}
+        transitionCard>
         <div className="device-whiteboard__popover-heading">
-          <h3>{nodes.find(node=>node.id===selectedDirection.src)?.label} → {nodes.find(node=>node.id===selectedDirection.dst)?.label}</h3>
-          <button type="button" className="training-icon-action" aria-label="关闭状态转换" title="关闭状态转换" onClick={closePopover}><Icon name="x" size={18}/></button>
+          <h3>{nodes.find(node=>node.id===(showDirectionSwitch ? selectedLink.src : selectedDirection.src))?.label} {showDirectionSwitch ? '⇄' : '→'} {nodes.find(node=>node.id===(showDirectionSwitch ? selectedLink.dst : selectedDirection.dst))?.label}</h3>
         </div>
-        {selectedLink.directions.length>1 &&
-        <div className="device-whiteboard__directions" role="group" aria-label="转换方向">
+        {showDirectionSwitch &&
+        <div className="device-whiteboard__directions" role="group" aria-label="状态转移方向">
           {selectedLink.directions.map(direction => <button key={direction.id} type="button"
-            aria-pressed={direction.id === selectedDirection.id}
-            onClick={() => setSelectedDirectionId(direction.id)}>
+            aria-pressed={direction.id === selectedDirection.id} disabled={inspectorBusy}
+            onClick={event => {
+              setSelectedDirectionId(direction.id);
+              const body=event.currentTarget.closest('.device-whiteboard__popover')?.querySelector('.device-whiteboard__popover-body');
+              if(body)body.scrollTop=0;
+            }}>
             {nodes.find(node => node.id === direction.src)?.label} → {nodes.find(node => node.id === direction.dst)?.label}
           </button>)}
         </div>}
-        <div className="device-whiteboard__popover-body" key={selectedDirection.id}>
-              <TransitionInspector transitions={selectedDirection.edges.map(edge=>edge.transition)}
-                projection={displayedRecords.filter(record=>selectedDirection.edges.some(edge=>trainingTransitionIds(record).includes(edge.transition.id)))}
-                catalog={training?.catalog} activityFor={activityFor} changedTeaching={changedTeaching}
-                onSave={actor === 'admin' ? training?.saveParameters : undefined}
-                onRemove={actor === 'admin' ? training?.remove : undefined}/>
+        <div className="device-whiteboard__popover-body">
+          {selectedLink.directions.map(direction=><div key={direction.id} hidden={direction.id!==selectedDirection.id} data-transition-direction={direction.id}>
+            <TransitionInspector transitions={direction.edges.map(edge=>edge.transition)}
+              projection={displayedRecords.filter(record=>direction.edges.some(edge=>trainingTransitionIds(record).includes(edge.transition.id)))}
+              catalog={training?.catalog} activityFor={activityFor} changedTeaching={changedTeaching}
+              onBusyChange={setInspectorBusy}
+              onSave={actor === 'admin' ? training?.saveParameters : undefined}
+              onRemove={actor === 'admin' ? training?.remove : undefined}/>
+          </div>)}
         </div>
       </StateBoardPopover>}
     </div>

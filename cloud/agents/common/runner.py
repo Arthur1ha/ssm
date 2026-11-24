@@ -101,6 +101,18 @@ async def _await(value):
     return await value if inspect.isawaitable(value) else value
 
 
+def _model_response_details(response) -> dict:
+    """Keep completion diagnostics, never provider reasoning or extra fields."""
+    metadata = getattr(response, "response_metadata", None) or {}
+    usage = getattr(response, "usage_metadata", None) or {}
+    counts = {key: usage[key] for key in ("input_tokens", "output_tokens", "total_tokens")
+              if type(usage.get(key)) is int}
+    reasoning = (usage.get("output_token_details") or {}).get("reasoning")
+    if type(reasoning) is int:
+        counts["reasoning_tokens"] = reasoning
+    return {"finish_reason": metadata.get("finish_reason"), "usage": counts or None}
+
+
 async def invoke_blocking(callback, *args, **kwargs):
     """Run a synchronous adapter without blocking the graph or losing trace context."""
     outcome: Future = Future()
@@ -279,12 +291,16 @@ async def run_role_graph(
         check_goal()
         calls = getattr(response, "tool_calls", None) or []
         content = getattr(response, "content", "")
+        details = _model_response_details(response)
         emit("model.response", turn=turns, output={"content": content, "tool_calls": calls},
+             **details,
              duration_ms=round((time.monotonic() - started) * 1000))
         if (not calls and not getattr(response, 'invalid_tool_calls', None)
                 and (not isinstance(content, str) or not content.strip())
+                and details["finish_reason"] != "length"
                 and time.time() < current.deadline - 1):
             emit("model.empty_retry", turn=turns)
+            started = time.monotonic()
             try:
                 response = await asyncio.wait_for(planner.ainvoke(messages + [SystemMessage(
                     content="上一轮没有返回内容或工具调用。请依据已有结果回答；"
@@ -295,9 +311,18 @@ async def run_role_graph(
             else:
                 calls = getattr(response, "tool_calls", None) or []
                 content = getattr(response, "content", "")
+                details = _model_response_details(response)
                 emit("model.response", turn=turns, retry=True,
                      output={"content": content, "tool_calls": calls},
+                     **details,
                      duration_ms=round((time.monotonic() - started) * 1000))
+        if details["finish_reason"] == "length":
+            # Even a parseable first call can be part of an incomplete batch.
+            # Do not execute it or retry with the same exhausted budget.
+            emit("model.error", turn=turns, error="ModelOutputTruncated", **details,
+                 message="模型输出额度已用尽，未执行本轮工具调用。")
+            current.status, current.response = "error", "模型回复未完整生成，未执行新动作。"
+            return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}
         if getattr(response, "invalid_tool_calls", None):
             current.status, current.response = "error", "工具调用格式无效，未执行新动作。"
             return {"run": asdict(current), "decision": {"kind": "finish"}, "turns": turns}

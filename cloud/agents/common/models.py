@@ -78,7 +78,10 @@ def get_text_model(role: str, model_class=None):
     }
     if role == "steward":
         common.update(timeout=_int_env("LLM_TIMEOUT", 30), max_retries=_int_env("LLM_MAX_RETRIES", 1))
-        max_tokens = _int_env("ORCHESTRATOR_MAX_TOKENS", 900)
+        # A small generation cap can be consumed before the provider produces
+        # a visible reply or tool call. Match the device roles' provider default
+        # unless the deployment explicitly sets a budget.
+        max_tokens = _int_env("ORCHESTRATOR_MAX_TOKENS", 0)
         if max_tokens > 0:
             common["max_tokens"] = max_tokens
         return model_class(model=model, **common)

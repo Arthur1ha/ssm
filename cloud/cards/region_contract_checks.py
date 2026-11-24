@@ -47,6 +47,29 @@ def test_lamp_card_contains_only_one_static_declaration():
     assert "TEST_ONLY" not in lamp()["state_machine"]["regions"][0]["states"]
 
 
+@pytest.mark.parametrize("device", ["go2", "lamp"])
+def test_transition_explanations_are_complete_and_do_not_change_capabilities(device):
+    from cloud.agents.common.training.catalog import catalog_for, declare_transition_ids
+    from cloud.go2.card import _build_go2_card
+
+    card = _build_go2_card() if device == "go2" else lamp()
+    rewritten = deepcopy(card)
+    for region in rewritten["state_machine"]["regions"]:
+        for edge in region["transitions"]:
+            assert edge["trigger_condition"].endswith("。")
+            assert "event_label" not in edge and "guard_label" not in edge
+            assert "，且" not in edge["trigger_condition"]
+            edge["trigger_condition"] = "改写说明不会改变这个状态转移的执行含义。"
+    # Identity and hashes exclude prose, preserving existing training references.
+    assert catalog_for(rewritten) == catalog_for(card)
+    before = declare_transition_ids(deepcopy(card))["state_machine"]["regions"]
+    after = declare_transition_ids(rewritten)["state_machine"]["regions"]
+    for original, updated in zip(before, after):
+        for edge, rewritten_edge in zip(original["transitions"], updated["transitions"]):
+            assert {key: value for key, value in edge.items() if key != "trigger_condition"} == {
+                key: value for key, value in rewritten_edge.items() if key != "trigger_condition"}
+
+
 @pytest.mark.parametrize("version", [None, 1, 2])
 def test_retired_firmware_is_rejected(version):
     with pytest.raises(ValueError, match="unsupported lamp fsm_version"):

@@ -3,10 +3,12 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from typing import Callable, Literal
 
@@ -16,10 +18,13 @@ from cloud.agents.common.training.policy import definition_transition_ids, valid
 from cloud.space.execution import ExecutionContext
 
 class ListTraining(BaseModel):
-    """读取设备转换目录、已保存教导和未确认草案。
+    """只读查询设备状态转移目录、当前未删除教导和未确认草案。
 
     制定或修订长期约定前先查询；用户表达当前情境时按语义选择已有教导，
     用 apply_training 应用。不要求固定句式或设备自动识别情境。
+    records 不含已删除教导和历史版本；disabled 表示未启用，不能当作当前生效教导。
+    proposals 的 status 和 confirmation_allowed 表示草案是否仍可确认。
+    查询不保存、不执行；空 records/proposals 不代表有待清理旧教导，出错时不猜测。
     """
     model_config = ConfigDict(extra='forbid', strict=True)
     unit_id: str
@@ -53,6 +58,10 @@ class ProposeTraining(BaseModel):
     create/update 给出完整 name 和 effect_text，文字完整对应条件、顺序及参数。
     失败重试必须保留触发器、身份限制和动作顺序，修正参数或如实说明能力缺项。
     制定规则无需当前已经满足条件；不得编造请求者身份或额外插入未授权动作。
+    忠实保存用户要求，不自行添加执行间隔、冷却时间、持续在场条件、重复次数或准备动作。
+    观察 trigger 仅启动整条 steps 链，不要求原观察在后续步骤始终成立。
+    用户未明确要求执行间隔时，新规则 cooldown_s=null；修改其他内容时保留原间隔。
+    同一观察事件去重和执行中避免并发由运行层处理，不得为“避免重复”自行设置60秒等间隔。
     """
     model_config = ConfigDict(extra='forbid', strict=True)
     operation: Literal['create', 'update', 'remove']
@@ -72,6 +81,74 @@ class TrainingAPIError(ValueError):
     def __init__(self, code, *, status_code, details=None):
         super().__init__(code)
         self.status_code, self.details = status_code, details
+
+
+_DURATION_NUMBER = r'(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+|半)'
+_DURATION_UNIT = r'(?:毫秒|秒钟?|分钟?|小时)'
+_INTERVAL_DURATION = re.compile(
+    rf'(?:冷却(?:时间)?|(?:执行|触发|重复)?间隔(?:时间)?|隔)\s*'
+    rf'(?:(?:改|设|设置|调整)(?:为|成|到)|为|是|用|至少|最少|要|需要)?\s*'
+    rf'(?P<number>{_DURATION_NUMBER})\s*(?P<unit>{_DURATION_UNIT})')
+_REPEAT_DURATION = re.compile(
+    rf'每\s*(?P<number>{_DURATION_NUMBER})\s*(?P<unit>{_DURATION_UNIT})\s*'
+    r'(?:最多|只|才)?(?:执行|触发|做|运行)?(?:一|1)次')
+_REMOVE_INTERVAL = re.compile(
+    r'(?:取消|去掉|移除|删除|不要|不用|无需|不设置|不设|不加)\s*(?:这个|那个|这条规则的|执行|触发|任何|所有|的)*\s*'
+    r'(?:冷却(?:时间)?|间隔(?:时间)?)'
+    r'|(?:冷却(?:时间)?|(?:执行|触发)?间隔(?:时间)?)\s*(?:取消|去掉|移除|删除|不要|不用|无需|不设)')
+
+
+def _duration_seconds(number: str, unit: str) -> float:
+    """Read only the duration bound to an explicit repeat-interval request."""
+    if number == '半':
+        value = .5
+    elif number[0].isdigit():
+        value = float(number)
+    else:
+        digits = dict(zip('零〇一二两三四五六七八九', (0, 0, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9)))
+        section = value = digit = 0
+        for char in number:
+            if char in digits:
+                digit = digits[char]
+            elif char == '万':
+                value += (section + digit) * 10000
+                section = digit = 0
+            else:
+                section += (digit or 1) * {'十': 10, '百': 100, '千': 1000}[char]
+                digit = 0
+        value += section + digit
+    scale = .001 if unit == '毫秒' else 3600 if unit == '小时' else 60 if unit.startswith('分') else 1
+    return value * scale
+
+
+def _check_requested_cooldown(definition, previous, source_text):
+    """Model proposals cannot invent or change a saved repeat interval.
+
+    The source comes from the authenticated role turn, never model arguments.
+    Action durations and unrelated numbers do not authorize a repeat interval.
+    Unrecognized wording fails with corrective feedback rather than guessing.
+    """
+    proposed = definition.get('cooldown_s')
+    baseline = (previous or {}).get('cooldown_s')
+    source = source_text if isinstance(source_text, str) else ''
+    requested = [_duration_seconds(match['number'], match['unit'])
+                 for pattern in (_INTERVAL_DURATION, _REPEAT_DURATION)
+                 for match in pattern.finditer(source)]
+    expected = baseline
+    if _REMOVE_INTERVAL.search(source):
+        expected = None
+        if proposed is None:
+            return
+    elif len(set(requested)) == 1:
+        expected = requested[0]
+        if proposed == requested[0]:
+            return
+    elif not requested and proposed == baseline:
+        return
+    raise ValueError('cooldown_not_requested: do not add or change an execution interval without '
+                     f'an explicit user interval request; use cooldown_s={json.dumps(expected)} '
+                     'to match this request and the prior definition; a new rule defaults to null, '
+                     'and action duration is not a repeat interval')
 
 
 def _preserve_event_request(arguments, attempts, catalog):
@@ -129,11 +206,57 @@ def _selection(context, unit_id):
         raise ValueError('selection_unit_mismatch')
     return selection
 
+_MODEL_RECORD_FIELDS = (
+    'schema_version', 'unit_id', 'space_id', 'teaching_id', 'revision',
+    'capability_hash', 'name', 'effect_text', 'definition', 'desired_status',
+    'loaded_revision', 'saved', 'load_status', 'executable', 'execution_reasons',
+    'transition_ids', 'transitionLabel', 'summaryText', 'changeText', 'scopeText',
+    'stepSummaries',
+)
+_MODEL_PROPOSAL_FIELDS = (
+    'proposal_id', 'operation', 'unit_id', 'teaching_id', 'expected_revision',
+    'capability_hash', 'expires_at', 'confirmation_allowed', 'reasons',
+    'confirmed', 'cancelled', 'superseded', 'superseded_by', 'expired',
+    'beforeSummaryText', 'afterSummaryText', 'transition_ids', 'transitionLabel',
+    'summaryText', 'changeText', 'scopeText', 'stepSummaries',
+)
+
+
+def _model_record(record):
+    return {key: deepcopy(record[key]) for key in _MODEL_RECORD_FIELDS if key in record}
+
+
+def _model_proposal(proposal):
+    result = {key: deepcopy(proposal[key]) for key in _MODEL_PROPOSAL_FIELDS if key in proposal}
+    for key in ('before', 'after'):
+        if key in proposal:
+            result[key] = _model_record(proposal[key]) if proposal[key] is not None else None
+    result['status'] = (
+        'confirmed' if proposal.get('confirmed') else
+        'cancelled' if proposal.get('cancelled') else
+        'superseded' if proposal.get('superseded') or proposal.get('superseded_by') else
+        'expired' if proposal.get('expired') else
+        'blocked' if proposal.get('confirmation_allowed') is False or proposal.get('reasons') else 'pending'
+    )
+    return result
+
+
+def _model_snapshot(snapshot):
+    """Project current configuration; management history stays in its API/store."""
+    return {
+        **{key: deepcopy(snapshot[key]) for key in ('unit_id', 'space_id', 'catalog', 'cursor') if key in snapshot},
+        'records': [_model_record(record) for record in snapshot.get('records', [])
+                    if record.get('desired_status') != 'removed'],
+        'proposals': [_model_proposal(proposal) for proposal in snapshot.get('proposals', [])],
+    }
+
+
 async def list_training(arguments, context, api_call):
     args = ListTraining.model_validate(arguments).model_dump()
     _selection(context, args['unit_id'])
     path = '/api/training?' + urllib.parse.urlencode({'unit_id': args['unit_id']})
-    return await api_call(path, None, context, method='GET')
+    snapshot = await api_call(path, None, context, method='GET')
+    return _model_snapshot(snapshot)
 
 async def propose_training(arguments, context, api_call):
     # The shared Graph runner omits nulls after schema validation. Restore
@@ -153,12 +276,14 @@ async def propose_training(arguments, context, api_call):
     _preserve_event_request(args, context.get('proposal_attempts', []), snapshot['catalog'])
     selected_proposal = (selection or {}).get('proposal_id')
     supersedes = args.get('supersedes_proposal_id') or selected_proposal
+    previous_definition = None
     if selected_proposal and supersedes != selected_proposal:
         raise ValueError('selection_proposal_mismatch')
     if supersedes:
         previous = next((p for p in snapshot.get('proposals', []) if p['proposal_id'] == supersedes), None)
         if previous is None or previous.get('confirmed') or previous.get('cancelled') or previous.get('superseded') or previous.get('expired'):
             raise ValueError('proposal_not_editable')
+        previous_definition = (previous.get('after') or {}).get('definition')
         args['supersedes_proposal_id'] = supersedes
         args['operation'] = previous['operation']
         if previous['operation'] != 'create':
@@ -192,7 +317,12 @@ async def propose_training(arguments, context, api_call):
         if selection and not selection.get('proposal_id') and selection['transition_id'] not in definition_transition_ids(record['definition']):
             raise ValueError('selection_transition_mismatch')
         payload['expected_revision'] = args['base_revision']
-    return await api_call('/api/training/proposals', payload, context, method='POST')
+        if previous_definition is None:
+            previous_definition = record['definition']
+    if definition is not None:
+        _check_requested_cooldown(definition, previous_definition, context.get('source_text'))
+    proposal = await api_call('/api/training/proposals', payload, context, method='POST')
+    return _model_proposal(proposal)
 
 async def internal_api_call(path, payload, context, *, method='POST'):
     """The caller owns context; model arguments cannot supply source or authority."""
@@ -288,7 +418,7 @@ async def execute_training(name, arguments, context):
         if name not in adapters:
             raise ValueError('unknown_training_tool')
         value = await adapters[name](arguments, context, internal_api_call)
-        return {'result': 'ok', 'result_kind': ('training_query' if name == 'list_training'
+        return {'result': 'ok', 'result_kind': ('query' if name == 'list_training'
                                                else 'training_proposal'), **value}
     except TrainingAPIError as exc:
         return {'result': 'rejected', 'error': str(exc),

@@ -51,7 +51,10 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
           companionPresentation.finishRequest(_unit, runId, result); resolve(result);
         }; finishCommands.set(runId,window.finishCommand); });
       }};
-      window.DeviceStateBoard = () => React.createElement('div', {style:{height:120}}, '设备状态');
+      window.DeviceStateBoard = props => {
+        window.__boardLocation=props.locateTransition;
+        return React.createElement('div', {style:{height:120}}, '设备状态');
+      };
       window.lamp = {unit_id:'esp32_desk_led', name:'皮皮灯', _online:true, transport:{},
         state_machine:{state_field:'ism',states:['OFF','ON','BLINKING'],transitions:[],views:{}},
         modes:[],widgets:[],skills:[],suggestions:['调成暖白色']};
@@ -267,23 +270,24 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(()=>finishCommands.get(sent[4].run_id)({result:'ok',reply:'替换目标完成',event_id:'replacement-result'}));
     await page.waitForFunction(()=>document.querySelector('.chat-messages').textContent.includes('替换目标完成'));
     assert.equal(await page.$eval('.chat-panel',el=>el.getAttribute('aria-busy')),'false');
-    // Long activity questions and teaching context must scroll with the device
-    // conversation, rather than consuming the composer's fixed available space.
+    // Long activity questions scroll with the conversation. Viewing a saved
+    // transition locates the board without creating a chat edit selection.
     await page.evaluate(()=>root.render(React.createElement(FsmDevicePage,{
       key:'long-context',unitId:lamp.unit_id,device:lamp,liveState:{state:{ism:'ON',ts:Date.now()/1000}},
       actor:'visitor',sessionId:'long-context',onBack(){},
       activityQuestion:{text:'这是需要用户补充的完整活动问题。'.repeat(100)},
-      trainingLocation:{teaching_id:'long',summaryText:'这是完整的规则说明。'.repeat(80)},
+      trainingLocation:{unit_id:lamp.unit_id,id:'saved-transition',teaching_id:'long'},
     })));
     await page.waitForSelector('.device-activity-question');
-    await page.waitForSelector('.training-selection');
+    await page.waitForFunction(()=>window.__boardLocation?.id==='saved-transition');
+    assert.equal(await page.$('.training-selection'),null);
     for(const [width,height] of [[320,568],[390,320],[844,390]]) {
       await page.setViewport({width,height});
       const view=await page.evaluate(()=>{
         const scroller=document.querySelector('.device-page__chat .chat-panel__scroll');
         const input=document.querySelector('.device-page__chat input').getBoundingClientRect();
         return {scrollable:scroller.scrollHeight>scroller.clientHeight,
-          contained:[...document.querySelectorAll('.device-activity-question,.training-selection')].every(el=>scroller.contains(el)),
+          contained:[...document.querySelectorAll('.device-activity-question')].every(el=>scroller.contains(el)),
           inputVisible:input.top>=0 && input.bottom<=innerHeight,
           fits:document.documentElement.scrollWidth<=innerWidth};
       });

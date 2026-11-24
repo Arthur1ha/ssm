@@ -67,11 +67,21 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
     async def step(state: TeachingState) -> TeachingState:
         index = state.get('index', 0)
         receipts = list(state.get('receipts') or [])
+        resolved = None
+        trusted = replace(execution, training_step_index=index,
+                          trigger_step_index=index if execution.trigger_ref else None)
+
+        async def stop(result):
+            result = {**result, 'step_index': index, 'step_count': len(receipts)}
+            if resolved is not None and after_step is not None:
+                await _call(after_step, resolved, trusted, result)
+            return {'index': index, 'receipts': receipts, 'stopped': True,
+                    'result': result}
+
         try:
             from cloud.space.user_goals import get_goal_registry
             if not get_goal_registry().is_current(execution.goal_revision):
-                return {'index': index, 'receipts': receipts, 'stopped': True,
-                        'result': {'result': 'cancelled', 'error': 'newer_user_goal'}}
+                return await stop({'result': 'cancelled', 'error': 'newer_user_goal'})
             if execution.expires_at and execution.expires_at <= time.time():
                 raise ValueError('execution_context_expired')
             if refresh_observation is not None:
@@ -79,8 +89,7 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
                     execution, training_step_index=index,
                     trigger_step_index=index if execution.trigger_ref else None))
                 if block:
-                    return {'index': index, 'receipts': receipts, 'stopped': True,
-                            'result': block}
+                    return await stop(block)
                 # Refresh may wait on the camera. Read all record, capability
                 # and physical facts below only after it finishes.
                 if not get_goal_registry().is_current(execution.goal_revision):
@@ -107,16 +116,14 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
             if before_step is not None:
                 block = await _call(before_step, resolved, trusted)
                 if block:
-                    return {'index': index, 'receipts': receipts, 'stopped': True,
-                            'result': block}
+                    return await stop(block)
             request_id = 'teaching_' + key + '_' + str(index)
             if resolved.get('skip'):
                 result = {'result': 'ok', 'skipped': True,
                           'reason': 'goal_observed', 'goal_state': resolved.get('goal_state')}
             else:
                 if not get_goal_registry().is_current(execution.goal_revision):
-                    return {'index': index, 'receipts': receipts, 'stopped': True,
-                            'result': {'result': 'cancelled', 'error': 'newer_user_goal'}}
+                    return await stop({'result': 'cancelled', 'error': 'newer_user_goal'})
                 identity = (unit_id, thread_id, run_id, request_id)
                 reserved = await invoke_blocking(
                     ledger.reserve, *identity, resolved['action'], resolved['params'])
@@ -142,7 +149,7 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
             if result.get('result') != 'ok':
                 return {'index': index, 'receipts': receipts, 'stopped': True,
                         'pending': receipt,
-                        'result': {**result, 'step_index': index}}
+                        'result': {**result, 'step_index': index, 'step_count': len(receipts)}}
             receipts.append(receipt)
             done = index + 1 >= len(definition['steps'])
             return {'index': index + 1, 'receipts': receipts, 'stopped': done,
@@ -151,8 +158,7 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
         except asyncio.CancelledError:
             raise
         except (ValueError, KeyError) as exc:
-            return {'index': index, 'receipts': receipts, 'stopped': True,
-                    'result': {'result': 'blocked', 'error': str(exc), 'step_index': index}}
+            return await stop({'result': 'blocked', 'error': str(exc)})
 
     graph = StateGraph(TeachingState)
     graph.add_node('transition', step)
@@ -174,6 +180,8 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
             if prior.get('pending') and observe is not None:
                 observed = await _call(observe, prior['pending'])
             return {**prior['result'], 'steps': prior.get('receipts') or [],
+                    'step_count': len(prior.get('receipts') or []),
+                    'total_steps': len(definition['steps']),
                     'training_ref': reference, 'training_revision': revision,
                     'training_run_id': run_id, 'replayed': True,
                     **({'last_step_result': observed} if observed is not None else {})}
@@ -181,6 +189,8 @@ async def run_training_workflow(prepared: dict, context: ExecutionContext, *,
                                         {'index': 0, 'receipts': [], 'stopped': False},
                                         config, durability='sync')
     return {**output['result'], 'steps': output.get('receipts') or [],
+            'step_count': len(output.get('receipts') or []),
+            'total_steps': len(definition['steps']),
             **({'last_step_result': output['pending']['result']} if output.get('pending') else {}),
             'training_ref': reference, 'training_revision': revision,
             'training_run_id': run_id}

@@ -49,7 +49,8 @@ _RESULT_FIELDS = {
     "activity": {"activity_id", "revision", "status", "stop_confirmed"},
     "configuration": {"constraint_id", "expires_at", "saved", "loaded"},
     "training": {"teaching_id", "training_ref", "revision", "training_revision", "name",
-                 "step_index", "step_number", "step_count", "saved", "loaded", "skipped"},
+                 "step_index", "step_number", "step_count", "total_steps", "training_run_finished",
+                 "saved", "loaded", "skipped", "goal_state"},
     "training_proposal": {"teaching_id", "training_ref", "revision", "name", "saved", "loaded"},
     "search": {"found", "frame_id", "as_of", "candidate", "stop_confirmed", "verified"},
 }
@@ -304,7 +305,9 @@ def training_step_facts(record: dict, resolved: dict, *, run_id: str,
     import uuid
 
     index = resolved["step_index"]
-    sequence = index * 3 + {"observation": 0, "call": 1, "result": 2}[phase]
+    finished = phase == 'finish'
+    sequence = (len(record.get('definition', {}).get('steps', [])) * 3 + 1
+                if finished else index * 3 + {"observation": 0, "call": 1, "result": 2}[phase])
     identity = f'{run_id}:{record["teaching_id"]}:{record["revision"]}:{index}:{phase}'
     facts = {
         "source_event_id": "evt_" + uuid.uuid5(uuid.NAMESPACE_URL, identity).hex,
@@ -314,9 +317,9 @@ def training_step_facts(record: dict, resolved: dict, *, run_id: str,
         "transition_id": resolved.get("transition_id"),
         "step_index": index, "step_number": index + 1,
         "name": record.get("name") or "", "result_kind": "training",
-        "fact_kind": phase, "context_scope": "process",
+        "fact_kind": 'result' if finished else phase, "context_scope": "process",
         "stage": "executing" if phase == "call" else "observed",
-        "status": (result or {}).get("result", "unknown") if phase == "result" else
+        "status": (result or {}).get("result", "unknown") if phase == "result" or finished else
                   "executing" if phase == "call" else "observed",
         "public_result": result or {},
     }

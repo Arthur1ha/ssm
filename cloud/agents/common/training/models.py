@@ -22,7 +22,7 @@ class Trigger(StrictModel):
 
 class Step(StrictModel):
     transition_ids: list[StrictStr] = Field(min_length=1, description='本步骤各合法源状态的候选转换；普通步骤必须同动作，明确goal_state可包含到该目标的不同姿态动作；数组顺序不是执行顺序')
-    conditions: list[Condition] = Field(default_factory=list, description='只约束本步骤所指转换的准入条件；主人身份必须来自可信请求者事实')
+    conditions: list[Condition] = Field(default_factory=list, description='仅保存用户明确提出的本步骤准入条件，不自行增加持续在场等限制；主人身份必须来自可信请求者事实')
     defaults: dict[str, Any] = Field(default_factory=dict)
     goal_state: StrictStr | None = Field(default=None, description='仅明确姿态或生命周期目标使用；当前真实状态已满足时可跳过，不能用于打招呼等命令动作')
 
@@ -30,8 +30,10 @@ class Step(StrictModel):
 class Definition(StrictModel):
     steps: list[Step] = Field(min_length=1, max_length=12, description='有序的已有转换步骤；单动作也是仅含一步的教导')
     origins: list[Literal['user_delegated', 'agent_autonomous']] = Field(min_length=1)
-    cooldown_s: StrictInt | StrictFloat | None = None
-    trigger: Trigger | None = None
+    cooldown_s: StrictInt | StrictFloat | None = Field(default=None,
+        description='仅用户明确要求重复执行间隔时填写秒数；未要求的新规则为null，修改其他内容保留原值。不得为避免重复自行补入冷却时间')
+    trigger: Trigger | None = Field(default=None,
+        description='新鲜观察事件仅启动一次完整steps链；启动后不要求原观察持续成立，不自行添加持续在场条件')
     # Interpreted by the role Graph, never used as a global device guard.
     situation: StrictStr | None = Field(default=None, min_length=1, max_length=2000,
         description="自然语言适用情境，由智能体语义理解；不要求传感器事件或固定口令")
@@ -173,9 +175,19 @@ class ParameterEdit(StrictModel):
     expected_revision: StrictInt = Field(ge=1)
     capability_hash: CapabilityHash
     event_params: dict[str, Any] = Field(default_factory=dict)
+    event_target: StrictStr | None = Field(default=None, min_length=1, max_length=200)
     steps: list[StepParameterEdit] = Field(default_factory=list, max_length=12)
     emotion: StrictStr | None = None
     cooldown_s: StrictInt | StrictFloat | None = None
+
+    @model_validator(mode='after')
+    def valid_event_target(self):
+        if 'event_target' in self.model_fields_set:
+            if self.event_target is None or self.event_target != self.event_target.strip():
+                raise ValueError('event_target_requires_trimmed_text')
+            if self.event_params:
+                raise ValueError('event_target_conflicts_with_event_params')
+        return self
 
 
 class EnabledRequest(StrictModel):

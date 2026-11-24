@@ -172,7 +172,8 @@ async def _training_preflight(command, params, context, *, reserve=False, dispat
                 from cloud.go2.training_events import person_teachings
                 if not person_teachings.allows(context):
                     return {'allowed': False, 'params': params, 'training_refs': [],
-                            'transition_id': None, 'reasons': [{'code': 'autonomy_unavailable'}]}
+                            'transition_id': None,
+                            'reasons': [{'code': person_teachings.execution_rejection(context)}]}
             current = go2.state_snapshot()
             fresh_body = current.get('body_telemetry_fresh') is True
             if not fresh_body:
