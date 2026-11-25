@@ -195,6 +195,19 @@ class SpaceRegistry:
         with self._lock:
             return dict(self._load_unlocked()["invite"])
 
+    def remove_device(self, device_id: str) -> bool:
+        """Remove just one member, preserving other concurrent space edits."""
+        if device_id not in {"esp32_desk", "go2"}:
+            raise ValueError("unsupported device id")
+        with self._lock:
+            data = self._load_unlocked()
+            if device_id not in data["device_ids"]:
+                return False
+            data["device_ids"].remove(device_id)
+            data["updated_at"] = int(time.time())
+            self._atomic_save(data)
+            return True
+
     def enable_invite(self) -> dict[str, Any]:
         with self._lock:
             data = self._load_unlocked()

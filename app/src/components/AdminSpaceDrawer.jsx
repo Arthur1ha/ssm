@@ -182,8 +182,7 @@ function DeviceLabelButton({ device }) {
     qrRef.current.innerHTML = '';
     loadQrLibrary('generate').then(QRCode => {
       if (!active || !qrRef.current) return;
-      new QRCode(qrRef.current, { text: label.code, width: 176, height: 176,
-        colorDark: '#0c0c15', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+      renderQrCode(qrRef.current, QRCode, label.code);
     }).catch(() => { if (active) { setErrorTarget('save'); setError('二维码生成失败，请重试'); } });
     return () => { active = false; };
   }, [open, label?.code]);

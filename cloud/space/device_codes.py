@@ -63,7 +63,7 @@ class DeviceCodeStore:
         if len(parts) != 4 or parts[:2] != ["ssm-device", "v1"]:
             return None
         device_id, token = parts[2:]
-        if device_id not in SUPPORTED_DEVICES or not token:
+        if device_id not in SUPPORTED_DEVICES or not token or not token.isascii():
             return None
         with self._lock:
             entry = self._load().get(device_id)

@@ -10,11 +10,12 @@ const puppeteer = require('puppeteer');
 const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transforms:['jsx'], production:true}).code;
 (async () => {
   for (const file of ['app/src/app.jsx','app/src/components/SessionGate.jsx','app/src/pages/DevicesPage.jsx']) compile(file);
-  const browser = await puppeteer.launch({headless:true, executablePath:process.env.PUPPETEER_EXECUTABLE_PATH, args:['--no-sandbox','--disable-dev-shm-usage']});
+  const browser = await puppeteer.launch({headless:true, protocolTimeout:15000, executablePath:process.env.PUPPETEER_EXECUTABLE_PATH, args:['--no-sandbox','--disable-dev-shm-usage']});
   try {
     const page = await browser.newPage();
+    page.setDefaultTimeout(10000);
     const errors = [];
-    page.on('pageerror', error => errors.push(error.message));
+    page.on('pageerror', error => { errors.push(error.message); console.error('Browser error:',error.message); });
     await page.setRequestInterception(true);
     page.on('request', req => req.respond({status:200,contentType:'text/html',body:'<div id="root"></div>'}));
     await page.goto('http://ssm.test/');
@@ -92,6 +93,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     `});
     await page.addScriptTag({content:compile('app/src/hooks/useTraining.js')});
     await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
+    await page.addScriptTag({content:compile('app/src/components/Toast.jsx')});
     await page.addScriptTag({content:compile('app/src/app.jsx')});
     await page.evaluate(() => root.render(React.createElement(App,{key:'home',session:{actor:'visitor'}})));
     await waitText('正在准备你的空间');
@@ -124,7 +126,138 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(() => snapshots.shift().resolve([]));
     await waitText('空间里还没有设备');
     assert((await body()).includes('对话内容'));
+
+    // Exercise the actual App scan result, reusable toast and undo together.
+    if (process.env.SSM_CHECK_VERBOSE) console.log('Checking App scan toast and undo');
+    await page.addStyleTag({path:'app/styles/app.css'});
+    await page.evaluate(() => {
+      for (const name of ['SpaceMenu','AdminInviteDrawer','AdminSpaceDrawer','OrchestratorSettingsDrawer','SpacePeopleDrawer'])
+        window[name] = () => null;
+      window.useTraining = () => ({proposals:[],resetVersion:0,loadAll(){}});
+      window.QrScanner = ({onScan}) => { window.emitScan=onScan; return React.createElement('p',null,'模拟摄像头'); };
+      window.fixtureDevice = {unit_id:'lamp',device_id:'esp32_desk',name:'皮皮灯',agent_type:'actuator',online:true};
+      window.members=[]; window.undoRequests=[]; window.bindCount=0;
+      window.bindReply={device_id:'esp32_desk',result:'added'};
+      apiClient.request=async (path,options={}) => {
+        if (path==='/api/devices') return [...members];
+        if (path==='/api/admin/devices/bind') {
+          bindCount++;
+          if (window.holdBind) await new Promise(resolve => {window.finishBind=resolve;});
+          if (window.bindError) throw Object.assign(new Error('Simulated binding error'),{status:bindError});
+          if (!members.length) members=[fixtureDevice];
+          return {...bindReply};
+        }
+        if (path==='/api/admin/devices/esp32_desk' && options.method==='DELETE') {
+          undoRequests.push({path,method:options.method});
+          if (window.undoError) throw new Error('Simulated removal failure');
+          if (window.holdUndo) await new Promise(resolve => {window.finishUndo=resolve;});
+          members=[];
+          return {device_id:'esp32_desk',result:'removed'};
+        }
+        return {};
+      };
+      root.render(React.createElement(App,{key:'admin-toast',session:{actor:'admin',session_id:'test'}}));
+    });
+    await page.setViewport({width:390,height:844});
+    await waitText('空间里还没有设备');
+    const headerHeight = await page.$eval('.device-scan-trigger',button=>button.parentElement.parentElement.getBoundingClientRect().height);
+    const scan = async () => {
+      await page.click('.device-scan-trigger');
+      await waitText('模拟摄像头');
+      await page.evaluate(() => { emitScan('ssm-device:v1:esp32_desk:test-token'); });
+    };
+    const toastText = () => page.$eval('.toast',element=>element.innerText);
+    await page.evaluate(()=>{window.holdBind=true;});
+    await page.click('.device-scan-trigger');
+    await waitText('模拟摄像头');
+    assert.equal(await page.$$eval('.device-scan-dialog button,.device-scan-dialog input,.device-scan-dialog form,.device-scan-dialog h2',elements=>elements.length),0);
+    assert.equal(await page.$eval('.device-scan-dialog',element=>element.innerText),'模拟摄像头');
+    await page.evaluate(()=>{emitScan('ssm-device:v1:esp32_desk:test-token');});
+    await page.waitForFunction(()=>window.finishBind);
+    await page.waitForSelector('.device-scan-dialog',{hidden:true,timeout:1000});
+    assert.equal(await page.$('.toast'),null,'Do not report success before the binding response');
+    await page.evaluate(()=>{window.holdBind=false;finishBind();});
+    await waitText('添加成功');
+    if (process.env.SSM_CHECK_VERBOSE) console.log('Toast rendered');
+    assert.equal(await page.$('.device-scan-dialog'),null);
+    assert.equal(await page.$eval('.toast__action',button=>button.textContent.trim()),'撤销');
+    assert.equal(await page.evaluate(()=>document.querySelector('.toast-region').parentElement===document.body),true);
+    assert.equal(await page.$eval('.device-scan-trigger',button=>button.parentElement.parentElement.getBoundingClientRect().height),headerHeight);
+    await page.focus('.toast__action');
+    for (const width of [320,390,1280]) {
+      await page.setViewport({width,height:844});
+      const rect=await page.$eval('.toast',element=>{
+        const r=element.getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,height:r.height};
+      });
+      assert(rect.left>=15 && rect.right<=width-15 && rect.bottom>=800 && rect.bottom<=824);
+      assert(rect.height>=44 && rect.height<80);
+    }
+    await page.setViewport({width:390,height:844});
+    await page.evaluate(()=>{window.holdUndo=true;document.querySelector('.toast__action').click();document.querySelector('.toast__action').click();});
+    await page.waitForFunction(()=>window.finishUndo);
+    assert.equal(await page.evaluate(()=>undoRequests.length),1,'Prevent duplicate undo requests');
+    assert.equal(await page.$eval('.toast__action',button=>button.disabled),true);
+    await page.evaluate(()=>{window.holdUndo=false;finishUndo();});
+    await waitText('已撤销添加');
+    if (process.env.SSM_CHECK_VERBOSE) console.log('Undo completed');
+    assert.equal(await page.$('.toast__action'),null);
+    await waitText('空间里还没有设备');
+    await page.mouse.move(0,0);
+    await page.waitForSelector('.toast',{hidden:true,timeout:5000});
+    if (process.env.SSM_CHECK_VERBOSE) console.log('Undo feedback expired');
+
+    await page.evaluate(()=>{bindReply.result='already_added';});
+    await scan();
+    await waitText('空间已有，无需重复添加');
+    assert.equal(await page.$('.toast__action'),null);
+    const count=await page.evaluate(()=>bindCount);
+    await new Promise(resolve=>setTimeout(resolve,1800));
+    await scan();
+    await page.waitForFunction(count=>bindCount>count,{},count);
+    await new Promise(resolve=>setTimeout(resolve,1500));
+    assert((await toastText()).includes('空间已有，无需重复添加'),'Repeated text gets a fresh duration');
+    await page.waitForSelector('.toast',{hidden:true,timeout:4000});
+    if (process.env.SSM_CHECK_VERBOSE) console.log('Repeated feedback timer checked');
+
+    // An actionable toast uses the same 3s duration and never auto-runs undo.
+    await page.evaluate(()=>{bindReply.result='added';});
+    await scan();
+    await waitText('添加成功');
+    await page.mouse.move(0,0);
+    await page.waitForSelector('.toast',{hidden:true,timeout:4500});
+    if (process.env.SSM_CHECK_VERBOSE) console.log('Actionable toast timer checked');
+    assert.equal(await page.evaluate(()=>undoRequests.length),1);
+
+    await page.evaluate(()=>{window.bindError=404;});
+    await scan();
+    await waitText('未发现设备，请确认已启动');
+    assert.equal(await page.$('.device-scan-dialog'),null);
+    assert.equal(await page.$('.toast__action'),null);
+
+    // Undo failure remains retryable; actual completion refreshes membership.
+    await page.evaluate(()=>{window.bindError=0;window.undoError=true;});
+    await scan();
+    await waitText('添加成功');
+    await page.click('.toast__action');
+    await waitText('撤销失败，请重试');
+    assert.equal(await page.$eval('.toast__action',button=>button.textContent.trim()),'重试');
+    await page.evaluate(()=>{window.undoError=false;});
+    await page.click('.toast__action');
+    await waitText('已撤销添加');
+
+    // A late action result cannot replace newer feedback.
+    await scan();
+    await waitText('添加成功');
+    await page.evaluate(()=>{window.holdUndo=true;window.finishUndo=null;});
+    await page.click('.toast__action');
+    await page.waitForFunction(()=>window.finishUndo);
+    await page.evaluate(()=>{bindReply.result='already_added';});
+    await scan();
+    await waitText('空间已有，无需重复添加');
+    await page.evaluate(()=>{window.holdUndo=false;finishUndo();});
+    await page.waitForFunction(()=>members.length===0);
+    assert((await toastText()).includes('空间已有，无需重复添加'));
     assert.deepEqual(errors, []);
-    console.log('PASS: real-browser session network/503/401, retry, invite preservation, session end, initial overview, refresh keeps partner rows, empty state; App initial loading/error/retry, simultaneous home reveal, refresh retains input, empty snapshot; JSX syntax.');
+    console.log('PASS: session/home regressions; actual App bottom toast, no header growth, mobile/desktop layout, uniform 3s expiry, repeated feedback resets duration; undo dispatch/deduplication/failure/retry; stale action result preserves newer toast; JSX syntax.');
   } finally { await browser.close(); }
 })().catch(error => {console.error(error);process.exitCode=1;});

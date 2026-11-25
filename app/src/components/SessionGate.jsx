@@ -344,8 +344,7 @@ function AdminInviteDrawer({ open, onClose }) {
     qrRef.current.innerHTML = '';
     loadQrLibrary('generate').then(QRCode => {
       if (!active || !qrRef.current) return;
-      new QRCode(qrRef.current, { text: inviteUrl, width: 176, height: 176,
-        colorDark: '#0c0c15', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+      renderQrCode(qrRef.current, QRCode, inviteUrl);
     }).catch(() => {
       if (active) { setMessageTarget('copy'); setMessage('二维码加载失败，请重试或复制邀请链接'); }
     });

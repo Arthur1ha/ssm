@@ -51,7 +51,8 @@ function App({ session, logout, refreshSession }) {
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
   const [peopleOpen,  setPeopleOpen]  = useState(false);
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
-  const [deviceNotice, setDeviceNotice] = useState('');
+  const deviceBinding = useRef(false);
+  const { toast, showToast, dismissToast } = useToast();
   const [activityQuestion, setActivityQuestion] = useState(null);
   const training = useTraining('', {sessionId:session.session_id,canEdit:session.actor === 'admin'});
   const chatRows = useMemo(() => trainingTimeline(activityLog, session.actor === 'admin' ? training.proposals : []), [activityLog,training.proposals,session.actor]);
@@ -61,11 +62,40 @@ function App({ session, logout, refreshSession }) {
   useEffect(() => { setTrainingSelection(null); setTrainingLocation(null); }, [training.resetVersion]);
   const [, setAgentNamesRevision] = useState(0);
 
-  useEffect(() => {
-    if (!deviceNotice) return;
-    const timeout = setTimeout(() => setDeviceNotice(''), 5000);
-    return () => clearTimeout(timeout);
-  }, [deviceNotice]);
+  const handleDeviceScan = async value => {
+    if (deviceBinding.current) return;
+    setDeviceScanOpen(false);
+    const code = String(value || '').trim();
+    if (!/^ssm-device:v1:(esp32_desk|go2):[A-Za-z0-9_-]+$/.test(code)) {
+      showToast('请使用空间管理中的设备标签');
+      return;
+    }
+    deviceBinding.current = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const result = await apiClient.request('/api/admin/devices/bind', {
+        method: 'POST', body: { code }, signal: controller.signal,
+      });
+      showToast(result.result === 'already_added' ? '空间已有，无需重复添加' : '添加成功',
+        result.result === 'added' ? { action: {
+          label: '撤销', successMessage: '已撤销添加', errorMessage: '撤销失败，请重试',
+          onClick: async () => {
+            await apiClient.request(`/api/admin/devices/${encodeURIComponent(result.device_id)}`, { method: 'DELETE' });
+            await refreshAgents();
+          },
+        } } : {});
+      refreshAgents();
+    } catch (error) {
+      showToast(error.name === 'AbortError' ? '添加超时，请检查设备列表'
+        : error.status === 400 ? '设备标签已失效，请重新获取'
+        : error.status === 404 ? '未发现设备，请确认已启动'
+        : apiErrorText(error, '添加失败，请稍后重试'));
+    } finally {
+      clearTimeout(timeout);
+      deviceBinding.current = false;
+    }
+  };
 
   useEffect(() => {
     const onNamesChanged = () => setAgentNamesRevision(value => value + 1);
@@ -283,10 +313,11 @@ function App({ session, logout, refreshSession }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             {session.actor === 'visitor' && <SessionBadge session={session}/>}
-            {session.actor === 'admin' && <div className="feedback-button"><button type="button" className="icon-button device-scan-trigger"
-              onClick={() => { setDeviceNotice(''); setDeviceScanOpen(true); }} aria-label="扫描设备" title="扫描设备">
+            {session.actor === 'admin' && <button type="button" className="icon-button device-scan-trigger"
+              disabled={deviceBinding.current}
+              onClick={() => setDeviceScanOpen(true)} aria-label="扫描设备" title="扫描设备">
               <Icon name="scan" size={18}/>
-            </button>{deviceNotice && <small className="action-feedback action-feedback--ok" role="status" title={deviceNotice}>{deviceNotice}</small>}</div>}
+            </button>}
             {session.actor === 'admin' && <SpaceMenu
               onShareSpace={() => setInviteOpen(true)} onTraining={() => setTrainingOpen(true)}
               onSpaceSettings={() => setSpaceOpen(true)} onOrchestratorSettings={() => setOrchestratorOpen(true)}
@@ -319,7 +350,7 @@ function App({ session, logout, refreshSession }) {
           )}
           <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
             connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
-            isAdmin={session.actor === 'admin'} onAddDevice={() => setDeviceScanOpen(true)}/>
+            isAdmin={session.actor === 'admin'} onAddDevice={() => { if (!deviceBinding.current) setDeviceScanOpen(true); }}/>
 
           </>}
           messageContent={<ActivityFeed entries={chatRows} busy={thinking}
@@ -349,11 +380,9 @@ function App({ session, logout, refreshSession }) {
         {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
         {session.actor === 'admin' && <OrchestratorSettingsDrawer open={orchestratorOpen} onClose={() => setOrchestratorOpen(false)}/>}
         {session.actor === 'admin' && <SpacePeopleDrawer open={peopleOpen} onClose={() => setPeopleOpen(false)}/>}
-        {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)} onBound={async result => {
-          setDeviceScanOpen(false);
-          setDeviceNotice(result.result === 'already_added' ? '设备已在空间中，原有设置已保留。' : '设备已加入当前空间。');
-          await refreshAgents();
-        }}/>}
+        {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)}
+          onScan={handleDeviceScan} onError={message => { setDeviceScanOpen(false); showToast(message); }}/>}
+        {toast && <Toast key={toast.id} notice={toast} onDismiss={dismissToast}/>}
       </div>
 
       {/* ── 设备页：叠在主屏之上，CSS 滑入/滑出 ── */}
@@ -385,68 +414,16 @@ function App({ session, logout, refreshSession }) {
 }
 window.App = App;
 
-function DeviceScanDialog({ onClose, onBound }) {
-  const { useEffect, useRef, useState } = React;
-  const [attempt, setAttempt] = useState(0);
-  const [pasteOpen, setPasteOpen] = useState(false);
-  const [code, setCode] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const inFlight = useRef(false);
-
-  useEffect(() => {
+function DeviceScanDialog({ onClose, onScan, onError }) {
+  React.useEffect(() => {
     const onKey = event => { if (event.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const submit = async value => {
-    if (inFlight.current) return;
-    const raw = String(value || '').trim();
-    if (!raw) { setError('请扫描或粘贴设备码'); return; }
-    if (raw.includes('#invite=') || raw.includes('#token=')) {
-      setError('这不是设备二维码');
-      return;
-    }
-    inFlight.current = true;
-    setBusy(true);
-    setError('');
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
-    try {
-      const result = await apiClient.request('/api/admin/devices/bind', { method: 'POST', body: { code: raw }, signal: controller.signal });
-      await onBound(result);
-    } catch (requestError) {
-      setError(requestError.name === 'AbortError' ? '识别超时，请检查网络后重试'
-        : requestError.status === 400 ? '这不是有效的设备二维码'
-        : requestError.status === 404 ? '还未发现这台设备，请启动设备后重试'
-        : apiErrorText(requestError, '设备识别失败，请重试'));
-      setPasteOpen(true);
-    } finally {
-      clearTimeout(timeout);
-      inFlight.current = false;
-      setBusy(false);
-    }
-  };
-
   return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
-    <section className="management-dialog device-scan-dialog" role="dialog" aria-modal="true" aria-labelledby="device-scan-title" onClick={event => event.stopPropagation()}>
-      <header><div><h2 id="device-scan-title">扫码添加设备</h2></div>
-        <button className="icon-button header-icon-btn" onClick={onClose} aria-label="关闭扫码"><Icon name="x" size={16}/></button></header>
-      <p>扫描设备上的二维码标签，识别后自动加入当前空间。</p>
-      {!busy && !pasteOpen && <QrScanner key={attempt} onScan={submit} hint="将设备二维码放入框内"/>}
-      {pasteOpen && !busy && <form className="session-entry__form" onSubmit={event => { event.preventDefault(); submit(code); }}>
-        <label htmlFor="device-code">设备码</label>
-        <input id="device-code" value={code} onChange={event => setCode(event.target.value)} autoComplete="off" placeholder="粘贴设备标签中的内容"/>
-        {error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}
-        <button className="btn btn--accent" disabled={!code.trim()}>识别并添加设备</button>
-      </form>}
-      <div className="device-scan-actions">
-        <button className="btn" onClick={() => { setError(''); setPasteOpen(false); setAttempt(value => value + 1); }} disabled={busy}>重新扫码</button>
-        <button className="btn" onClick={() => setPasteOpen(value => !value)} disabled={busy}>{pasteOpen ? '返回摄像头' : '粘贴设备码'}</button>
-      </div>
-      {busy && <small className="action-feedback" role="status">正在识别设备…</small>}
-      {!pasteOpen && error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}
+    <section className="management-dialog device-scan-dialog" role="dialog" aria-modal="true" aria-label="扫描设备二维码" onClick={event => event.stopPropagation()}>
+      <QrScanner onScan={onScan} onError={onError} frameOnly/>
     </section>
   </div>;
 }

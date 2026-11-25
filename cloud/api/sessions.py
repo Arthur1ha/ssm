@@ -88,6 +88,16 @@ async def bind_device(req: DeviceBindRequest, session: dict[str, Any] = Depends(
     }
 
 
+@router.delete("/api/admin/devices/{device_id}")
+async def remove_device(device_id: str, session: dict[str, Any] = Depends(require_admin_csrf)):
+    if device_id not in SUPPORTED_DEVICES:
+        raise HTTPException(status_code=404, detail="unsupported device")
+    removed = get_space_registry().remove_device(device_id)
+    audit_event("device_removed", session, device_id=device_id,
+                result="removed" if removed else "already_removed")
+    return {"device_id": device_id, "result": "removed" if removed else "already_removed"}
+
+
 @router.post("/api/visitor/session")
 async def create_visitor_session(req: VisitorSessionRequest, request: Request, response: Response):
     check_rate_limit(request, "visitor-session")

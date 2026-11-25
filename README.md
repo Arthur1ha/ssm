@@ -18,6 +18,12 @@ flowchart LR
 
 用户可聊天、控制设备、确认教导或启动空间活动。灯默认 `manual`，`reactive` 下结合传感器自主决策；Go2 自主模式为 `free_explore`。活动中的协作与游戏由各设备自己的 Graph 决策，用户再次介入结束活动。ESP32 硬件 tick 独立运行，当前没有离线自动控灯规则。
 
+添加设备：管理员在「空间管理 → 设备标签」保存或打印标签，再用首页「扫码添加设备」扫描。设备标签使用 `ssm-device:v1:<device_id>:<token>`，空间分享码和原厂二维码不能替代。
+
+摄像头需 HTTPS（本机 localhost 可调试）及相机权限；扫码使用本地固定版本 `qr-scanner 1.4.2`，由库管理后摄选择、视频帧调度、扫描区域与定位框、原生识别及 Worker 后备解码，关闭窗口立即释放相机。模块和 Worker 包装文件保持同目录；若部署设置 CSP，需允许 `worker-src blob:`。来源、完整性校验与许可证见 [qr-scanner](app/src/utils/qr-scanner/README.md)。保存的标签 PNG 包含白色留边。
+
+标签校验、管理员会话和 CSRF 校验通过且 MQTT 已发现该整机的 Agent Card 后才加入 `main`，前端刷新 `/api/devices` 显示；标签轮换后旧标签立即失效，重复添加不覆盖空间设置。
+
 ## 部署
 
 需要 Python ≥3.13、uv、Mosquitto 和 `envsubst`；公网部署另行配置同源代理、HTTPS 与网络访问策略。PWA 使用 React 全局脚本，无构建步骤。
