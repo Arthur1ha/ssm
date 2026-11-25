@@ -68,7 +68,7 @@ function getAgentOpeningLine(agent) {
   const id = typeof agent === 'string' ? agent : (agent?.agent_id || agent?.unit_id || '');
   const name = getAgentDisplayName(agent);
   if (id === 'orchestrator' || id === 'cloud_orchestrator') {
-    return `我是${name}。想做点什么，或只是想聊聊，都可以慢慢说。`;
+    return `你好，我是${name}。有什么想聊的，或想让伙伴们做的，告诉我就好。`;
   }
   if (id === 'esp32_desk_led') {
     return `我是${name}。灯光这事我有点讲究，有什么想法，尽管说。`;

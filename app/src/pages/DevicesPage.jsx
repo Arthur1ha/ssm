@@ -1,21 +1,9 @@
 /* 首页把设备入口、环境读数和最近事件收在同一个空间概览里。 */
-function DeviceEmptyState({ isAdmin, onAddDevice }) {
-  return (
-    <div className="device-empty">
-      <span className="device-empty__icon"><Icon name="addDevice" size={26}/></span>
-      <strong>空间里还没有设备</strong>
-      <p>{isAdmin
-        ? '添加第一台设备，空间就能开始感知和响应。'
-        : '管理员添加设备后，设备状态会自动出现在这里。'}</p>
-      {isAdmin && <button type="button" className="btn btn--accent" onClick={onAddDevice}>添加设备</button>}
-    </div>
-  );
-}
-
 function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceName,
-  loading = false, error = '', isAdmin, onAddDevice }) {
+  loading = false, error = '' }) {
   const { useState } = React;
   const [sensorsOpen, setSensorsOpen] = useState(false);
+  if (!agents.length) return null;
   const devices = agents.filter(a => a.agent_type === 'robot' || a.agent_type === 'actuator');
   const sensors = agents.filter(a => a.agent_type !== 'robot' && a.agent_type !== 'actuator');
   const onlineCount = agents.filter(agent => isDeviceOnline(agent, unitData)).length;
@@ -27,10 +15,6 @@ function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceNa
       <h2>空间伙伴</h2>
       <span>{loading ? '正在同步…' : error || !connected ? '状态待同步' : `${onlineCount}/${agents.length} 位在线`}</span>
     </header>
-
-    {!agents.length && (loading || error
-      ? <p className="home-space__placeholder" role="status">{error ? '暂时没收到伙伴们的消息，请重试。' : '正在听听伙伴们的近况…'}</p>
-      : <DeviceEmptyState isAdmin={isAdmin} onAddDevice={onAddDevice}/>)}
 
     {devices.length > 0 && <div className="home-space__devices">
       {devices.map(agent => <HomeDeviceRow key={agent.unit_id} agent={agent}
@@ -67,5 +51,4 @@ function DevicesScreen({ agents, unitData, connected, recentEvents = [], spaceNa
   </section>;
 }
 
-window.DeviceEmptyState = DeviceEmptyState;
 window.DevicesScreen = DevicesScreen;

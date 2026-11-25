@@ -85,8 +85,9 @@ function Go2AssetsDrawer({ open, onClose }) {
         <header className="space-drawer__header">
           <div><h2 id="go2-assets-title">{getAgentDisplayName('go2')}管理</h2></div>
           <div className="space-drawer__header-actions">
-            <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
-              {loading ? '同步中…' : '刷新资产'}
+            <div className="feedback-button"><button type="button" className="icon-button" onClick={loadAssets} disabled={loading}
+              aria-label={loading ? '正在刷新' : '刷新'} title="刷新">
+              <Icon name="refresh" size={16}/>
             </button>{feedback('refresh')}</div>
             <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭 Go2 管理">
               <Icon name="x" size={16}/>
@@ -94,10 +95,14 @@ function Go2AssetsDrawer({ open, onClose }) {
           </div>
         </header>
         <div className="space-drawer__body" aria-busy={loading}>
-          <section className="asset-section">
+          <section className="asset-section agent-management-profile">
+            <p className="agent-management-intro">观察周围，陪伴互动，探索空间。</p>
+            <AgentPersonalitySettings agentId="go2" active={open}/>
+          </section>
+          <section className="asset-section agent-management-locations">
             <div className="asset-section__heading">
               <div><h3>命名地点</h3></div>
-              <span>{locations.length} 个坐标</span>
+              <span>{locations.length}</span>
             </div>
             <div className="location-ledger">
               {locations.length ? locations.map(location => (
@@ -118,8 +123,9 @@ function Go2AssetsDrawer({ open, onClose }) {
               )) : <p className="asset-empty">还没有命名地点。让 Go2 站在目标位置后保存。</p>}
             </div>
             {feedback('delete-location')}
-            <form className="asset-action-row" onSubmit={tagLocation}>
-              <input value={locationName} onChange={event => setLocationName(event.target.value)}
+            <form className="asset-action-row" {...window.ssmInputAttributes.form} onSubmit={tagLocation}>
+              <input type="text" value={locationName} onChange={event => setLocationName(event.target.value)}
+                {...window.ssmInputAttributes.text} aria-label="地点名称"
                 maxLength="48" placeholder="当前位置名称，如：窗边"/>
               <button className="btn btn--accent" disabled={busy === 'tag-location' || !locationName.trim()}>保存当前位置</button>
               {feedback('tag-location')}
@@ -131,18 +137,9 @@ function Go2AssetsDrawer({ open, onClose }) {
             {feedback('set-home')}
           </section>
 
-          <section className="asset-section">
-            <div className="asset-section__heading">
-              <div><h3>{getAgentDisplayName('go2')}的人格与特质</h3></div>
-              <span>长期生效</span>
-            </div>
-            <AgentPersonalitySettings agentId="go2" active={open}/>
-          </section>
-
           <section className="asset-section asset-section--memory">
             <div className="asset-section__heading">
-              <div><h3>长期记忆摘要</h3></div>
-              <span>经历与摘要</span>
+              <div><h3>记忆</h3></div>
             </div>
             <div className="memory-block">
               <h4>今日事件</h4><pre>{memory.today || '（今天暂无记录）'}</pre>
@@ -152,7 +149,6 @@ function Go2AssetsDrawer({ open, onClose }) {
               {memory.summaries.length ? memory.summaries.map(item => (
                 <div key={item.date}><strong>{item.date}</strong><pre>{item.summary}</pre></div>
               )) : <p className="asset-empty">还没有每日摘要。</p>}
-              <p>特质最近更新：{memory.last_evolved || '尚未更新'}</p>
             </div>
           </section>
         </div>

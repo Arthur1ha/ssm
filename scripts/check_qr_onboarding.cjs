@@ -1,7 +1,8 @@
 /* Camera/QR/browser regression with real QR encoding, qr-scanner module/Worker and React 18.
  * No live APIs or devices. NODE_PATH must expose sucrase and puppeteer.
  * Set SSM_CHECK_REACT / SSM_CHECK_REACT_DOM to local React 18 UMD scripts;
- * optionally PUPPETEER_EXECUTABLE_PATH. Run from the repository root. */
+ * optionally PUPPETEER_EXECUTABLE_PATH. Run from the repository root.
+ * --label-only checks the saved label PNG without starting the camera flow. */
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -54,7 +55,7 @@ const code = 'ssm-device:v1:esp32_desk:abcdefghijklmnopqrstuvwxyz0123456789ABCDE
       await page.addScriptTag({ path: file });
     }
     await page.addStyleTag({ path: 'app/styles/app.css' });
-    for (const file of ['ApiClient.js', 'utils/qrLibrary.js', 'utils/qrcode.vendor.js',
+    for (const file of ['utils/inputAttributes.js', 'ApiClient.js', 'utils/qrLibrary.js', 'utils/qrcode.vendor.js',
       'components/Toast.jsx', 'components/QrScanner.jsx', 'components/AdminSpaceDrawer.jsx', 'components/SessionGate.jsx', 'app.jsx']) {
       await page.addScriptTag({ content: compile(`app/src/${file}`) });
     }
@@ -99,7 +100,7 @@ const code = 'ssm-device:v1:esp32_desk:abcdefghijklmnopqrstuvwxyz0123456789ABCDE
       window.mountScanner = key => root.render(React.createElement(QrScanner, { key, onScan: value => scanResults.push(value) }));
       function ScanHarness() {
         const [open, setOpen] = React.useState(true);
-        const { toast, showToast, dismissToast } = useToast();
+        const { toast, showToast } = useToast();
         return React.createElement(React.Fragment, null,
           open && React.createElement(DeviceScanDialog, {
             onClose: () => setOpen(false),
@@ -115,7 +116,7 @@ const code = 'ssm-device:v1:esp32_desk:abcdefghijklmnopqrstuvwxyz0123456789ABCDE
             },
             onError: message => { setOpen(false); showToast(message); },
           }),
-          toast && React.createElement(Toast, { key: toast.id, notice: toast, onDismiss: dismissToast }));
+          toast && React.createElement(Toast, { key: toast.id, notice: toast }));
       }
       window.mountDialog = key => root.render(React.createElement(ScanHarness, { key }));
     }, code);
@@ -133,16 +134,56 @@ const code = 'ssm-device:v1:esp32_desk:abcdefghijklmnopqrstuvwxyz0123456789ABCDE
       const value = (await Scanner.scanImage(canvas, { returnDetailedScanResult: true })).data;
       const oldClick = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function () { window.download = this.href; };
-      [...document.querySelectorAll('button')].find(button => button.textContent === '保存二维码').click();
+      [...document.querySelectorAll('.device-label-actions button')].find(button => button.textContent === '保存').click();
       HTMLAnchorElement.prototype.click = oldClick;
       return { value, width: canvas.width, border: Array.from(ctx.getImageData(0, 0, 1, 1).data),
         savedPng: download === canvas.toDataURL('image/png') };
     });
     assert.deepEqual(saved, { value: code, width: 640, border: [255, 255, 255, 255], savedPng: true });
+    if (process.argv.includes('--label-only')) {
+      console.log('PASS: label save downloads the real 640px PNG with a white border and decodes to the original device credential.');
+      return;
+    }
 
     // Use the real camera component and real library worker all the way to bind.
     if (process.env.SSM_CHECK_VERBOSE) console.log("Use the real camera component and real library worker all the way to bind.");
-    await page.evaluate(() => mountDialog('worker'));
+    await page.evaluate(() => {
+      const ctx = camera.getContext('2d');
+      ctx.fillStyle = '#777'; ctx.fillRect(0, 0, camera.width, camera.height);
+      mountDialog('worker');
+    });
+    await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2
+      && !document.querySelector('.qr-scanner__overlay'));
+    assert.equal(await page.$('.device-scan-dialog .qr-scanner__target'), null);
+    assert.equal(await page.$eval('.qr-scanner__sweep', node => getComputedStyle(node,'::after').animationName), 'qr-scan-sweep');
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+    assert.equal(await page.$eval('.qr-scanner__sweep', node => getComputedStyle(node,'::after').animationName), 'none');
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
+    for (const [width, height] of [[320,568],[390,844],[844,390],[1280,800]]) {
+      await page.setViewport({ width, height });
+      const layout = await page.$eval('.device-scan-dialog', dialog => {
+        const video = dialog.querySelector('video');
+        const frame = video.parentElement;
+        const rect = video.getBoundingClientRect();
+        const outer = dialog.getBoundingClientRect();
+        return { width: rect.width, height: rect.height,
+          centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2,
+          fillsDialog: Math.abs(rect.width - outer.width) < 1 && Math.abs(rect.height - outer.height) < 1,
+          borderless: [dialog, frame].every(node => getComputedStyle(node).borderTopWidth === '0px'),
+          padding: getComputedStyle(dialog).padding, radius: getComputedStyle(frame).borderRadius };
+      });
+      assert(Math.abs(layout.width - layout.height) < 1, JSON.stringify(layout));
+      assert(Math.abs(layout.centerX - width / 2) < 1 && Math.abs(layout.centerY - height / 2) < 1,
+        JSON.stringify({ width, height, ...layout }));
+      assert(layout.fillsDialog && layout.borderless && layout.padding === '0px' && layout.radius === '0px');
+      assert(layout.width <= width - 32 && layout.height <= height - 32);
+      if (process.env.SCREENSHOT_DIR) {
+        fs.mkdirSync(process.env.SCREENSHOT_DIR, { recursive: true });
+        await page.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, `scan-${width}-${height}.png`) });
+      }
+    }
+    await page.setViewport({ width: 390, height: 844 });
+    await page.evaluate(() => paintCamera(testCode));
     await page.waitForFunction(() => bound.length === 1);
     assert.deepEqual(requests, [{ body: { code }, csrf: 'test-csrf' }]);
     assert.equal(await page.evaluate(() => tracks.every(track => track.readyState === 'ended')), true);

@@ -66,7 +66,7 @@ async def test_device_binding_rejects_visitor_code_and_visitor_session(client, a
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as anon:
         assert (await anon.get("/api/admin/device-codes/go2")).status_code == 401
         assert (await anon.post("/api/admin/devices/bind", json={"code": code})).status_code == 401
-        invite = (await client.post("/api/admin/invite/enable", headers=csrf)).json()
+        invite = (await client.get("/api/admin/invite")).json()
         assert (await anon.post("/api/visitor/session", json={"token": invite["share_id"]})).status_code == 200
         assert (await anon.post("/api/admin/devices/bind", json={"code": code}, headers={
             "X-CSRF-Token": anon.cookies.get("ssm_csrf"),
@@ -110,7 +110,7 @@ async def test_remove_device_rejects_anonymous_and_visitor(client, app, api_env)
     space, _ = api_env
     space.add_device("go2")
     csrf = await login_admin(client)
-    invite = (await client.post("/api/admin/invite/enable", headers=csrf)).json()
+    invite = (await client.get("/api/admin/invite")).json()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as visitor:
         assert (await visitor.delete("/api/admin/devices/go2")).status_code == 401
         await visitor.post("/api/visitor/session", json={"token": invite["share_id"]})

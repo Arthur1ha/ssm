@@ -2,7 +2,7 @@
  * ChatMessages and ChatInput own all conversation presentation. */
 function ChatPanel({ messages = [], agents, defaultAgent, training,
   onSend, onLocate, busy, busyProgress, disabled, placeholder, focusKey, suggestions = [],
-  beforeMessages, messageContent, inputAvatar, children }) {
+  beforeMessages, messageContent, inputAvatar, footerRef, children }) {
   const scrollRef = React.useRef(null);
   const contentRef = React.useRef(null);
   const following = React.useRef(true);
@@ -16,27 +16,31 @@ function ChatPanel({ messages = [], agents, defaultAgent, training,
     const scroller=scrollRef.current;
     if (scroller) scroller.scrollTop=scroller.scrollHeight;
   },[]);
-  React.useLayoutEffect(() => {
-    if (following.current) followLatest();
-  });
+  const syncScroll = React.useCallback(() => {
+    const scroller=scrollRef.current;
+    if (!scroller) return;
+    const overflow=scroller.scrollHeight-scroller.clientHeight;
+    const distance=overflow-scroller.scrollTop;
+    if (following.current || overflow<=2 || resumeOnBottom.current && distance<=2) followLatest();
+    else setPaused(distance>2);
+  },[followLatest]);
+  React.useLayoutEffect(() => { syncScroll(); });
   React.useEffect(() => {
-    const observer=typeof ResizeObserver==='function' ? new ResizeObserver(() => {
-      if (following.current) followLatest();
-    }) : null;
+    const observer=typeof ResizeObserver==='function' ? new ResizeObserver(syncScroll) : null;
     if (contentRef.current) observer?.observe(contentRef.current);
     if (scrollRef.current) observer?.observe(scrollRef.current);
     return () => observer?.disconnect();
-  },[followLatest]);
+  },[syncScroll]);
   const pauseFollowing = () => {
+    const scroller=scrollRef.current;
+    if (!scroller || scroller.scrollHeight-scroller.clientHeight<=2) return;
     following.current=false;
     resumeOnBottom.current=false;
-    setPaused(true);
   };
-  const onScroll = event => {
-    const scroller=event.currentTarget;
+  const onScroll = () => {
     // Layout, scroll anchoring and our own writes also emit scroll events.
     // Only an explicit upward input pauses following, never a changed offset.
-    if (following.current || resumeOnBottom.current && scroller.scrollHeight-scroller.clientHeight-scroller.scrollTop<=2) followLatest();
+    syncScroll();
   };
   const onTouchMove = event => {
     const current=event.touches[0]?.clientY;
@@ -61,7 +65,7 @@ function ChatPanel({ messages = [], agents, defaultAgent, training,
       <div style={{ height: 16 }}/>
       </div>
     </div>
-    <div className="chat-panel__footer">
+    <div className="chat-panel__footer" ref={footerRef}>
       {paused && <button type="button" className="chat-panel__latest" onClick={followLatest}>回到最新 ↓</button>}
       {suggestions.length > 0 && <div className="chat-suggestions">
         {suggestions.map(text => <button type="button" key={text}
@@ -102,18 +106,27 @@ function ChatInput({ onSend, busy, disabled, placeholder, focusKey, avatar }) {
         border: '1px solid var(--color-border)',
         borderRadius: 999,
       }}>
-        <input
+        <textarea
+          {...ssmInputAttributes.chat}
           ref={inputRef}
+          rows={1}
+          wrap="off"
+          name="chat-message"
           aria-label="聊天消息"
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && !e.isComposing && handleSend()}
+          onKeyDown={e => {
+            if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.isComposing) return;
+            e.preventDefault();
+            handleSend();
+          }}
           placeholder={busy && !disabled ? '输入新的要求…' : (placeholder || '告诉我想要什么…')}
           disabled={unavailable}
           style={{
             flex: 1, minWidth: 0, background: 'transparent', border: 'none',
-            color: unavailable ? 'rgba(255,255,255,0.35)' : '#fff',
-            fontSize: 14, fontFamily: 'inherit', outline: 'none',
+            height: 24, padding: 0, resize: 'none', overflowY: 'hidden', lineHeight: '24px',
+            color: unavailable ? 'var(--color-text-dim)' : 'var(--color-text)',
+            fontSize: 'var(--text-input)', fontFamily: 'inherit', outline: 'none',
             WebkitTapHighlightColor: 'transparent',
           }}
         />

@@ -264,9 +264,9 @@ function SessionEntry({ error, sessionNotice, onAdminLogin, onVisitorJoin }) {
             <button type="button" className="entry-subflow__paste" onClick={() => setShowPaste(value => !value)}>
               {showPaste ? '收起链接输入' : '粘贴分享链接或邀请码'}
             </button>
-            {showPaste && <form className="session-entry__form" onSubmit={join}>
+            {showPaste && <form className="session-entry__form" {...ssmInputAttributes.form} onSubmit={join}>
               <label htmlFor="invite-link">空间分享链接或邀请码</label>
-              <input id="invite-link" type="text" inputMode="url" autoComplete="off"
+              <input id="invite-link" type="text" {...ssmInputAttributes.url}
                 value={inviteValue} onChange={event => setInviteValue(event.target.value)}
                 placeholder="粘贴分享链接或邀请码"/>
               <button type="submit" className="btn btn--accent" disabled={busy || !inviteValue.trim()}>
@@ -326,16 +326,17 @@ function SessionBadge({ session }) {
 function AdminInviteDrawer({ open, onClose }) {
   const { useEffect, useRef, useState } = React;
   const [invite, setInvite] = useState(null);
-  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
-  const [messageTarget, setMessageTarget] = useState('toggle');
+  const [copied, setCopied] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const qrRef = useRef(null);
   const inviteUrl = invite?.share_id
     ? `${window.location.origin}${window.location.pathname}#invite=${encodeURIComponent(invite.share_id)}` : '';
 
   const load = async () => {
+    setLoadFailed(false); setMessage('');
     try { setInvite(await apiClient.request('/api/admin/invite')); }
-    catch (error) { setMessageTarget('toggle'); setMessage(apiErrorText(error)); }
+    catch (error) { setLoadFailed(true); setMessage(apiErrorText(error)); }
   };
   useEffect(() => { if (open) load(); }, [open]);
   useEffect(() => {
@@ -346,32 +347,22 @@ function AdminInviteDrawer({ open, onClose }) {
       if (!active || !qrRef.current) return;
       renderQrCode(qrRef.current, QRCode, inviteUrl);
     }).catch(() => {
-      if (active) { setMessageTarget('copy'); setMessage('二维码加载失败，请重试或复制邀请链接'); }
+      if (active) setMessage('二维码加载失败，请复制邀请链接');
     });
     return () => { active = false; };
   }, [open, inviteUrl]);
 
-  const enable = async () => {
-    setBusy(true); setMessage('');
-    try {
-      setInvite(await apiClient.request('/api/admin/invite/enable', { method: 'POST', body: {} }));
-      setMessageTarget('toggle'); setMessage('空间分享已启用，二维码保持不变');
-    } catch (error) { setMessageTarget('toggle'); setMessage(apiErrorText(error)); }
-    finally { setBusy(false); }
-  };
-  const disable = async () => {
-    setBusy(true); setMessage('');
-    try {
-      const data = await apiClient.request('/api/admin/invite/disable', { method: 'POST', body: {} });
-      setInvite(data); setMessageTarget('toggle'); setMessage('空间分享已停用，访客会话已结束');
-    } catch (error) { setMessageTarget('toggle'); setMessage(apiErrorText(error)); }
-    finally { setBusy(false); }
-  };
   const copy = async () => {
-    setMessageTarget('copy');
-    try { await navigator.clipboard.writeText(inviteUrl); setMessage('邀请链接已复制'); }
-    catch { setMessage('无法自动复制，请长按下方链接'); }
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setCopied(true); setMessage('邀请链接已复制');
+    } catch { setCopied(false); setMessage('无法自动复制，请长按链接'); }
   };
+  useEffect(() => {
+    if (!copied) return undefined;
+    const timer = setTimeout(() => { setCopied(false); setMessage(''); }, 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   return (
     <>
@@ -382,28 +373,22 @@ function AdminInviteDrawer({ open, onClose }) {
         <header><h2 id="invite-drawer-title">分享空间</h2>
           <button className="icon-button" onClick={onClose} aria-label="关闭分享空间"><Icon name="x" size={16}/></button></header>
         <div className="invite-drawer__body">
-          <div className={`invite-state ${invite?.enabled ? 'is-enabled' : ''}`}>
-            <i/><span>{invite?.enabled ? '邀请已启用' : '邀请未启用'}</span>
-            {invite?.version !== undefined && <code>V{invite.version}</code>}
-          </div>
           {inviteUrl ? (
             <div className="invite-pass">
               <div className="invite-pass__qr" ref={qrRef}/>
-              <p>{invite.enabled ? '扫码可加入当前空间。此二维码与空间绑定，保持不变。' : '分享已停用。重新启用后，此二维码仍可使用。'}</p>
-              <button className="btn" onClick={copy}><Icon name="link" size={13}/> 复制邀请链接</button>
-              {messageTarget === 'copy' && message && <small className="action-feedback" role="status" title={message}>{message}</small>}
-              <code>{inviteUrl}</code>
+              <div className="invite-pass__link">
+                <code>{inviteUrl}</code>
+                <button className="icon-button" onClick={copy} aria-label="复制邀请链接" title="复制邀请链接">
+                  <Icon name={copied ? 'check' : 'copy'} size={18}/>
+                </button>
+              </div>
             </div>
           ) : (
-            <div className="invite-empty"><Icon name="scan" size={26}/><p>正在加载空间二维码…</p></div>
+            <div className="invite-empty"><Icon name="scan" size={26}/>
+              {loadFailed ? <button className="btn" onClick={load}>重新加载</button> : <p>正在加载空间二维码…</p>}
+            </div>
           )}
-          <div className="invite-drawer__actions">
-            <button className={`btn ${invite?.enabled ? 'btn--danger' : ''}`}
-              onClick={invite?.enabled ? disable : enable} disabled={busy || !invite}>
-              {invite?.enabled ? '停用分享' : '启用分享'}
-            </button>
-            {messageTarget === 'toggle' && message && <small className="action-feedback" role="status" title={message}>{message}</small>}
-          </div>
+          {message && <small className="action-feedback" role="status">{message}</small>}
         </div>
       </aside>
     </>

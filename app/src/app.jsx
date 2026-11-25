@@ -52,7 +52,8 @@ function App({ session, logout, refreshSession }) {
   const [peopleOpen,  setPeopleOpen]  = useState(false);
   const [deviceScanOpen, setDeviceScanOpen] = useState(false);
   const deviceBinding = useRef(false);
-  const { toast, showToast, dismissToast } = useToast();
+  const { toast, showToast } = useToast();
+  const toastAnchorRef = useRef(null);
   const [activityQuestion, setActivityQuestion] = useState(null);
   const training = useTraining('', {sessionId:session.session_id,canEdit:session.actor === 'admin'});
   const chatRows = useMemo(() => trainingTimeline(activityLog, session.actor === 'admin' ? training.proposals : []), [activityLog,training.proposals,session.actor]);
@@ -294,21 +295,18 @@ function App({ session, logout, refreshSession }) {
         display: 'flex', flexDirection: 'column',
       }}>
         {/* 头部 */}
-        <div style={{
+        <div className="space-header" style={{
           padding: '12px 16px', display: 'flex',
-          alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+          alignItems: 'center', justifyContent: 'space-between', gap: 12, flexShrink: 0,
           borderBottom: '1px solid var(--color-border)',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-            <div style={{
-              width: 7, height: 7, borderRadius: '50%',
-              background: connected ? 'var(--color-accent)' : 'var(--color-danger)',
-              boxShadow: connected ? '0 0 8px var(--color-online-glow)' : 'none',
-              flexShrink: 0,
-            }}/>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.space_name || '当前空间'}</div>
-              <div style={{ fontSize: 10, color: 'var(--color-text-dim)' }}>{connected ? '空间已连接' : '连接中断'}</div>
+          <div className="space-header__identity">
+            <div className="page-header__name" style={{ color: connected ? 'var(--color-accent)' : 'var(--color-text-dim)' }}>
+              {session.space_name || '当前空间'}
+            </div>
+            <div className="page-header__status">
+              <i className={connected ? '' : 'is-offline'}/>
+              <span>{connected ? '空间已连接' : '连接中断'}</span>
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
@@ -334,8 +332,8 @@ function App({ session, logout, refreshSession }) {
           </button>}
         </div> : <>
         {/* 卡片、对话和输入栏在首次设备快照就绪后一起显示。 */}
-        <ChatPanel onSend={handleSend} busy={thinking}
-          placeholder={loadingAgents ? '正在整理空间成员…' : '告诉我想让大家做什么…'}
+        <ChatPanel onSend={handleSend} busy={thinking} footerRef={toastAnchorRef}
+          placeholder={loadingAgents ? '正在整理空间成员…' : hasDevices ? '告诉我想让大家做什么…' : '和总管家说点什么…'}
           suggestions={activityLog.every(e => e.type !== 'user') && !thinking && !currentActivity ? suggestions : []}
           beforeMessages={<>
           {agentsError && (
@@ -349,8 +347,7 @@ function App({ session, logout, refreshSession }) {
             </div>
           )}
           <DevicesScreen spaceName={session.space_name} agents={agents} unitData={unitData}
-            connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}
-            isAdmin={session.actor === 'admin'} onAddDevice={() => { if (!deviceBinding.current) setDeviceScanOpen(true); }}/>
+            connected={connected} recentEvents={recentEvents} loading={loadingAgents} error={agentsError}/>
 
           </>}
           messageContent={<ActivityFeed entries={chatRows} busy={thinking}
@@ -377,12 +374,12 @@ function App({ session, logout, refreshSession }) {
           training={training} agents={agents}
           onClose={() => setTrainingOpen(false)}/>}
         {session.actor === 'admin' && <AdminInviteDrawer open={inviteOpen} onClose={() => setInviteOpen(false)}/>}
-        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onInvite={() => { setSpaceOpen(false); setInviteOpen(true); }} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
+        {session.actor === 'admin' && <AdminSpaceDrawer open={spaceOpen} onClose={() => setSpaceOpen(false)} onDevicesChanged={refreshAgents} onSpaceRenamed={() => { refreshSession().catch(() => {}); }}/>}
         {session.actor === 'admin' && <OrchestratorSettingsDrawer open={orchestratorOpen} onClose={() => setOrchestratorOpen(false)}/>}
         {session.actor === 'admin' && <SpacePeopleDrawer open={peopleOpen} onClose={() => setPeopleOpen(false)}/>}
         {session.actor === 'admin' && deviceScanOpen && <DeviceScanDialog onClose={() => setDeviceScanOpen(false)}
           onScan={handleDeviceScan} onError={message => { setDeviceScanOpen(false); showToast(message); }}/>}
-        {toast && <Toast key={toast.id} notice={toast} onDismiss={dismissToast}/>}
+        {toast && <Toast key={toast.id} notice={toast} anchorRef={hasLoadedAgents ? toastAnchorRef : undefined}/>}
       </div>
 
       {/* ── 设备页：叠在主屏之上，CSS 滑入/滑出 ── */}
@@ -422,7 +419,7 @@ function DeviceScanDialog({ onClose, onScan, onError }) {
   }, [onClose]);
 
   return <div className="device-scan-backdrop" role="presentation" onClick={onClose}>
-    <section className="management-dialog device-scan-dialog" role="dialog" aria-modal="true" aria-label="扫描设备二维码" onClick={event => event.stopPropagation()}>
+    <section className="device-scan-dialog" role="dialog" aria-modal="true" aria-label="扫描设备二维码" onClick={event => event.stopPropagation()}>
       <QrScanner onScan={onScan} onError={onError} frameOnly/>
     </section>
   </div>;

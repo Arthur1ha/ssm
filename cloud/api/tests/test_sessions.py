@@ -2,7 +2,7 @@ import httpx
 import json
 import pytest
 
-from cloud.api import intents
+from cloud.api import auth, intents
 from .conftest import login_admin
 
 
@@ -14,42 +14,58 @@ async def test_admin_cookie_is_signed_httponly_and_csrf_protected(client):
     assert any("ssm_session=" in value and "HttpOnly" in value and "SameSite=lax" in value for value in cookies)
     assert any("ssm_csrf=" in value and "HttpOnly" not in value for value in cookies)
 
-    assert (await client.post("/api/admin/invite/enable")).status_code == 403
+    assert (await client.patch("/api/admin/space", json={"name": "Changed"})).status_code == 403
     csrf = {"X-CSRF-Token": client.cookies.get("ssm_csrf")}
-    assert (await client.post("/api/admin/invite/enable", headers=csrf)).status_code == 200
+    assert (await client.patch("/api/admin/space", json={"name": "Changed"}, headers=csrf)).status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_persistent_space_qr_disable_and_visitor_invalidation(client, app, api_env):
+async def test_persistent_space_qr_is_always_available_and_private(client, app, api_env):
     store, _mqtt = api_env
     created_id = json.loads(store.path.read_text(encoding="utf-8"))["invite"]["share_id"]
     assert created_id
+    assert (await client.get("/api/admin/invite")).status_code == 401
     csrf = await login_admin(client)
-    initial = (await client.get("/api/admin/invite")).json()
-    first = initial["share_id"]
-    assert initial["enabled"] is False
-    assert first == created_id
-    assert first == (await client.get("/api/admin/invite")).json()["share_id"]
-    assert first == json.loads(store.path.read_text(encoding="utf-8"))["invite"]["share_id"]
+    initial = await client.get("/api/admin/invite")
+    assert initial.headers["Cache-Control"] == "no-store"
+    assert initial.json()["enabled"] is True
+    assert initial.json()["share_id"] == created_id
     assert "share_id" not in (await client.get("/api/admin/space")).json()["invite"]
-    assert (await client.post("/api/admin/invite/enable", headers=csrf)).json()["share_id"] == first
-
+    for action in ("enable", "disable", "rotate"):
+        assert (await client.post(f"/api/admin/invite/{action}", headers=csrf)).status_code == 404
+    store.update_space(name="Renamed space")
+    assert (await client.get("/api/admin/invite")).json()["share_id"] == created_id
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as visitor:
-        exchanged = await visitor.post("/api/visitor/session", json={"token": first})
+        assert (await visitor.post("/api/visitor/session", json={"token": "invalid-token-long-enough"})).status_code == 401
+        exchanged = await visitor.post("/api/visitor/session", json={"token": created_id})
         assert exchanged.status_code == 200
         assert exchanged.json()["actor"] == "visitor"
-
-        assert (await client.post("/api/admin/invite/disable", headers=csrf)).json()["share_id"] == first
-        assert (await visitor.get("/api/me")).status_code == 401
-        assert (await client.post("/api/admin/invite/enable", headers=csrf)).json()["share_id"] == first
-        assert (await visitor.post("/api/visitor/session", json={"token": first})).status_code == 200
+        assert (await visitor.get("/api/admin/invite")).status_code == 403
         assert (await visitor.get("/api/me")).status_code == 200
 
-        assert (await client.post("/api/admin/invite/rotate", headers=csrf)).status_code == 404
-        assert (await client.get("/api/admin/invite")).json()["share_id"] == first
-        await client.post("/api/admin/invite/disable", headers=csrf)
+
+@pytest.mark.asyncio
+async def test_disabled_space_migrates_once_without_restoring_old_sessions(client, app, api_env):
+    store, _mqtt = api_env
+    data = store.get_space()
+    share_id = data["invite"]["share_id"]
+    data["invite"].update(enabled=False, version=5)
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+    # A stale signed visitor cookie remains invalid after reopening the fixed code.
+    stale_session = auth.new_session("visitor", invite_version=5)
+    await login_admin(client)
+    current = (await client.get("/api/admin/invite")).json()
+    assert current["share_id"] == share_id
+    assert current["enabled"] is True
+    assert current["version"] == 6
+    assert (await client.get("/api/admin/invite")).json() == current
+    assert json.loads(store.path.read_text(encoding="utf-8"))["invite"] == current
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as visitor:
+        visitor.cookies.set(auth.SESSION_COOKIE, auth.encode_session(stale_session))
         assert (await visitor.get("/api/me")).status_code == 401
-        assert (await visitor.post("/api/visitor/session", json={"token": first})).status_code == 401
+        visitor.cookies.clear()
+        assert (await visitor.post("/api/visitor/session", json={"token": share_id})).status_code == 200
+        assert (await visitor.get("/api/me")).status_code == 200
 
 
 @pytest.mark.asyncio

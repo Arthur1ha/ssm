@@ -56,7 +56,7 @@ function QrScanner({ onScan, onError, frameOnly = false, hint = '将二维码放
         }, {
           preferredCamera: 'environment',
           maxScansPerSecond: 12,
-          highlightScanRegion: true,
+          highlightScanRegion: !frameOnly,
           overlay: overlayRef.current,
           returnDetailedScanResult: true,
           onDecodeError: scanError => {
@@ -81,13 +81,14 @@ function QrScanner({ onScan, onError, frameOnly = false, hint = '将二维码放
 
     start();
     return stop;
-  }, [attempt]);
+  }, [attempt, frameOnly]);
 
   return (
-    <div className="qr-scanner">
+    <div className={`qr-scanner${frameOnly ? ' qr-scanner--frame' : ''}`}>
       <div className="qr-scanner__view">
         <video ref={videoRef} autoPlay muted playsInline aria-label="扫描二维码的摄像头画面"/>
-        <div ref={overlayRef} className="qr-scanner__target" style={{ display: 'none' }} aria-hidden="true"/>
+        {frameOnly && status === 'scanning' && <div className="qr-scanner__sweep" aria-hidden="true"/>}
+        {!frameOnly && <div ref={overlayRef} className="qr-scanner__target" style={{ display: 'none' }} aria-hidden="true"/>}
         {status !== 'scanning' && <span className="qr-scanner__overlay">
           {status === 'starting' ? '正在打开摄像头…' : status === 'loading' ? '正在加载扫码器…' : status === 'done' ? '已识别二维码' : '摄像头不可用'}
         </span>}

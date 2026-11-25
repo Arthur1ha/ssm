@@ -18,12 +18,8 @@ function OrchestratorSettingsDrawer({ open, onClose }) {
         </button>
       </header>
       <div className="space-drawer__body">
-        <section className="asset-section orchestrator-settings-drawer__intro">
-          <div className="asset-section__heading"><div><h3>协调空间中的智能体</h3></div></div>
-          <p>管家负责理解请求、安排任务并说明结果。这里调整它的表达和判断偏好，不改变设备的权限与动作规则。</p>
-        </section>
-        <section className="asset-section orchestrator-settings-drawer__profile">
-          <div className="asset-section__heading"><div><h3>人格与特质</h3></div><span>保存后下次对话生效</span></div>
+        <section className="asset-section agent-management-profile orchestrator-settings-drawer__profile">
+          <p className="agent-management-intro">理解请求，协调空间中的设备。</p>
           <AgentPersonalitySettings agentId="cloud_orchestrator" active={open}/>
         </section>
       </div>

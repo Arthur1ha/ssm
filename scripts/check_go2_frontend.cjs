@@ -93,7 +93,7 @@ assert.equal(merge(rebootedLamp,{ts:9999,ism:'ON'}).ism,'OFF',
   'Retained state without live receipt evidence replaced the live state');
 assert.equal(merge({ts:570,ism:'OFF'},{ts:19,ism:'ON',_received_at:1001}).ism,'ON',
   'First live post-reboot state was discarded behind a retained snapshot');
-const files = ['app/src/components/Icon.jsx','app/src/avatars/registry.js','app/src/avatars/presentation.js','app/src/avatars/Avatar.jsx','app/src/avatars/CompanionAvatar.jsx','app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
+const files = ['app/src/utils/inputAttributes.js','app/src/components/Icon.jsx','app/src/avatars/registry.js','app/src/avatars/presentation.js','app/src/avatars/Avatar.jsx','app/src/avatars/CompanionAvatar.jsx','app/src/utils/color.js', 'app/src/utils/stateMachine.js', 'app/src/utils/agentMeta.js', 'app/src/utils/stateSnapshot.js',
   'app/src/hooks/useTraining.js', 'app/src/components/TrainingPreview.jsx', 'app/src/components/TrainingDrawer.jsx', 'app/src/pages/TransitionInspector.jsx',
   'app/src/components/DeviceWidgets.jsx', 'app/src/pages/fsmWidgets.jsx',
   'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx',
@@ -163,6 +163,7 @@ async function checkInteractions() {
   let index = 0;
   let effects = [];
   const calls = [];
+  const requests = [];
   const sources = [];
   const React = {
     Fragment: Symbol('Fragment'),
@@ -186,7 +187,9 @@ async function checkInteractions() {
   const ChatPanel = () => null;
   const ui = vm.createContext({ React, window: {addEventListener(){},removeEventListener(){},dispatchEvent(){}}, console, setTimeout, clearTimeout, ChatPanel, Icon: () => null,
     sessionStorage: {getItem(){return null},setItem(){},removeItem(){}},
-    apiClient: { addEventListener() {}, removeEventListener() {}, request: async () => ({records:[],edge_annotations:[]}) },
+    apiClient: { addEventListener() {}, removeEventListener() {}, request: async url => {
+      requests.push(url); return {records:[],edge_annotations:[]};
+    } },
     commandBus: { describe: result => result.error || result.result,
       async command(unitId, action, params) { calls.push({unitId, action, params}); return { result: 'accepted' }; } },
     EventSource: function() { sources.push(this); this.close = () => {}; },
@@ -261,6 +264,15 @@ async function checkInteractions() {
   assert.equal(fireCount, 0, 'Node selection opened edge details');
   descendants(graph).find(node => node.props?.['data-action'] === 'Sit').props.onClick({type:'click'});
   assert.equal(fireCount, 1, 'Edge must open transition details');
+  const modeCard = {...card, modes:[
+    {id:'autonomy',get:'/api/go2/autonomy',options:[]},
+    {id:'other',get:'/api/go2/other-mode',options:[]},
+  ]};
+  const settings = find(render(modeCard), ui.DeviceSettingsMenu);
+  assert.deepEqual(Array.from(settings.props.modes, axis=>axis.id), ['other'],
+    'Device management must hide autonomy while retaining other declared mode axes');
+  assert.equal(requests.includes('/api/go2/autonomy'),false,'Hidden autonomy settings still fetched their state');
+  assert.equal(requests.includes('/api/go2/other-mode'),true,'Other declared modes stopped loading');
   hooks.forEach(hook => hook?.cleanup?.());
   console.log('PASS: command duplicate guard and errors, SSE old epoch rejection, device switch isolation, region-based lamp state, separate node selection and edge inspection.');
 }
@@ -281,7 +293,7 @@ async function checkInteractions() {
   const React = require('react');
   const ReactDOMServer = require('react-dom/server');
   const previewContext = vm.createContext({ React, window: {}, console });
-  for (const name of ['app/src/utils/stateMachine.js', 'app/src/hooks/useTraining.js', 'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx', 'app/src/pages/HierarchicalFsmBoard.jsx']) {
+  for (const name of ['app/src/utils/inputAttributes.js', 'app/src/utils/stateMachine.js', 'app/src/hooks/useTraining.js', 'app/src/pages/StateVisual.jsx', 'app/src/pages/FsmGraph.jsx', 'app/src/pages/HierarchicalFsmBoard.jsx']) {
     vm.runInContext(compile(name), previewContext, {filename:name});
   }
   const initialState = {state_schema_version:2,epoch:'preview',revision:1,connected:true,
@@ -510,7 +522,7 @@ async function checkInteractions() {
         await page.screenshot({path:'/tmp/ssm-direction-tabs-compact.png',fullPage:true});
         await page.keyboard.press('Escape');
         await page.evaluate(()=>{window.__layoutTeaching=structuredClone(__training.records[0]);__training.records=[];__emit({type:'training.updated',unit_id:__lampCard.unit_id});});
-        await page.waitForFunction(()=>!document.querySelector('.fsm-whiteboard__event-marker'));
+        await page.waitForFunction(()=>!document.querySelector('.fsm-whiteboard__event-marker'),{polling:'mutation'});
         await page.$eval(edge,node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true})));
         await page.waitForSelector('.device-whiteboard__popover--transition .training-transition-events');
         assert.ok(await page.$('.device-whiteboard__directions'),'Native-only bidirectional transitions retain direction tabs');
@@ -519,7 +531,7 @@ async function checkInteractions() {
         await page.$$eval('.device-whiteboard__directions button',buttons=>buttons.find(button=>button.textContent.includes('闪烁 → 熄灭')).click());
         await page.waitForFunction(()=>document.querySelectorAll('[data-transition-direction]:not([hidden]) .training-transition-events li').length===2);
         assert.equal(await page.$('[data-transition-direction]:not([hidden]) .training-custom-events'),null);
-        assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events',node=>node.textContent),/指定次数完成.*闪烁前为熄灭/);
+        assert.match(await page.$eval('[data-transition-direction]:not([hidden]) .training-transition-events',node=>node.textContent),/已完成指定闪烁次数.*闪烁前为熄灭/);
         await page.screenshot({path:'/tmp/ssm-native-transition-without-custom.png',fullPage:true});
         await page.keyboard.press('Escape');
         await page.evaluate(()=>{__training.records=[{...__layoutTeaching,desired_status:'removed'}];__emit({type:'training.updated',unit_id:__lampCard.unit_id});});
@@ -1029,7 +1041,7 @@ async function checkInteractions() {
       });
       await page.waitForFunction(()=>!document.querySelector('.fsm-whiteboard__edge.is-teaching-unconfirmed'));
       await page.keyboard.press('Escape');
-      await page.type('.device-page__chat input','以后坐下后等三秒才能再次坐下');
+      await page.type('.device-page__chat [aria-label="聊天消息"]','以后坐下后等三秒才能再次坐下');
       await page.keyboard.press('Enter');
       await page.waitForFunction(()=>__calls.some(r=>r.action==='chat'));
       await page.evaluate(()=>{
@@ -1047,7 +1059,7 @@ async function checkInteractions() {
       assert.equal(await page.$eval('.chat-messages',node=>node.textContent.split('以后坐下后等三秒才能再次坐下').length-1),1,'Proposal duplicated the original user message');
       assert.equal(await page.$eval('.training-change',node=>/用户委托|已加载|JSON/.test(node.textContent)),false);
       assert.equal(await page.$('.training-change button[aria-label="修改规则"]'),null,'Drafts must not send parameter edits back into chat');
-      await page.type('.device-page__chat input','改成五秒');
+      await page.type('.device-page__chat [aria-label="聊天消息"]','改成五秒');
       await page.keyboard.press('Enter');
       await page.waitForFunction(()=>__calls.filter(r=>r.action==='chat').length===2);
       assert.equal(await page.evaluate(()=>!!__calls.filter(r=>r.action==='chat')[1].params.selection),false,'Natural-language messages must not acquire an edit selection from the rule card');
@@ -1442,7 +1454,7 @@ async function checkInteractions() {
               return rect.left >= canvas.left-1 && rect.right <= canvas.right+1 && rect.top >= canvas.top-1 && rect.bottom <= canvas.bottom+1;
             }) && document.documentElement.scrollWidth <= innerWidth;
         }), true, `Go2 media or states overlap at ${width}×${height}`);
-        assert.equal(await page.$eval('.device-page__chat input', node => node.getBoundingClientRect().bottom <= innerHeight), true);
+        assert.equal(await page.$eval('.device-page__chat [aria-label="聊天消息"]', node => node.getBoundingClientRect().bottom <= innerHeight), true);
       }
       await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
       await page.evaluate(()=>__renderState({ism:'ON',ts:1},{...__lampCard,_online:true}));
@@ -1460,7 +1472,7 @@ async function checkInteractions() {
             return r.left >= bounds.left-1 && r.right <= bounds.right+1 && r.top >= bounds.top-1 && r.bottom <= bounds.bottom+1;
           });
         }), true, `Lamp state clipped at ${width}×${height}`);
-        assert.equal(await page.$eval('.device-page__chat input', element => element.getBoundingClientRect().bottom <= innerHeight), true);
+        assert.equal(await page.$eval('.device-page__chat [aria-label="聊天消息"]', element => element.getBoundingClientRect().bottom <= innerHeight), true);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       }
       await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
@@ -1807,7 +1819,7 @@ async function checkInteractions() {
     await page.keyboard.press('ArrowRight');await page.waitForFunction(before=>__calls.length>before,{},beforeColor);
     assert.equal(await page.evaluate(()=>__calls.at(-1).action),'SET_COLOR');
     await page.click('.device-header__settings');
-    assert.equal(await page.$$eval('.device-settings-axis button.is-active',nodes=>nodes.some(node=>node.textContent.includes('自动调光'))),true);
+    assert.equal(await page.$$('.device-settings-axis').then(nodes=>nodes.length),0,'Autonomy settings must stay out of device management');
     await page.click('[aria-label="关闭管理"]');
     await page.screenshot({path:'/tmp/ssm-whiteboard-lamp-mobile.png',fullPage:true});
     for (const source of ['OFF','ON','BLINKING']) {
@@ -1857,10 +1869,10 @@ async function checkInteractions() {
     await page.evaluate(()=>{
       __renderState({epoch:'real-chat',revision:1,connected:true,connection_state:'online',activity_state:'active',life_state:'idle',body_state:'standing',available_actions:['StandDown','Sit','Hello','Stretch','Content','Dance1','Dance2','FingerHeart','FrontPounce','FrontJump','EnterMoveControl'],available_life_actions:['request_rest','start_explore']});
     });
-    await page.waitForSelector('.device-page__chat input');
+    await page.waitForSelector('.device-page__chat [aria-label="聊天消息"]');
     for(const [width,height] of [[390,844],[360,740],[390,520]]) {
       await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
-      assert.equal(await page.$eval('.device-page__chat input',node=>{const r=node.getBoundingClientRect();return r.bottom<=innerHeight&&r.top>=0;}),true,`Real chat clipped at ${width}×${height}`);
+      assert.equal(await page.$eval('.device-page__chat [aria-label="聊天消息"]',node=>{const r=node.getBoundingClientRect();return r.bottom<=innerHeight&&r.top>=0;}),true,`Real chat clipped at ${width}×${height}`);
       await assertAllStatesVisible();
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
       if(height===844) await page.screenshot({path:'/tmp/go2-whiteboard-mobile.png',fullPage:true});

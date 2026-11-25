@@ -1,14 +1,18 @@
 /* AdminSpaceDrawer — current space settings and device membership.
  * This component is mounted by App for space managers.
  */
-function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRenamed }) {
-  const { useCallback, useEffect, useState } = React;
+function AdminSpaceDrawer({ open, onClose, onDevicesChanged, onSpaceRenamed }) {
+  const { useCallback, useEffect, useRef, useState } = React;
   const [space, setSpace] = useState(null);
   const [spaceName, setSpaceName] = useState('');
   const [deviceCandidates, setDeviceCandidates] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState(null);
+  const [deviceMenu, setDeviceMenu] = useState('');
+  const [menuAbove, setMenuAbove] = useState(false);
+  const menuRef = useRef(null);
+  const menuTriggerRef = useRef(null);
 
   const loadAssets = useCallback(async () => {
     setLoading(true);
@@ -35,7 +39,23 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
     setLoading(false);
   }, []);
 
-  useEffect(() => { if (open) loadAssets(); }, [open, loadAssets]);
+  useEffect(() => { if (open) loadAssets(); else setDeviceMenu(''); }, [open, loadAssets]);
+  useEffect(() => {
+    if (!deviceMenu) return undefined;
+    const closeOutside = event => { if (!menuRef.current?.contains(event.target)) setDeviceMenu(''); };
+    const closeOnEscape = event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      setDeviceMenu(''); menuTriggerRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', closeOutside);
+    window.addEventListener('keydown', closeOnEscape, true);
+    menuRef.current?.querySelector('[role="menuitem"]')?.focus();
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside);
+      window.removeEventListener('keydown', closeOnEscape, true);
+    };
+  }, [deviceMenu]);
   useEffect(() => {
     if (!open) return undefined;
     const closeOnEscape = event => { if (event.key === 'Escape') onClose(); };
@@ -60,10 +80,11 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
     } finally { setBusy(''); }
   };
 
-  const toggleDevice = async deviceId => {
+  const removeDevice = async deviceId => {
     if (!space || busy) return;
     const current = new Set(space.device_ids || []);
     if (!current.has(deviceId)) return;
+    setDeviceMenu('');
     current.delete(deviceId);
     setBusy(`device-${deviceId}`); setMessage(null);
     try {
@@ -73,7 +94,6 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
       setSpace(updated);
       setDeviceCandidates(rows => rows.map(row => ({ ...row, added: current.has(row.device_id) })));
       onDevicesChanged?.();
-      setMessage({ key: `device-${deviceId}`, tone: 'ok', text: '设备已从当前空间移除' });
     } catch (error) {
       setMessage({ key: `device-${deviceId}`, tone: 'error', text: apiErrorText(error, '设备配置保存失败') });
     } finally { setBusy(''); }
@@ -92,8 +112,8 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
             <h2 id="space-drawer-title">空间管理</h2>
           </div>
           <div className="space-drawer__header-actions">
-            <div className="feedback-button"><button className="btn" onClick={loadAssets} disabled={loading}>
-              {loading ? '同步中…' : '刷新空间'}
+            <div className="feedback-button"><button className={`icon-button ${loading ? 'is-loading' : ''}`} onClick={loadAssets} disabled={loading} aria-label="刷新空间" title="刷新空间">
+              <Icon name="refresh" size={18}/>
             </button>{feedback('refresh')}</div>
             <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭空间管理">
               <Icon name="x" size={16}/>
@@ -103,57 +123,81 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
 
         <div className="space-drawer__body" aria-busy={loading}>
           <section className="asset-section asset-section--space">
-            <div className="asset-section__heading">
-              <div><small>空间管理</small><h3>{space?.name || '当前空间'}</h3></div>
-              <span>{space?.device_ids?.length || 0} 台设备</span>
-            </div>
-            <form className="asset-inline-form" onSubmit={saveSpaceName}>
+            <form className="asset-inline-form" {...ssmInputAttributes.form} onSubmit={saveSpaceName}>
               <label htmlFor="space-name">空间名称</label>
-              <div><input id="space-name" maxLength="80" value={spaceName}
+              <div><input id="space-name" {...ssmInputAttributes.text} maxLength="80" value={spaceName}
                 onChange={event => setSpaceName(event.target.value)} placeholder="给这个空间命名"/>
                 <button className="btn btn--accent" disabled={busy === 'space' || !spaceName.trim() || spaceName.trim() === space?.name}>
-                  {busy === 'space' ? '保存中…' : '保存名称'}
+                  {busy === 'space' ? '保存中…' : '保存'}
                 </button></div>
               {feedback('space')}
             </form>
-            <div className="space-members">
-              {(space?.device_ids || []).map(deviceId => <span key={deviceId}>
-                {deviceCandidates.find(device => device.device_id === deviceId)?.name || '已加入设备'}
-              </span>)}
-            </div>
+
           </section>
 
           <section className="asset-section asset-section--devices">
             <div className="asset-section__heading">
-              <div><small>设备管理</small><h3>空间设备</h3></div>
-              <span>{space?.device_ids?.length || 0} 台已加入</span>
+              <h3>设备</h3>
+              {Boolean(space?.device_ids?.length) && <span>{space.device_ids.length} 台</span>}
             </div>
-            <p className="asset-section__intro">从首页的管理菜单添加设备；这里可移除已加入的设备并管理标签。</p>
-            <div className="space-device-options">
-              {deviceCandidates.map(device => (
-                <div key={device.device_id} className={`space-device-option ${device.added ? 'is-added' : ''}`}>
-                  <span className="space-device-option__icon"><Icon name="wifi" size={17}/></span>
-                  <span className="space-device-option__copy"><strong>{device.name}</strong><small>{device.description}</small></span>
-                  <span className={`space-device-option__state ${device.online ? 'is-online' : ''}`}>
-                    <i/>{device.online ? '在线' : '离线'} · {device.added ? '已加入' : '未加入'}
-                  </span>
-                  <div className="space-device-option__actions">
-                    <DeviceLabelButton device={device}/>
-                    {device.added && <button type="button" className="btn btn--danger" onClick={() => toggleDevice(device.device_id)} disabled={loading || Boolean(busy)}>移除</button>}
+            <div className="space-device-options space-device-options--grouped">
+              {deviceCandidates.filter(device => space?.device_ids?.includes(device.device_id)).map(device => (
+                <div key={device.device_id} className="space-device-option">
+                  <span className="space-device-option__icon"><Icon name={device.device_id === 'go2' ? 'robot' : 'bulb'} size={22}/></span>
+                  <div className="space-device-option__copy">
+                    <div className="space-device-option__heading"><strong>{device.name}</strong>
+                      <span className={`space-device-option__state ${device.online ? 'is-online' : ''}`}>
+                        <i/>{device.online ? '在线' : '离线'}
+                      </span>
+                    </div>
+                    <small>{device.description}</small>
                   </div>
+                    <div className="space-device-option__menu" ref={deviceMenu === device.device_id ? menuRef : null}>
+                      <button type="button" className="icon-button" aria-label={`${device.name}更多操作`}
+                        aria-haspopup="menu" aria-expanded={deviceMenu === device.device_id}
+                        aria-controls={`device-menu-${device.device_id}`} disabled={loading || Boolean(busy)}
+                        onClick={event => {
+                          menuTriggerRef.current = event.currentTarget;
+                          const trigger = event.currentTarget.getBoundingClientRect();
+                          const body = event.currentTarget.closest('.space-drawer__body').getBoundingClientRect();
+                          setMenuAbove(body.bottom - trigger.bottom < 108 && trigger.top - body.top >= 108);
+                          setDeviceMenu(current => current === device.device_id ? '' : device.device_id);
+                        }}><Icon name="more" size={18}/></button>
+                      <div className={`space-device-menu ${menuAbove ? 'space-device-menu--above' : ''}`}
+                        hidden={deviceMenu !== device.device_id} id={`device-menu-${device.device_id}`} role="menu" aria-label={`${device.name}操作`}
+                        onBlur={event => { if (!event.currentTarget.parentElement.contains(event.relatedTarget)) setDeviceMenu(''); }}
+                        onKeyDown={event => {
+                          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+                          event.preventDefault();
+                          const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]:not([disabled])')];
+                          const index = items.indexOf(document.activeElement);
+                          const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+                            : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+                          items[next]?.focus();
+                        }}>
+                        <DeviceLabelButton device={device} menuItem onOpen={() => setDeviceMenu('')} returnFocusRef={menuTriggerRef}/>
+                        <button type="button" role="menuitem" className="btn btn--danger" onClick={() => removeDevice(device.device_id)}>
+                          <Icon name="trash" size={15}/> 移除设备
+                        </button>
+                      </div>
+                    </div>
                   {feedback(`device-${device.device_id}`)}
                 </div>
               ))}
             </div>
+            {!loading && !space?.device_ids?.length && <p className="asset-empty">暂无设备</p>}
+            {deviceCandidates.some(device => !space?.device_ids?.includes(device.device_id)) && <details className="space-device-history">
+              <summary>历史设备</summary>
+              {deviceCandidates.filter(device => !space?.device_ids?.includes(device.device_id)).map(device => (
+                <div className="space-device-history__row" key={device.device_id}>
+                  <span>{device.name}</span><DeviceLabelButton device={device}/>
+                </div>
+              ))}
+            </details>}
           </section>
 
         </div>
-        <footer className="space-drawer__footer">
-          <span>{space?.name || '当前空间'} · {space?.device_ids?.length || 0} 台设备</span>
-          <button className="btn btn--accent" onClick={onInvite} disabled={!space?.device_ids?.length}>
-            查看空间二维码 <Icon name="arrow" size={14}/>
-          </button>
-        </footer>
+
       </aside>
     </>
   );
@@ -161,7 +205,7 @@ function AdminSpaceDrawer({ open, onClose, onInvite, onDevicesChanged, onSpaceRe
 
 window.AdminSpaceDrawer = AdminSpaceDrawer;
 
-function DeviceLabelButton({ device }) {
+function DeviceLabelButton({ device, menuItem = false, onOpen, returnFocusRef }) {
   const { useEffect, useRef, useState } = React;
   const [label, setLabel] = useState(null);
   const [open, setOpen] = useState(false);
@@ -169,9 +213,39 @@ function DeviceLabelButton({ device }) {
   const [error, setError] = useState('');
   const [errorTarget, setErrorTarget] = useState('load');
   const qrRef = useRef(null);
+  const dialogRef = useRef(null);
+  const triggerRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const parent = triggerRef.current?.closest('[role="dialog"]');
+    const wasInert = parent?.inert;
+    if (parent) parent.inert = true;
+    dialogRef.current?.querySelector('button')?.focus();
+    const onKeyDown = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopImmediatePropagation(); setOpen(false);
+      }
+      if (event.key !== 'Tab') return;
+      const buttons = [...(dialogRef.current?.querySelectorAll('button:not([disabled])') || [])];
+      const first = buttons[0], last = buttons[buttons.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      if (parent) parent.inert = wasInert || parent.getAttribute('aria-hidden') === 'true';
+      const trigger = returnFocusRef?.current || triggerRef.current;
+      if (trigger?.isConnected && !parent?.inert) trigger.focus();
+    };
+  }, [open, returnFocusRef]);
 
   const load = async () => {
     setOpen(true); setBusy(true); setError('');
+    onOpen?.();
     try { setLabel(await apiClient.request(`/api/admin/device-codes/${encodeURIComponent(device.device_id)}`)); }
     catch (requestError) { setErrorTarget('load'); setError(apiErrorText(requestError, '设备标签暂时不可用')); }
     finally { setBusy(false); }
@@ -187,13 +261,6 @@ function DeviceLabelButton({ device }) {
     return () => { active = false; };
   }, [open, label?.code]);
 
-  const rotate = async () => {
-    if (!window.confirm(`轮换「${device.name}」设备标签？旧标签将立即失效。`)) return;
-    setBusy(true); setError('');
-    try { setLabel(await apiClient.request(`/api/admin/device-codes/${encodeURIComponent(device.device_id)}/rotate`, { method: 'POST', body: {} })); }
-    catch (requestError) { setErrorTarget('rotate'); setError(apiErrorText(requestError, '标签轮换失败')); }
-    finally { setBusy(false); }
-  };
   const save = () => {
     const canvas = qrRef.current?.querySelector('canvas');
     const image = qrRef.current?.querySelector('img');
@@ -206,11 +273,10 @@ function DeviceLabelButton({ device }) {
   };
 
   return <>
-    <button type="button" className="btn" onClick={load}>设备标签</button>
+    <button ref={triggerRef} type="button" role={menuItem ? 'menuitem' : undefined} className={menuItem ? undefined : 'btn'} onClick={load}><Icon name="scan" size={15}/>设备标签</button>
     {open && ReactDOM.createPortal(<div className="device-label-backdrop" onClick={() => setOpen(false)}>
-      <section className="management-dialog device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
-        <header><div><small>设备标签</small><h3>{device.name}设备标签</h3></div><button className="icon-button" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={16}/></button></header>
-        <p>保存或打印后贴在设备上。扫码前请先启动设备。</p>
+      <section ref={dialogRef} className="management-dialog device-label-dialog" role="dialog" aria-modal="true" aria-label={`${device.name}设备标签`} onClick={event => event.stopPropagation()}>
+        <header><div><h3>{device.name}</h3></div><button className="icon-button" onClick={() => setOpen(false)} aria-label="关闭设备标签"><Icon name="x" size={16}/></button></header>
         {busy && !label && <small className="action-feedback" role="status">正在读取设备标签…</small>}
         {label && <div className="device-label-qr" ref={qrRef}/>}
         {!label && !busy && errorTarget === 'load' && error && <div className="feedback-button">
@@ -218,11 +284,9 @@ function DeviceLabelButton({ device }) {
           <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>
         </div>}
         <div className="device-label-actions">
-          <div className="feedback-button"><button className="btn btn--accent" onClick={save} disabled={!label || busy}>保存二维码</button>
+          <div className="feedback-button"><button className="btn btn--accent" onClick={save} disabled={!label || busy}>保存</button>
             {errorTarget === 'save' && error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}</div>
-          <button className="btn" onClick={() => window.print()} disabled={!label || busy}>打印</button>
-          <div className="feedback-button"><button className="btn btn--danger" onClick={rotate} disabled={busy}>轮换标签</button>
-            {errorTarget === 'rotate' && error && <small className="action-feedback action-feedback--error" role="alert" title={error}>{error}</small>}</div>
+
         </div>
       </section>
     </div>, document.body)}

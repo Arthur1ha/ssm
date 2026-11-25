@@ -9,9 +9,10 @@ const {renderToStaticMarkup} = require('react-dom/server');
 const {transform} = require('sucrase');
 const root = path.resolve(__dirname,'..');
 const context = vm.createContext({window:{},React,getAgentDisplayName:id=>id==='go2' ? 'Go2' : id});
-for (const name of ['app/src/components/Icon.jsx','app/src/utils/stateMachine.js','app/src/hooks/useTraining.js','app/src/pages/TransitionInspector.jsx','app/src/components/TrainingPreview.jsx']) {
+for (const name of ['app/src/utils/inputAttributes.js','app/src/components/Icon.jsx','app/src/utils/stateMachine.js','app/src/hooks/useTraining.js','app/src/pages/TransitionInspector.jsx','app/src/components/TrainingPreview.jsx']) {
   const source = fs.readFileSync(path.join(root,name),'utf8');
   vm.runInContext(transform(source,{transforms:['jsx'],jsxRuntime:'classic',production:true}).code,context);
+  Object.assign(context, context.window);
 }
 const inspect = (transition,records,catalog) => renderToStaticMarkup(React.createElement(context.window.TransitionInspector,{transition,projection:records,catalog}));
 const nativeSentence = '机器狗已站稳、没有待确认动作时，管理员可开启自由探索。';

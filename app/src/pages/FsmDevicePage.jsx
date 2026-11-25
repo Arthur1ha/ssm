@@ -196,7 +196,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   }, [execution]);
 
   /* Every Card replacement, including removed fields, immediately replaces the UI. */
-  const modes = card?.modes || [];
+  const modes = (card?.modes || []).filter(axis => axis.id !== 'autonomy');
   const widgets = card?.widgets || [];
   const suggestions = card?.suggestions || [];
   const [modeVals, setModeVals] = useState({});
@@ -206,7 +206,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
     setModeVals({});
     modes.forEach(axis => {
       if (!axis.get?.startsWith('/api/')) return;
-      fetch(axis.get).then(r => r.json()).then(d => {
+      apiClient.request(axis.get).then(d => {
         if (active && d.mode) setModeVals(prev => ({ ...prev, [axis.id]: d.mode }));
       }).catch(() => {});
     });
@@ -405,7 +405,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
   return (
     <div className="device-page" style={{
       position: 'fixed', inset: 0,
-      background: 'var(--color-bg)', color: '#ccc',
+      background: 'var(--color-bg)', color: 'var(--color-text)',
       fontFamily: 'var(--font-sans)',
       paddingTop: 'env(safe-area-inset-top,0px)',
       display: 'flex', flexDirection: 'column',
@@ -429,12 +429,11 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
 
         {/* 设备名与右侧实时状态 */}
         <div style={{ minWidth: 0, flex: '0 1 auto' }}>
-          <div style={{
-            fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          <div className="page-header__name" style={{
             color: runtimeLive ? ACCENT : 'var(--color-text-dim)',
           }}>{getAgentDisplayName(card || unitId)}</div>
         </div>
-        <div className="device-header__status" title={statusLabel}>
+        <div className="device-header__status page-header__status" title={statusLabel}>
           <i className={runtimeLive ? '' : 'is-offline'}/>
           <span>{statusLabel}</span>
         </div>
@@ -444,7 +443,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
           onClick={() => setSettingsOpen(true)} aria-label="管理" title="管理"><Icon name="settings" size={16}/></button>
       </div>
 
-      {!cardLoaded && execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 12 }}>{execution}</div>}
+      {!cardLoaded && execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 'var(--text-caption)' }}>{execution}</div>}
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
         <div className="device-state-workspace device-state-workspace--shared">
@@ -539,18 +538,19 @@ function LampAssetsDrawer({ unitId, open, onClose }) {
       <header className="space-drawer__header">
         <div><h2 id="lamp-assets-title">{getAgentDisplayName(unitId)}管理</h2></div>
         <div className="space-drawer__header-actions">
-          <button className="btn" onClick={load} disabled={busy}>刷新</button>
+          <button type="button" className="icon-button" onClick={load} disabled={busy}
+            aria-label={busy ? '正在刷新' : '刷新'} title="刷新"><Icon name="refresh" size={16}/></button>
           <button className="icon-button space-drawer__close" onClick={onClose} aria-label="关闭灯管理"><Icon name="x" size={16}/></button>
         </div>
       </header>
       <div className="space-drawer__body" aria-busy={busy}>
         {feedback && <p role="alert" className="action-feedback action-feedback--error">{feedback}</p>}
-        <section className="asset-section">
-          <div className="asset-section__heading"><div><h3>灯的人格与特质</h3></div><span>长期生效</span></div>
+        <section className="asset-section agent-management-profile">
+          <p className="agent-management-intro">感知环境，用灯光回应你的需要。</p>
           <AgentPersonalitySettings agentId={unitId} active={open}/>
         </section>
         <section className="asset-section asset-section--memory">
-          <div className="asset-section__heading"><div><h3>灯的记忆</h3></div><span>经历与摘要</span></div>
+          <div className="asset-section__heading"><div><h3>记忆</h3></div></div>
           <div className="memory-block"><h4>今日记录</h4><pre>{memory.daily_summary || '（今天暂无记录）'}</pre></div>
           <div className="memory-block"><h4>近期经历</h4>
             {memory.episodes?.length ? <ul>{memory.episodes.map((entry, index) =>
@@ -616,16 +616,16 @@ function DeviceSettingsMenu({ open, onClose, modes, modeVals, onSwitchMode, offl
         </button>)}</div>
       </section>)}
       {actor === 'admin' && isGo2 && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onGo2Settings(); }}>
-        <span><strong>Go2 管理</strong><small>地点、人设与记忆</small></span><Icon name="arrow" size={15}/>
+        <span><strong>人格、地点与记忆</strong></span><Icon name="arrow" size={15}/>
       </button>}
       {actor === 'admin' && isLamp && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onLampSettings(); }}>
-        <span><strong>灯智能体管理</strong><small>人设与记忆</small></span><Icon name="arrow" size={15}/>
+        <span><strong>人格与记忆</strong></span><Icon name="arrow" size={15}/>
       </button>}
       {actor === 'admin' && <button type="button" className="device-settings-go2" onClick={() => { onClose(); onTraining(); }}>
-        <span><strong>设备规则</strong><small>查看和修改设备规则</small></span><Icon name="arrow" size={15}/>
+        <span><strong>设备规则</strong></span><Icon name="arrow" size={15}/>
       </button>}
       <button type="button" className="device-settings-go2" onClick={() => { onClose(); onCapabilities(); }}>
-        <span><strong>设备能力与技能</strong><small>查看观察条件与公开技能</small></span><Icon name="arrow" size={15}/>
+        <span><strong>设备能力与技能</strong></span><Icon name="arrow" size={15}/>
       </button>
       <a className="device-settings-card" href={'/api/devices/' + encodeURIComponent(unitId) + '/agent'}
         target="_blank" rel="noopener noreferrer">

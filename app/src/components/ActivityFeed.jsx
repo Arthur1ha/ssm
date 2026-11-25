@@ -33,8 +33,11 @@ function ActivityFeed({ entries, agents = [], unitData = {}, connected = false, 
     const position = anchor >= 0 ? anchor : card === currentCard ? entries.length : 0;
     cardsAt.set(position, [...(cardsAt.get(position) || []), card]);
   });
-  const rows = [{ type: 'ai', agent: 'cloud_orchestrator',
-    text: getAgentOpeningLine('cloud_orchestrator'), eventId: 'welcome' }];
+  const showOpening = !entries.length && !cards.length && !busy;
+  const rows = showOpening ? [{ type: 'ai', agent: 'cloud_orchestrator',
+    text: agents.length ? getAgentOpeningLine('cloud_orchestrator')
+      : `你好，我是${getName('cloud_orchestrator')}。可以先和我聊聊，也可以扫码添加新伙伴。`,
+    eventId: 'welcome' }] : [];
   for (let index = 0; index <= entries.length; index++) {
     (cardsAt.get(index) || []).forEach(card => rows.push({ type: 'space_activity', card }));
     if (index < entries.length) rows.push(entries[index]);

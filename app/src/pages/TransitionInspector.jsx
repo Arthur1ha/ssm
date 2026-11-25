@@ -4,8 +4,9 @@ function TrainingParameterInput({field,value,onChange}) {
   const choices=schema.enum?.map(choice=>trainingValueText(choice,schema));
   const placeholder=field.path==='cooldown_s' ? '清空为无间隔' : choices ? `例如：${choices.slice(0,3).join('、')}` : schema.type==='boolean' ? '是 / 否'
     : numeric && (schema.minimum!=null || schema.maximum!=null) ? `${schema.minimum ?? '不限'}–${schema.maximum ?? '不限'}` : undefined;
-  return <input aria-label={field.label.endsWith('参数') ? field.label : `${field.label}参数`} value={value} onChange={event=>onChange(event.target.value)}
-    type="text" inputMode={numeric ? schema.type==='integer' ? 'numeric' : 'decimal' : undefined} required={field.path!=='cooldown_s'}
+  return <input {...ssmInputAttributes[numeric ? schema.type==='integer' ? 'numeric' : 'decimal' : 'text']}
+    aria-label={field.label.endsWith('参数') ? field.label : `${field.label}参数`} value={value} onChange={event=>onChange(event.target.value)}
+    type="text" required={field.path!=='cooldown_s'}
     minLength={schema.type==='string' && !schema.enum ? schema.minLength : undefined}
     maxLength={schema.type==='string' && !schema.enum ? schema.maxLength : undefined} placeholder={placeholder}/>;
 }
@@ -49,10 +50,10 @@ function TrainingCompactRuleEditor({record,catalog,values,onChange,transitionIds
     const value=String(values[field.path] ?? '');
     return <span className="training-inline-input" key={field.path}>
       <span className="training-inline-input__size" aria-hidden="true">{value || ' '}{'\u200a'}</span>
-      <input type="text" data-field={field.key} data-path={field.path}
+      <input {...ssmInputAttributes[['number','integer'].includes(field.schema.type) ? field.schema.type==='integer' ? 'numeric' : 'decimal' : 'text']}
+        type="text" data-field={field.key} data-path={field.path}
         aria-label={`事件参数：${label(field)}`} value={value} required={field.path!=='cooldown_s'}
         placeholder={field.path==='cooldown_s' ? '无间隔' : undefined}
-        inputMode={['number','integer'].includes(field.schema.type) ? field.schema.type==='integer' ? 'numeric' : 'decimal' : undefined}
         minLength={field.schema.type==='string' && !field.schema.enum ? field.schema.minLength : undefined}
         maxLength={field.schema.type==='string' && !field.schema.enum ? field.schema.maxLength : undefined}
         onChange={event=>onChange(field.path,event.target.value)}/>
@@ -154,7 +155,7 @@ function TrainingRuleCard({record,catalog,onSave,onRemove,status,activity,change
     {(!base || !compact) && <span className={`training-inspector__status${!loaded && !success ? ' is-muted' : ''}${success ? ' training-save-success' : ''}`} role="status">{displayStatus}</span>}
     {!base && (live.definition?.steps?.length || 0)>1 && <TrainingEventChain view={trainingTransitionView(live,catalog)}/>}
     {!base && <TrainingRunProgress record={live} catalog={catalog} activity={activity}/>}
-    <form onSubmit={submit} onKeyDown={event=>{
+    <form {...ssmInputAttributes.form} onSubmit={submit} onKeyDown={event=>{
       if(event.key==='Escape' && base){event.stopPropagation();if(!busy){setBase(null);setError('');}}
     }}>
       <fieldset disabled={busy}>

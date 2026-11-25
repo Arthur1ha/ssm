@@ -21,6 +21,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.goto('http://ssm.test/');
     await page.addScriptTag({path:process.env.SSM_CHECK_REACT});
     await page.addScriptTag({path:process.env.SSM_CHECK_REACT_DOM});
+    await page.addScriptTag({content:compile('app/src/utils/inputAttributes.js')});
     await page.addScriptTag({content:compile('app/src/ApiClient.js')});
     await page.addScriptTag({content:compile('app/src/components/SessionGate.jsx')});
     for (const file of ['app/src/avatars/registry.js', 'app/src/avatars/presentation.js', 'app/src/avatars/Avatar.jsx', 'app/src/avatars/CompanionAvatar.jsx'])
@@ -67,14 +68,12 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(() => apiClient.dispatchEvent(new Event('unauthorized')));
     await waitText('会话已结束');
     await page.evaluate(() => root.render(React.createElement(DevicesScreen,{agents:[],unitData:{},connected:false,loading:true})));
-    await waitText('空间伙伴');
-    assert((await body()).includes('正在听听伙伴们的近况'));
-    assert(!(await body()).includes('添加设备'));
+    await page.waitForFunction(() => !document.getElementById('root').hasChildNodes());
     await page.evaluate(() => root.render(React.createElement(DevicesScreen,{agents:[{unit_id:'lamp',name:'皮皮灯',agent_type:'actuator',_online:true}],unitData:{},connected:true,loading:true})));
     await waitText('皮皮灯');
     assert((await body()).includes('正在同步'));
-    await page.evaluate(() => root.render(React.createElement(DevicesScreen,{agents:[],unitData:{},connected:true,loading:false,isAdmin:true})));
-    await waitText('添加设备');
+    await page.evaluate(() => root.render(React.createElement(DevicesScreen,{agents:[],unitData:{},connected:true,loading:false})));
+    await page.waitForFunction(() => !document.getElementById('root').hasChildNodes());
     // Exercise the actual App + device hook together, with delayed snapshots.
     await page.addScriptTag({content:compile('app/src/utils/stateSnapshot.js')});
     await page.addScriptTag({content:compile('app/src/hooks/useSsmCore.js')});
@@ -82,15 +81,16 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       window.useSpaceActivity = () => [];
       window.useActivityTimeline = () => ({events:[]});
       window.useSendIntent = () => ({thinking:false,send(){}});
-      window.setAgentDisplayNames = () => {};
       window.SessionBadge = () => null;
-      window.ActivityFeed = () => React.createElement('div', null, '对话内容');
 
       window.snapshots = [];
       apiClient.request = path => path === '/api/devices'
         ? new Promise((resolve,reject) => snapshots.push({resolve,reject}))
         : Promise.resolve({});
     `});
+    for (const file of ['utils/agentMeta.js','utils/activityView.js','utils/runProcess.js',
+      'components/RunProcess.jsx','components/ChatMessages.jsx','components/ActivityFeed.jsx'])
+      await page.addScriptTag({content:compile('app/src/'+file)});
     await page.addScriptTag({content:compile('app/src/hooks/useTraining.js')});
     await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
     await page.addScriptTag({content:compile('app/src/components/Toast.jsx')});
@@ -98,34 +98,44 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(() => root.render(React.createElement(App,{key:'home',session:{actor:'visitor'}})));
     await waitText('正在准备你的空间');
     assert(!(await body()).includes('空间伙伴'));
-    assert(!(await body()).includes('对话内容'));
-    assert.equal(await page.$('input'), null);
+    assert.equal(await page.$('.chat-messages'), null);
+    assert.equal(await page.$('[aria-label="聊天消息"]'), null);
     await page.evaluate(() => snapshots.shift().reject(new Error('模拟设备服务异常')));
     await waitText('重新加载');
     assert(!(await body()).includes('空间伙伴'));
-    assert(!(await body()).includes('对话内容'));
+    assert.equal(await page.$('.chat-messages'), null);
     await page.evaluate(() => document.querySelector('.home-loading button').click());
     await waitText('正在准备你的空间');
     await page.evaluate(() => snapshots.shift().resolve([{unit_id:'lamp',name:'皮皮灯',agent_type:'actuator',online:true}]));
     await waitText('皮皮灯');
     assert((await body()).includes('空间伙伴'));
-    assert((await body()).includes('对话内容'));
-    await page.type('input', '尚未发送');
+    assert(await page.$('.chat-messages'));
+    await page.type('[aria-label="聊天消息"]', '尚未发送');
     await page.evaluate(() => apiClient.dispatchEvent(new Event('events-open')));
     await waitText('正在同步');
     assert((await body()).includes('皮皮灯'));
-    assert((await body()).includes('对话内容'));
-    assert.equal(await page.$eval('input', input=>input.value), '尚未发送');
+    assert(await page.$('.chat-messages'));
+    assert.equal(await page.$eval('[aria-label="聊天消息"]', input=>input.value), '尚未发送');
     await page.evaluate(() => snapshots.shift().reject(new Error('模拟刷新失败')));
     await waitText('重试');
     assert((await body()).includes('皮皮灯'));
-    assert.equal(await page.$eval('input', input=>input.value), '尚未发送');
+    assert.equal(await page.$eval('[aria-label="聊天消息"]', input=>input.value), '尚未发送');
     // An empty, successfully loaded space also reveals chat (no endless loading).
     await page.evaluate(() => root.render(React.createElement(App,{key:'empty',session:{actor:'visitor'}})));
     await waitText('正在准备你的空间');
     await page.evaluate(() => snapshots.shift().resolve([]));
-    await waitText('空间里还没有设备');
-    assert((await body()).includes('对话内容'));
+    await waitText('你好，我是总管家。');
+    assert.equal(await page.$eval('.agent-speech__name', node=>node.textContent), '总管家');
+    assert.equal(await page.$eval('.agent-speech__bubble', node=>node.textContent),
+      '你好，我是总管家。可以先和我聊聊，也可以扫码添加新伙伴。');
+    assert.equal(await page.$('.home-space'), null);
+    assert.equal(await page.$('.chat-panel button:not([aria-label="发送消息"])'), null);
+    assert.equal(await page.$('.shape-face'), null);
+    assert.equal(await page.$eval('[aria-label="聊天消息"]', input=>input.placeholder), '和总管家说点什么…');
+    await page.type('[aria-label="聊天消息"]', '先聊聊今天的安排');
+    await page.keyboard.press('Enter');
+    await waitText('先聊聊今天的安排');
+    assert(!(await body()).includes('你好，我是总管家。'));
 
     // Exercise the actual App scan result, reusable toast and undo together.
     if (process.env.SSM_CHECK_VERBOSE) console.log('Checking App scan toast and undo');
@@ -159,7 +169,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       root.render(React.createElement(App,{key:'admin-toast',session:{actor:'admin',session_id:'test'}}));
     });
     await page.setViewport({width:390,height:844});
-    await waitText('空间里还没有设备');
+    await waitText('你好，我是总管家。');
     const headerHeight = await page.$eval('.device-scan-trigger',button=>button.parentElement.parentElement.getBoundingClientRect().height);
     const scan = async () => {
       await page.click('.device-scan-trigger');
@@ -181,15 +191,25 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     if (process.env.SSM_CHECK_VERBOSE) console.log('Toast rendered');
     assert.equal(await page.$('.device-scan-dialog'),null);
     assert.equal(await page.$eval('.toast__action',button=>button.textContent.trim()),'撤销');
+    assert.equal(await page.$eval('.agent-speech__bubble',node=>node.textContent),
+      '你好，我是总管家。有什么想聊的，或想让伙伴们做的，告诉我就好。');
     assert.equal(await page.evaluate(()=>document.querySelector('.toast-region').parentElement===document.body),true);
     assert.equal(await page.$eval('.device-scan-trigger',button=>button.parentElement.parentElement.getBoundingClientRect().height),headerHeight);
     await page.focus('.toast__action');
-    for (const width of [320,390,1280]) {
-      await page.setViewport({width,height:844});
-      const rect=await page.$eval('.toast',element=>{
-        const r=element.getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,height:r.height};
+    await page.$eval('.toast', element => Promise.all(element.getAnimations().map(animation => animation.finished)));
+    for (const [width,height] of [[320,568],[390,844],[390,520],[1280,800]]) {
+      await page.setViewport({width,height});
+      await page.waitForFunction(()=>{
+        const toast=document.querySelector('.toast').getBoundingClientRect();
+        const footer=document.querySelector('.chat-panel__footer').getBoundingClientRect();
+        return Math.abs(footer.top-toast.bottom-12)<1;
       });
-      assert(rect.left>=15 && rect.right<=width-15 && rect.bottom>=800 && rect.bottom<=824);
+      const rect=await page.$eval('.toast',element=>{
+        const r=element.getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,height:r.height,
+          footerTop:document.querySelector('.chat-panel__footer').getBoundingClientRect().top};
+      });
+      assert(rect.left>=15 && rect.right<=width-15 && Math.abs(rect.footerTop-rect.bottom-12)<1,
+        JSON.stringify({width,height,...rect}));
       assert(rect.height>=44 && rect.height<80);
     }
     await page.setViewport({width:390,height:844});
@@ -201,9 +221,9 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await waitText('已撤销添加');
     if (process.env.SSM_CHECK_VERBOSE) console.log('Undo completed');
     assert.equal(await page.$('.toast__action'),null);
-    await waitText('空间里还没有设备');
-    await page.mouse.move(0,0);
-    await page.waitForSelector('.toast',{hidden:true,timeout:5000});
+    await waitText('你好，我是总管家。');
+    await page.hover('.toast');
+    await page.waitForSelector('.toast',{hidden:true,timeout:3500});
     if (process.env.SSM_CHECK_VERBOSE) console.log('Undo feedback expired');
 
     await page.evaluate(()=>{bindReply.result='already_added';});
@@ -223,8 +243,9 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(()=>{bindReply.result='added';});
     await scan();
     await waitText('添加成功');
-    await page.mouse.move(0,0);
-    await page.waitForSelector('.toast',{hidden:true,timeout:4500});
+    await page.focus('.toast__action');
+    await page.hover('.toast__action');
+    await page.waitForSelector('.toast',{hidden:true,timeout:3500});
     if (process.env.SSM_CHECK_VERBOSE) console.log('Actionable toast timer checked');
     assert.equal(await page.evaluate(()=>undoRequests.length),1);
 
@@ -257,6 +278,19 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.evaluate(()=>{window.holdUndo=false;finishUndo();});
     await page.waitForFunction(()=>members.length===0);
     assert((await toastText()).includes('空间已有，无需重复添加'));
+
+    // Pending actions do not extend a toast; their eventual result gets its own 3s.
+    await page.evaluate(()=>{bindReply.result='added';});
+    await scan();
+    await waitText('添加成功');
+    await page.evaluate(()=>{window.holdUndo=true;window.finishUndo=null;});
+    await page.click('.toast__action');
+    await page.waitForFunction(()=>window.finishUndo);
+    await page.waitForSelector('.toast',{hidden:true,timeout:3500});
+    await page.evaluate(()=>{window.holdUndo=false;finishUndo();});
+    await waitText('已撤销添加');
+    await page.hover('.toast');
+    await page.waitForSelector('.toast',{hidden:true,timeout:3500});
     assert.deepEqual(errors, []);
     console.log('PASS: session/home regressions; actual App bottom toast, no header growth, mobile/desktop layout, uniform 3s expiry, repeated feedback resets duration; undo dispatch/deduplication/failure/retry; stale action result preserves newer toast; JSX syntax.');
   } finally { await browser.close(); }

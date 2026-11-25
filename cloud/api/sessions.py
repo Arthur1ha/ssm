@@ -194,17 +194,3 @@ def _admin_invite(response: Response, invite: dict[str, Any]) -> dict[str, Any]:
 @router.get("/api/admin/invite")
 async def get_admin_invite(response: Response, _session: dict[str, Any] = Depends(require_admin)):
     return _admin_invite(response, get_space_registry().get_invite())
-
-
-@router.post("/api/admin/invite/enable")
-async def enable_admin_invite(response: Response, session: dict[str, Any] = Depends(require_admin_csrf)):
-    invite = get_space_registry().enable_invite()
-    audit_event("invite_enabled", session, invite_version=invite["version"])
-    return _admin_invite(response, invite)
-
-
-@router.post("/api/admin/invite/disable")
-async def disable_admin_invite(response: Response, session: dict[str, Any] = Depends(require_admin_csrf)):
-    invite = get_space_registry().disable_invite()
-    audit_event("invite_disabled", session, invite_version=invite["version"])
-    return _admin_invite(response, invite)

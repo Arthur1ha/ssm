@@ -32,7 +32,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       await page.evaluate(async data=>{const f=new FontFace('PresentationCJK',`url(data:font/otf;base64,${data})`);await f.load();document.fonts.add(f);},fs.readFileSync(process.env.SSM_CHECK_FONT).toString('base64'));
       await page.addStyleTag({content:':root{--font-sans:PresentationCJK,sans-serif;--font-mono:PresentationCJK,monospace}input,button{font-family:inherit}'});
     }
-    for (const file of ['utils/stateMachine.js','utils/stateSnapshot.js','utils/agentMeta.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js','avatars/presentation.js',
+    for (const file of ['utils/inputAttributes.js','utils/stateMachine.js','utils/stateSnapshot.js','utils/agentMeta.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js','avatars/presentation.js',
       'components/Icon.jsx','avatars/Avatar.jsx','avatars/CompanionAvatar.jsx','hooks/useTraining.js','components/TrainingPreview.jsx','components/ActivityMembers.jsx','components/RunProcess.jsx',
       'components/ChatMessages.jsx','components/ChatPanel.jsx','components/ActivityFeed.jsx','pages/FsmDevicePage.jsx']) {
       await page.addScriptTag({content:compile('app/src/'+file)});
@@ -71,13 +71,13 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       ]));
       device();
     });
-    await page.waitForSelector('.chat-panel input');
+    await page.waitForSelector('.chat-panel [aria-label="聊天消息"]');
     assert.equal(await page.$('.device-page__header .shape-face'), null, 'The device header must not duplicate the input avatar');
     assert.equal(await page.$$('.chat-input__avatar .shape-face').then(nodes => nodes.length), 1);
     let deviceInputHeight;
     for (const [width, height] of [[320,568],[390,844],[390,520]]) {
       await page.setViewport({width,height});
-      await page.$eval('input', input => input.blur());
+      await page.$eval('[aria-label="聊天消息"]', input => input.blur());
       await page.waitForFunction(() => document.querySelector('.chat-input__avatar .shape-face').getBoundingClientRect().width === 48);
       const before = await page.$eval('.chat-input', node => ({
         height:node.getBoundingClientRect().height,
@@ -87,14 +87,14 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       deviceInputHeight = before.height;
       assert(before.bottom <= height, 'The companion input must remain visible on a short viewport');
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      await page.focus('input');
+      await page.focus('[aria-label="聊天消息"]');
       await page.waitForFunction(() => document.querySelector('.chat-input__avatar .shape-face').getBoundingClientRect().width === 36);
       assert.equal(await page.$eval('.chat-input', node => node.getBoundingClientRect().height), before.height,
         'Focusing the input must not increase the composer height');
       assert.equal(await page.$eval('.device-state-workspace', node => node.getBoundingClientRect().height), before.board,
         'The avatar must not take height from the whiteboard');
     }
-    await page.$eval('input', input => input.blur());
+    await page.$eval('[aria-label="聊天消息"]', input => input.blur());
     await page.waitForFunction(() => document.querySelector('.chat-input__avatar .shape-face').getBoundingClientRect().width === 48);
     assert.match(await page.$eval('.chat-input__avatar .shape-face', node => getComputedStyle(node).transitionProperty), /filter/,
       'Companion sizing must preserve the avatar offline fade');
@@ -110,10 +110,10 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     assert.equal(await page.$eval('.chat-messages', node => node.textContent.includes('旧回复')), false,
       'A fresh page must not restore the old sessionStorage transcript');
     // Send through the real device page and observe actual SSE projection.
-    await page.type('.chat-panel input', '调成暖白色');
+    await page.type('.chat-panel [aria-label="聊天消息"]', '调成暖白色');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => sent.length === 1);
-    assert.equal(await page.$eval('input', node => node.disabled), false,
+    assert.equal(await page.$eval('[aria-label="聊天消息"]', node => node.disabled), false,
       'A running goal must allow a new user request');
     await page.evaluate(() => {
       apiClient.dispatchEvent(new CustomEvent('server-event',{detail:{type:'agent_progress',
@@ -147,7 +147,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       // HTTP repeats the same final reply; it must not produce another bubble.
       finishCommand({result:'ok',reply:'已经调好了',event_id:'r1'});
     });
-    await page.waitForFunction(() => !document.querySelector('input').disabled);
+    await page.waitForFunction(() => !document.querySelector('[aria-label="聊天消息"]').disabled);
     await page.waitForSelector('.chat-input__avatar .shape-face[data-emotion="happy"]');
     assert.equal(await page.$eval('.chat-input__avatar .shape-face', el => el.dataset.behavior), 'idle');
     assert.equal(await page.$$eval('.chat-messages img', nodes => nodes.length), 1);
@@ -156,16 +156,16 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.click('details summary');
     assert.equal(await page.$eval('details', node => node.open), true);
     await page.evaluate(() => device(false));
-    await page.waitForFunction(() => document.querySelector('input').disabled);
-    assert.match(await page.$eval('input', node => node.placeholder), /离线/);
+    await page.waitForFunction(() => document.querySelector('[aria-label="聊天消息"]').disabled);
+    assert.match(await page.$eval('[aria-label="聊天消息"]', node => node.placeholder), /离线/);
     assert.equal(await page.$eval('.chat-input__avatar .shape-face', node => node.dataset.animated), 'false');
     await page.evaluate(() => device(true, 'remount'));
-    await page.waitForFunction(() => !document.querySelector('input').disabled);
+    await page.waitForFunction(() => !document.querySelector('[aria-label="聊天消息"]').disabled);
     assert.match(await page.$eval('.chat-messages', node => node.textContent), /已经调好了/);
     assert.equal(await page.$eval('.chat-input__avatar .shape-face', el => el.dataset.emotion), 'happy', 'Remount must preserve the still-current reply expression');
     // Long device tools publish their own source. Keep their in-flight
     // observations, decisions and screenshot in the same request transcript.
-    await page.type('.chat-panel input', '去找猫头鹰');
+    await page.type('.chat-panel [aria-label="聊天消息"]', '去找猫头鹰');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => sent.length === 2);
     assert.equal(await page.$eval('.chat-input__avatar .shape-face', el => el.dataset.behavior), 'thinking');
@@ -211,7 +211,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await (await latestProcess.$('summary')).click();
     await page.waitForFunction(node=>node.querySelector('summary').getAttribute('aria-expanded')==='false',{},latestProcess);
     await page.evaluate(() => finishCommand({result:'blocked',reply:'本次搜索结束，遮挡区域仍未确认。'}));
-    await page.waitForFunction(() => !document.querySelector('input').disabled);
+    await page.waitForFunction(() => !document.querySelector('[aria-label="聊天消息"]').disabled);
     assert.equal(await latestProcess.evaluate(node=>node.open),false,'A failure must not reopen details the user closed');
     if (process.env.SCREENSHOT_DIR) {
       fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
@@ -230,7 +230,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     }})));
     await page.waitForFunction(() => document.querySelector('.chat-messages').textContent.includes('过期的回复'));
     assert.equal(await page.$eval('.chat-input__avatar .shape-face', el => el.dataset.emotion), expressionBeforeLate, 'Old server timestamps cannot be converted into fresh animation');
-    await page.type('.chat-panel input', '再来一次');
+    await page.type('.chat-panel [aria-label="聊天消息"]', '再来一次');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => sent.length === 3);
     await page.evaluate(() => {
@@ -248,10 +248,10 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       'A retained prior run must not override the latest request expression');
     // A new request replaces an in-flight device conversation. Old HTTP/SSE
     // replies cannot finish the new request; late physical receipts remain.
-    await page.type('.chat-panel input','旧的长任务');
+    await page.type('.chat-panel [aria-label="聊天消息"]','旧的长任务');
     await page.keyboard.press('Enter');
     await page.waitForFunction(()=>sent.length===4);
-    await page.type('.chat-panel input','改为新的任务');
+    await page.type('.chat-panel [aria-label="聊天消息"]','改为新的任务');
     await page.keyboard.press('Enter');
     await page.waitForFunction(()=>sent.length===5);
     await page.evaluate(()=>{
@@ -285,7 +285,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       await page.setViewport({width,height});
       const view=await page.evaluate(()=>{
         const scroller=document.querySelector('.device-page__chat .chat-panel__scroll');
-        const input=document.querySelector('.device-page__chat input').getBoundingClientRect();
+        const input=document.querySelector('.device-page__chat [aria-label="聊天消息"]').getBoundingClientRect();
         return {scrollable:scroller.scrollHeight>scroller.clientHeight,
           contained:[...document.querySelectorAll('.device-activity-question')].every(el=>scroller.contains(el)),
           inputVisible:input.top>=0 && input.bottom<=innerHeight,
@@ -304,12 +304,48 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
         {type:'ai',agent:'go2',text:'汪，我在这儿。今天过得怎么样？',requestId:'ordinary',final:true}],agents:[lamp],onSend(){},
     }))));
     await page.waitForFunction(()=>document.querySelector('.chat-messages')?.textContent.includes('今天过得怎么样'));
+    assert.deepEqual(await page.$eval('.chat-input [aria-label="聊天消息"]', input => ({
+      type: input.type, autocomplete: input.autocomplete, inputMode: input.inputMode, enterKeyHint: input.enterKeyHint,
+    })), {type:'textarea',autocomplete:'off',inputMode:'text',enterKeyHint:'send'});
     assert.equal(await page.$('.chat-input__avatar'), null, 'The shared home composer must not acquire a device avatar');
     assert.equal(await page.$eval('.chat-input', node => node.getBoundingClientRect().height), deviceInputHeight,
       'The device avatar must reuse the same composer height as ordinary chat');
     assert.equal(await page.$$('.chat-messages details').then(rows=>rows.length),0);
     assert.equal(await page.$$('.chat-messages .shape-face').then(rows=>rows.length),0);
     if(process.env.SCREENSHOT_DIR){await page.setViewport({width:390,height:844});await page.screenshot({path:process.env.SCREENSHOT_DIR+'/ordinary-chat-390.png'});}
+    // Upward input only pauses a scrollable conversation after leaving its bottom.
+    await page.setViewport({width:390,height:568});
+    await page.evaluate(()=>{
+      window.shortRows=[];
+      window.renderShort=()=>ReactDOM.flushSync(()=>root.render(React.createElement('div',
+        {style:{display:'flex',height:'100dvh'}},React.createElement(ChatPanel,{
+          key:'no-overflow',messages:shortRows,onSend(){}}))));
+      renderShort();
+    });
+    for (const rows of [[],[{type:'ai',text:'你好，我是总管家。可以先和我聊聊，也可以扫码添加新伙伴。'}]]) {
+      await page.evaluate(rows=>{shortRows=rows;renderShort();},rows);
+      assert(await page.$eval('.chat-panel__scroll',el=>el.scrollHeight<=el.clientHeight+2));
+      const box=await page.$eval('.chat-panel__scroll',el=>{const r=el.getBoundingClientRect();return {x:r.left+20,y:r.top+20};});
+      await page.mouse.move(box.x,box.y);
+      await page.mouse.wheel({deltaY:-200});
+      await page.focus('.chat-panel__scroll');
+      await page.keyboard.press('Home');
+      await page.keyboard.press('PageUp');
+      await page.evaluate(()=>{
+        const scroller=document.querySelector('.chat-panel__scroll');
+        for (const [type,y] of [['touchstart',100],['touchmove',160],['touchend',160]])
+          scroller.dispatchEvent(Object.assign(new Event(type,{bubbles:true}),{touches:[{clientY:y}]}));
+      });
+      assert.equal(await page.$('.chat-panel__latest'),null,'Short conversations must not offer a return to latest');
+    }
+    await page.evaluate(()=>{
+      shortRows=Array.from({length:24},()=>({type:'ai',text:'新增的聊天消息。'.repeat(10)}));renderShort();
+    });
+    await page.waitForFunction(()=>{
+      const el=document.querySelector('.chat-panel__scroll');
+      return el.scrollHeight>el.clientHeight && el.scrollHeight-el.clientHeight-el.scrollTop<=2;
+    });
+    assert.equal(await page.$('.chat-panel__latest'),null,'Gestures on short content must not disable following later messages');
     // One shared scrollport follows arrivals and late content sizing until the
     // user scrolls up; returning to latest restores that behavior.
     await page.setViewport({width:390,height:480});
@@ -360,8 +396,17 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await page.focus('.chat-panel__scroll');
     await page.keyboard.press('PageUp');
     await page.waitForSelector('.chat-panel__latest');
-    await page.click('.chat-panel__latest');
+    await page.keyboard.press('End');
     await atBottom();
+    await page.waitForSelector('.chat-panel__latest',{hidden:true});
+    await page.keyboard.press('Home');
+    await page.waitForSelector('.chat-panel__latest');
+    await page.evaluate(()=>{
+      followRows=[{type:'ai',text:'缩短后所有消息都在当前页面内。'}];
+      document.getElementById('late-sized-content').remove();
+      renderFollow();
+    });
+    await page.waitForSelector('.chat-panel__latest',{hidden:true});
     // Waiting belongs to the current request's feed, then its concrete process.
     for (const home of [true,false]) {
       await page.evaluate(home=>{
@@ -421,7 +466,7 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       for (const [width,height] of [[320,568],[390,844],[390,520]]) {
         await page.setViewport({width,height});
         const layout = await page.$eval('.chat-panel', node => {
-          const input = node.querySelector('input').getBoundingClientRect();
+          const input = node.querySelector('[aria-label="聊天消息"]').getBoundingClientRect();
           return {overflow:document.documentElement.scrollWidth > innerWidth, bottom:input.bottom};
         });
         assert.equal(layout.overflow, false);
@@ -439,12 +484,12 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       await page.setViewport({width,height:320});
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'A long user URL overflowed the conversation');
     }
-    await page.type('input', '组合输入');
-    await page.$eval('input', input => input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',isComposing:true,bubbles:true})));
-    assert.equal(await page.$eval('input', input => input.value), '组合输入', 'IME Enter prematurely sent the draft');
+    await page.type('[aria-label="聊天消息"]', '组合输入');
+    await page.$eval('[aria-label="聊天消息"]', input => input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',isComposing:true,bubbles:true})));
+    assert.equal(await page.$eval('[aria-label="聊天消息"]', input => input.value), '组合输入', 'IME Enter prematurely sent the draft');
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => sent.includes('组合输入'));
-    assert.equal(await page.$eval('input', input => input.value), '');
+    assert.equal(await page.$eval('[aria-label="聊天消息"]', input => input.value), '');
     await page.click('.chat-suggestions button');
     await page.waitForFunction(() => sent.includes('快捷测试'));
     // Exercise the real intent hook: replacement before/after HTTP acceptance,
@@ -466,11 +511,11 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
       window.goalEvent=(trace_id,type,extra={})=>apiClient.dispatchEvent(new CustomEvent('server-event',{
         detail:{trace_id,type,agent_id:'cloud_orchestrator',event_id:crypto.randomUUID(),...extra}}));
     });
-    await page.type('input','原来的目标');
+    await page.type('[aria-label="聊天消息"]','原来的目标');
     await page.keyboard.press('Enter');
     await page.waitForFunction(()=>goalRequests.length===1);
     await page.evaluate(()=>goalRequests[0].resolve({trace_id:'goal-old'}));
-    await page.type('input','新的目标');
+    await page.type('[aria-label="聊天消息"]','新的目标');
     await page.keyboard.press('Enter');
     await page.waitForFunction(()=>goalRequests.length===2);
     await page.evaluate(()=>{

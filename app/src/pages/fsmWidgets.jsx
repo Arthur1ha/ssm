@@ -90,7 +90,7 @@ function ConnectionWidget({ widget, unitId, actor, liveState, stateField, connec
         <div style={{
           flex: 1,
           color: 'var(--color-text-muted)',
-          fontSize: 12,
+          fontSize: 'var(--text-caption)',
           fontFamily: 'var(--font-sans)',
         }}>
           {({ connecting: '连接中', connected: '已连接', online: '已连接',

@@ -451,7 +451,7 @@ function VirtualJoystick({ onMove, onStop, disabled, label, radius = 62 }) {
           pointerEvents: "none",
         }} />
       </div>
-      <div style={{ fontSize: 12, color: "var(--color-text-muted)",
+      <div style={{ fontSize: 'var(--text-caption)', color: "var(--color-text-muted)",
         fontFamily: 'var(--font-sans)' }}>{label}</div>
     </div>
   );

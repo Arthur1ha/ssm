@@ -36,10 +36,9 @@ function ChatMessages({ entries, agents = [], defaultAgent = 'cloud_orchestrator
             <div key={e.id || e.eventId || `${e.type}-${i}`} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
               <div style={{ maxWidth: '78%', display: 'flex', flexDirection: 'column',
                 alignItems: 'flex-end', gap: 4 }}>
-                <div style={{ fontSize: 10, paddingRight: 4, color: 'var(--color-accent)',
-                  opacity: 0.75, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>你</div>
+                <div style={{ fontSize: 'var(--text-caption)', paddingRight: 4, color: 'var(--color-text-muted)' }}>你</div>
                 <div style={{
-                  padding: '10px 14px', fontSize: 14, lineHeight: 1.5, overflowWrap: 'anywhere',
+                  padding: '10px 14px', fontSize: 'var(--text-body)', lineHeight: 1.6, overflowWrap: 'anywhere',
                   borderRadius: 'var(--radius-card)',
                   background: 'var(--color-accent)', color: 'var(--color-bg)',
                 }}>{e.text}</div>

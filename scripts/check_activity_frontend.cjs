@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const sucrase = require('sucrase');
 const compile = name => sucrase.transform(fs.readFileSync(name,'utf8'),{transforms:['jsx'],production:true}).code;
-const files = ['utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/stateSnapshot.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js','avatars/presentation.js',
+const files = ['utils/inputAttributes.js','utils/stateMachine.js','utils/agentMeta.js','utils/color.js','utils/stateSnapshot.js','utils/activityView.js','utils/runProcess.js','avatars/registry.js','avatars/presentation.js',
   'components/Icon.jsx','avatars/Avatar.jsx','avatars/CompanionAvatar.jsx','components/RunProcess.jsx','components/ActivityMembers.jsx','components/ChatMessages.jsx','components/ChatPanel.jsx','components/ActivityFeed.jsx'];
 const context = vm.createContext({window:{}});
 for (const file of files) {
@@ -518,7 +518,7 @@ async function browserChecks() {
     assert.equal(await home.$('.home-activity-input-note'),null);
     // Activity progress must not enter either the global search feed or an
     // unrelated request that is currently waiting for its own SSE feedback.
-    await home.type('.chat-panel input','查看当前情况');
+    await home.type('.chat-panel [aria-label="聊天消息"]','查看当前情况');
     await home.keyboard.press('Enter');
     await home.waitForFunction(()=>window.__homeIntentCount === 1);
     await home.evaluate(({activity,searchSteps})=>{
@@ -636,7 +636,7 @@ async function browserChecks() {
       await home.mouse.wheel({deltaY:240});
       await home.waitForFunction(top=>document.querySelector('.chat-panel__scroll').scrollTop>top+100,{},pointer.top);
       assert.equal(await home.evaluate(()=>{
-        const t=document.querySelector('.space-activity__timeline'),input=document.querySelector('.chat-panel input').getBoundingClientRect();
+        const t=document.querySelector('.space-activity__timeline'),input=document.querySelector('.chat-panel [aria-label="聊天消息"]').getBoundingClientRect();
         return t.scrollHeight<=t.clientHeight+1 && document.documentElement.scrollWidth<=innerWidth
           && input.top>=0 && input.bottom<=innerHeight;
       }),true,`Activity content or composer was clipped at ${width}×${height}`);
@@ -656,7 +656,7 @@ async function browserChecks() {
       });
     }
     await home.setViewport({width:390,height:320});
-    await home.focus('.chat-panel input');
+    await home.focus('.chat-panel [aria-label="聊天消息"]');
     if(process.env.SCREENSHOT_DIR)await home.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'home-long-activity-short.png')});
     console.log('PASS: continuous outer wheel scrolling, latest anchor, long activity and composer at 320px/short/landscape/desktop; delayed photos preserve size and reading position.');
     assert.deepEqual(errors,[]);

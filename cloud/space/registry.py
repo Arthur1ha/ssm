@@ -21,7 +21,7 @@ _DEFAULT_SPACE = {
     "id": DEFAULT_SPACE_ID,
     "name": "SSM 体验空间",
     "device_ids": [],
-    "invite": {"enabled": False, "share_id": "", "version": 0, "updated_at": 0},
+    "invite": {"enabled": True, "share_id": "", "version": 0, "updated_at": 0},
     "updated_at": 0,
 }
 
@@ -108,7 +108,7 @@ class SpaceRegistry:
             "name": str(data.get("name") or _DEFAULT_SPACE["name"]),
             "device_ids": _unique_strings(device_ids),
             "invite": {
-                "enabled": bool(invite.get("enabled", False)),
+                "enabled": True,
                 "share_id": str(invite.get("share_id") or ""),
                 "version": max(0, int(invite.get("version") or 0)),
                 "updated_at": int(invite.get("updated_at") or 0),
@@ -126,10 +126,13 @@ class SpaceRegistry:
         old_invite = raw.get("invite", {}) if isinstance(raw, dict) else {}
         old_hash = old_invite.get("token_hash") if isinstance(old_invite, dict) else None
         has_legacy_field = isinstance(old_invite, dict) and "token_hash" in old_invite
-        if not data["invite"]["share_id"] or has_legacy_field:
+        was_disabled = not bool(old_invite.get("enabled", False)) if isinstance(old_invite, dict) else True
+        if not data["invite"]["share_id"] or has_legacy_field or was_disabled:
             if not data["invite"]["share_id"]:
                 data["invite"]["share_id"] = secrets.token_urlsafe(24)
-            if old_hash and data["invite"]["enabled"]:
+            # Reopen legacy disabled spaces without reviving an old signed
+            # visitor session; the immutable share ID remains unchanged.
+            if old_hash or was_disabled:
                 data["invite"]["version"] += 1
             data["invite"]["updated_at"] = int(time.time())
             data["updated_at"] = data["invite"]["updated_at"]
@@ -207,31 +210,6 @@ class SpaceRegistry:
             data["updated_at"] = int(time.time())
             self._atomic_save(data)
             return True
-
-    def enable_invite(self) -> dict[str, Any]:
-        with self._lock:
-            data = self._load_unlocked()
-            invite = data["invite"]
-            if not invite["enabled"]:
-                invite["enabled"] = True
-                invite["version"] = int(invite["version"]) + 1
-                invite["updated_at"] = int(time.time())
-                data["updated_at"] = invite["updated_at"]
-                self._atomic_save(data)
-            return dict(invite)
-
-    def disable_invite(self) -> dict[str, Any]:
-        with self._lock:
-            data = self._load_unlocked()
-            now = int(time.time())
-            invite = data["invite"]
-            invite.update({
-                "enabled": False,
-                "version": int(invite["version"]) + 1, "updated_at": now,
-            })
-            data["updated_at"] = now
-            self._atomic_save(data)
-            return dict(invite)
 
     # Compatibility for read-only orchestration code during migration. No
     # caller-supplied space id is accepted or consulted.
