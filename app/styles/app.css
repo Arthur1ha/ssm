@@ -1,4 +1,4 @@
-/* SSM Phone PWA Styles */
+/* SSM responsive PWA styles */
 :root {
   /* ── 背景（单一深色底，用表面层级建立纵深，而非渐变） ── */
   --color-bg:           #0C0C15;
@@ -110,6 +110,12 @@ button, input, select, textarea { font-family: inherit; }
 input::placeholder, textarea::placeholder { color: var(--color-text-dim); opacity: 1; }
 
 /* Shared conversation shell and homepage-style input/suggestions. */
+.space-page, .device-page-route, .device-page {
+  position: fixed; inset: var(--app-viewport-top, 0px) 0 auto;
+  height: var(--app-viewport-height, 100dvh); min-width: 0; overflow: hidden;
+}
+.device-page-route > .device-page { position: absolute; top: 0; height: 100%; }
+.space-header { padding: 12px 16px; }
 .chat-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .chat-panel__scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .chat-panel__content { display: flow-root; }
@@ -249,26 +255,33 @@ input::placeholder, textarea::placeholder { color: var(--color-text-dim); opacit
 }
 /* Device pages share a spatial whiteboard and the existing system palette. */
 .device-page { overflow: hidden; overscroll-behavior: contain; }
-.device-page__header { position: relative; z-index: 5; min-height: 52px; }
+.device-page__header {
+  position: relative; z-index: 5; min-height: 52px;
+  padding: 7px max(16px, calc((100% - 1600px) / 2 + 16px));
+}
 .device-header__stop { flex: 0 0 auto; min-height: 44px; padding: 5px 10px; font-size: var(--text-caption); }
-.device-page > .device-page__chat { overflow: hidden; }
+.device-page__body {
+  display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0;
+  width: 100%; max-width: 1600px; margin-inline: auto;
+}
+.device-page__chat { flex: 1 1 180px; min-width: 0; min-height: 150px; display: flex; flex-direction: column; overflow: hidden; }
 .device-state-workspace.device-state-workspace--shared {
-  height: auto; min-height: 0; max-height: calc(100dvh - 220px);
-  flex: 0 1 auto; overflow: hidden;
+  height: auto; min-height: 0; max-height: max(0px, calc(var(--app-viewport-height, 100dvh) - 220px - env(safe-area-inset-top, 0px)));
+  flex: 0 1 auto; overflow-x: hidden; overflow-y: auto;
 }
 .device-state-board { min-width: 0; color: var(--color-text); background: var(--color-bg); }
-.device-whiteboard { position: relative; max-height: inherit; display: flex; flex-direction: column; container-type: inline-size; }
+.device-whiteboard { position: relative; display: flex; flex-direction: column; container-type: inline-size; }
 .device-whiteboard__media { display: flex; justify-content: center; flex: 0 0 auto; gap: 8px; padding: 8px 12px 4px; }
 .device-whiteboard__media-slot { flex: 1 1 0; min-width: 0; max-width: 190px; height: clamp(68px,10dvh,88px); }
 .device-whiteboard__media-tile { position: relative; width: 100%; height: 100%; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface-1); }
 .device-whiteboard__media-empty { display: grid; place-items: center; height: 100%; font-size: var(--text-micro); color: var(--color-text-dim); }
-.device-whiteboard__canvas { position: relative; flex: 0 1 auto; height: clamp(150px, calc(100cqw * var(--board-graph-ratio, 1)), 52dvh); min-height: 0; overflow: hidden; background-image: radial-gradient(var(--color-border-strong) .7px, transparent .7px); background-size: 20px 20px; }
+.device-whiteboard__canvas { position: relative; flex: 0 1 auto; height: clamp(150px, calc(100cqw * var(--board-graph-ratio, 1)), calc(var(--app-viewport-height, 100dvh) * .52)); min-height: 0; overflow: hidden; background-image: radial-gradient(var(--color-border-strong) .7px, transparent .7px); background-size: 20px 20px; }
 /* Keep the media inset aligned with the Card's canvas, including when the
    viewport height limits the graph. Both thumbnails share a 16:9 frame. */
 .device-whiteboard__frame { display: contents; }
 .device-whiteboard--inset-media .device-whiteboard__frame {
   display: flex; justify-content: center; container-type: size; min-height: 0; flex: 0 1 auto;
-  height: clamp(150px, calc(100cqw * var(--board-graph-ratio)), 52dvh);
+  height: clamp(150px, calc(100cqw * var(--board-graph-ratio)), calc(var(--app-viewport-height, 100dvh) * .52));
 }
 .device-whiteboard--inset-media .device-whiteboard__canvas {
   width: min(100cqw, calc(100cqh / var(--board-graph-ratio)));
@@ -742,9 +755,9 @@ input::placeholder, textarea::placeholder { color: var(--color-text-dim); opacit
 .device-label-qr img, .device-label-qr canvas { max-width: 160px; max-height: 160px; }
 /* Management flows slide up from the bottom and fit their content. */
 .management-dialog {
-  position: fixed; z-index: 241; top: auto; left: 50%; right: auto; bottom: 0;
+  position: fixed; z-index: 241; top: auto; left: 50%; right: auto; bottom: var(--app-viewport-bottom, 0px);
   width: min(560px, 100vw); height: auto;
-  max-height: min(86dvh, calc(100dvh - max(16px, env(safe-area-inset-top))));
+  max-height: min(calc(var(--app-viewport-height, 100dvh) * .86), calc(var(--app-viewport-height, 100dvh) - max(16px, env(safe-area-inset-top))));
   margin: 0; overflow: hidden; transform: translateX(-50%);
   border: 1px solid var(--color-border-strong); border-bottom: 0;
   border-radius: var(--radius-dialog) var(--radius-dialog) 0 0;
@@ -1184,3 +1197,42 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 .training-selection { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--color-border); background: var(--color-surface-1); color: var(--color-text-muted); font-size: var(--text-caption); line-height: 1.6; overflow-wrap: anywhere; }
 .training-selection button { flex-shrink: 0; cursor: pointer; }
 /* Feedback is an overlay so changing its text does not move the state graph. */
+
+/* One conversation tree across window sizes: only its available space changes. */
+.space-page > .chat-panel { width: min(100%, 960px); align-self: center; }
+.chat-panel__content, .chat-panel__footer { min-width: 0; }
+.chat-panel__content { overflow-wrap: anywhere; }
+.space-page, .device-page {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+@media (min-width: 1024px) {
+  .space-header { padding-inline: max(24px, calc((100% - 960px) / 2 + 16px)); }
+  .space-page > .chat-panel .chat-panel__content { padding-top: 12px; }
+  .device-page__body {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 40%);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .device-state-workspace.device-state-workspace--shared {
+    height: 100%; max-height: none; min-width: 0;
+    border-bottom: 0; border-right: 1px solid var(--color-border);
+  }
+  .device-whiteboard { height: 100%; max-height: none; }
+  .device-whiteboard:not(.device-whiteboard--inset-media) .device-whiteboard__canvas {
+    height: auto; min-height: 180px; flex: 1 0 180px;
+  }
+  .device-whiteboard--inset-media .device-whiteboard__frame {
+    height: auto; min-height: 180px; flex: 1 0 180px;
+  }
+  .device-page__chat { min-height: 0; }
+  /* A card can still be loading: let its conversation use the whole row. */
+  .device-page__body > .device-page__chat:only-child { grid-column: 1 / -1; }
+}
+@media (max-width: 1023px) and (max-height: 500px) {
+  .device-whiteboard__canvas, .device-whiteboard--inset-media .device-whiteboard__frame {
+    height: clamp(100px, 32dvh, 160px);
+  }
+  .device-whiteboard--inset-media .device-whiteboard__canvas { height: 100%; }
+  .chat-suggestions { padding-top: 4px; }
+  .chat-suggestions button { padding-block: 5px; }
+}

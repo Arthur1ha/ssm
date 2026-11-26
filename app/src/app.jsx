@@ -23,8 +23,38 @@ function useHashLocal() {
 /* 路由跳转 */
 function navigate(hash) { window.location.hash = hash; }
 
+/* The visual viewport follows mobile keyboards without remounting either page. */
+function useAppViewport() {
+  React.useLayoutEffect(() => {
+    const viewport = window.visualViewport;
+    const style = document.documentElement.style;
+    const sync = () => {
+      // Let browser zoom pan naturally rather than resizing the app to the zoom.
+      if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
+      const height = viewport?.height || window.innerHeight;
+      const top = viewport?.offsetTop || 0;
+      style.setProperty('--app-viewport-height', `${height}px`);
+      style.setProperty('--app-viewport-top', `${top}px`);
+      style.setProperty('--app-viewport-bottom', `${Math.max(0, window.innerHeight - top - height)}px`);
+    };
+    sync();
+    window.addEventListener('resize', sync);
+    viewport?.addEventListener('resize', sync);
+    viewport?.addEventListener('scroll', sync);
+    return () => {
+      window.removeEventListener('resize', sync);
+      viewport?.removeEventListener('resize', sync);
+      viewport?.removeEventListener('scroll', sync);
+      style.removeProperty('--app-viewport-height');
+      style.removeProperty('--app-viewport-top');
+      style.removeProperty('--app-viewport-bottom');
+    };
+  }, []);
+}
+
 function App({ session, logout, refreshSession }) {
   const { useState, useEffect, useRef, useMemo } = React;
+  useAppViewport();
   const {
     connected, agents, loadingAgents, hasLoadedAgents, agentsError, unitData, refreshAgents,
   } = useSsmCore();
@@ -288,15 +318,14 @@ function App({ session, logout, refreshSession }) {
   return (
     <>
       {/* ── 主屏（始终挂载，不受路由影响） ── */}
-      <div style={{
-        position: 'fixed', inset: 0,
+      <div className="space-page" style={{
         background: 'var(--color-bg)', color: 'var(--color-text)',
         fontFamily: 'var(--font-sans)', paddingTop: 'env(safe-area-inset-top,0px)',
         display: 'flex', flexDirection: 'column',
       }}>
         {/* 头部 */}
         <div className="space-header" style={{
-          padding: '12px 16px', display: 'flex',
+          display: 'flex',
           alignItems: 'center', justifyContent: 'space-between', gap: 12, flexShrink: 0,
           borderBottom: '1px solid var(--color-border)',
         }}>
@@ -386,8 +415,8 @@ function App({ session, logout, refreshSession }) {
       {displayUid && (
         <div
           key={displayUid}
+          className="device-page-route"
           style={{
-            position: 'fixed', inset: 0,
             animation: isExiting
               ? 'page-slide-out 0.22s cubic-bezier(0.55,0,1,0.45) forwards'
               : 'page-slide-in  0.25s cubic-bezier(0.25,0.46,0.45,0.94)',

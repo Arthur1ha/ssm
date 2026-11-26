@@ -4,6 +4,8 @@
  * GO2_PREVIEW_FONT embeds a small local CJK font solely for readable screenshots.
  * --rule-layout-only checks direction tabs, lamp layout and immediate deletion.
  * --control-notices-only checks shared chat feedback for state-node commands.
+ * --layout-only checks mobile/desktop layout, retained drafts, simulated keyboard
+ * viewport and management drawer; SCREENSHOT_DIR optionally saves previews.
  * Screenshots and controls use explicitly simulated state, never a live API. */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -1414,17 +1416,65 @@ async function checkInteractions() {
       return;
     }
     if (process.argv.includes('--layout-only')) {
+      for (const style of ['process','avatars']) await page.addStyleTag({path:`app/styles/${style}.css`});
+      await page.addScriptTag({content:compile('app/src/app.jsx')});
       await page.addScriptTag({content:compile('app/src/utils/activityView.js')});
       await page.addScriptTag({content:compile('app/src/utils/runProcess.js')});
       await page.addScriptTag({content:compile('app/src/components/RunProcess.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatMessages.jsx')});
       await page.addScriptTag({content:compile('app/src/components/ChatPanel.jsx')});
+      await page.evaluate(() => {
+        const ResponsiveDevice = props => {
+          useAppViewport();
+          return React.createElement('div',{className:'device-page-route'},React.createElement(FsmDevicePage,props));
+        };
+        window.__renderState=(next,card=__card,actor='admin')=>{
+          __state=next; window.responsiveUnit=card.unit_id;
+          appRoot.render(React.createElement(ResponsiveDevice,{unitId:card.unit_id,device:card,
+            liveState:{state:next},actor,sessionId:'simulated_session',onBack(){}}));
+        };
+      });
+      const checkResponsiveLayout = async (width,height) => {
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const layout=await page.evaluate(() => {
+          const bounds=selector=>document.querySelector(selector).getBoundingClientRect().toJSON();
+          const input=document.querySelector('.device-page__chat [aria-label="聊天消息"]');
+          return {board:bounds('.device-state-workspace'),chat:bounds('.device-page__chat'),
+            body:bounds('.device-page__body'),input:input.getBoundingClientRect().toJSON(),
+            same:input===window.responsiveInput,draft:input.value,calls:__calls.length};
+        });
+        assert(layout.input.bottom<=height && layout.input.top>=0, `Composer clipped at ${width}×${height}`);
+        assert(layout.body.left>=0 && layout.body.right<=width && layout.body.width<=1600);
+        if(width>=1024) {
+          assert(layout.board.right<=layout.chat.left+1 && Math.abs(layout.board.top-layout.chat.top)<1,
+            `Desktop board and conversation must be side by side at ${width}×${height}`);
+          assert(layout.chat.width>=360, 'Desktop conversation is too narrow');
+        } else assert(layout.board.bottom<=layout.chat.top+1, 'Mobile board must stay above the conversation');
+        assert(layout.same && layout.draft==='保留设备草稿', 'Changing layout must preserve the composer and draft');
+        assert.equal(layout.calls,await page.evaluate(()=>window.responsiveCalls), 'Resizing must not send a device command');
+        if(process.env.SCREENSHOT_DIR && [390,1440,1920].includes(width)) {
+          fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});
+          await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,`responsive-${await page.evaluate(()=>responsiveUnit)}-${width}-${height}.png`)});
+        }
+      };
+      const rememberComposer = async () => {
+        await page.focus('.device-page__chat [aria-label="聊天消息"]');
+        await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control');
+        await page.keyboard.press('Backspace');
+        await page.type('.device-page__chat [aria-label="聊天消息"]','保留设备草稿');
+        await page.$eval('.device-page__chat [aria-label="聊天消息"]',node=>node.blur());
+        await page.evaluate(()=>{
+          window.responsiveInput=document.querySelector('.device-page__chat [aria-label="聊天消息"]');
+          window.responsiveCalls=__calls.length;
+        });
+      };
       await page.evaluate(()=>{
         __card.widgets=[{type:'video',endpoint:'/api/go2/video',states:[],requires_connection:true},
           {type:'map',endpoint:'/api/go2/map.png',states:[],requires_connection:true}];
         __renderState(__state);
       });
       await page.waitForSelector('.device-whiteboard__media');
+      await rememberComposer();
       const go2Height = await page.$eval('.device-state-workspace', element => element.getBoundingClientRect().height);
       const graph = await page.$eval('.fsm-whiteboard__viewport',svg=>({
         loops:[...svg.querySelectorAll('.fsm-whiteboard__edge')].filter(edge=>edge.dataset.source===edge.dataset.target).length,
@@ -1436,8 +1486,9 @@ async function checkInteractions() {
       assert.equal(graph.nodes['body:content'].label,'开心');
       assert.equal(graph.nodes['body:sitting'].label,'坐下');
       await page.screenshot({path:'/tmp/ssm-go2-radial-layout.png',fullPage:true});
-      for (const [width,height] of [[320,740],[390,844],[768,1024],[1440,1000],[844,390],[390,520]]) {
+      for (const [width,height] of [[320,740],[360,740],[390,844],[430,932],[768,1024],[1023,768],[1024,768],[1366,768],[1440,1000],[1920,1080],[844,390],[390,520]]) {
         await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+        await checkResponsiveLayout(width,height);
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         assert.equal(await page.evaluate(() => {
           const tiles = [...document.querySelectorAll('.device-whiteboard__media-tile')].map(node => node.getBoundingClientRect());
@@ -1459,12 +1510,14 @@ async function checkInteractions() {
       await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
       await page.evaluate(()=>__renderState({ism:'ON',ts:1},{...__lampCard,_online:true}));
       await page.waitForSelector('.fsm-whiteboard__node[data-state="device:ON"]');
+      await rememberComposer();
       assert.equal(await page.$$eval('.fsm-whiteboard__edge',edges=>edges.some(edge=>edge.dataset.source===edge.dataset.target)),false);
       const lampHeight = await page.$eval('.device-state-workspace', element => element.getBoundingClientRect().height);
       assert(lampHeight < go2Height - 80, `Lamp board did not shrink: lamp=${lampHeight}, Go2=${go2Height}`);
       console.log(`Adaptive board height at 390px: lamp=${Math.round(lampHeight)}px, Go2=${Math.round(go2Height)}px`);
-      for (const [width,height] of [[320,740],[390,844],[768,1024],[1440,1000],[390,520]]) {
+      for (const [width,height] of [[320,740],[360,740],[390,844],[430,932],[1024,768],[1366,768],[1440,1000],[1920,1080],[844,390],[390,520]]) {
         await page.setViewport({width,height,deviceScaleFactor:1,isMobile:true,hasTouch:true});
+        await checkResponsiveLayout(width,height);
         assert.equal(await page.$eval('.fsm-whiteboard__viewport', svg => {
           const bounds = svg.getBoundingClientRect();
           return [...svg.querySelectorAll('.fsm-whiteboard__node')].every(node => {
@@ -1477,8 +1530,38 @@ async function checkInteractions() {
       }
       await page.setViewport({width:390,height:844,deviceScaleFactor:1,isMobile:true,hasTouch:true});
       await page.screenshot({path:'/tmp/ssm-lamp-no-loops.png',fullPage:true});
+      // The route wrapper and page must follow the same visual viewport once.
+      await page.evaluate(() => {
+        Object.defineProperty(visualViewport,'height',{configurable:true,value:300});
+        Object.defineProperty(visualViewport,'offsetTop',{configurable:true,value:40});
+        visualViewport.dispatchEvent(new Event('resize'));
+      });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const keyboard=await page.$eval('.device-page',node=>{
+        const rect=node.getBoundingClientRect();
+        const workspace=node.querySelector('.device-state-workspace');
+        workspace.scrollTop=workspace.scrollHeight;
+        return {top:rect.top,height:rect.height,inputBottom:node.querySelector('[aria-label="聊天消息"]').getBoundingClientRect().bottom,
+          controlsBottom:node.querySelector('.device-whiteboard__controls').getBoundingClientRect().bottom,
+          workspaceBottom:workspace.getBoundingClientRect().bottom};
+      });
+      assert.equal(keyboard.top,40);
+      assert.equal(keyboard.height,300);
+      assert(keyboard.inputBottom<=340, 'Device composer left the simulated keyboard viewport');
+      assert(keyboard.controlsBottom<=keyboard.workspaceBottom+1, 'Short viewport must allow scrolling to the device controls');
+      await page.click('.device-header__settings');
+      await page.waitForFunction(() => {
+        const panel=document.querySelector('.device-settings-panel')?.getBoundingClientRect();
+        return panel && Math.abs(panel.bottom-340)<1 && panel.top>=40;
+      });
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.device-settings-panel',{hidden:true});
+      await page.evaluate(() => {
+        delete visualViewport.height; delete visualViewport.offsetTop;
+        visualViewport.dispatchEvent(new Event('resize'));
+      });
       assert.deepEqual(errors,[]);
-      console.log('PASS: quick Go2/lamp layout render, renamed nodes, no self-loop edges.');
+      console.log('PASS: Go2/lamp mobile and desktop layout, media/state containment, retained drafts, no resize commands, simulated keyboard viewport and management drawer.');
       return;
     }
     assert.equal(await page.$$('.device-state-lane,.device-state-action-row,.device-state-topology,.device-region-diagram').then(nodes=>nodes.length),0);

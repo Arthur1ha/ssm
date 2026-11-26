@@ -404,7 +404,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
 
   return (
     <div className="device-page" style={{
-      position: 'fixed', inset: 0,
       background: 'var(--color-bg)', color: 'var(--color-text)',
       fontFamily: 'var(--font-sans)',
       paddingTop: 'env(safe-area-inset-top,0px)',
@@ -414,7 +413,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       {/* ── 头部 ── */}
       <div className="device-page__header" style={{
         display: 'flex', alignItems: 'center', gap: 8,
-        padding: '7px 16px',
         borderBottom: '1px solid var(--color-border)',
         background: 'var(--color-surface-1)',
         flexShrink: 0,
@@ -444,6 +442,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       </div>
 
       {!cardLoaded && execution && <div role="status" aria-live="polite" style={{ padding: '8px 16px', fontSize: 'var(--text-caption)' }}>{execution}</div>}
+      <div className="device-page__body">
       {/* ── Card 驱动的设备白板。 ── */}
       {cardLoaded && (
         <div className="device-state-workspace device-state-workspace--shared">
@@ -456,7 +455,6 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
 
       {/* ── 共用聊天面板；离线整体置灰并禁用输入 ── */}
       <div className="device-page__chat" style={{
-        flex: '1 1 180px', minHeight: 150, display: 'flex', flexDirection: 'column',
         filter: offline ? 'grayscale(1)' : 'none',
         opacity: offline ? 0.45 : 1,
         transition: 'filter 0.2s, opacity 0.2s',
@@ -487,6 +485,7 @@ function FsmDevicePage({ unitId, device, liveState, onBack, actor, sessionId, ac
       >
         {trainingSelection && <div className="training-selection" role="status">修改规则：{trainingSelection.summaryText || '请直接输入新的要求。'}<button onClick={() => setTrainingSelection(null)}>取消</button></div>}
       </ChatPanel>
+      </div>
       </div>
       {trainingOpen && <TrainingDrawer unitId={unitId} training={training} onClose={() => setTrainingOpen(false)}/>}
       <DeviceSettingsMenu open={settingsOpen} onClose={() => setSettingsOpen(false)}

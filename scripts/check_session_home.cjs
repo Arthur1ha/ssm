@@ -291,6 +291,43 @@ const compile = file => sucrase.transform(fs.readFileSync(file, 'utf8'), {transf
     await waitText('已撤销添加');
     await page.hover('.toast');
     await page.waitForSelector('.toast',{hidden:true,timeout:3500});
+    // Resizing keeps the same conversation/composer, with a readable desktop width.
+    await page.type('.space-page [aria-label="聊天消息"]', '保留这段草稿');
+    await page.evaluate(() => { window.responsiveInput=document.querySelector('.space-page [aria-label="聊天消息"]'); });
+    for (const [width,height] of [[320,568],[360,740],[390,844],[430,932],[932,430],[1023,768],[1024,768],[1366,768],[1440,900],[1920,1080]]) {
+      await page.setViewport({width,height});
+      await page.waitForFunction(() => Math.abs(document.querySelector('.space-page').getBoundingClientRect().height-visualViewport.height)<1);
+      const layout=await page.evaluate(() => {
+        const panel=document.querySelector('.space-page > .chat-panel').getBoundingClientRect();
+        const input=document.querySelector('.space-page [aria-label="聊天消息"]');
+        return {left:panel.left,right:panel.right,width:panel.width,bottom:input.getBoundingClientRect().bottom,
+          documentWidth:document.documentElement.scrollWidth,same:input===responsiveInput,draft:input.value};
+      });
+      assert(layout.left>=0 && layout.right<=width && layout.documentWidth<=width, `Home overflow at ${width}×${height}`);
+      assert(layout.width<=960 && Math.abs(layout.left-(width-layout.width)/2)<1, 'Home conversation must be centered and limited in width');
+      assert(layout.bottom<=height && layout.same && layout.draft==='保留这段草稿', 'Resizing must keep the visible composer and its draft');
+    }
+    // Simulate the visual viewport shrinking/panning independently of the layout
+    // viewport, as a mobile keyboard can do. This is not a real-device keyboard test.
+    await page.setViewport({width:390,height:844});
+    await page.evaluate(() => {
+      Object.defineProperty(visualViewport,'height',{configurable:true,value:320});
+      Object.defineProperty(visualViewport,'offsetTop',{configurable:true,value:40});
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    const keyboard=await page.$eval('.space-page', node => {
+      const rect=node.getBoundingClientRect();
+      const input=node.querySelector('[aria-label="聊天消息"]').getBoundingClientRect();
+      return {top:rect.top,height:rect.height,inputBottom:input.bottom};
+    });
+    assert.equal(keyboard.top,40);
+    assert.equal(keyboard.height,320);
+    assert(keyboard.inputBottom<=360, 'The composer must stay within the simulated keyboard viewport');
+    await page.evaluate(() => {
+      delete visualViewport.height; delete visualViewport.offsetTop;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    console.log('PASS: responsive home width, landscape, breakpoints, draft preservation and simulated keyboard viewport.');
     assert.deepEqual(errors, []);
     console.log('PASS: session/home regressions; actual App bottom toast, no header growth, mobile/desktop layout, uniform 3s expiry, repeated feedback resets duration; undo dispatch/deduplication/failure/retry; stale action result preserves newer toast; JSX syntax.');
   } finally { await browser.close(); }

@@ -1,12 +1,12 @@
 # SSM — Smart System Mesh
 
-分布式多智能体 IoT 系统，连接 ESP32、云端管家 / 灯 / Go2 智能体与手机 PWA。设备通过 MQTT retained manifest/card/status 声明能力与在线状态；管理员将发现的设备加入固定空间 `main` 后，PWA 自动同步，无需手动订阅。
+分布式多智能体 IoT 系统，连接 ESP32、云端管家 / 灯 / Go2 智能体与电脑 / 手机 PWA。设备通过 MQTT retained manifest/card/status 声明能力与在线状态；管理员将发现的设备加入固定空间 `main` 后，PWA 自动同步，无需手动订阅。
 
 ## 架构与使用
 
 ```mermaid
 flowchart LR
-    PWA[手机 PWA] <-->|同源 HTTP / SSE| API[FastAPI :8082]
+    PWA[电脑 / 手机 PWA] <-->|同源 HTTP / SSE| API[FastAPI :8082]
     API <--> MQTT[Mosquitto TCP :1883]
     MQTT <--> Steward[管家编排器]
     MQTT <-->|任务 / 回执 / 传感器| ESP[ESP32]
@@ -29,6 +29,8 @@ flowchart LR
 ## 部署
 
 需要 Python ≥3.13、uv、Mosquitto 和 `envsubst`；公网部署另行配置同源代理、HTTPS 与网络访问策略。PWA 使用 React 全局脚本，无构建步骤。
+
+页面按浏览器可用宽度适配：小于 1024px 时设备白板与对话上下排列，达到 1024px 时左右并排，设备工作区最大宽度为 1600px；首页对话始终居中，最大宽度为 960px。窗口缩放保留当前对话和输入草稿，手机输入栏跟随可视窗口高度，短屏白板与长弹窗可内部滚动。
 
 在项目根目录执行：
 
